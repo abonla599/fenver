@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0e1013">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>AI 智能助手</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="vendor/hljs-github-dark.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 侧栏 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sb-head">
+        <div class="brand">
+          <img src="icon.png" alt="" class="brand-logo">
+          <span>AI 智能助手</span>
+        </div>
+        <button class="icon-btn only-mobile" id="closeSidebar" aria-label="关闭侧栏">×</button>
+      </div>
+
+      <nav class="sb-nav">
+        <button class="nav-item" id="newChatBtn"><span class="ni-ico">＋</span>新对话</button>
+        <button class="nav-item" id="navProviders"><span class="ni-ico">⌗</span>模型服务</button>
+        <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
+        <!-- 日程是一等功能，不藏在设置深处：设计稿 T0.1 的侧栏就是 会话/记忆/日程/设置。 -->
+        <button class="nav-item" id="navSchedule"><span class="ni-ico">▤</span>日程</button>
+      </nav>
+
+      <div class="search-box">
+        <input id="sessionSearch" type="search" placeholder="搜索会话" autocomplete="off">
+      </div>
+
+      <div class="sb-label">会话</div>
+      <nav class="sb-list" id="sessionGroups" aria-label="会话列表"></nav>
+
+      <!-- 我是谁 + 进设置的入口，合成一行：原先"设置"是导航里的一条、身份只在弹层
+           里看得到，而"这台机器上是谁在用"恰是最常被问的事。整行可点。
+           「◐ 主题」是低频动作，挪进设置弹层，不占这里的位置。 -->
+      <div class="sb-foot">
+        <button class="who-row" id="whoRow" title="打开设置">
+          <span class="avatar" id="userAvatar">·</span>
+          <span class="who-name" id="userName">未登录</span>
+          <span class="who-cta">设置</span>
+          <span class="who-gear">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <circle cx="12" cy="12" r="5.6" fill="none" stroke="currentColor" stroke-width="3"/>
+              <g fill="currentColor">
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(45 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(90 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(135 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(180 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(225 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(270 12 12)"/>
+                <rect x="10.7" y="1.5" width="2.6" height="3.2" rx="0.7" transform="rotate(315 12 12)"/>
+              </g>
+            </svg>
+          </span>
+        </button>
+      </div>
+    </aside>
+    <div class="backdrop" id="backdrop"></div>
+
+    <!-- 主区 -->
+    <main class="main">
+      <!-- 顶栏只有两样：开侧栏，和"我在哪段对话里"。模型选择、角色设定、导出原先
+           挤在这一行，现在都在设置的「当前会话」那一页——未登录时那个模型框还是个
+           空白框，占着首屏最贵的位置却什么都不能说。 -->
+      <header class="topbar">
+        <button class="icon-btn only-mobile" id="openSidebar" aria-label="打开侧栏">☰</button>
+        <span class="top-title" id="topTitle">新对话</span>
+      </header>
+
+      <section class="messages" id="messages" aria-live="polite"></section>
+
+      <div class="composer">
+        <div class="att-row" id="attRow"></div>
+        <div class="suggestions" id="suggestions"></div>
+        <form class="input-card" id="chatForm">
+          <textarea id="input" rows="1" placeholder="发消息，Shift + Enter 换行" autocomplete="off"></textarea>
+          <div class="input-foot">
+            <button type="button" class="icon-btn plus-btn" id="attachBtn" aria-label="添加附件" title="添加附件">＋</button>
+            <span class="hint" id="statusHint"></span>
+            <!-- 快速切换模型芯片：点开就是可用模型清单，选一个立刻生效并同步
+                 服务端「我的默认」。hidden 是默认值——模型清单要等 /v1/models
+                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。 -->
+            <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
+            <button type="button" class="btn hidden" id="stopBtn">停止</button>
+            <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
+          </div>
+        </form>
+
+        <div class="attach-menu hidden" id="attachMenu" role="menu">
+          <div class="attach-row">
+            <button type="button" class="attach-tile" id="pickCamera" role="menuitem">
+              <span class="tile-ico">📷</span><span>相机</span>
+            </button>
+            <button type="button" class="attach-tile" id="pickImage" role="menuitem">
+              <span class="tile-ico">🖼</span><span>图片</span>
+            </button>
+            <button type="button" class="attach-tile" id="pickFile" role="menuitem">
+              <span class="tile-ico">📄</span><span>文件</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 模型快切弹单：条目由 app.js 的 renderModelMenu 从 state.providers
+             现渲染。和附件菜单同款"让位层"：相机、附件打开时它自动收起。 -->
+        <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="选择模型"></div>
+
+        <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
+             accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->
+        <input type="file" id="imageInput" hidden multiple
+               accept="image/png,image/jpeg,image/gif,image/webp,image/bmp">
+        <input type="file" id="fileInput" hidden multiple
+               accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.ini,.cfg,.html,.css,.py,.js,.ts,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml,.pdf,.docx">
+
+        <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
+        <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">
+          <div class="cam-card">
+            <video id="camVideo" playsinline muted autoplay></video>
+            <canvas id="camCanvas" hidden></canvas>
+            <div class="cam-hint" id="camHint"></div>
+            <div class="cam-actions">
+              <button type="button" class="btn" id="camCancel">取消</button>
+              <button type="button" class="btn btn-primary" id="camShoot">拍照</button>
+              <button type="button" class="btn hidden" id="camRetake">重拍</button>
+              <button type="button" class="btn btn-primary hidden" id="camUse">使用照片</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 按住说话的录音浮层（v0.22，与原生端 VoiceOverlay 同款）：波纹条 + 蓝穹顶 +
+           一行提示。默认 hidden，只有长按空输入框进了录音态才亮；穹顶沉出屏底一半。 -->
+      <div class="voice-mask hidden" id="voiceMask" aria-hidden="true">
+        <div class="voice-dome"></div>
+        <div class="voice-panel">
+          <div class="voice-heard hidden" id="voiceHeard"></div>
+          <div class="voice-bars" id="voiceBars"></div>
+          <div class="voice-hint" id="voiceHint">松手发送，上移取消</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 设置面板：一屏到底的分组列表 + 二级页。
+       为什么没有 tab：原先 6 个 tab 在 390px 宽下只露得出 4 个，且没有任何"右边还有"
+       的迹象——「连接」「关于」两页等于不存在。分组小标题 + 卡片行把这件事从根上消掉。
+       值的两种后缀是语义：`⇅` 就地改，`›` 进二级页。 -->
+  <div class="modal hidden" id="settings" role="dialog" aria-modal="true" aria-label="设置">
+    <div class="modal-card set-sheet">
+      <div class="set-view" id="setList">
+        <div class="set-bar">
+          <h2 class="set-title">设置</h2>
+          <button class="icon-btn set-x" id="closeSettings" aria-label="关闭">×</button>
+        </div>
+        <div class="set-scroll">
+          <div class="set-card set-me">
+            <span class="set-av" id="setAvatar">·</span>
+            <span class="set-me-name" id="setMe">未登录</span>
+            <span class="set-tag" id="setRole"></span>
+          </div>
+
+          <p class="set-group">账户</p>
+          <div class="set-card">
+            <button class="set-row" id="rowAccounts">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg></span>
+              <span class="set-lbl">切换账户</span><span class="set-val" id="accountsVal"></span><span class="set-go">›</span></button>
+            <button class="set-row" id="rowPassword">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8" cy="12" r="3.6"/><path d="M11.6 12H21l-2 2.5"/></svg></span>
+              <span class="set-lbl">改密码</span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">模型</p>
+          <div class="set-card">
+            <div class="set-row">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></span>
+              <span class="set-lbl">当前模型</span>
+              <span class="set-val"><select id="modelSel" class="set-sel" aria-label="选择模型"></select></span></div>
+            <button class="set-row" id="rowProviders">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 12l4-3"/></svg></span>
+              <span class="set-lbl">模型服务</span><span class="set-val" id="chatNote"></span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">对话</p>
+          <div class="set-card">
+            <button class="set-row" id="rowPersona">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-5 4V5Z"/></svg></span>
+              <span class="set-lbl">角色设定</span><span class="set-val" id="personaVal"></span><span class="set-go">›</span></button>
+            <div class="set-row">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 4h9l3 3v13H6V4Z"/><path d="M9 4v5h6"/></svg></span>
+              <span class="set-lbl">上下文长度</span>
+              <!-- 2026-09-23：刻度从"条"换成 token（缩写 k）。条数让人以为
+                   上下文与内容无关，而模型真正吃得下的是 token——设置直接说 token。
+                   斜杠后那截是**当前模型的上限**，来自模型档案的 max_context_k，
+                   切模型自动跟着换；滑杆拖不过它，预算也就不会越界吃 4xx。 -->
+              <span class="set-val"><b id="ctxVal">8</b>/<span id="ctxCap">64</span>k
+                <input type="range" id="ctxRange" min="2" max="64" step="2" value="8" aria-label="上下文 token 预算（k），上限随所选模型"></span></div>
+            <button class="set-row" id="exportBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></span>
+              <span class="set-lbl">导出本次对话</span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">记忆</p>
+          <div class="set-card">
+            <button class="set-row" id="rowMemory">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v6c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8V6M5 12v6c0 1.6 3.1 2.8 7 2.8s7-1.2 7-2.8v-6"/></svg></span>
+              <span class="set-lbl">长期记忆</span><span class="set-val" id="memoryVal"></span><span class="set-go">›</span></button>
+          </div>
+
+          <!-- 日程（v0.23 R3）：服务端按天存的那份清单，与"提醒"（这台设备上的闹钟）
+               是两件事，所以单独一组，不塞进记忆也不塞进设备。 -->
+          <p class="set-group">日程</p>
+          <div class="set-card">
+            <button class="set-row" id="rowSchedule">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="5" width="16" height="15" rx="2.5"/><path d="M8 3v4M16 3v4M4 10h16"/></svg></span>
+              <span class="set-lbl">日程</span><span class="set-val" id="scheduleVal"></span><span class="set-go">›</span></button>
+          </div>
+
+          <!-- 提醒是**这台手机上的壳**在排期的，服务端没有这件事：所以它既不在记忆
+               那一组、也不在对话那一组，单独一组「设备」。浏览器里没有壳，这一页
+               只剩一句说明（app.js 的 renderReminders）。 -->
+          <p class="set-group">设备</p>
+          <div class="set-card">
+            <button class="set-row" id="rowReminders">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 17h10l-1.5-2.4V11a3.5 3.5 0 0 0-7 0v3.6L7 17Z"/><path d="M10.4 20h3.2"/></svg></span>
+              <span class="set-lbl">提醒</span><span class="set-val" id="remindersVal"></span><span class="set-go">›</span></button>
+          </div>
+
+          <p class="set-group">关于</p>
+          <div class="set-card">
+            <!-- 版本只有一个来源：壳通过 capabilities() 报上来的 versionName，而它来自
+                 android/app/build.gradle。这里出现不了写死的 "v0.16"——抄一份到前端，
+                 下次升版必然有一处是旧的，而且它显示得理直气壮。浏览器里没有安装包可说，
+                 那句由 app.js 给，不在这儿硬写。 -->
+            <div class="set-row set-plain">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.6"/></svg></span>
+              <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span></div>
+            <!-- 桥诊断：只有页面认不到壳时才露出来（填它的是 app.js 的 renderAboutRows）。
+                 这不是给用户看的功能说明，是"桥静默失效"唯一的现场证据——present 一旦为
+                 false，整个界面和手机浏览器长得一模一样，光凭眼睛分不清是对象没注入、
+                 调用没匹配上 Java 方法、还是被壳那侧的 origin 闸门拒了。2026-09-22 那次
+                 真机排查就是因为没有这一行，只能靠拆 APK 数字符串。 -->
+            <p class="pane-note hidden" id="bridgeDiag"></p>
+            <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
+                 只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
+                 两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a
+                 （直接去下载页）。下载页的地址写在 markup 里而不是 app.js 里，是因为
+                 test_frontend_uses_relative_api_paths_only 禁前端出现绝对 URL——那条锁
+                 拦的是"把我们自己的服务地址写死"，这里顺着它把外部链接留在 HTML 里。
+                 2026-09-21 从「设备」那一组挪到这里：换安装包这件事和"这是什么版本"
+                 是同一个问题的两面，放在提醒旁边没人找得到。 -->
+            <button class="set-row hidden" id="rowUpdate">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
+              <span class="set-lbl">检查更新</span><span class="set-val" id="updateVal"></span><span class="set-go">›</span></button>
+            <a class="set-row hidden" id="rowUpdateLink" target="_blank" rel="noopener"
+               href="https://github.com/abonla599/fenver/releases/latest">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
+              <span class="set-lbl">检查更新</span><span class="set-val" id="updateLinkVal"></span><span class="set-go">↗</span></a>
+            <button class="set-row" id="themeBtn">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
+              <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <div class="set-row set-plain set-only" id="connRow">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
+              <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>
+          </div>
+
+          <!-- 退出 = 先让服务端作废这一枚令牌，再把这个人从本机清单里去掉。
+               只删本机不撤销是个假动作：那枚令牌在服务端还活着。 -->
+          <div class="set-card set-last">
+            <button class="set-row set-danger" id="rowLogout">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 4h5v16h-5"/><path d="M10 12H3M6 9l-3 3 3 3"/></svg></span>
+              <span class="set-lbl">退出登录</span></button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 二级页：同一弹层内换 view，不新开弹层。 -->
+      <div class="set-view hidden" id="setPages">
+        <div class="set-bar">
+          <button class="icon-btn set-back" id="setBack" aria-label="返回">‹</button>
+          <h2 class="set-title" id="setPageTitle">设置</h2>
+        </div>
+        <div class="set-scroll" id="setPageBody">
+        <!-- 模型服务：所有人可进。页面分两区——「共享模型」由管理员维护
+             （普通用户只读，管理员在这里增删改的是**全站**上游）；「我的模型」
+             每个人用自己的 API Key 接入任意 OpenAI 兼容服务，条目只有主人看得见、
+             调用记在主人账上（paid_by=user）。后端按所有权分面：/v1/providers 仅管理员、
+             /v1/me/providers 仅本人，界面收起与否从来不是边界，手搓请求由路由守着。 -->
+        <section class="set-page hidden" data-page="providers" id="paneProviders">
+          <p class="set-group">共享模型（管理员维护）</p>
+          <div id="sharedProvList" class="prov-list"></div>
+          <button class="btn btn-block hidden" id="addSharedBtn" data-admin-only>＋ 添加共享模型服务</button>
+
+          <p class="set-group">我的模型（自带 API Key）</p>
+          <div id="myProvList" class="prov-list"></div>
+          <button class="btn btn-block" id="addProviderBtn">＋ 添加我的模型</button>
+
+          <form class="prov-form hidden" id="provForm">
+            <input type="hidden" id="provId">
+            <div class="preset-row" id="presetRow"></div>
+            <label class="field"><span>显示名称</span><input id="provLabel" type="text" placeholder="例如 DeepSeek Chat" autocomplete="off"></label>
+            <label class="field"><span>Base URL</span><input id="provBase" type="text" placeholder="https://api.deepseek.com/v1" autocomplete="off"></label>
+            <label class="field"><span>API Key</span><input id="provKey" type="password" placeholder="留空则保留原密钥" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+            <label class="field"><span>模型名</span><input id="provModel" type="text" placeholder="deepseek-flash / qwen-vl-max" autocomplete="off"></label>
+            <!-- 上限（K token）决定聊天设置里"上下文长度"滑杆能拖到多远：
+                 留空按 64K；豆包 256k 填 256，1M 窗口的填 1000。 -->
+            <label class="field"><span>上下文上限（K token）</span><input id="provCtxK" type="number" min="1" max="10000" step="1" placeholder="留空按 64，例如 256 或 1000" inputmode="numeric"></label>
+            <label class="check"><input id="provVision" type="checkbox"><span>该模型支持图片输入（视觉）</span></label>
+            <div class="row">
+              <button class="btn" type="button" id="provTestBtn">测试连通</button>
+              <button class="btn btn-primary" type="submit">保存</button>
+              <button class="btn btn-ghost" type="button" id="provCancelBtn">取消</button>
+            </div>
+            <p class="pane-note" id="provTestResult"></p>
+          </form>
+
+          <!-- 手工填令牌：本机直跑服务时的后门。它只跟着管理员出现，
+               普通用户不该在设置里看见一个填令牌的输入框。hidden 必须是
+               HTML 默认值：applyRole 要等 /v1/auth/me 回来才跑，默认可见
+               等于每次冷启动先闪出来再收掉。 -->
+          <div class="row hidden" data-admin-only>
+            <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="off">
+            <button class="btn btn-primary" id="saveTokenBtn">保存</button>
+          </div>
+        </section>
+
+        <!-- 账户：这台机器上认识谁。清单由 app.js 的 renderAccounts 填进
+             #accountList（每行 = 一个名字 + 一个退出，点名字那行就切过去）。
+             注册只有两处入口：首屏那一层，和这里这颗按钮。 -->
+        <section class="set-page hidden" data-page="accounts" id="paneAccounts">
+          <div class="set-card" id="accountList"></div>
+          <p class="pane-note" id="whoInfo">未登录</p>
+          <div class="row"><button class="btn" id="openRegister">添加账户</button></div>
+          <p class="pane-note" id="registerHint"></p>
+        </section>
+
+        <!-- 角色设定 -->
+        <section class="set-page hidden" data-page="persona" id="panePersona">
+          <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
+          <div class="row">
+            <button class="btn btn-primary" id="savePersonaBtn">保存</button>
+            <button class="btn" id="clearPersonaBtn">清除</button>
+          </div>
+        </section>
+
+        <!-- 长期记忆 -->
+        <section class="set-page hidden" data-page="memory" id="paneMemory">
+          <form class="row" id="memoryAddForm">
+            <input id="memoryInput" type="text" placeholder="让助手记住一件事，例如：我叫张三" autocomplete="off">
+            <button class="btn" type="submit">添加</button>
+          </form>
+          <form class="row" id="memorySearchForm">
+            <input id="memoryQuery" type="search" placeholder="语义搜索记忆…" autocomplete="off">
+            <button class="btn" type="submit">搜索</button>
+          </form>
+          <ul class="mem-list" id="memoryList"></ul>
+        </section>
+
+        <!-- 提醒：整块内容由 app.js 的 renderReminders 铺——这一页要么只有壳，
+             要么只有一个空壳，HTML 里写死任何一行都会在浏览器里露出一个按不动的表单。 -->
+        <section class="set-page hidden" data-page="reminders" id="paneReminders"></section>
+
+        <!-- 日程（v0.23 T2.6）：结构逐块对位 T0.1 同构设计稿——面板 → 顶栏 → 日期条 →
+             组头 → 条目 → 新增行 → 保存条。骨架留在 HTML（可访问性名字与静态文案），
+             会变的部分（日期条、条目、错误条、空态、计数）全由 app.js 的 renderSchedule
+             铺：这里写死任何一条安排，就等于和安卓那份各存一份真相。 -->
+        <section class="set-page hidden" data-page="schedule" id="paneSchedule">
+          <div class="sched-panel">
+            <div class="sched-head">
+              <h3 class="sched-h1">日程 <span class="day" id="schedDayLabel"></span></h3>
+              <p class="sched-sub" id="schedSub">「今天」取服务端日期</p>
+            </div>
+            <div class="calbar" id="schedCalBar" role="group" aria-label="日期选择">
+              <div class="cal-head">
+                <button class="cal-nav" id="calPrevYear" type="button" aria-label="上一年">«</button>
+                <button class="cal-nav" id="calPrevMonth" type="button" aria-label="上个月">‹</button>
+                <span class="cal-title" id="calTitle" aria-live="polite"></span>
+                <button class="cal-nav" id="calNextMonth" type="button" aria-label="下个月">›</button>
+                <button class="cal-nav" id="calNextYear" type="button" aria-label="下一年">»</button>
+              </div>
+              <div class="cal-wd" id="schedCalWeeks" aria-hidden="true"></div>
+              <div class="cal-grid" id="schedCalGrid"></div>
+            </div>
+            <p class="errbar hidden" id="schedError" role="alert"></p>
+            <p class="group" id="schedGroup">今日安排<span class="count" id="schedCount"></span></p>
+            <div class="empty hidden" id="schedEmpty">
+              <span class="big">▤</span>这天还没有安排<br>点下面「添加一项」记下第一件
+            </div>
+            <div id="schedItems"></div>
+            <button class="add-row" id="schedAdd"><span class="plus">＋</span>添加一项</button>
+            <div class="sched-foot">
+              <span class="dirty-note" id="schedDirty">尚无修改</span>
+              <button class="btn-save" id="schedSaveBtn" disabled>保存</button>
+            </div>
+          </div>
+        </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <template id="msgTpl">
+    <article class="msg">
+      <div class="msg-role"></div>
+      <div class="msg-body"></div>
+      <div class="msg-atts"></div>
+      <div class="msg-tools">
+        <button data-act="copy">复制</button>
+        <button data-act="edit">编辑</button>
+        <button data-act="regen">重新生成</button>
+        <button data-act="good" title="有帮助">👍</button>
+        <button data-act="bad" title="没帮助">👎</button>
+        <button data-act="del">删除</button>
+      </div>
+    </article>
+  </template>
+
+  <!-- 首屏凭据层：没有有效令牌时挡住整个应用。两块视图共用这一层——
+       登录/注册（authForm）与找回密码（recoverForm），差别只是显示哪一块。
+       注册分两步、在同一张表单里换字段：第一步用户名 + 密码 + 确认密码，第二步才是
+       那三道固定题的答案。第二步不另开一个弹窗，是因为两块的字段属于同一次提交，
+       分开就会有一个"前一步填的东西还在另一个层里"的收尾问题。
+       题面文字不在这里：三句是全站常量、由 app.js 从 RECOVERY_QUESTIONS 渲染进
+       .auth-q 那几格，HTML 里再抄一份就是第二个事实来源（test_web_pwa 钉着不许有）。 -->
+  <!-- 默认就是挡着的：hidden 会让浏览器在 JS 跑起来之前先画出聊天外壳，
+       于是每个人都能看到"对话窗口闪一下才变成确认身份"。pending 是中性态，
+       只露字标和下面那句，三条出路都由 app.js 摘掉它。 -->
+  <div class="auth pending" id="authModal" role="dialog" aria-modal="true" aria-label="登录">
+    <div class="auth-inner">
+      <div class="auth-brand"><img src="icon.png" alt=""><span>AI 助手</span></div>
+
+      <!-- 冷启动的第一句：先问服务端「我是谁」，中间那半秒到两秒既不露表单也不露
+           聊天外壳。三条出路（认出人 / 要凭据 / 连不上）都会摘掉这一态。 -->
+      <p class="auth-pending" id="authPending">正在确认身份…</p>
+
+      <!-- 开场动画里"上推的那块弧形面板"就是这一层：两张表单（登录/注册与找回）都在它
+           里面，所以切到找回时不会又冒出一块新面板。中性态那句「正在确认身份…」刻意留在
+           面板外——它是动画还没跑完时唯一该看得见的一行字。 -->
+      <div class="auth-sheet">
+      <form class="auth-form" id="authForm" autocomplete="on">
+        <p class="auth-sub" id="authSub">登录后继续；还没有账号就点下面的「立即注册」。</p>
+        <div class="auth-field">
+          <input id="authUser" type="text" placeholder="请输入用户名" autocomplete="username">
+        </div>
+        <!-- 重名是当事人自己能改好的事，所以写在用户名那一格下面，而不是混进
+             表单末尾那句通用提示：改完就能立刻接着提交，不必回头找红字在哪。
+             注册第二步也保留这一格——撞名就发生在那一次提交上。 -->
+        <p class="field-err hidden" id="authUserErr"></p>
+        <div class="auth-field" id="authPassRow">
+          <input id="authPass" type="password" placeholder="请输入密码" autocomplete="current-password">
+          <button class="auth-eye" id="authEye" type="button" aria-label="显示密码" title="显示/隐藏密码">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-width="1.7"
+                    d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/>
+              <circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.7"/>
+            </svg>
+          </button>
+        </div>
+        <!-- 注册第一步比登录多出来的一格：确认密码只在前端校验（后端不该多一个
+             纯客户端语义的字段），所以不一致时根本不该发请求。 -->
+        <div class="auth-field hidden" id="authPass2Row">
+          <input id="authPass2" type="password" placeholder="再输入一遍密码" autocomplete="new-password">
+        </div>
+        <div class="auth-step hidden" id="regStep2">
+          <p class="auth-sub">最后一步：这三道题将来用于忘记密码时自助找回，答案只有你自己知道才对得上。
+            它们和密码一样只存这台机器上的摘要，管理员也看不到原话。</p>
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns1"><span id="regQ1"></span></label>
+            <div class="auth-field">
+              <input id="regAns1" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns2"><span id="regQ2"></span></label>
+            <div class="auth-field">
+              <input id="regAns2" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="regAns3"><span id="regQ3"></span></label>
+            <div class="auth-field">
+              <input id="regAns3" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+        </div>
+        <p class="auth-note">对话与记忆只存在这台机器上，不会上传到别处。</p>
+        <div class="auth-links">
+          <!-- 上一步只在注册第二步出现：填错答案不该逼人重开整张表单。
+               「忘记密码」在注册时被收起来：还没有账号就没有可找回的东西。 -->
+          <button class="auth-link" id="regBack" type="button">上一步</button>
+          <button class="auth-link" id="authForgot" type="button">忘记密码</button>
+          <button class="auth-link" id="authSwitch" type="button">立即注册</button>
+        </div>
+        <button class="btn btn-primary auth-go" id="authGo" type="submit">登录</button>
+        <p class="auth-hint" id="authHint"></p>
+      </form>
+
+      <form class="auth-form hidden" id="recoverForm">
+        <p class="auth-sub" id="rcSub">先输入你的用户名。</p>
+        <div class="auth-field">
+          <input id="rcUser" type="text" placeholder="请输入用户名" autocomplete="username">
+        </div>
+        <!-- 第二步一次铺开：三道固定题 + 三个答案 + 新密码 + 确认新密码。
+             答案与新密码必须同一枪提交——分开验答案就等于给外人一个 oracle。 -->
+        <div class="auth-step hidden" id="rcStep2">
+          <p class="auth-sub">回答这三道题，再设一个新密码。三道全对才改得动：题目是全站固定的那三道，答案是注册第二步留的那三句。</p>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns1"><span id="rcQ1"></span></label>
+            <div class="auth-field">
+              <input id="rcAns1" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns2"><span id="rcQ2"></span></label>
+            <div class="auth-field">
+              <input id="rcAns2" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-qa">
+            <label class="auth-q" for="rcAns3"><span id="rcQ3"></span></label>
+            <div class="auth-field">
+              <input id="rcAns3" type="text" placeholder="你的答案" autocomplete="off" maxlength="64">
+            </div>
+          </div>
+          <div class="auth-field">
+            <input id="rcNew" type="password" placeholder="新密码，至少 8 位" autocomplete="new-password">
+          </div>
+          <div class="auth-field">
+            <input id="rcNew2" type="password" placeholder="再输入一遍新密码" autocomplete="new-password">
+          </div>
+        </div>
+        <button class="btn btn-primary auth-go" id="rcGo" type="submit">下一步</button>
+        <p class="auth-hint" id="rcHint"></p>
+        <div class="auth-links">
+          <button class="auth-link" id="rcBack" type="button">回去登录</button>
+        </div>
+      </form>
+      </div><!-- /.auth-sheet -->
+    </div>
+  </div>
+
+  <!-- 「发现版本更新」：底部卡片，只在确实有新版时弹（判据在 app.js 的 offerUpdate）。
+       和设置里那行「检查更新」是两件事——那一行是人去问，这张卡是"替他看一眼然后提一句"，
+       所以两者各自独立存在，删掉一张另一张照常。
+       版本号从 /v1/release/latest 填进来，这里一个字都不写死：抄一份进 markup，下一次
+       发版它就腐烂，而且腐烂得理直气壮（和 versionVal 那条是同一个理由）。
+       「立即更新」有两个元素（button 与 a），同一时刻只露一个，规则与设置那一行完全相同：
+       报得出版本号、又带 update 能力的壳才调桥，其余一律给下载页——否则手机上会留下一颗
+       点了没反应的死按钮。下载页地址写在 markup 里而不是 app.js：
+       test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。 -->
+  <div class="update-sheet hidden" id="updateSheet" role="dialog" aria-label="发现版本更新">
+    <div class="us-top">
+      <div class="us-text">
+        <p class="us-title">发现版本更新</p>
+        <p class="us-ver" id="updateVer"></p>
+      </div>
+      <svg class="us-art" viewBox="0 0 88 64" fill="none" aria-hidden="true">
+        <rect x="27" y="6" width="30" height="52" rx="8" stroke="currentColor" stroke-width="2.4"/>
+        <path d="M42 19v16M36 30l6 6 6-6" stroke="currentColor" stroke-width="2.4"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path class="us-spark" d="M14 11l2.3 5.2 5.2 2.3-5.2 2.3-2.3 5.2-2.3-5.2-5.2-2.3 5.2-2.3z"/>
+        <path class="us-spark" d="M75 33l1.7 3.8 3.8 1.7-3.8 1.7-1.7 3.8-1.7-3.8-3.8-1.7 3.8-1.7z"/>
+      </svg>
+    </div>
+    <div class="us-acts">
+      <button class="us-btn us-ghost hidden" id="updateLaterBtn" type="button">稍后</button>
+      <button class="us-btn us-primary hidden" id="updateGoBtn" type="button">立即更新</button>
+      <a class="us-btn us-primary hidden" id="updateGoLink" target="_blank" rel="noopener"
+         href="https://github.com/abonla599/fenver/releases/latest">立即更新</a>
+    </div>
+  </div>
+
+  <!-- 这一页是哪一版：`__ASSET_TOKEN__` 由服务端在出门前填（app/web/web_router.py 的
+       rewritten_html）。HTML 允许缓存 30 秒，所以"旧骨架跑新代码"有一个 30 秒的窗口，
+       症状是缺元素、点了没反应；app.js 拿这个值对一次账，不对就自己重载。 -->
+  <script>window.__ASSETS__ = "__ASSET_TOKEN__";</script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <!-- highlight.js 不在关键路径上：由 markdown.js 在首次遇到代码块时懒加载，
+       样式表仍在这里同步引入（体积小，且避免代码块先裸奔一帧再变色）。 -->
+  <script src="markdown.js"></script>
+  <script src="api.js"></script>
+  <!-- shell.js 必须排在 app.js 之前：它定义的全局 SHELL 是 app.js 里三处 setOwner 与
+       提醒/分享那几段的唯一入口，而它本身在没有桥的浏览器里就是一堆空操作。 -->
+  <script src="shell.js"></script>
+  <!-- layers.js 提供 makeLayerStack，app.js 在加载时就调它建栈（那时会 replaceState 一次），
+       所以必须排在前面。它只认 history、不碰 DOM，因此也能被 node 直接跑起来验行为。 -->
+  <script src="layers.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

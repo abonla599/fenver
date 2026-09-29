@@ -1,0 +1,260 @@
+"""鉴权接线：把凭据解析成 Principal，并提供两个端点依赖。
+
+与 core/auth.py 分家的原因：身份规则要能离线测，也不该被 web 框架绑住。
+"""
+import hmac
+import os
+from typing import Optional
+
+from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
+                           auth_store)
+# 导出票据的路径形状只有存储层知道（长度跟着生成器走），这里引用而不是抄第二份。
+from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_PATH_RE
+
+BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
+
+# 无需凭据即可到达的端点，精确匹配。注册与登录本来就是给"还没有身份的人"用的，
+# 所以它们必然公开——代价是这几个端点自己变成攻击面，防线全部落在 auth_router
+# 的真实 IP 限流与"几种失败同一句话、同一份耗时"上（注册/登录/改密都是）。
+# 找回只有改密这一条公开端点：三题是全站常量，页面自己渲染，不必问服务器要。
+# 新增公开端点必须同时改这里，否则路由契约测试会红。
+PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
+                          # 公开信息，不含任何用户数据：手机上那张「发现版本更新」的卡片
+                          # 要问"最新是哪一版"，而它发生在人还没登录的时候。
+                          # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
+                          # 出站请求带 10 分钟缓存（app/core/releases.py）：一小时内最多
+                          # 6 次，与来多少请求无关。
+                          "/v1/release/latest",
+                          # 壳「检查更新」的透传端点：与上面那条共用同一份快照与同一套
+                          # 缓存代价，公开的是本来就公开的发布元数据。它替代的是
+                          # "壳自己直连 api.github.com"——那条通道要过各家 ROM 的下载器。
+                          "/v1/update/info"})
+
+# 会话 Cookie（方案 C：凭据不进 JS）。名字刻意短且不带语义泄露；值就是存储层
+# 签发的那枚令牌原文，服务端不新建第二套凭据体系。
+# path=/v1：静态页面与文档路由永远收不到它，能带上它的只有数据端点本身。
+# HttpOnly：页面脚本读不到 document.cookie，XSS 拿不走会话。
+# SameSite=Lax：跨站 POST 一律不带 Cookie（第一道 CSRF 防线），顶层 GET 跳转仍带。
+# 不设 Max-Age = 会话级 Cookie：浏览器/WebView 进程退出即蒸发。
+SESSION_COOKIE = "session"
+
+# CSRF 第二道防线：不带凭据请求头、却带会话 Cookie 的不安全方法，必须声明这个
+# 自定义头。跨站脚本能诱导浏览器带出 Cookie（同站顶层导航之外其实带不出，Lax
+# 已挡 POST），但任何站点的 JS 都发不出"既带该头又能让浏览器附上本站 Cookie"的
+# 跨站 POST；而原生 HTTP 客户端从来不受同源约束，也就从来不需要这道门。
+# 值不校验内容，只要求非空：它是"我在 JS 里"的声明位，不是秘密。
+CSRF_HEADER = "x-csrf"
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_DETAIL = "缺少 CSRF 校验头"
+
+# 免凭据的第二种形状：带变量段的公开路由。精确匹配的门今天只有票据兑换这一条
+# 需要跨过去——链接本身就是凭据（128 位随机、5 分钟过期、一次作废，见
+# app/session/export_store.py），壳 APK 的下载请求带不出 Authorization 头，
+# 不匿名就没有任何文件能落进手机。
+# 放行的是"整条路径恰好等于前缀+票据形状"（锚定的正则，不是前缀匹配）：
+# /v1/exports/ 、/v1/exports/short、/v1/exports/x/y 都仍然要凭据。key 是路由
+# 模板（给路由契约测试核对挂载表用），value 是中间件匹配具体请求用的正则。
+# 新增一条带变量的公开路由 = 在这里点名 + 改 tests/test_route_auth_contract.py，
+# 与 PUBLIC_PATHS 同一套"多一条就红"的规矩。
+PUBLIC_ROUTE_TEMPLATES = {f"{EXPORT_PATH_PREFIX}{{ticket_id}}": TICKET_PATH_RE}
+
+_PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
+
+# 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺
+# （"没有身份"，区别于 403 的"有身份但不够"）。
+UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
+
+
+def is_public_path(path: str) -> bool:
+    """这条**具体请求路径**免不免凭据：精确名单，或恰好整条命中票据形状。
+
+    判定收在这一个函数里，中间件与测试共用同一份口径；写成两处各来一遍的
+    话，改天漂移的那一半就是没人知道的免凭据门。
+    """
+    return path in PUBLIC_PATHS or any(p.match(path)
+                                       for p in PUBLIC_ROUTE_TEMPLATES.values())
+
+
+def _auth_mode() -> str:
+    """每次请求现读。做成 import 期常量的话，测试就得 reload 模块才能切模式。"""
+    return os.getenv("AUTH_MODE", "enforced").strip().lower()
+
+
+# disabled 模式的远程放行开关：运维显式设 1 才承认"我知道我在裸奔"。
+DISABLED_REMOTE_ENV = "ALLOW_DISABLED_REMOTE"
+
+
+def _bind_host() -> str:
+    """进程对外绑定的网卡地址。约定读 HOST（与 uvicorn --host / docker 传参同名）。
+
+    缺省按 127.0.0.1 算：run_backend.py 与桌面 EXE 都硬编码回环，不设 env 的
+    部署形态本来就是本机单机；把缺省判成 0.0.0.0 会误伤全部本地安装。
+    """
+    return (os.getenv("HOST", "").strip() or "127.0.0.1").lower()
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in ("127.0.0.1", "localhost", "::1") or host.startswith("127.")
+
+
+def _disabled_mode_allowed() -> bool:
+    """disabled 只允许出现在回环绑定上；绑到 0.0.0.0 等对外网卡时必须拒绝。
+
+    这就是"仅打印警告"缺的那道技术护栏：警告是给自觉的人看的，护栏是给误配的人
+    兜底的。判定每次现读 env，与 _auth_mode 同一套口径，测试 monkeypatch 即生效。
+    """
+    host = _bind_host()
+    if _is_loopback_host(host):
+        return True
+    return os.getenv(DISABLED_REMOTE_ENV, "").strip() == "1"
+
+
+def _bootstrap_token() -> str:
+    return os.getenv(BOOTSTRAP_TOKEN_ENV, "").strip()
+
+
+def docs_kwargs_for_mode(mode: str) -> dict:
+    """按模式给出 FastAPI 构造参数——纯函数，不读 env，因此两种模式都断言得到。
+
+    文档路由在 app 构造期就定死，请求期改不了。这个判定原先写在 main.py 里，
+    测试要覆盖另一半就只能 importlib.reload(app.main)：reload 会把 sessions_store
+    等模块级对象重新绑定到别处，而全局 client 早已抓住旧 app，后续任务给
+    app.main 打补丁时就会静默错位。抽成函数后 main.py 只留一行传参。
+    """
+    if mode == "disabled":
+        return {}
+    # 路由表本身就是侦察材料，对外一律不给 openapi
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+def _header_credential(request: Request) -> str:
+    supplied = request.headers.get("authorization", "").strip()
+    scheme, _, credential = supplied.partition(" ")
+    # 认证方案名大小写不敏感（RFC 7235）；未写方案名时整值即凭据
+    if not credential and scheme:
+        credential = scheme
+    elif scheme.lower() not in ("bearer", "token"):
+        credential = ""
+    return credential or request.headers.get("x-access-token", "").strip()
+
+
+def _cookie_credential(request: Request) -> str:
+    """httpOnly 会话 Cookie 里的那一枚；页面 JS 永远看不见它的值。"""
+    return request.cookies.get(SESSION_COOKIE, "").strip()
+
+
+def _credential(request: Request) -> str:
+    """请求携带的凭据原文：请求头优先，其次是会话 Cookie。
+
+    保持这个函数名不为别的——logout 与一切"把调用方刚用的那枚作废/复述回去"的
+    语义都要走同一份口径，否则会出现"中间件认得这枚、退出说不认识"。
+    """
+    return _header_credential(request) or _cookie_credential(request)
+
+
+def _secrets_match(supplied: str, secret: str) -> bool:
+    """常量时间比较，且不让畸形请求头变成 500。
+
+    bootstrap 口令是外部可比对的秘密，所以不能图省事用 ==；但请求头是任意
+    UTF-8，hmac.compare_digest 收到非 ASCII str 会抛 TypeError——那等于任何人
+    用一个乱码令牌就能把鉴权打成 500。编码规则不在这里重写，直接沿用
+    auth._as_hash_bytes：同一条"先按字节、非 ASCII 不崩"的规则只有一份权威，
+    否则两处各自的边角情况迟早对不上。
+    """
+    return hmac.compare_digest(_as_hash_bytes(supplied), _as_hash_bytes(secret))
+
+
+def resolve_principal(request: Request) -> Optional[Principal]:
+    """解析请求身份。返回 None 表示"没有身份"，由调用方决定 401/403。"""
+    credential = _credential(request)
+    if not credential:
+        return None
+    bootstrap = _bootstrap_token()
+    if bootstrap and _secrets_match(credential, bootstrap):
+        return BOOTSTRAP_PRINCIPAL
+    return auth_store.resolve(credential)
+
+
+def _has_any_identity() -> bool:
+    """库里没有任何管理员、也没配 bootstrap 时，服务端就没有可服务的身份。
+
+    这里的 admin 检查只认运维手工写进 users.json 的逃生口：角色永不通过请求
+    产生，否则任何人都能给自己提权。
+
+    判定走 has_role 而不是 list_users()：这条在每个受保护请求上都要跑一遍，
+    把整个身份库连口令散列一起拷一份只为读一个字段，纯属白付。拷贝省掉了，
+    实时性一点没省——has_role 在同一把锁里现读，所以删号/停用/手工把某个人的
+    role 改回 user，下一句请求就按新状态回答。这里**不要**加缓存：那道门是
+    fail-closed 的判据，读到过期身份等于把 503 变成放行。
+    """
+    return bool(_bootstrap_token()) or auth_store.has_role("admin")
+
+
+def install_auth(app) -> None:
+    if _auth_mode() == "disabled":
+        if _disabled_mode_allowed():
+            print("⚠️ AUTH_MODE=disabled：所有请求均以本机管理员身份运行（当前绑定回环，仅限本机）")
+        else:
+            print(f"⛔ AUTH_MODE=disabled 但 HOST={_bind_host()} 绑到了对外网卡："
+                  f"受保护请求将一律 503，直到改回回环或显式 {DISABLED_REMOTE_ENV}=1")
+
+    @app.middleware("http")
+    async def authenticate(request, call_next):
+        path = request.url.path
+        if request.method == "OPTIONS" or not path.startswith(_PROTECTED_PREFIXES):
+            return await call_next(request)
+        if is_public_path(path):
+            return await call_next(request)
+
+        if _auth_mode() == "disabled":
+            # 技术护栏：disabled + 非回环绑定 = 把管理员身份挂在公网门把手上。
+            # 请求期再判一次而不只靠启动打印：绑定参数可能在启动打印之后才被
+            # 容器/脚本改环境覆盖，而这条 503 是唯一不依赖"有人看了日志"的防线。
+            if not _disabled_mode_allowed():
+                return JSONResponse(status_code=503, content={
+                    "detail": "AUTH_MODE=disabled 不允许在对外网卡上运行："
+                              "请改绑回环，或确认风险后设置 ALLOW_DISABLED_REMOTE=1"})
+            request.state.principal = BOOTSTRAP_PRINCIPAL
+            return await call_next(request)
+
+        # CSRF 闸门只可能由"凭据出自 Cookie"触发：带请求头凭据的请求不是浏览器
+        # 自动附带的东西（没有 CORS 就没有跨站自定义头，而受同源约束的自动信道
+        # 恰恰只有 Cookie 一条），本身对 CSRF 免疫。顺序放在身份判定之前：一个
+        # 既没登录又跨站伪造的 POST 该先被 CSRF 挡下，而不是替攻击者免费试探
+        # "这台服务器配没配身份"。
+        if (request.method in _UNSAFE_METHODS
+                and not _header_credential(request)
+                and _cookie_credential(request)
+                and not request.headers.get(CSRF_HEADER, "").strip()):
+            return JSONResponse(status_code=403, content={"detail": CSRF_DETAIL})
+
+        if not _has_any_identity():
+            return JSONResponse(status_code=503,
+                                content={"detail": "服务端未配置访问凭据"})
+
+        principal = resolve_principal(request)
+        if principal is None:
+            return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
+        request.state.principal = principal
+        return await call_next(request)
+
+
+def current_principal(request: Request) -> Principal:
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        raise HTTPException(status_code=401, detail=UNAUTHORIZED_DETAIL)
+    return principal
+
+
+def require_admin(request: Request) -> Principal:
+    principal = current_principal(request)
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return principal
+
+
+CurrentPrincipal = Depends(current_principal)
+RequireAdmin = Depends(require_admin)

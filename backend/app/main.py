@@ -1,0 +1,1164 @@
+import sys
+import os
+
+# 中文 Windows 的控制台默认 GBK，打包成 EXE 后任何 emoji 日志都会抛
+# UnicodeEncodeError 并在导入阶段终止进程（开发终端能显示 UTF-8，所以看不出来）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import uuid
+import threading
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+import uvicorn
+
+# ---------- 路径设置 ----------
+# 确保项目根目录 (backend) 在路径中，以便支持 from app.xxx import xxx
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # 指向 backend/
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# ---------- 可选导入：后台任务模块（本人负责） ----------
+
+# 1. auto_weight_adjuster (假设它在 app 目录下)
+try:
+    from app import auto_weight_adjuster
+except ImportError:
+    auto_weight_adjuster = None
+    print("⚠️ auto_weight_adjuster 未安装，实时反馈监听不可用")
+
+# 2. preference_analyzer：定时任务里唯一真正干活的后台模块。
+#    memory_weight_updater 从前也挂在这个 import 上，但它整个模块只有一个 print，
+#    每 300 秒被调用一次、每轮都印一句"执行记忆权重更新"——而它什么都不改。
+#    现在它只提供一句启动时打印的实话（见该文件的模块文档），不再进定时任务。
+try:
+    from app import preference_analyzer
+    HAS_BG_TASKS = True
+except ImportError as e:
+    HAS_BG_TASKS = False
+    preference_analyzer = None
+    print(f"⚠️ 偏好分析模块未找到: {e}")
+
+from app import memory_weight_updater
+
+# 3. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
+# 注意：如果 preference_analyzer 已经在上面导入成功，这里可以直接从 app.preference_analyzer 导入函数
+try:
+    from app.feedback_storage import save_feedback, FEEDBACK_FILE
+    # 如果 preference_analyzer 模块存在，从中导入具体函数
+    # 偏好摘要按人分账之后，"重算一次"这个动作必须说清楚是替谁重算：
+    # analyze_and_update_preference(user_id) 服务单个用户，
+    # analyze_all_preferences() 服务后台定时器（它没有"当前调用者"这个身份）。
+    if preference_analyzer:
+        from app.preference_analyzer import (analyze_and_update_preference,
+                                             analyze_all_preferences)
+    else:
+        analyze_and_update_preference = None
+        analyze_all_preferences = None
+except ImportError as e:
+    save_feedback = None
+    FEEDBACK_FILE = None
+    analyze_and_update_preference = None
+    analyze_all_preferences = None
+    print(f"⚠️ 反馈存储/偏好分析模块未找到: {e}")
+
+# ---------- 其他核心导入 ----------
+try:
+    from app.core.llm_client import get_llm_response
+    from app.pipeline import ChatPipeline
+    USE_PIPELINE = True
+except ImportError as e:
+    USE_PIPELINE = False
+    print(f"❌ ChatPipeline 不可用，记忆注入与工具调用已失效（非流式对话将直接调用模型）: {e}")
+
+try:
+    from app.agents.orchestrator import Orchestrator
+    # 不给 Orchestrator 传模型名：留空 = 每次调用现走 setDefault 的 provider。
+    # 在这里刻一个服务商名，等于把用户在设置页里换默认模型的权力没收。
+    orchestrator = Orchestrator()
+except ImportError as e:
+    orchestrator = None
+    print(f"⚠️ 编排器不可用，/v1/agent/orchestrate 等端点将返回 503: {e}")
+
+try:
+    from app.agents.task_store import task_store, get_task, TaskStatus
+except ImportError:
+    task_store = {}
+    get_task = None
+    TaskStatus = None
+
+# ... (其余代码保持不变) ...
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行
+    # 先把"这八份可变数据此刻到底写在哪儿"打出来：它原先只是文档里的一段散文，
+    # 而 data_file() 会在 data/ 下没有同名文件时退回项目根那份历史文件——于是
+    # "所有数据都在 data/ 下吗"取决于本机有没有一个老 preference.txt，光看文档猜不出来。
+    from app.core.paths import log_data_locations
+    log_data_locations()
+    # 紧接着打一行"齐不齐"：出事时人在看日志，而不是去猜当时 /health 回过什么。
+    from app.core.selfcheck import log_startup_summary
+    log_startup_summary()
+    # v0.24 T1.4：再补一行配置口径——注册开没开、更新去哪个仓找。这两件事直接
+    # 决定来人第一次怎么进门，值得在日志里留一句，而不是让人去翻 data/config.json。
+    from app.core.config_store import log_config_summary
+    log_config_summary()
+    # uvicorn 的 access/error logger 也要过一遍脱敏：访问日志会把查询串原样写出来
+    # （?model=deepseek-chat 就是这么漏进 named.log 的），光给文件流加壳拦不住它。
+    # 放在启动摘要之后，是因为这条之前已经有人往日志里写过东西。
+    from app.core import logsanitizer
+    logsanitizer.install_std_filters()
+    # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
+    # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
+    from app.tools.availability import start_probe
+    start_probe()
+    start_background_scheduler()
+    yield
+    # 关闭时执行（如果需要清理资源）
+    print("服务正在关闭...")
+
+# 记忆模块路由（包含完整的 /v1/memory/* 端点）
+from app.memory.memory_router import router as memory_router
+
+# 身份端点：邀请码注册 + 管理面。哪个端点免凭据由 authz.PUBLIC_PATHS 说了算，
+# 这里只负责挂载，不在此处再判一遍凭据。
+from app.core.auth_router import router as auth_router
+from app.core.auth_router import (chat_allowed, note_chat, chat_retry_after,
+                                  _client_ip, _too_many)
+
+# PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
+from app.web.web_router import mount_admin, mount_pwa
+
+# ---------- 创建 FastAPI 应用 ----------
+# 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
+# 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
+from app.core.authz import (_auth_mode, CurrentPrincipal, docs_kwargs_for_mode,
+                            install_auth, Principal, RequireAdmin)
+
+# 非 disabled 模式连文档路由都不生成（路由表本身就是侦察材料）
+app = FastAPI(
+    title="AI 智能助手",
+    description="多模型、工具调用、记忆管理的智能助手系统",
+    version="1.0.0",
+    lifespan=lifespan,  # 注册 lifespan
+    **docs_kwargs_for_mode(_auth_mode())
+)
+
+# ---------- 错误形状 ----------
+# 形状错（整个字段缺失、字段类型不对）落在 FastAPI 的 RequestValidationError 上，默认
+# detail 是一个结构化 list，而且 pydantic 会把提交进来的值原样放进 input——注册与找回
+# 那两格里过的就是密码和找回答案。两个客户端因此同时坏：api.js 是 `new Error(detail)`，
+# 数组过去显示成 [object Object]；管理页 admin.js 同一套写法。
+#
+# 这句话只在服务端说一次。找回那道 pydantic 条数闸门撤掉之后，"字段缺失/不是数组"这一类
+# 仍然走结构化 detail，如果让每个客户端各自兜一层（Array.isArray(detail) ? ... : ...），
+# 形状就有了 N 个事实来源，而 curl 与桌面壳这两个没兜的东西照样看不懂。
+# 判据见 tests/test_auth_endpoints.py 的
+# test_a_malformed_body_says_one_plain_chinese_sentence。
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+MALFORMED_BODY_DETAIL = "提交的内容不完整或格式不对：请检查每一栏都填了"
+
+
+@app.exception_handler(RequestValidationError)
+async def on_malformed_body(_: Request, exc: RequestValidationError):
+    """把结构化校验错误压成一句人话，状态码仍是 422。"""
+    # 原始错误只进服务端日志，且只取字段路径：够定位是哪儿没填，
+    # 又不会把密码或答案写进控制台与 EXE 的日志文件里。
+    where = "、".join(".".join(str(part) for part in (err.get("loc") or ()))
+                      for err in exc.errors()[:8])
+    print(f"⚠️ 请求体形状不对（{where or '未知字段'}）")
+    return JSONResponse(status_code=422, content={"detail": MALFORMED_BODY_DETAIL})
+
+# 注册记忆路由（优先使用 Router 中的端点）
+app.include_router(memory_router)
+
+# 注册身份端点（/v1/auth/*、/v1/admin/*）
+app.include_router(auth_router)
+
+# 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
+mount_pwa(app)
+
+# 管理员页挂在 /admin：一个不含数据的空壳，数据一律经 /v1/admin/* 取。
+mount_admin(app)
+
+# ---------- 访问鉴权 ----------
+# 身份规则见 app/core/authz.py（import 在创建应用那一节）。这里只负责装上。
+install_auth(app)
+
+# 耗时日志装在鉴权**之后**，于是它包在鉴权外面：被 401 挡掉的那几次同样留一行。
+# 人打不开页面的那些分钟，最需要知道的是"请求到底有没有到"——把观察器装在门里面，
+# 被门挡掉的那些就正好是日志里的一片空白。
+from app.core.request_log import RequestTiming
+
+app.add_middleware(RequestTiming)
+
+# ---------- 数据模型 ----------
+class ChatRequest(BaseModel):
+    # 兼容字段：作为 provider 的别名解析。默认从写死的服务商名改为 None（F-1f）：
+    # 名字刻在这儿，用户在设置页换了默认 provider 也不会有任何影响——resolve
+    # 对 None 与对该名字的兜底路径本来就是同一个 default()，去掉刻名只是把
+    # "碰巧被上游兜住"改成"这里本来就没写"。
+    model: Optional[str] = None
+    provider: Optional[str] = None        # 模型服务 id（首选）
+    attachments: List[str] = []           # /v1/uploads 返回的附件 id
+    messages: list[dict]
+    session_id: Optional[str] = None
+
+class FeedbackRequest(BaseModel):
+    message_id: str
+    rating: int
+    comment: Optional[str] = None
+
+class AgentRequest(BaseModel):
+    task: str
+    max_turns: Optional[int] = 10
+    max_duration: Optional[int] = 120
+    # provider id（或旧式模型名）；留空走默认配置。端点原先向上写死
+    # "deepseek-chat"，等于在代码里刻了一个服务商名。
+    model: Optional[str] = None
+
+class OrchestrateRequest(BaseModel):
+    goal: str
+    task_id: Optional[str] = None
+
+# ---------- 会话存储 ----------
+from app.session.session_store import SessionStore
+
+# ⚠️ 导入期副作用：这一行会把 $SESSION_DB_PATH 指向的文件读进来并做 owner 回填，
+# 未设置该变量时就是仓库真实的 data/sessions.json —— 也就是说"只是 import 一下
+# app.main"就会改写用户真实数据，并在旁边落下 sessions.json.bak-<时间戳>。
+# 脚本与测试必须先定 SESSION_DB_PATH / UPLOAD_DIR / USERS_DB_PATH，
+# 再导入本模块（backend/tests/conftest.py 就是为此存在）。
+# fail-fast 是刻意的；改成惰性构造留给 Task 8。
+sessions_store = SessionStore()
+
+# ---------- 后台定时任务 ----------
+def run_scheduler_cycle():
+    """跑一轮周期性后台任务。
+
+    单独成一个函数，是为了这一轮能被测试调用：`backend/tests/
+    test_memory_weight_scheduler.py` 用一个 tripwire 钉住"定时器不改权重"。
+    原先整段逻辑埋在一个 while True 里，谁都调不到它，于是那句谎话印了
+    多少个周期都没人能为它写一条断言。
+
+    这里刻意不碰权重：写权重的只有用户反馈与两个显式端点，见
+    `app/memory_weight_updater.py` 的模块文档。
+    """
+    print("--- 开始执行周期性后台任务 ---")
+    if HAS_BG_TASKS and preference_analyzer:
+        # 定时器没有"当前调用者"，所以它不能替某一个人决定归属：
+        # 反馈里出现过谁就重算谁那一份（偏好摘要按人分账，见
+        # preference_analyzer）。原先这里调用的是不带身份的
+        # analyze_and_update_preference()，它把所有人合并成一份
+        # 全站摘要再注入每个人的提示词。
+        preference_analyzer.analyze_all_preferences()
+
+
+def run_scheduler():
+    while True:
+        try:
+            run_scheduler_cycle()
+            print("--- 周期性后台任务执行完毕 ---")
+        except Exception as e:
+            print(f"后台任务执行出错: {e}")
+        time.sleep(300)
+
+def start_background_scheduler():
+    # 一句话说明权重到底由谁改写。只在启动时印这一次：它描述的是"没有自动衰减"
+    # 这件事，而这件事不会因为又过了 300 秒而变化——按周期印只会让人以为有东西在跑。
+    memory_weight_updater.log_weight_policy()
+
+    # 启动偏好分析线程
+    bg_thread = threading.Thread(target=run_scheduler, daemon=True)
+    bg_thread.start()
+    print("🚀 后台偏好分析定时任务已启动（只重算偏好摘要，不改写记忆权重）")
+
+    # 这里原来还起一条"实时反馈闭环监听器"线程，并打印"🔁 实时反馈闭环监听器已启动！"。
+    # 它没做事：调用时没传 callback，auto_weight_adjuster 退化成默认 lambda，只往
+    # stdout 印一句"未提供回调函数"。真正改权重的是 /v1/feedback 的同步路径，需求已经
+    # 被它覆盖。留着的结果是一行永远在说谎的启动日志——本项目最贵的那类东西。
+
+
+
+# ---------- API 端点 ----------
+# 同步 def：自检要读盘（密钥库、账本、chroma 的集合元数据）。挂在 async 上就是
+# 把阻塞 I/O 放回事件循环——那正是 524 的根因，而且会连带冻住流式回答。
+@app.get("/health")
+def health_check():
+    """进程活着只是及格线；这里报的是"那几样会静默坏掉的东西齐不齐"。
+
+    状态码不随检查结果变化（永远 200）：坏的是配置，重启修不好它，而"非 200 就拉起"
+    的守护会因此每分钟杀掉一次正在进行的对话。判据给日志和运维，不给进程管理器。
+
+    `build` 是这套部署的构建戳（构建时由 git tag 生成，见 app/core/buildinfo.py）。
+    放在这里而不是新开一个端点：这是免鉴权的公开信息（版本号本来就在公开仓库的 tag
+    上），而「设置 → 关于」那一行正是没有登录态的时候也要能显示。
+    """
+    from app.core.buildinfo import build_version
+    from app.core.selfcheck import run
+    return {"build": build_version(), **run()}
+
+
+# 同步 def：这条会替调用方去 GitHub 拉一次（最多 5 秒）。写成 async 就是把阻塞网络
+# 放回事件循环——524 那节课的第二遍，代价是所有人的流式回答一起卡住。
+@app.get("/v1/release/latest")
+def release_latest(have: str = None):
+    """手机上那张「发现版本更新」要问的全部：最新是哪版、比手上这版新吗、去哪儿下。
+
+    免鉴权（在 `authz.PUBLIC_PATHS` 里点了名）：它发生在人还没登录的时候。免鉴权不等于
+    没有代价——它会替调用方出一次网，所以那条请求带 10 分钟缓存，一小时内最多 6 次，
+    与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
+
+    拉不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
+    """
+    from app.core import releases
+    return releases.probe(have)
+
+
+# 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
+@app.get("/v1/update/info")
+def update_info():
+    """壳「检查更新」的数据源：原样的 GitHub 发布 JSON + 顶层 `apk_sha256`。
+
+    为什么壳不自己问 GitHub 的发布接口：手机到 GitHub 的链路要过运营商、代理与各家
+    ROM 的下载器，正是 2026-09-23 那次"迅雷劫持 → 残包 → 安装失败"的案发通道；
+    而手机到这台服务器是天天在用的链路。一台机器出网、全员共享缓存，代价与
+    `/v1/release/latest` 完全同构（判据在 tests/test_release_probe.py）。
+
+    与那条卡片端点的分工：卡片要的是"要不要提一句"（拉不到就**不弹**，ok:false）；
+    这条要的是"人主动点了检查"，拉不到必须说出来——所以拉不到时是 502 带理由，
+    而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款；
+    AC-4 的后半句「不伪装最新」在这一头还意味着：GitHub 恢复前，超过缓存期的旧快照
+    对这条端点等同于读不出来（判据在 `releases.latest_release_manifest`，
+    钉在 test_update_channel 的 stale 用例组）。
+    """
+    from fastapi.responses import JSONResponse
+    from app.core import releases
+    manifest, reason = releases.latest_release_manifest()
+    if manifest is None:
+        return JSONResponse(status_code=502, content={"detail": f"问不到发布信息：{reason}"})
+    return manifest
+
+# ---------- 聊天接口 ----------
+from app.core.providers import (store as provider_store, ProviderError, PRESETS,
+                                looks_placeholder, build_client, scrub_secrets)
+from app.core.uploads import (store as upload_store, build_user_content,
+                              UploadError, MAX_UPLOAD_BYTES)
+
+
+def _fail_reason(e: BaseException) -> str:
+    """把异常链压成一句能定位的话：类型全留，重复的句子并掉。
+
+    SDK 的默认文案不含任何线索（openai 那句 "Connection error." 底下才躺着
+    "CERTIFICATE_VERIFY_FAILED：本机卡巴斯基拆了 TLS"），根因只在 __cause__ /
+    __context__ 上。真机上量到这条链四层里有三层是同一句话，所以按文案分组、组内
+    并掉重名类型：一层原文配一串类型名，才是既说得清又不刷屏的形状。
+
+    最后一句要过一次 scrub_secrets：这个函数是**日志与响应体共用的那一个出口**
+    （main.py 的四处调用 + 管理员的探活都从这儿过），脱敏长在这里才只有一份口径；
+    写在每个调用点上迟早会漏一处，而漏的那一处正好是上游把 key 打印回来的那次。
+    """
+    groups = []          # 每项是 ([类型名...], 文案)
+    seen = set()
+    cur = e
+    while cur is not None and len(seen) < 8 and id(cur) not in seen:
+        seen.add(id(cur))
+        name = type(cur).__name__
+        text = str(cur)[:160]
+        if groups and groups[-1][1] == text:
+            if groups[-1][0][-1] != name:
+                groups[-1][0].append(name)
+        else:
+            groups.append(([name], text))
+        cur = cur.__cause__ or cur.__context__
+    return scrub_secrets(" ← ".join(" → ".join(names) + (f": {text}" if text else "")
+                                    for names, text in groups))
+
+
+def _throttle_chat(http: Request, principal: Principal) -> None:
+    """第五本限流账：60 秒 20 次，键 `IP + 登录身份`。
+
+    顺序是**先判断、再记账、才叫模型**——反过来写的话，被挡下的那一次也会把
+    真金白银花出去，而那正是这本账要挡的事。判据在 test_chat_throttle.py 里。
+    """
+    ip = _client_ip(http)
+    if not chat_allowed(ip, principal.user_id):
+        raise _too_many(chat_retry_after(ip, principal.user_id))
+    note_chat(ip, principal.user_id)
+
+
+def _prepare_chat(request: ChatRequest, principal: Principal):
+    """解析模型服务、拼装附件。
+
+    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本)。
+    历史里只记原始文本加附件名，避免把整份文件塞进会话记录。
+
+    principal 一路传进来而不是在这里再取一次：附件归属必须由"谁在请求"决定，
+    请求里那个 attachments 列表只是别人塞进来的 id 集合。
+    """
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+
+    provider = provider_store.resolve(request.provider, legacy_model=request.model,
+                                      user_id=principal.user_id)
+
+    messages = list(request.messages)
+    last = messages[-1] or {}
+    raw = last.get("content")
+    text = raw if isinstance(raw, str) else ChatPipeline.text_of(raw)
+
+    content = build_user_content(text, request.attachments, provider["supports_vision"],
+                                 principal.user_id)
+    messages[-1] = {**last, "content": content}
+
+    history_text = text
+    if request.attachments:
+        names = "、".join(
+            (upload_store.get(a, owner=principal.user_id) or {}).get("name", a)
+            for a in request.attachments)
+        history_text = (text + "\n" if text else "") + f"[附件] {names}"
+
+    return provider, messages, history_text
+
+
+def _require_session_owner(session_id, principal: Principal) -> None:
+    """有 session_id 就先证明它属于调用者，否则 404，且必须在调模型之前。
+
+    为什么不能只靠 add_message 返回 False：那样这条路会对"别人的会话 id"回一个
+    200，而模型已经调完、token 已经花掉，转录则被静默丢掉——调用方看到的界面
+    上一切正常，历史里一个字都没落。写没写进去是这条链路的契约，就不能靠一个
+    被丢弃的返回值来表达。
+
+    404 不会把它变成探测器："不是你的"和"根本不存在"经 store 返回同一个 None，
+    因此发出的是同一个 404、同一句话，跟 /v1/sessions/{id} 那些路由一模一样。
+    """
+    if session_id and sessions_store.get(session_id, owner=principal.user_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+
+@app.post("/v1/chat")
+def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrincipal):
+    _throttle_chat(http, principal)
+    _require_session_owner(request.session_id, principal)
+    try:
+        provider, messages, user_text = _prepare_chat(request, principal)
+    except (ProviderError, UploadError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        used_memory_ids = []
+        if USE_PIPELINE:
+            result = ChatPipeline(user_id=principal.user_id).process(
+                provider["model"], messages, provider_id=provider["id"])
+            reply = result.get("reply", "")
+            used_memory_ids = result.get("used_memory_ids") or []
+        else:
+            reply = get_llm_response(
+                model=provider["model"], messages=messages,
+                temperature=0.7, provider_id=provider["id"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 失败就明确失败：把错误当回复返回会让它被写进会话历史、伪装成成功
+        reason = _fail_reason(e)
+        print(f"模型调用失败: {reason}", file=sys.stderr, flush=True)
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{reason}")
+
+    message_id = str(uuid.uuid4())
+    if request.session_id:
+        sessions_store.add_message(request.session_id, principal.user_id, "user", user_text)
+        sessions_store.add_message(request.session_id, principal.user_id, "assistant", reply,
+                                   message_id, used_memory_ids)
+    return {"reply": reply, "message_id": message_id,
+            "provider": provider["id"], "model": provider["model"]}
+
+# ---------- 流式聊天接口 ----------
+from fastapi.responses import StreamingResponse
+import json as json_module
+
+@app.post("/v1/chat/stream")
+def stream_chat_endpoint(request: ChatRequest, http: Request,
+                         principal: Principal = CurrentPrincipal):
+    """流式聊天端点，返回 Server-Sent Events
+
+    端点与 generate() 都必须是同步的：模型 token 是从阻塞 socket 上读出来的，
+    留在事件循环里会让一个慢请求冻住整台服务（线上 524）。
+    """
+    from app.core.streaming import stream_chat
+
+    # 节流同样必须在这里判，理由和下面那条归属一样：流一开，状态码就锁死在 200，
+    # 那时再挡只能断流，而 429 与 Retry-After 根本送不出去。
+    _throttle_chat(http, principal)
+
+    # 归属必须在这里判，不能在 generate() 里判：流一开始 HTTP 状态就锁死在 200，
+    # 那时再发现 session_id 不是你的，只能静默不落盘（原先正是这样）。
+    _require_session_owner(request.session_id, principal)
+
+    # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
+    try:
+        provider, messages, user_text = _prepare_chat(request, principal)
+    except (ProviderError, UploadError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 流式此前直接调 stream_chat、绕过 pipeline，因此既没注入记忆与偏好，
+    # 也不会把本轮对话写回记忆。这里复用同一个 pipeline 实例补齐两者。
+    used_memory_ids = []
+    pipe = ChatPipeline(user_id=principal.user_id) if USE_PIPELINE else None
+    if pipe is not None and messages:
+        try:
+            query_text = ChatPipeline.text_of(messages[-1].get("content"))
+            messages, used_memory_ids = pipe.inject_context(messages, query_text)
+        except Exception as e:
+            print(f"流式上下文注入失败（不影响本次对话）: {_fail_reason(e)}",
+                  file=sys.stderr, flush=True)
+
+    def generate():
+        message_id = str(uuid.uuid4())
+        # 发送开始事件
+        yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id, 'model': provider['model']})}\n\n"
+
+        # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
+        if request.session_id:
+            sessions_store.add_message(request.session_id, principal.user_id,
+                                       "user", user_text)
+
+        full_text = ""
+        try:
+            # tools 走的是同一个 pipeline 实例：非流式那条一直把工具传给模型，
+            # 流式这条以前一个都没传，于是界面上工具等于不存在（模型如实说它
+            # 不会用计算器）。清单装配见 ChatPipeline.__init__。
+            for chunk in stream_chat(provider["model"], messages,
+                                     provider_id=provider["id"],
+                                     tools=pipe.tools_schema if pipe else None,
+                                     user_id=principal.user_id):   # 账本要落在人头上
+                full_text += chunk
+                yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
+            
+            # 保存助手回复到会话（如果提供了 session_id）
+            if request.session_id:
+                sessions_store.add_message(
+                    request.session_id, principal.user_id, "assistant",
+                    full_text, message_id, used_memory_ids)
+
+            # 按信号写长期记忆，判据与非流式路径同一处（pipeline.save_interaction）
+            if pipe is not None:
+                try:
+                    pipe.save_interaction(user_text)
+                except Exception as e:
+                    print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
+                          file=sys.stderr, flush=True)
+            
+            # 发送完成事件
+            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
+        except Exception as e:
+            reason = _fail_reason(e)
+            print(f"流式模型调用失败: {reason}", file=sys.stderr, flush=True)
+            yield f"data: {json_module.dumps({'type': 'error', 'message': f'模型调用失败：{reason}'})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+# ---------- 会话管理 ----------
+# 归属只由 principal 推导：路由不接受任何来自 body/query/path 的 user_id 或
+# owner，否则"我是谁"就成了客户端说了算。
+# 非本人一律 404 而不是 403：403 等于承认这个 id 存在，session_id 是 uuid4，
+# 但只要有一次 403 漏出来，这个接口就成了"哪些会话真实存在"的探测器。
+@app.post("/v1/sessions")
+def create_session(model: Optional[str] = None,
+                         principal: Principal = CurrentPrincipal):
+    # 默认不再刻服务商名（F-1f）。会话上的 model 只是展示元数据——真正用哪个
+    # provider 是每次聊天时 resolve 决定的，这里传空串而不是 None：老记录与
+    # 白名单投影里该字段一直是字符串，别让"没指定"把形状改成 null。
+    return sessions_store.create(model or "", owner=principal.user_id)
+
+@app.get("/v1/sessions")
+def list_sessions(principal: Principal = CurrentPrincipal):
+    return {"sessions": sessions_store.list_summaries(principal.user_id)}
+
+@app.get("/v1/sessions/{session_id}")
+def get_session(session_id: str, principal: Principal = CurrentPrincipal):
+    session = sessions_store.get(session_id, owner=principal.user_id)
+    if session is None:
+        # 404 而非 403：403 等于承认这个 id 存在，可以被拿来枚举
+        raise HTTPException(status_code=404, detail="会话不存在")
+    # 投影而不是裸记录：owner 是存储内部字段，列表侧早有白名单，详情没有就等于
+    # 三条读路径各说各话，下一个加字段的人只能猜该抄哪一条。
+    return sessions_store.public(session)
+
+@app.delete("/v1/sessions/{session_id}")
+def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
+    if sessions_store.delete(session_id, owner=principal.user_id):
+        return {"status": "deleted", "session_id": session_id}
+    raise HTTPException(status_code=404, detail="会话不存在")
+
+class SessionMessagesRequest(BaseModel):
+    messages: List[Dict[str, Any]] = []
+
+@app.put("/v1/sessions/{session_id}/messages")
+def replace_session_messages(session_id: str, req: SessionMessagesRequest,
+                                   principal: Principal = CurrentPrincipal):
+    """整体替换会话消息，使前端编辑/删除/重新生成后的视图与后端一致。"""
+    if not sessions_store.replace(session_id, principal.user_id, req.messages):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"status": "updated", "count": len(req.messages)}
+
+# ---------- 日程（"今天该干什么"那份清单） ----------
+# 归属人一律从凭据里取（principal.user_id），请求体与查询串里都没有 user_id 这个口子：
+# 与记忆/会话/附件同一口径，见 app/core/schedule.py 的模块注释。
+from app.core import schedule
+
+
+class ScheduleItem(BaseModel):
+    text: str
+    at: Optional[str] = None            # 24 小时的 HH:MM，或干脆不填
+    done: bool = False
+
+
+class ScheduleRequest(BaseModel):
+    day: Optional[str] = None           # 空 = 服务端本地日期的今天
+    items: List[ScheduleItem] = []
+
+
+@app.get("/v1/schedule")
+def get_schedule(day: Optional[str] = None, principal: Principal = CurrentPrincipal):
+    """这一天的清单，外加这个人有过安排的那些天（给日期选择器用）。
+
+    坏日期回 400，不回"一份空清单"：后者与"那天确实没安排"长得一模一样，界面会把
+    一句问错了的话渲染成一句真话。
+    """
+    try:
+        target = schedule.normalize_day(day)
+        return {"day": target,
+                "items": schedule.plan(principal.user_id, target),
+                "days": schedule.days_for(principal.user_id)}
+    except schedule.ScheduleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/v1/schedule")
+def put_schedule(req: ScheduleRequest, principal: Principal = CurrentPrincipal):
+    """整天一次替换（幂等）。为什么不是逐条增删，写在 schedule.set_plan 的注释里。"""
+    try:
+        target = schedule.normalize_day(req.day)
+        rows = schedule.set_plan(principal.user_id,
+                                 [item.model_dump() for item in req.items], day=target)
+    except schedule.ScheduleError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"day": target, "items": rows, "count": len(rows)}
+
+
+# ---------- 导出下载（一次性票据） ----------
+# 前端 blob: + <a download> 在 Android WebView 壳里存不下文件（壳收不到 blob 下载
+# 回调，也不会给下载请求带 Authorization），所以导出必须换成一条免登录、真实、
+# 一次性的 HTTPS 链接。鉴权靠"链接本身就是票据"，不靠请求头：
+#   1. 签发（下面第一条）走 CurrentPrincipal，且复用 _require_session_owner——
+#      "不是你的会话"和"这会话不存在"是同一句话、同一个 404，不是枚举信道；
+#   2. 兑换（第二条）免凭据可达，但免登录的门只放行"整条恰好是票据形状"的路径
+#      （authz.PUBLIC_ROUTE_TEMPLATES），且票据 5 分钟过期、兑换一次即作废。
+from app.session.export_store import (EXPORT_PATH_PREFIX, TICKET_TTL_SECONDS,
+                                      content_disposition, export_ticket_store,
+                                      session_markdown)
+from fastapi.responses import Response
+
+# 兑换失败只有一句话：票据不存在、已过期、已被用过、签发后会话又被删了，四种
+# 走到这里都回同一份 404。区分它们等于把这个端点养成一台"这条链接是否真存在过"
+# 的探测器——正是票据链接最不该成为的东西。
+EXPORT_TICKET_INVALID_DETAIL = "导出链接无效或已过期"
+
+
+@app.post("/v1/sessions/{session_id}/export-ticket")
+def create_export_ticket(session_id: str, principal: Principal = CurrentPrincipal):
+    """为属于自己的会话签一张一次性导出票据，返回可匿名兑换的相对路径。
+
+    同步 def：签发要读写进程内会话存储（带锁 + 落盘），放在事件循环里就是
+    那次线上 524 的形状。归属校验必须在签票之前，且复用 _require_session_owner
+    而不是另写一套判断。
+    """
+    _require_session_owner(session_id, principal)
+    # 惰性清理（剔除过期条目）写在 store.issue 内部：每次签发顺带扫一遍，
+    # 既不必起后台线程，也不会让过期票据在表里越积越多。
+    ticket_id = export_ticket_store.issue(session_id, principal.user_id)
+    return {"path": f"{EXPORT_PATH_PREFIX}{ticket_id}",
+            "expires_in": TICKET_TTL_SECONDS}
+
+
+@app.get("/v1/exports/{ticket_id}")
+def redeem_export_ticket(ticket_id: str):
+    """用票据换回该会话的 Markdown。免登录，所以这一条路由不挂任何身份依赖。
+
+    兑换即作废：store.consume 无论命中与否都把票据弹出，第二次永远拿不回内容。
+    取会话用签发时记下的 owner（不是当前请求者——这里根本没有请求者身份），
+    只导出服务端真实存着的消息。文件名走 RFC 5987，标题绝不原样拼进响应头。
+    """
+    redeemed = export_ticket_store.consume(ticket_id)
+    if redeemed is None:
+        raise HTTPException(status_code=404, detail=EXPORT_TICKET_INVALID_DETAIL)
+    session_id, owner = redeemed
+    session = sessions_store.get(session_id, owner=owner)
+    if session is None:
+        # 签发与会话删除之间有窗口：票据还在，会话已经没了。回同一句话，
+        # 别把"票据有效但会话已删"这件事透露出去。
+        raise HTTPException(status_code=404, detail=EXPORT_TICKET_INVALID_DETAIL)
+    return Response(content=session_markdown(session),
+                    media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": content_disposition(
+                        session.get("title"))})
+
+
+# ---------- 模型列表（由 Provider 配置派生） ----------
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+
+@app.get("/v1/models")
+def list_models(principal: Principal = CurrentPrincipal):
+    """模型清单：前端那个下拉就靠它渲染。
+
+    清单是**按当前用户裁剪的**：全局共享条目 + 这个人自己的私有 provider。
+    别人的私有条目从这里根本不存在（与 resolve 的越权即回落同一套口径），
+    所以这个端点同时也是一个"哪些模型存在"的诚实答案，不掺枚举信号。
+
+    挂身份依赖不是为了挡住匿名读取
+    ——那道门由 install_auth 的中间件在路由之前守着，但只在 **enforced 模式下、
+    且只在 authz._PROTECTED_PREFIXES 那几个前缀（含 /v1/）之下**成立：disabled 模式
+    人人都是本机管理员，websocket 握手更是压根不经过这个 HTTP 中间件（实测见
+    tests/test_route_auth_contract.py）。要的理由就两条：路由契约
+    （tests/test_route_auth_contract.py）不接受没有身份的 /v1 端点，且这是中间件
+    之外多出来的一把锁。完整理由见下面 providers 段那段注释。
+    key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
+    """
+    return {
+        "models": provider_store.catalog(principal.user_id),
+        "default": (provider_store.default_for(principal.user_id) or {}).get("id"),
+        "presets": PRESETS,
+    }
+
+# ---------- 模型服务（Provider）配置 ----------
+# 这一面补上了身份依赖，且角色已收归管理员。写侧升级是 Task 7 明写的活：
+# 改默认 provider、改 base_url 或塞进一把密钥，就把**所有人**的对话改道到攻击者
+# 指定的上游——那是跨用户外泄通道，不是"他能看到别人的会话"那种局部越权。
+# 邀请码人人可换（Task 3），所以"注册用户"在这道门前不含任何信任量。
+# 身份依赖本身仍然保留，理由与 /v1/models 那条一样：路由契约要求每条 /v1 路由声明
+# 身份；install_auth 的中间件之外多一把锁（受保护前缀哪天收窄、挂载顺序哪天被动过，
+# 锁不至于只有一把）；将来要按人记账时身份已经在手里。
+# 前端（/app 的设置页）配合收起这些入口，但那只是不让普通用户点到一个必然 403 的
+# 按钮：手搓请求仍旧由这里的依赖拒绝，界面从来不是边界。
+class ProviderRequest(BaseModel):
+    id: Optional[str] = None
+    label: str
+    base_url: str
+    api_key: str = ""
+    model: str
+    supports_vision: bool = False
+    # 上下文上限（K token）。留 None → 存储层归一为缺省 64；界面据此给
+    # 「上下文长度」滑杆封顶。钳制/非法值判据只写在 providers._validate 一处。
+    max_context_k: Optional[int] = None
+    is_default: bool = False
+
+def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
+    """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
+
+    别人的私有 provider 与不存在的 id 走同一个 404、同一句话——和 sessions、
+    uploads 那两处的防枚举纪律一模一样：管理面与个人面都不许长成
+    "这个 id 存在吗"的探测器。
+    """
+    existing = provider_store.get(provider_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    owner = existing.get("owner") or ""
+    if require_own:
+        if owner != user_id:
+            raise HTTPException(status_code=404, detail="模型服务不存在")
+    elif owner:
+        # 管理员面碰私有条目：不存在（对管理员也不暴露用户私配的存在性）
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    return existing
+
+@app.get("/v1/providers")
+def list_providers(_: Principal = RequireAdmin):
+    # 绝不返回明文密钥，只给掩码与"是否已配置"。清单只含共享条目：
+    # 用户私有 provider 连"存在"这件事都不进管理员面（owner 维度见 providers.py）
+    return {"providers": provider_store.public_list(), "presets": PRESETS}
+
+@app.post("/v1/providers")
+def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
+    try:
+        saved = provider_store.upsert(req.model_dump())
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.put("/v1/providers/{provider_id}")
+def update_provider(provider_id: str, req: ProviderRequest,
+                          _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
+    record = req.model_dump()
+    record["id"] = provider_id
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.delete("/v1/providers/{provider_id}")
+def remove_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
+    if provider_store.delete(provider_id):
+        return {"status": "deleted", "id": provider_id}
+    raise HTTPException(status_code=404, detail="模型服务不存在")
+
+@app.post("/v1/providers/{provider_id}/default")
+def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
+    _owner_gate(provider_id, "", require_own=False)
+    if provider_store.set_default(provider_id):
+        return {"status": "ok", "default": provider_id}
+    raise HTTPException(status_code=404, detail="模型服务不存在")
+
+@app.post("/v1/providers/{provider_id}/test")
+def test_provider(provider_id: str, _: Principal = RequireAdmin):
+    """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。
+
+    必须是同步 def：ping 是一次 timeout=20 的阻塞模型调用，留在 async 里就是
+    "点一下测试，整台服务二十秒不响应"（见 test_event_loop_not_blocked）。
+    """
+    _owner_gate(provider_id, "", require_own=False)
+    try:
+        return provider_store.ping(provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def _test_draft(req: ProviderRequest) -> dict:
+    """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
+    try:
+        candidate = provider_store._validate(req.model_dump())
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if looks_placeholder(candidate["api_key"]):
+        return {"ok": False, "detail": "请先填写有效的 API Key"}
+    try:
+        client = build_client(candidate)
+        client.chat.completions.create(model=candidate["model"],
+                                       messages=[{"role": "user", "content": "ping"}],
+                                       max_tokens=4)
+        return {"ok": True, "detail": f"{candidate['model']} 响应正常"}
+    except Exception as e:
+        # 上游/中转站可能把 Authorization 原样打印回来——出口过一次 scrub。
+        return {"ok": False, "detail": scrub_secrets(_fail_reason(e))}
+
+@app.post("/v1/providers/test")
+def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+    return _test_draft(req)
+
+# ---------- 个人模型服务（用户自带 API） ----------
+# 与管理员面的分界线：这里每条路由都按 principal.user_id 圈所有权。
+# 用户能增删改的只有自己名下的条目；自己的密钥只服务自己的请求（paid_by=user
+# 在 _validate 之上由这里钉死）。"普通用户可改写全站上游"依然是禁区——
+# 私有条目永不进站级默认（providers.default() 已滤），也不对其他人可见。
+
+class ProviderDefaultRequest(BaseModel):
+    provider_id: str
+
+@app.get("/v1/me/providers")
+def my_providers(principal: Principal = CurrentPrincipal):
+    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。"""
+    return {
+        "shared": provider_store.public_list(None),
+        "mine": provider_store.mine_public(principal.user_id),
+        "default": provider_store.get_pref(principal.user_id),
+        "presets": PRESETS,
+    }
+
+@app.post("/v1/me/providers")
+def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    record = req.model_dump()
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.put("/v1/me/providers/{provider_id}")
+def update_my_provider(provider_id: str, req: ProviderRequest,
+                       principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    record = req.model_dump()
+    record["id"] = provider_id
+    record.update(owner=principal.user_id, paid_by="user", is_default=False)
+    try:
+        saved = provider_store.upsert(record)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "saved", "provider": provider_store._public(saved)}
+
+@app.delete("/v1/me/providers/{provider_id}")
+def remove_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    provider_store.delete(provider_id)
+    return {"status": "deleted", "id": provider_id}
+
+@app.post("/v1/me/providers/default")
+def set_my_default_provider(req: ProviderDefaultRequest,
+                            principal: Principal = CurrentPrincipal):
+    """把「我默认用哪个模型」存到服务端。共享或自己的私有条目都可以指。"""
+    provider = provider_store.get(req.provider_id)
+    if provider is None or not provider_store.visible_to(req.provider_id, principal.user_id):
+        raise HTTPException(status_code=404, detail="模型服务不存在")
+    try:
+        provider_store.set_pref(principal.user_id, req.provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "default": req.provider_id}
+
+@app.post("/v1/me/providers/{provider_id}/test")
+def test_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
+    """只许试自己的条目：拿别人的（含共享的）已存密钥去发探测请求不是这个门的功能。"""
+    _owner_gate(provider_id, principal.user_id, require_own=True)
+    try:
+        return provider_store.ping(provider_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/v1/me/providers/test")
+def test_my_provider_draft(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    """保存前草稿试连：密钥是这个人刚填的，出口照过 scrub。"""
+    return _test_draft(req)
+
+# ---------- 附件上传 ----------
+@app.post("/v1/uploads")
+def upload_attachment(file: UploadFile = File(...),
+                            principal: Principal = CurrentPrincipal):
+    # 先读满硬上限+1 字节再判，而不是裸 read() 全量进内存：save() 的分档体积校验
+    # 在拿到完整 blob 之后才跑，挡不住"先把你内存打爆"。read(n) 对 SpooledTemporaryFile
+    # 只多要一字节用于判超限，正常文件行为与原来逐字节一致。
+    blob = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(blob) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过单次上传上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
+    try:
+        record = upload_store.save(file.filename or "unnamed", blob,
+                                   file.content_type or "", owner=principal.user_id)
+    except UploadError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return record
+
+@app.get("/v1/uploads/{upload_id}/file")
+def download_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+    # 附件是别人传的账单和论文。非属主给 404，不给 403：后者会把"id 存在"这件事
+    # 白送出去，而 id 只有 16 位十六进制。
+    record = upload_store.get(upload_id, owner=principal.user_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="附件不存在或已清理")
+    return FileResponse(record["path"], media_type=record["mime"], filename=record["name"])
+
+@app.delete("/v1/uploads/{upload_id}")
+def delete_attachment(upload_id: str, principal: Principal = CurrentPrincipal):
+    if upload_store.delete(upload_id, owner=principal.user_id):
+        return {"status": "deleted", "id": upload_id}
+    raise HTTPException(status_code=404, detail="附件不存在")
+
+# ---------- 反馈 ----------
+FEEDBACK_WEIGHT_STEP = 0.1
+
+
+@app.post("/v1/feedback")
+def submit_feedback(feedback: FeedbackRequest,
+                          principal: Principal = CurrentPrincipal):
+    """记录反馈，并立刻把它作用回系统。
+
+    此前反馈只落盘到 feedback.json 和一份无人读取的 preference.txt，对模型行为
+    零影响；这里改为真正闭环：调整本次回答所用记忆的权重 + 即时刷新偏好摘要。
+
+    归属必须先于任何写入。原先的顺序是反的：先无条件往 feedback.json 加一行、
+    再重算偏好，然后才按 message_id 反查记忆——而 preference.txt 会被注入
+    **所有人**的提示词，于是任何持凭据者都能靠别人的 message_id 表态，改写的
+    却是全站的行为。反查用带归属的 find_message：不属于你就当作不存在，
+    两种情况同一个 404、同一句话，这个端点不是探测他人 message_id 的信道。
+
+    偏好摘要现在按人分账：重算的是**调用者自己**那一份，别人的反馈进不了他的
+    摘要（见 preference_analyzer.preference_path）。
+    """
+    from app.memory.memory_router import memory_manager
+
+    if save_feedback is None:
+        raise HTTPException(status_code=503, detail="反馈存储不可用")
+
+    located = sessions_store.find_message(feedback.message_id, principal.user_id)
+    if located is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    try:
+        save_feedback(feedback.message_id, feedback.rating, feedback.comment or "",
+                      principal.user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"反馈保存失败：{e}")
+
+    adjusted = []
+    # 消息是你的，不代表消息上挂的 memory_ids 是你的：整份回写会话的端点接受
+    # 客户端给的 memory_ids（前端编辑历史要用），于是别人家的记忆 id 能被种进
+    # 你自己的会话，再点一次反馈就去调它的权重。筛选写在 adjust_weights 内部
+    # （owner 必填），这里就不再自己预筛一遍——能被调用方忘记的守卫迟早会被忘记。
+    claimed = located.get("message", {}).get("memory_ids") or []
+    if claimed and memory_manager is not None:
+        delta = FEEDBACK_WEIGHT_STEP if feedback.rating > 0 else -FEEDBACK_WEIGHT_STEP
+        try:
+            adjusted = memory_manager.adjust_weights(
+                claimed, principal.user_id, delta).get("updated", [])
+        except Exception as e:
+            print(f"记忆权重调整失败: {e}")
+
+    # 立即重算他自己那份偏好，使下一轮对话就能生效，而不是等后台定时器
+    try:
+        if HAS_BG_TASKS and preference_analyzer:
+            preference_analyzer.analyze_and_update_preference(principal.user_id)
+    except Exception as e:
+        print(f"偏好刷新失败（不影响反馈记录）: {e}")
+
+    return {
+        "status": "success",
+        "message": "反馈已记录并生效",
+        "memory_weight_adjusted": len(adjusted),
+        "used_memories": bool(adjusted),
+    }
+
+# ---------- 智能体 ----------
+# 这一面挂的是 require_admin，不是 current_principal，理由是"没有归属可谈"：
+# 编排与任务表（app/agents/task_store）是一个进程级全局 dict，条目上没有 owner，
+# 所以这里若只声明"我是某个注册用户"，契约会是绿的，而任何注册用户都能列出、取消、
+# 删除别人的任务；agent 本身还拿着本机自己的上游配置跑付费调用，跑在谁的账上
+# 无人知道。要做成普通用户可用，先给 task 加 owner（与会话同一套归属规则），
+# 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
+# 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
+@app.post("/v1/agent/run")
+def run_agent(request: AgentRequest, principal: Principal = RequireAdmin):
+    try:
+        from app.agents.react_agent import ReActAgent
+        agent = ReActAgent(
+            model=request.model,
+            max_turns=request.max_turns
+        )
+        # user_id 必须往下传：needs_user 类工具（查日程/查记忆）靠执行器用服务端
+        # 身份覆盖模型参数，原先这一格是空的——管理员跑 agent 时那些工具会静悄悄
+        # 落在 default_user 的账上，读到的可能不是自己的数据。
+        result = agent.run(
+            task=request.task,
+            max_duration=request.max_duration,
+            user_id=principal.user_id,
+        )
+        return {"result": result}
+    except ImportError:
+        return {"result": "智能体模块尚未就绪，请稍后再试"}
+
+@app.post("/v1/agent/orchestrate")
+def orchestrate_task(request: OrchestrateRequest, principal: Principal = RequireAdmin):
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
+    # 身份必须往下传：以前这一格写的是 `_: Principal`（收下就丢），于是任务
+    # 建出来不知道属于谁，而"先记着、读的时候再说"正是这个项目付过账的形状。
+    return orchestrator.run(
+        goal=request.goal,
+        task_id=request.task_id,
+        user_id=principal.user_id,
+    )
+
+# ---------- 任务状态 ----------
+# 与上面两组同一个守卫：读侧必须和写侧一样严，否则"谁的任务"这件事就只
+# 在取消/删除那两条上被守住，列出全部目标一句话就能拿到。
+@app.get("/v1/tasks/{task_id}")
+async def get_task_status(task_id: str, _: Principal = RequireAdmin):
+    if get_task is None:
+        raise HTTPException(status_code=503, detail="任务存储模块尚未就绪")
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    response = {
+        "task_id": task.task_id,
+        "goal": task.goal,
+        "status": task.status,
+        "current_subtask": task.current_subtask,
+        "total_subtasks": len(task.subtasks),
+        "subtasks": task.subtasks,
+        "results": task.results if task.status == "completed" else None,
+        "final_answer": task.final_answer,
+        "error": task.error,
+        "created_at": task.created_at,
+        "cancelled": task.cancelled
+    }
+    if len(task.subtasks) > 0:
+        response["progress_percent"] = round(
+            (task.current_subtask / len(task.subtasks)) * 100, 1
+        )
+    else:
+        response["progress_percent"] = 0
+    return response
+
+@app.get("/v1/tasks")
+async def list_all_tasks(_: Principal = RequireAdmin):
+    if task_store is None:
+        return {"total": 0, "tasks": []}
+    tasks = list(task_store.values())
+    return {
+        "total": len(tasks),
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "goal": t.goal[:50] + "..." if len(t.goal) > 50 else t.goal,
+                "status": t.status,
+                "user_id": t.user_id,
+                "progress": f"{t.current_subtask}/{len(t.subtasks)}",
+                "created_at": t.created_at
+            }
+            for t in tasks
+        ]
+    }
+
+@app.post("/v1/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, _: Principal = RequireAdmin):
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    task = task_store[task_id]
+    if TaskStatus and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+        return {
+            "status": "warning",
+            "task_id": task_id,
+            "message": f"任务已处于终态: {task.status.value}，无需取消"
+        }
+    task.mark_cancelled()
+    return {
+        "status": "cancelled",
+        "task_id": task_id,
+        "message": "任务已标记为取消，将在当前子任务完成后停止"
+    }
+
+@app.delete("/v1/tasks/{task_id}")
+async def delete_task(task_id: str, _: Principal = RequireAdmin):
+    if task_id in task_store:
+        del task_store[task_id]
+        return {"status": "deleted", "task_id": task_id}
+    raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+
+# ---------- 官网 ----------
+# 放最后只是因为这一节属于"对外长什么样",和上面那堆接口分开摆。
+# R7 之后它不再承担顺序语义：没有 catch-all Mount,所以放早也不会吞掉 /v1。
+from app.web.web_router import install_site
+install_site(app)
+
+# ---------- 启动入口 ----------
+if __name__ == "__main__":
+    # 默认绑回环。此前这里硬写 0.0.0.0，而 `.env.example` 写着 `HOST=127.0.0.1` 却
+    # 没有任何代码读它——配置说谎 + 局域网里任何人都能直连源站。打包版
+    # (run_backend.py) 一直绑的是 127.0.0.1，源码跑没理由更宽。
+    # 对外只应经 Cloudflare 隧道；真要换部署形态，改这个环境变量，不是改代码。
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

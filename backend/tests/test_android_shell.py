@@ -1,0 +1,737 @@
+"""壳（android/）里那些只能在真机上暴露、但源码形状就能判定的坑。
+
+本机没有模拟器也没有真机，所以这里全是"读源码"的锁，不是行为测试。它们的价值不在于
+证明功能对，而在于**不让注释重新变成第二个事实来源**——下面这条就是为一次真实闪退写的。
+"""
+
+import os
+import re
+import shutil
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SHELL_SRC = REPO_ROOT / "android" / "app" / "src" / "main" / "java"
+
+# Android 14（targetSdk 34）起，Context.registerReceiver 只有在过滤器【全部】命中
+# AOSP IntentFilter.SYSTEM_ONLY_ACTIONS 那张硬编码表时才能省掉导出标志，否则直接抛
+# SecurityException。android.intent.action.DOWNLOAD_COMPLETE 不在那张表里。
+EXPORT_FLAGS = ("RECEIVER_EXPORTED", "RECEIVER_NOT_EXPORTED")
+
+
+def _call_args(src: str, open_paren: int) -> str:
+    """从左括号起取到配对的右括号，跨行也算。"""
+    depth = 0
+    for i in range(open_paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_paren + 1:i]
+    return src[open_paren:]
+
+
+def _strip_java_comments(src: str) -> str:
+    """去掉 // 与 /* */ 两种注释，但【尊重字符串字面量】。
+
+    不尊重字符串的话就毁在自家门口：ShellEvents 里那个
+    `OPEN_URI_PREFIX = "assistant://open/"` 会被当成注释从 `//` 起整段切掉，
+    于是凡拿剥完的源码去数 URI 形状的地方都会因为读不到而永远绿着。
+    注释里的符号也不该算数：把一行注掉不等于把那处调用删了。
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"' or c == "'":
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n:
+                if src[i] == "\\" and i + 1 < n:
+                    out.append(src[i:i + 2])
+                    i += 2
+                    continue
+                out.append(src[i])
+                if src[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            out.append(" ")            # 保住两侧的换行以外的分词边界
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _code(path: Path) -> str:
+    return _strip_java_comments(path.read_text(encoding="utf-8"))
+
+
+def test_every_runtime_receiver_registration_names_an_export_flag():
+    """v0.13 崩在 MainActivity.onCreate 里的原因：registerReceiver 少给一个标志。
+
+    那条注释当时写着"属系统广播，因此不必传 RECEIVER_EXPORTED"——这个豁免不成立，
+    于是 Android 14+ 的设备上点图标闪一下回桌面，而服务端一条请求都收不到。
+
+    带标志的重载是 API 33 才有的，minSdk 23 必须按版本分岔，所以"没带标志"本身不是罪：
+    只有当它**同时**不在 SDK_INT 判据的保护下才红。这是源码形状的近似（往回看 12 行），
+    不是精确的控制流分析——它守的是"别再靠注释宣称豁免"，不是编译器。
+    """
+    offenders = []
+    sites = 0
+    for path in sorted(SHELL_SRC.rglob("*.java")):
+        src = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"(?<!un)\bregisterReceiver\s*\(", src):
+            sites += 1
+            args = _call_args(src, m.end() - 1)
+            if any(flag in args for flag in EXPORT_FLAGS):
+                continue
+            line = src[:m.start()].count("\n") + 1
+            guarded = "SDK_INT" in "\n".join(src.splitlines()[max(0, line - 13):line - 1])
+            if not guarded:
+                offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{line}")
+
+    # 正向对照：路径写错时 rglob 一个文件都找不到，offenders 空着也"通过"——那这条锁
+    # 就只是在空转，而它绿得和真的守住时一模一样。CI 里跑的正是这条命令，所以这里必须钉。
+    assert sites >= 1, f"在 {SHELL_SRC} 下一个 registerReceiver 调用都没扫到：要么路径错了，要么这条锁没用了"
+
+    assert not offenders, (
+        "这些 registerReceiver 既没给导出标志、也不在 SDK_INT 保护下，"
+        "Android 14+ 上会抛 SecurityException：" + "、".join(offenders)
+    )
+
+
+# ---------- 「检查更新」这条新链路：边界与"三处必须一起改" ----------
+
+SHELL_RES = REPO_ROOT / "android" / "app" / "src" / "main" / "res"
+MAIN_ACTIVITY = SHELL_SRC / "xyz" / "fenever" / "assistant" / "MainActivity.java"
+SHELL_BRIDGE = SHELL_SRC / "xyz" / "fenever" / "assistant" / "ShellBridge.java"
+SHELL_EVENTS = SHELL_SRC / "xyz" / "fenever" / "assistant" / "core" / "ShellEvents.java"
+SHORTCUT_PLAN = SHELL_SRC / "xyz" / "fenever" / "assistant" / "core" / "ShortcutPlan.java"
+SHORTCUTS_XML = SHELL_RES / "xml" / "shortcuts.xml"
+WIDGET_LAYOUT = SHELL_RES / "layout" / "widget_assistant.xml"
+WIDGET_JAVA = SHELL_SRC / "xyz" / "fenever" / "assistant" / "AssistantWidget.java"
+MANIFEST = REPO_ROOT / "android" / "app" / "src" / "main" / "AndroidManifest.xml"
+
+
+def _const_values(path: Path) -> dict:
+    """把 `public static final String OPEN_CAMERA = "camera";` 读成 {OPEN_CAMERA: camera}。"""
+    body = path.read_text(encoding="utf-8")
+    return dict(re.findall(r'public\s+static\s+final\s+String\s+(\w+)\s*=\s*"([^"]*)"\s*;', body))
+
+
+def _wanted_entries() -> list:
+    """ShortcutPlan.WANTED 里引的那几个 ShellEvents 常量，折成它们的字面值。"""
+    plan = _code(SHORTCUT_PLAN)
+    block = re.search(r"WANTED\s*=\s*Collections\.unmodifiableList\((.*?)\)\;", plan, re.S)
+    assert block, "读不到 ShortcutPlan.WANTED：这条锁的名字跟着源码变了"
+    names = re.findall(r"ShellEvents\.(OPEN_\w+)", block.group(1))
+    assert names, "ShortcutPlan.WANTED 是空的，那这条锁在空转"
+    values = _const_values(SHELL_EVENTS)
+    missing = [n for n in names if n not in values]
+    assert not missing, f"WANTED 引用了没定义的常量：{missing}"
+    return [values[n] for n in names]
+
+
+def _invocations(src: str, name: str) -> list:
+    """这个方法被【调用】的位置：`name(` 与 `::name` 两种写法都算，定义那一行不算。"""
+    hits = []
+    for m in re.finditer(r"(?<!\w)" + re.escape(name) + r"\s*(?:\(|$)", src):
+        line_start = src.rfind("\n", 0, m.start()) + 1
+        head = src[line_start:m.start()]
+        if re.search(r"\b(void|public|private|protected)\b", head):
+            continue                                   # 这是定义，不是调用
+        hits.append(m.start())
+    for m in re.finditer(r"::\s*" + re.escape(name) + r"\b", src):
+        hits.append(m.start())
+    return sorted(hits)
+
+
+def test_nothing_checks_for_an_update_unless_the_user_asks():
+    """「不点检查更新就不会替你下载/安装」这条承诺的下半段：那条链没有任何自动触发。
+
+    能点燃【下载并安装】这条链的入口恰好三个——长按图标的快捷方式、桌面组件那颗按钮、
+    设置里那一行（走桥）——每一个都是"用户自己点的"。今天多一处"顺手在 onResume 里查一下"，
+    这句话就变成谎，而且没人会报错：GitHub 那个接口按来源 IP 限 60 次/小时，自动化的第一个代价
+    是把配额自己烧光。
+
+    2026-09-22 起这句话的边界要划清楚：网页那边新加了一张「发现版本更新」的底部卡片，
+    它每天会**自动问一次服务端**（GET /v1/release/latest）。那不是本条锁的例外，因为
+    那一次问的只是一个只读端点，它既不下载也不安装，也不碰下面这些 Java 符号；
+    卡片上那颗「立即更新」仍然要人点，点下去走的仍然是这里唯一那个桥方法。
+    换句话说：自动的只剩"提一句"，动手的仍然必须是点。缓存与出站的代价由
+    test_release_probe.py 那一边钉（10 分钟一次，与来多少请求无关）。
+
+    判据是"可数"而不是"看着像"：startUpdateCheck 只容许一个调用者，
+    那个调用者（requestUpdateCheck）只容许两处引用，且每处都必须贴着它自己的用户动作判据。
+    """
+    main = _code(MAIN_ACTIVITY)
+    bridge = _code(SHELL_BRIDGE)
+
+    starts = _invocations(main, "startUpdateCheck")
+    assert len(starts) == 1, (
+        f"startUpdateCheck 只容许一个调用者（现在 {len(starts)} 个）："
+        "多出来的那一处就是「不点也会检查更新」")
+    assert "void requestUpdateCheck()" in main, "唯一那个调用者必须在 requestUpdateCheck 里"
+    body = main[main.index("void requestUpdateCheck()"):]
+    assert starts[0] > main.index("void requestUpdateCheck()") and \
+        starts[0] < main.index("void requestUpdateCheck()") + body.index("\n    }") + 1, \
+        "startUpdateCheck 的调用点跑出了 requestUpdateCheck 的方法体"
+
+    from_main = _invocations(main, "requestUpdateCheck")
+    from_bridge = _invocations(bridge, "requestUpdateCheck")
+    assert len(from_main) == 1 and len(from_bridge) == 1, (
+        f"requestUpdateCheck 的引用数变了：壳内 {len(from_main)}、桥里 {len(from_bridge)}"
+        "（每多一处就要在这里说清它是哪个用户动作）")
+
+    line = main[:from_main[0]].count("\n") + 1
+    window = "\n".join(main.splitlines()[max(0, line - 9):line - 1])
+    assert "isCheckUpdateLaunch" in window, (
+        f"MainActivity.java:{line} 的 requestUpdateCheck 不在用户动作的判据后面")
+    b_line = bridge[:from_bridge[0]].count("\n") + 1
+    b_window = "\n".join(bridge.splitlines()[max(0, b_line - 12):b_line - 1])
+    assert "@JavascriptInterface" in b_window and "checkUpdate" in b_window, (
+        f"ShellBridge.java:{b_line} 的 requestUpdateCheck 不是从桥方法里来的——"
+        "桥方法是页面里【人点出来的】，绕开它就没有自动触发")
+
+    others = [p for p in SHELL_SRC.rglob("*.java")
+              if p not in (MAIN_ACTIVITY, SHELL_BRIDGE)]
+    assert len(others) >= 8, "没扫到别的壳源码文件，这条锁在空转"
+    for path in others:
+        body = _code(path)
+        assert "startUpdateCheck" not in body and "requestUpdateCheck" not in body, (
+            f"{path.name} 里出现了触发更新的符号：它会在没人点的时候跑")
+
+    # 探测是【页面】的事，不是壳的事。壳一旦自己去问 /v1/release/latest，网页那把
+    # 「一天一次」的 localStorage 闸就管不到它了—— onResume 每帧一次都有可能，
+    # 而它烧的是服务端替所有人挡在前的那一份 GitHub 配额。
+    for path in [MAIN_ACTIVITY, SHELL_BRIDGE] + others:
+        assert "release/latest" not in _code(path), (
+            f"{path.name} 引用了页面那张卡片的探测地址：出发的位置从页面挪到了壳里")
+
+
+def test_bridge_advertises_the_update_capability_the_page_depends_on():
+    """capabilities() 必须报 update 与 version，网页那一行全靠这两个键决定画法。
+
+    少一个键不会让任何东西崩：app.js 只认不到 caps.update，于是所有手机上的这一行
+    永远退化成"去下载页"，而 v0.16 明明能真的查——这是一条会静默生效的回归。
+    """
+    bridge = _code(SHELL_BRIDGE)
+    block = bridge[bridge.index("public String capabilities()"):]
+    block = block[:block.index("\n    }")]
+    assert '"update"' in block and "1L" in block, f"capabilities 没报 update：{block}"
+    assert '"version"' in block and "BuildConfig.VERSION_NAME" in block, \
+        "capabilities 没报 version：设置那一行就没地方显示装的是哪一版"
+
+
+def test_bridge_advertises_the_two_permissions_the_status_row_depends_on():
+    """提醒页那一行读的 notifications / exactAlarms 两个键，判定必须只有 PermissionStatus
+    与 ReminderScheduler 那一处。
+
+    桥里再 checkSelfPermission 一遍是最容易顺手写出的形状（"这里就三行，抄一下快了"），
+    而两份判定的分叉方式永远是"接收器以为能发、界面显示没授权"——两边各自都自洽，
+    只有人对上屏幕时才看见矛盾，这正是本项目最贵的那一类。
+    """
+    bridge = _code(SHELL_BRIDGE)
+    block = bridge[bridge.index("public String capabilities()"):]
+    block = block[:block.index("\n    }")]
+    assert '"notifications"' in block and "PermissionStatus.notificationsGranted" in block, \
+        f"capabilities 没报 notifications，或者它自己判定了一遍：{block}"
+    assert '"exactAlarms"' in block and "ReminderScheduler.exactAllowed" in block, \
+        f"capabilities 没报 exactAlarms，或者它自己判定了一遍：{block}"
+    assert "checkSelfPermission" not in bridge, "桥里自己判权限：那是第二份真相"
+    assert "canScheduleExactAlarms" not in bridge, "桥里自己问闹钟特权：那是第二份真相"
+
+
+def test_a_silent_drop_and_a_fired_reminder_both_leave_a_trace():
+    """到点这一支必须留下证据、且两支都照常推进排期：发出去了记 firedAt，发不出去记 missed。
+
+    以前通知没授权时 ReminderReceiver 直接 return、一笔不记，于是"设过的提醒从来没响过"
+    在屏幕上读不出来——用户只能在手机上翻系统设置猜。这一条锁的是"两支都记账"这个形状，
+    特别是**没有**只剩一句 return 的那一支。
+
+    <p>另一头，没授权那一支以前只记一笔 missed 就 return，不 advance 也不重排——看着像
+    "既然没响成就不该改用户的排期"，实际是把一次性的闹钟消费掉之后再也不排第二轮：
+    daily/weekly 从此变成列表里看得见、重启不管（BootReceiver 只重排 at > now）、授权恢复
+    也不会再响的孤儿，once 更会被别的提醒的每一次广播重复计一笔 missed。现在两支共用同一套
+    骨架，唯一区别就是有没有 notify()——这一条把"没有 notify 的那一支也必须 advance +
+    重排"钉死。
+    """
+    recv = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ReminderReceiver.java")
+    at = recv.index("notificationsGranted")
+    block = recv[at:recv.index("\n        }", at)]
+    assert "markMissed" in block, f"没授权那一支没记 missed（它又变回静默 return 了）：{block}"
+    assert "advance(r, now)" in block, f"没授权那一支没推进排期，daily/weekly 会变成永久孤儿：{block}"
+    assert "ReminderScheduler.schedule" in block, f"没授权那一支没给 daily/weekly 重排：{block}"
+    assert "notify(manager" not in block, "没授权那一支不该发通知，这是两支唯一的区别"
+    assert "markFired" in recv, "发出去的那一支没记 firedAt"
+    assert "notify(manager" in recv, "发通知那一支整条不见了：上面两条断言在空转"
+
+
+def test_notification_permission_check_also_covers_the_master_switch():
+    """notificationsGranted 必须同时问"运行时权限"和"通知总开关"，只问前者是半句谎。
+
+    checkSelfPermission 在 Android 13 以下恒回 GRANTED（那条权限压根不是运行时权限），
+    13 以上也只回答"该不该拦"，不回答"用户后来在系统设置里有没有把本应用的通知关掉"。
+    areNotificationsEnabled() 是唯一跨版本都问对的那一个——漏了它，23–32 上总开关关了
+    这一层还是查不出来，到点 notify() 被系统吞掉，markFired 却照样记"发出"，屏幕上
+    "上次发出 xx:xx"就是一次反着说谎。
+    """
+    src = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "PermissionStatus.java")
+    at = src.index("static boolean notificationsGranted")
+    block = src[at:src.index("\n    }", at)]
+    assert "checkSelfPermission" in block, "运行时权限那一问不能丢：Android 13+ 弹框问的就是它"
+    assert "areNotificationsEnabled" in block, \
+        "只问 checkSelfPermission：13 以下恒真、总开关关了也查不出，这是半个判定"
+
+
+def test_the_bridge_exposes_exactly_the_methods_the_page_calls():
+    """桥面方法的名字只有一份真相：Java 侧的 @JavascriptInterface 与 shell.js 的调用点。
+
+    这条锁替代了原来的"八个方法"存在性断言——那种写法加方法不会红，所以 v0.16 加了
+    checkUpdate 之后那句"八个"散文独自谎了两个版本；而"shell.js 漏接一个方法"这种真事故
+    它同样一声不吭。两边各扫一遍比集合，改名、漏接、壳里加了页面没接的方法三种都当场红。
+    """
+    from tests.test_web_pwa import _js      # JS 那把剥注释的尺子只有一份，不在这里抄第二遍
+    java = _code(SHELL_BRIDGE)
+    exposed = set(re.findall(r"@JavascriptInterface\s+public String\s+(\w+)\s*\(", java))
+    called = set(re.findall(r"\b(?:raw|call|rows)\(\s*\"(\w+)\"", _js("shell.js")))
+    assert len(exposed) >= 10, f"Java 侧只扫到 {len(exposed)} 个方法，正则失效了：{exposed}"
+    assert exposed == called, (
+        f"壳有页面没接：{sorted(exposed - called)}；页面调了壳没有：{sorted(called - exposed)}")
+
+
+def test_the_shell_never_talks_to_github_directly():
+    """2026-09-23 起，壳的问与取都只经过自家服务器：`api.github.com` 在壳源码里【一处都不许有】。
+
+    这条是原来"只许出现一次且在 ReleasePlan.LATEST_URL"的反向续集：那一跳连同把下载地址
+    丢给 DownloadManager 的整条通道，就是"迅雷劫持 → 未命名残包 → 安装失败"的案发链路。
+    修完之后壳源码里再出现一处 GitHub API 地址，就意味着有人在重新接那条被拆掉的线。
+
+    同一批钉住的还有两件事，缺一条这条锁就开始空转：
+    ① 确实扫到了足够多的文件（正对照，路径写错时"没有命中"和"守住了"长得一模一样）；
+    ② 三个钉死的地址同源、且 Activity 只通过 BuildConfig 引用它们——
+       地址的唯一真相在 build.gradle，改天换域名只改那一处，Java 里没有第二份可以漂。
+    """
+    files = sorted(SHELL_SRC.rglob("*.java"))
+    assert len(files) >= 12, f"只扫到 {len(files)} 个壳源码文件，这条锁多半在空转"
+    hits = [p.name for p in files if "api.github.com" in _code(p)]
+    assert not hits, f"壳又直连 GitHub 了（这些文件里出现地址）：{hits}"
+
+    main = _code(MAIN_ACTIVITY)
+    assert "BuildConfig.UPDATE_INFO_URL" in main, "检查更新不再问钉死的地址了？"
+    assert "BuildConfig.UPDATE_APK_URL" in main, "安装包不再从钉死的地址下载了？"
+
+    gradle = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+    # 值是 `"\"https://…\""` 这种套了一层转义引号的 Groovy 写法，正则按那个原样形状抓。
+    pinned = dict(re.findall(
+        r'buildConfigField\s+"String",\s+"(APP_URL|UPDATE_INFO_URL|UPDATE_APK_URL)",\s+'
+        r'"\\?"(https?://[^"\\]+)',
+        gradle))
+    assert set(pinned) == {"APP_URL", "UPDATE_INFO_URL", "UPDATE_APK_URL"}, \
+        f"钉死的地址三件套不齐：{sorted(pinned)}"
+    hosts = {re.match(r"https://([^/]+)/", url).group(1) for url in pinned.values()}
+    assert hosts == {"ai.fenever.xyz"}, f"更新链路与 APP_URL 不同源（三个地址的主机名）：{hosts}"
+    assert pinned["UPDATE_INFO_URL"].endswith("/v1/update/info")
+    assert pinned["UPDATE_APK_URL"].endswith("/site/android.apk"), \
+        "安装包不再走官网那颗按钮同款的加固代取端点"
+
+
+def test_the_apk_provider_registration_and_the_installer_share_one_authority():
+    """手写 FileProvider 的 authority 是三处拼出来的（manifest、Java 常量、Intent），必须一致。
+
+    对不上的表现不是崩溃，是安装页拿到一个解析不了的 URI 后一句"找不到文件"——
+    用户视角与残包事故几乎同一个症状，查起来却要先怀疑下载。
+    """
+    manifest = MANIFEST.read_text(encoding="utf-8")
+    assert 'android:authorities="${applicationId}.apkprovider"' in manifest, \
+        "manifest 里的 provider authority 形状变了，Java 侧那份要跟着改"
+    assert 'android:name=".ApkFileProvider"' in manifest
+    assert 'android:exported="false"' in manifest and "grantUriPermissions" in manifest
+    provider = _code(SHELL_SRC / "xyz" / "fenever" / "assistant" / "ApkFileProvider.java")
+    assert 'AUTHORITY_SUFFIX = ".apkprovider"' in provider, "Java 侧那份后缀与 manifest 漂了"
+    main = _code(MAIN_ACTIVITY)
+    assert "ApkFileProvider.uriForFile" in main, "安装页不再通过手写 provider 拿 URI"
+
+
+def test_the_apk_provider_imports_parcelfiledescriptor_from_the_real_package():
+    """ParcelFileDescriptor 在 android.os，不在 android.content——第一次签发 v0.19 就死在这。
+
+    本机没有 Android SDK，这类"类名对、包名错"的 import 只有 CI 编译时才炸；而炸的位置
+    恰好是全链路唯一没有 JVM 台架覆盖的一环（provider 依赖平台类，纯 Java 测试跑不了）。
+    所以在这里钉一行：错包名一旦出现，develop 推送即红，不用等打 tag 才发现。
+    """
+    provider = (SHELL_SRC / "xyz" / "fenever" / "assistant" / "ApkFileProvider.java") \
+        .read_text(encoding="utf-8")
+    assert "import android.os.ParcelFileDescriptor;" in provider, \
+        "ParcelFileDescriptor 的 import 包名又漂了：它在 android.os"
+    assert "import android.content.ParcelFileDescriptor;" not in provider, \
+        "android.content 下没有这个类，编译必炸（v0.19 首发实测）"
+
+
+def test_install_intent_and_its_permission_arrive_together():
+    """起安装页与 REQUEST_INSTALL_PACKAGES 必须同批存在。
+
+    只改一边各有两种坏法：有 Intent 没权限 → 点了下载永远装不上（还会被 catch 成一句
+    "去设置"，看起来像 ROM 的问题）；有权限没 Intent → 白要一个吓人的授权，
+    而"这个应用想装别的软件"是会被用户记住的那一类声明。
+    """
+    src = _code(MAIN_ACTIVITY)
+    manifest = MANIFEST.read_text(encoding="utf-8")
+    fires = "package-archive" in src
+    declared = "REQUEST_INSTALL_PACKAGES" in manifest
+    assert fires and declared, (
+        "安装链路断了一头：" + ("清单没声明 REQUEST_INSTALL_PACKAGES" if not declared
+                                else "代码里没有起安装页的那一句"))
+
+
+def test_every_launcher_entry_exists_in_all_three_places():
+    """长按菜单、桌面组件、以及"点进来以后认不认"这三处必须列同一批入口。
+
+    漏在哪一处的表现都是"那颗按钮点了没反应"或"桌面上干脆少一颗"，而它不会让任何
+    Java 编译失败——正是本仓反复栽的那一类。
+    """
+    wanted = set(_wanted_entries())
+    assert wanted, "WANTED 折出来是空的，这条锁在空转"
+
+    xml = SHORTCUTS_XML.read_text(encoding="utf-8")
+    in_shortcuts = set(re.findall(r'assistant://open/([A-Za-z0-9_]+)', xml))
+    assert in_shortcuts == wanted, (
+        f"shortcuts.xml 与 ShortcutPlan.WANTED 对不上：只在 XML {sorted(in_shortcuts - wanted)}、"
+        f"只在 WANTED {sorted(wanted - in_shortcuts)}（对不上的那条会被冷启动自检补成重复项）")
+
+    layout = WIDGET_LAYOUT.read_text(encoding="utf-8")
+    drawn = set(re.findall(r'android:id="@\+id/(btn\w+)"', layout))
+    wired = set(re.findall(r"R\.id\.(btn\w+)", _code(WIDGET_JAVA)))
+    assert drawn == wired and drawn, (
+        f"组件布局里的按钮 {sorted(drawn)} 与代码挂上事件的 {sorted(wired)} 不是同一批——"
+        "画出来但没挂 PendingIntent 的那颗就是死按钮")
+
+
+def test_released_apks_are_signed_with_one_pinned_key():
+    """发出去的每个包必须签在**同一把**密钥上——这条为一次真实的"更新失败"而写。
+
+    Android 判能不能覆盖安装看的是签名，不看版本号。发布流之前跑的是 assembleDebug，
+    而每台 GitHub runner 都会现造一把 debug keystore：实测 v0.15 与 v0.16 两个 Release
+    的证书 SHA-256 指纹不同（60f1ded9… / 8de2fbe3…），所以用户点"检查更新"永远装不上，
+    只能卸载重装。debug 签名还带 android:debuggable=true——任何能连 adb 的人都能读出
+    壳里 localStorage 存的会话令牌。
+
+    所以这里钉三件：① 发布流不许再出 debug 包；② 密钥从 Secrets 来、从环境变量读，
+    仓库里不许躺任何密钥文件；③ 缺 secret 时必须**失败**，不许悄悄退回现造一把新钥匙
+    ——那等于再给用户制造一次"必须卸载重装"，而这件事一旦发生就收不回来。
+    """
+    raw_workflow = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    # 判 YAML 的正文，不判注释：这条锁要禁的字符串（assembleDebug）正是注释里
+    # 解释"为什么禁它"时用到的那个词——拿原文去 grep，锁会因为它自己说的话而红。
+    workflow = "\n".join(ln for ln in raw_workflow.splitlines() if not ln.lstrip().startswith("#"))
+    gradle = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+
+    for forbidden in ("assembleDebug", "apk/debug/"):
+        assert forbidden not in workflow, f"发布流又回到 {forbidden}：每次一把新 debug 钥匙，老用户永远装不上"
+    assert "assembleRelease" in workflow, "发布流不再出 release 包了"
+    assert "secrets.APK_KEYSTORE_BASE64" in workflow, "签名密钥不再来自 Secrets"
+    assert 'if [ -z "${KEY_B64:-}" ]' in workflow and "exit 1" in workflow, (
+        "缺 secret 时没有停下来：宁可发布失败，也不该发一把新钥匙签的包")
+    assert "keytool" in workflow, "不再把签进包里的指纹打进日志——下次查签名问题又要靠回忆"
+
+    assert 'System.getenv("APK_KEYSTORE")' in gradle, "gradle 不再从环境变量读密钥路径"
+    assert "APK_KEYSTORE_PASSWORD" in gradle and "APK_KEY_ALIAS" in gradle, "签名四项缺项：配了路径没配口令"
+    for leak in ("storeFile file(\"release.jks\")", "keyPassword \""):
+        assert leak not in gradle, f"gradle 里出现了写死的密钥材料：{leak}"
+
+
+def _gradle_block(text: str, header: str) -> str:
+    """取 `header {` 到与之配对的那个 `}` 之间的正文（按花括号深度配对，跨行算）。
+
+    判"某一行在不在文件里"永远看不出**它写在哪儿**，而 Groovy DSL 恰恰是按位置解释的：
+    同一句 storeFile 放进 signingConfigs 是对的，放进 buildTypes 是配置期就炸。
+    """
+    start = text.index(header)
+    open_at = text.index("{", start)
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i]
+    raise AssertionError(f"{header} 这块没有闭合，gradle 文件本身就不对")
+
+
+def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
+    """签名四项 + storeType 必须待在 signingConfigs 里，buildTypes 只许引用它。
+
+    为一次真实的发版失败而写：v0.17 第一次跑 release-apk.yml，"Restore the pinned
+    signing key" 过了、"Assemble release APK" 炸了。原因是那几行被写在
+    `buildTypes.release { … }` 里面——`BuildType` 没有 storeFile 这个属性，Groovy 在
+    配置期就报 unknown property。上一条锁（test_released_apks_are_signed_with_one_pinned_key）
+    当时是全绿的，因为它只问"这些名字在文件里出现过吗"，而它们确实出现过、只是位置错了。
+    本机没有 AGP 也跑不了 gradle，所以位置只能这样钉。
+    """
+    raw = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
+    gradle = _strip_java_comments(raw)          # 注释里也出现过 storeFile 这个词
+    signing = _gradle_block(gradle, "signingConfigs")
+    build_types = _gradle_block(gradle, "buildTypes")
+
+    for prop in ("storeFile", "storePassword", "keyAlias", "keyPassword", "storeType"):
+        assert prop in signing, f"{prop} 不在 signingConfigs 里：密钥配不出签名"
+        assert prop not in build_types, (
+            f"{prop} 又回到 buildTypes 里了：BuildType 没这个属性，配置期直接报错，"
+            "而 CI 之前跑 assembleDebug 时这段根本不执行，所以看不见")
+
+    release = _gradle_block(build_types, "release")
+    assert re.search(r"signingConfig\s+signingConfigs\.release", release), \
+        "release 这个 buildType 没挂上 signingConfig：签出来的包与那把钉死的密钥无关"
+    assert 'storeType "PKCS12"' in signing, \
+        "storeType 不再写死：JDK 默认值一改，gradle 就会拿 JKS 去读一把 PKCS12"
+
+    # 两边说的是同一件事：生成脚本也得显式写 PKCS12，不能靠 keytool 的默认值
+    generator = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    assert "-storetype PKCS12" in generator, \
+        "生成脚本靠 JDK 默认格式，而 gradle 写死了 PKCS12——两边有一边会先漂"
+
+
+def _workflow_step(name: str) -> str:
+    """取 release-apk.yml 里那一步的 shell 正文（原样，不改一个字符）。"""
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    for step in doc["jobs"]["release"]["steps"]:
+        if step.get("name") == name:
+            return step["run"]
+    raise AssertionError(f"发布流里没有这一步：{name}")
+
+
+def _run_bash_e(script: str, env: dict):
+    """按 Actions 的方式跑一段 shell：`bash -e`。
+
+    为什么必须真跑而不是读文本：第一次写"把失败翻译成人话"那两步时忘了 Actions 默认
+    带 `-e`，keytool 一非零整步就地中止，::error:: 一个都没发出去——诊断本身坏了，
+    而且坏得没有任何声音（步骤是红的，annotations 是空的）。读文本看不出这件事。
+    """
+    import subprocess
+
+    if not shutil.which("bash"):
+        pytest.skip("这台机器上没有 bash，跑不了这段 shell")
+    full = {**os.environ, **env}
+    return subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                          timeout=120, env=full)
+
+
+MISSING = "SIGNING KEY MISSING -> 没贴上来：secret APK_KEYSTORE_BASE64"
+CORRUPTED = "SIGNING KEY CORRUPTED -> 重贴 secret APK_KEYSTORE_BASE64（粘贴掉字了）"
+UNREADABLE = "SIGNING KEY UNREADABLE -> 重贴 secret APK_KEYSTORE_PASSWORD / APK_KEY_ALIAS"
+
+
+def test_the_key_diagnostic_reports_instead_of_just_going_red(tmp_path):
+    """keytool 读不出密钥时，那一步必须把原因写成 annotation，而不是静默中止。"""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    keytool = fake_bin / "keytool"
+    keytool.write_text("#!/bin/sh\n"
+                       "echo 'keytool error: java.io.IOException: ' >&2\n"
+                       "echo 'keystore was tampered with, or password was incorrect' >&2\n"
+                       "exit 1\n", encoding="utf-8")
+    keytool.chmod(0o755)
+
+    run = _run_bash_e(_workflow_step(UNREADABLE), {
+        "JAVA_HOME": fake_bin.parent.as_posix(),
+        "APK_KEYSTORE": (tmp_path / "release.jks").as_posix(),
+        "APK_KEYSTORE_PASSWORD": "whatever",
+        "APK_KEY_ALIAS": "ai-assistant",
+    })
+    assert run.returncode != 0, "钥匙读不出来却成功了：这一步白加了"
+    assert "::error::" in run.stdout, (
+        f"没有任何 annotation，红得没有原因（多半是 -e 抢在中止前）：\n"
+        f"stdout={run.stdout!r}\nstderr={run.stderr!r}")
+    assert "tampered" in run.stdout, f"keytool 的原话没被搬出来：{run.stdout!r}"
+
+
+def test_a_mangled_paste_is_named_as_a_paste_problem(tmp_path):
+    """base64 掉一个字符时，报的必须是「粘贴坏了」，而不是往后漂成「口令不对」。"""
+    import base64
+    import hashlib
+
+    payload = base64.b64encode("一把假密钥的字节".encode("utf-8")).decode()
+    good = hashlib.sha256("一把假密钥的字节".encode("utf-8")).hexdigest()
+
+    def paste(value, expected):
+        """按顺序跑「落盘」与「核指纹」两步，返回第二步的结果。
+
+        第二步读的是第一步写在 RUNNER_TEMP 里的那个文件，所以两步必须连着跑——
+        单独跑第二步会因为文件不存在而红，那是测试脚手架的错，不是产品的错。
+        """
+        runner_temp = tmp_path / f"runner-{value[-2:]}-{expected[:6]}"
+        runner_temp.mkdir(exist_ok=True)
+        env_file = runner_temp / "github_env"
+        env_file.write_text("", encoding="utf-8")
+        env = {"RUNNER_TEMP": runner_temp.as_posix(), "GITHUB_ENV": env_file.as_posix(),
+               "KEY_B64": value, "EXPECTED_SHA": expected}
+        first = _run_bash_e(_workflow_step(MISSING), env)
+        if first.returncode != 0:
+            return first
+        return _run_bash_e(_workflow_step(CORRUPTED), env)
+
+    mangled = paste(payload[:-2] + "AA", good)
+    assert mangled.returncode != 0, "指纹不一致却放行了"
+    assert "::error::" in mangled.stdout and "粘贴" in mangled.stdout, mangled.stdout
+
+    intact = paste(payload, good)
+    assert intact.returncode == 0, f"指纹一致反而失败了：{intact.stdout} {intact.stderr}"
+
+    absent = paste("", good)
+    assert absent.returncode != 0 and "缺少 secret" in absent.stdout, absent.stdout
+
+
+def test_each_signing_step_asserts_exactly_one_thing():
+    """三步各查一件事，而且**结论写在步骤名里**——这是这套诊断能被远程读懂的唯一途径。
+
+    未鉴权调 /actions/runs/{id}/jobs 时 `output` 整个是空的（2026-09-21 实测），
+    ::error:: 的正文只有登录的人看得见。所以"哪一步红了"必须自己就是那句话：
+    MISSING = 没贴、CORRUPTED = 贴坏、UNREADABLE = 口令或 alias 不对。
+    一步只断言一件事，否则名字就开始说谎。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    steps = doc["jobs"]["release"]["steps"]
+    names = [s.get("name") for s in steps]
+    ordered = [MISSING, CORRUPTED, UNREADABLE]
+    assert all(n in names for n in ordered), f"三步不齐：{names}"
+    assert names.index(MISSING) < names.index(CORRUPTED) < names.index(UNREADABLE)
+    assert names.index(UNREADABLE) < names.index("Assemble release APK"), \
+        "验钥匙得排在构建之前：让 gradle 去报「签不出来」就晚了"
+    for n in ordered:
+        assert "->" in n and ("secret" in n or "PASSWORD" in n), f"步骤名没点名要重贴哪个：{n}"
+
+    presence, digest, unlock = (_workflow_step(n) for n in ordered)
+    assert "sha256sum" not in presence, "第一步不该顺带核指纹：那会让 CORRUPTED 那步永远轮不到红"
+    assert "[ -z" not in digest and "-z \"" not in digest, "第二步不该顺带查空"
+    assert "sha256sum" not in unlock and "[ -z" not in unlock, "第三步只查钥匙能不能打开"
+
+
+def test_a_manual_run_can_never_publish_a_release():
+    """workflow_dispatch 是"再验一次签名"的按钮，不是发版按钮。
+
+    为什么要在意这个：重贴 secret 之后要能自己点一下就知道红不红，而不是我每试一次
+    就把 v0.17 这个 tag 删了重钉一次。但 dispatch 事件里没有 tag，Release 的名字与
+    包里 versionName 无从对上——所以发版那一步必须只认 tag 事件，
+    而签名那几步在两种事件下都得真跑到。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    steps = {s["name"]: s for s in doc["jobs"]["release"]["steps"] if s.get("name")}
+    guard = "startsWith(github.ref, 'refs/tags/')"
+
+    for gated in ("Publish GitHub Release", "Check tag matches versionName"):
+        assert guard in (steps[gated].get("if") or ""), \
+            f"{gated} 没有只认 tag：手工触发会发出一份名字对不上版本号的公开 Release"
+    for always in (MISSING, CORRUPTED, UNREADABLE, "Assemble release APK"):
+        assert steps[always].get("if") is None, \
+            f"{always} 被加了 if：手工触发时正好跳过要验的那几步"
+
+
+def test_no_signing_key_lives_in_the_repository():
+    """密钥文件一旦进了这个公开仓库，就等于把"能给他的用户发更新"的能力公开送人。
+
+    tools/secret_scan.py 已经按扩展名挡了 .jks/.keystore，那条是"提交了会红"；
+    这条是"根本没打算提交"的正向确认——两件事都写下来，下一个人才不会觉得多余。
+    """
+    import subprocess
+
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=str(REPO_ROOT),
+                            capture_output=True, timeout=60)
+    assert listed.returncode == 0, "问不到 git，这条锁就是空的"
+    tracked = [p.decode() for p in listed.stdout.split(b"\0") if p]
+    bad = [p for p in tracked if p.endswith((".jks", ".keystore")) or p.endswith("keystore.properties")]
+    assert not bad, f"版本库里躺着签名密钥：{bad}"
+
+
+def test_the_keystore_generator_refuses_to_overwrite():
+    """生成脚本必须拒绝覆盖已有的密钥。
+
+    丢了这把钥匙没有补救办法：从此每个新包都是新签名，所有装过的人都要先卸载。
+    一个"顺手再跑一次"就把这件事做掉的脚本，比没有脚本更危险。
+    """
+    script = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    assert "REFUSING TO OVERWRITE" in script, "覆盖前不再拦一道"
+    assert "exit 2" in script, "拦下来却不以非零退出：脚本照样被下一步当成成功"
+    assert "-validity 10000" in script, "证书有效期缩短会让未来的包签不上（Android 要求签名证书有效到 2033 之后）"
+
+
+def test_the_ci_test_step_names_the_lock_that_went_red(tmp_path):
+    """CI 的「Run tests」必须把红的那条锁的**名字**送进一个不登录也看得见的地方。
+
+    2026-09-21 实测两次：未鉴权调 /actions/runs/{id}/jobs 时 `output` 整个是空的，
+    annotations 里只有 "Process completed with exit code 1"。于是"哪条测试红了"这个问题
+    要先登录、再翻三百行日志才有答案——而这件事发生在我手机上（只想知道哪红了的时候）。
+    发布流那边靠"结论写进步骤名"绕过了它；pytest 没法拆成多步，所以换个载体：
+    把 FAILED / ERROR 那几行原样抄成 ::error::，它们进 annotations，
+    而 /check-runs/{id}/annotations 未鉴权可读（同一轮实测）。
+
+    这条锁**真跑**那段 shell，喂一个必定失败的假 pytest：既要它保持非零退出
+    （否则红被吞掉，CI 就永远绿着骗人），又要它把测试名报出来；再反过来喂一次全绿，
+    要求这一步跟着绿、且不凭空造错误标注。三种改法会被抓到：撤掉那段 echo、
+    把要抄的前缀写错、把 `exit $rc` 换成 `exit 0`。
+
+    一件它**不**能抓到的事，写下来免得这句话变成谎：那段 shell 里的 `set +e` 今天
+    是保险而不是必需——管道以 tee 结尾，`bash -e` 看的是最后一个命令的退出码，
+    撤掉 set +e 这一步今天照样发得出 annotation。它防的是"下一个人把 tee 拿掉"那天。
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "tests.yml")
+                         .read_text(encoding="utf-8"))
+    steps = doc["jobs"]["test"]["steps"]
+    script = next((s.get("run") for s in steps if s.get("name") == "Run tests"), None)
+    assert script, "tests.yml 里没有「Run tests」这一步了：这条锁跟着改名一起失效"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    py = fake_bin / "python"
+    py.write_text("#!/bin/sh\n"
+                  'echo "...."\n'
+                  'echo "FAILED backend/tests/test_demo.py::test_the_demo - AssertionError: 演示"\n'
+                  'echo "1 failed in 0.01s"\n'
+                  "exit 1\n", encoding="utf-8")
+    py.chmod(0o755)
+
+    run = _run_bash_e(script, {
+        "PATH": fake_bin.as_posix() + os.pathsep + os.environ.get("PATH", ""),
+        "RUNNER_TEMP": tmp_path.as_posix(),          # 不许往工作树里写临时文件
+    })
+    assert run.returncode != 0, "pytest 失败了这一步却成功了：CI 会永远绿着骗人"
+    assert "::error" in run.stdout, (
+        "红得没有原因——FAILED 那几行没被抄成 annotation，而未鉴权只能看见 annotations。"
+        f"\nstdout={run.stdout!r}\nstderr={run.stderr!r}")
+    assert "test_the_demo" in run.stdout, f"抄了，但没抄到名字：{run.stdout!r}"
+    assert not list(REPO_ROOT.glob("pytest.log")), "那段 shell 把临时文件写进了工作树"
+
+    # 反过来一遍：全绿时这一步必须跟着绿，而且不许凭空造错误标注。
+    # 只测失败路径的锁会把"永远判红"这种改法放过去——那等于把 CI 变成装饰。
+    py.write_text("#!/bin/sh\n"
+                  'echo "784 passed in 175.10s"\n'
+                  "exit 0\n", encoding="utf-8")
+    ok = _run_bash_e(script, {
+        "PATH": fake_bin.as_posix() + os.pathsep + os.environ.get("PATH", ""),
+        "RUNNER_TEMP": tmp_path.as_posix(),
+    })
+    assert ok.returncode == 0, f"全绿却被判红：{ok.stdout!r} {ok.stderr!r}"
+    assert "::error" not in ok.stdout, "没失败却发了错误标注：下一次没人相信它了"

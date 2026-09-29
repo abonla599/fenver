@@ -1,0 +1,18 @@
+name: Secret Scan Gate
+on: [push, pull_request]
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 全历史扫。浅克隆会漏掉早期提交里的形状，而"历史清不干净"正是
+          # 本仓为 .env 被跟踪付过的学费（一把 API Key 公开了五个月）。
+          # 快照仓只有一个提交，这条对它就是扫那一个。
+          fetch-depth: 0
+      # 不用 gitleaks 官方 action（它对仓可见性有许可口径的坑），直接 CLI：
+      # 判据和 tools/secret_scan.py 同构——形状命中即红，没有"回头再清"。
+      - name: gitleaks detect
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --redact --exit-code 1

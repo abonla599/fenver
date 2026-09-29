@@ -1,0 +1,201 @@
+"""
+任务编排器模块
+负责将复杂目标分解为子任务，并协调ReAct Agent逐步执行
+支持任务状态持久化，可断点续传，支持任务取消
+"""
+from typing import List, Optional, Dict, Any
+from .task_store import Task, TaskStatus, task_store
+from .planner import Planner
+from .executor import Executor
+from ..core.llm_client import get_llm_response
+
+
+class Orchestrator:
+    def __init__(self, model: str = None):
+        # model 留空 = 走 setDefault 的 provider（口径同 ReActAgent）；服务商名
+        # 不刻进源码。planner/executor 同源透传，一条解析规则管三个类。
+        self.model = model
+        self.planner = Planner(model)
+        self.executor = Executor(model)
+
+    def run(self, goal: str, task_id: Optional[str] = None,
+            user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        执行任务的主方法
+        Args:
+            goal: 用户目标描述
+            task_id: 可选，如果提供则尝试恢复已有任务
+            user_id: 这个任务属于谁。必填（Task 会拒收空归属）——恢复已有任务时
+                不新建设象，所以只有新建那一路用得上，但签名上不给默认值才是真话
+        Returns:
+            包含任务状态和结果的字典
+        """
+        task = None
+
+        # --- 1. 尝试恢复任务或创建新任务 ---
+        # 归属校验下沉在这里而不是端点里（审查 #13）：这一句拿 uuid 恢复任务时是
+        # 以**原属主**的身份往下跑的（executor 用 task.user_id 注入 needs_user 工具），
+        # 所以"是不是你的"必须由真正要跑它的人来判，不能指望每个调用方记得判。
+        # 不是自己的就当不存在——不报错、不解释：一句"这任务不是你的"就把任务表
+        # 变成了 uuid 探测器。落到新建分支后 Task 会因空 user_id 拒收，fail-closed。
+        if task_id and task_id in task_store and \
+                task_store[task_id].user_id == (user_id or "").strip():
+            task = task_store[task_id]
+
+            # ⭐ 检查是否已被取消
+            if task.cancelled or task.status == TaskStatus.CANCELLED:
+                return {
+                    "task_id": task.task_id,
+                    "status": "cancelled",
+                    "goal": task.goal,
+                    "message": "任务已被取消"
+                }
+
+            # 如果任务已完成，直接返回结果
+            if task.status == TaskStatus.COMPLETED:
+                print(f"[Orchestrator] 任务 {task_id} 已完成，直接返回结果")
+                return {
+                    "task_id": task.task_id,
+                    "status": "completed",
+                    "goal": task.goal,
+                    "final_answer": task.final_answer,
+                    "subtasks": task.subtasks,
+                    "results": task.results
+                }
+
+            # 如果任务失败，询问是否重新执行
+            if task.status == TaskStatus.FAILED:
+                print(f"[Orchestrator] 任务 {task_id} 之前失败，从断点重新执行")
+                # 从当前中断的子任务继续
+            else:
+                print(f"[Orchestrator] 恢复任务: {task.task_id}, 进度: {task.current_subtask}/{len(task.subtasks)}")
+        else:
+            # 创建新任务
+            print(f"[Orchestrator] 创建新任务，目标: {goal}")
+            plan = self.planner.plan(goal)
+            task = Task(goal=goal, subtasks=plan, user_id=user_id)
+            task_store[task.task_id] = task
+            print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
+
+        # --- 2. 更新任务状态为执行中 ---
+        task.status = TaskStatus.RUNNING
+
+        try:
+            # --- 3. 逐步执行子任务 ---
+            while task.current_subtask < len(task.subtasks):
+                # ⭐⭐⭐ 每个子任务执行前检查取消标志 ⭐⭐⭐
+                if task.cancelled:
+                    task.mark_cancelled()
+                    print(f"[Orchestrator] 任务 {task.task_id} 在第 {task.current_subtask} 步被取消")
+                    return {
+                        "task_id": task.task_id,
+                        "status": "cancelled",
+                        "goal": task.goal,
+                        "message": f"任务在第 {task.current_subtask + 1} 步被取消",
+                        "completed_subtasks": task.current_subtask,
+                        "total_subtasks": len(task.subtasks),
+                        "results": task.results
+                    }
+
+                idx = task.current_subtask
+                subtask = task.subtasks[idx]
+
+                print(f"[Orchestrator] ========== 执行子任务 {idx+1}/{len(task.subtasks)} ==========")
+                print(f"[Orchestrator] 子任务内容: {subtask}")
+
+                # 使用Executor（内部调用ReAct Agent）执行单个子任务
+                # user_id 往下传：子任务里的工具要知道是谁在调（needs_user 那类不给身份就拒绝）
+                result = self.executor.execute_task(subtask, user_id=task.user_id)
+
+                # 保存结果
+                task.results.append(result)
+                task.current_subtask += 1
+
+                print(f"[Orchestrator] 子任务 {idx+1} 完成")
+                print(f"[Orchestrator] 当前进度: {task.current_subtask}/{len(task.subtasks)}")
+
+            # --- 4. 所有子任务完成，生成最终汇总 ---
+            print(f"[Orchestrator] ========== 所有子任务完成，开始汇总 ==========")
+
+            # 构造汇总提示词
+            summary_prompt = self._build_summary_prompt(task)
+
+            # 调用LLM生成最终答案
+            final_answer = get_llm_response(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个善于总结的助手，请将以下子任务的执行结果整合成一个完整、清晰的回答。"},
+                    {"role": "user", "content": summary_prompt}
+                ]
+            )
+
+            # 保存最终答案
+            task.final_answer = final_answer
+            task.status = TaskStatus.COMPLETED
+
+            print(f"[Orchestrator] 任务 {task.task_id} 完成！")
+
+            return {
+                "task_id": task.task_id,
+                "status": "completed",
+                "goal": task.goal,
+                "final_answer": final_answer,
+                "subtasks": task.subtasks,
+                "results": task.results
+            }
+
+        except Exception as e:
+            # --- 5. 异常处理 ---
+            error_msg = str(e)
+            print(f"[Orchestrator] 任务执行出错: {error_msg}")
+
+            task.status = TaskStatus.FAILED
+            task.error = error_msg
+
+            return {
+                "task_id": task.task_id,
+                "status": "failed",
+                "goal": task.goal,
+                "error": error_msg,
+                "current_subtask": task.current_subtask,
+                "total_subtasks": len(task.subtasks)
+            }
+
+    def _build_summary_prompt(self, task: Task) -> str:
+        """构造汇总提示词"""
+        parts = [f"用户原始目标：{task.goal}\n"]
+        parts.append("以下是各子任务及其执行结果：\n")
+
+        for i, (subtask, result) in enumerate(zip(task.subtasks, task.results)):
+            parts.append(f"--- 子任务 {i+1} ---")
+            parts.append(f"任务内容：{subtask}")
+            parts.append(f"执行结果：{result}")
+            parts.append("")
+
+        parts.append("请将以上所有子任务的结果整合成一个完整、连贯的回答，直接呈现给用户。")
+
+        return "\n".join(parts)
+
+    def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        查询任务状态
+        Args:
+            task_id: 任务ID
+        Returns:
+            任务状态信息字典，如果任务不存在则返回None
+        """
+        task = task_store.get(task_id)
+        if not task:
+            return None
+
+        return {
+            "task_id": task.task_id,
+            "goal": task.goal,
+            "status": task.status,
+            "current_subtask": task.current_subtask,
+            "total_subtasks": len(task.subtasks),
+            "final_answer": task.final_answer,
+            "error": task.error,
+            "created_at": task.created_at,
+            "cancelled": task.cancelled  # ⭐ 新增
+        }

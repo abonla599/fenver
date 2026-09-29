@@ -1,0 +1,49 @@
+name: Backend Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          # 与本地开发/验证以及 PyInstaller 冻结时所用的解释器对齐。
+          # 此前钉在 3.10，而这批代码全是在 3.12 上写、在 3.12 上验、并按 3.12 打成 EXE
+          # 的——CI 因此一直是"唯一没被对齐过的那一环"。requirements.txt 钉死
+          # chromadb==0.5.0，其对 Python 的支持上限也是 3.12，再往上同样会引入新问题。
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir --force-reinstall -r backend/requirements.txt
+      # test_sandbox_concurrency.py 真的起容器，用的是 app/sandbox/sandbox_manager.py
+      # 里钉死的 ai-sandbox:latest。它不是 pip 依赖，requirements 装不出来，此前只有
+      # 开发机上手工 build 过的那一份——于是这条用例在 CI 上从来没跑过，只在本机跑过
+      # （而"只在本机跑过"正是这轮 CI 红反复教训的那件事）。镜像就 12 行 Dockerfile，
+      # 在这里现造，让沙箱执行路径真正进回归。
+      - name: Build sandbox image
+        run: docker build -t ai-sandbox:latest -f docker/sandbox/Dockerfile docker/sandbox
+      # 跑整个目录，不点名文件。这里曾经写的是
+      # `pytest backend/tests/test_memory.py backend/tests/test_integration.py`，
+      # 于是 Task 1-7 产出的鉴权契约锁、越权隔离、fail-closed 全部用例在 push 时
+      # 一条都不执行——对任何后来的贡献者而言那些锁等于不存在（锁没写进 CI 的回归
+      # 就不是锁）。按目录跑还有一层保护：新增测试文件自动被覆盖，不会再有人因为
+      # "忘了往清单里加一行"而悄悄失去守护。路径写错或用例被清空时 pytest 以 5 退出，
+      # 所以这条命令不会退化成"零用例也绿"。
+      - name: Run tests
+        run: |
+          # 关掉 -e。今天这条管道以 tee 结尾，`bash -e` 还咬不到它（管道的退出码取最后一个
+          # 命令，而 tee 总是成功）——但"把 ::error:: 发出去"不该依赖"管道末尾恰好是个
+          # 会成功的命令"这种巧合：哪天有人把 tee 拿掉、或改成 `pytest ...; rc=$?`，
+          # -e 就会抢在 annotation 之前中止整步。发布流那三步第一次就是这么栽的。
+          # 也就是说：撤掉下面这行，本仓那条锁今天不会红（判据见 test_android_shell.py 的说明）。
+          set +e
+          python -m pytest backend/tests/ -q --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
+          rc=${PIPESTATUS[0]}
+          # 未鉴权读不到日志正文，但读得到 annotations（2026-09-21 实测：/check-runs/{id}/annotations
+          # 匿名可取，而 jobs 的 output 是空的）。所以"哪一条锁红了"的载体是 ::error::，
+          # 不是那三百行日志——问这件事的人可能就在手机上。
+          # head -40：一屏读得完；sed 把 % 转成 %25，否则消息里的 % 会打断 workflow 命令语法。
+          grep -E '^(FAILED|ERROR)' "$RUNNER_TEMP/pytest.log" | head -40 | sed 's/%/%25/g' \
+            | while IFS= read -r line; do echo "::error title=pytest 红了一条::$line"; done
+          exit $rc

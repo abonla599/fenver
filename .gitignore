@@ -1,0 +1,144 @@
+# 本地数据库与数据文件
+# 这几行只兜"数据"这一类东西，形状必须是 glob 而不是逐个记名字：本仓已经因运行数据
+# 被跟踪付出过代价（chroma_db/ 与 .env 曾入库，一把 API Key 因此公开了五个月），而
+# "漏一个名字就裸奔"正是那种事故的形状——按人分账之后偏好摘要叫 preference-<uid>.txt，
+# 精确名 `preference.txt` 挡不住它。feedback/preference 现在默认落在 data/ 下
+# （见 backend/app/core/paths.py::data_file），下面两行是给历史遗留的根目录那一份兜底。
+data/
+*.sqlite3
+feedback.json
+preference*.txt
+chroma_db/
+
+# 其他临时文件
+*.log
+*.tmp
+
+# Python 虚拟环境与缓存
+venv/
+.env
+.env.txt
+__pycache__/
+*.pyc
+
+# PyInstaller 打包产物（.spec 是构建配置，需要入库，不要忽略）
+# build_new 是 run_backend.spec 里写的工作目录名，和 build/ 同一种东西。
+dist/
+build/
+build_new/
+# 构建戳：打包前由 `git describe --tags --abbrev=0` 生成，随包一起打进去。
+# 版本号的唯一来源是 git tag——把它抄进源码或前端就是第二个事实来源，下次升版
+# 必然有一处是旧的、而且显示得理直气壮。所以只挡不追：文件本来就该每次构建现生成。
+version.txt
+
+# Flutter 编译产物（保留源码，排除编译输出）
+flutter_app/build/
+flutter_app/windows/x64/runner/Release/
+
+# NSIS 安装包
+AI智能助手_Setup.exe
+*.nsi~
+
+# IDE 配置
+.vscode/
+.idea/
+
+# 个人文件（与本项目无关，勿提交到公开仓库）
+COP15_生物多样性笔记.csv
+COP15_生物多样性笔记.md
+generate_docx.py
+个人总结-*.md
+# 内部设计稿归档（官网/功能设计过程稿、命名规范原稿只留本机，不进开源快照）
+docs-internal/
+
+# 本地工具产物与临时备份（不属于源码，勿提交）
+.qoder/
+# 本地工具产物：cloudflared.exe 与隧道 yml 不属于源码，整目录默认排除。
+# 例外只开一个：start-ai-stack.bat 是**开机自启的真身**，它不进仓库就等于"换一台机器
+# 没人知道开机该跑什么"——本会话已为此付过两次静默停机的排查成本，而命名隧道的
+# config.yml 本来就落在 %USERPROFILE%\.cloudflared\ 不在这里，所以没有任何凭据被带进来。
+# （这里曾经有一条 !tools/make-invite.bat 例外，随邀请码机制一起删除了。）
+/tools/*
+!/tools/start-ai-stack.bat
+# 同理：这条 .bat 的无闪窗包装（wscript 层）也是开机自启的真身的一部分，
+# 不进仓库就等于换一台机器开机又退回"闪一下 cmd 窗"的老样子。
+!/tools/start-ai-stack-hidden.vbs
+# 这台机器没有 Gradle 也没有 Android SDK，壳的 core/ 单测本来只能推上去等 CI 判。
+# 这个台架就是为省掉那段等待写的。它以前叫 _diag_shell_bench.py，那个名字同时撞着
+# `/tools/*` 和下面的 `_diag_*.py` 两条排除，等于永远进不了仓库——每换一次会话就得
+# 重新找一遍 android.jar 与 junit jar 的路径。纯逻辑、只读源码，不含任何凭据。
+!/tools/shell_jvm_tests.py
+# APK 签名密钥生成脚本：它自己不含任何密钥，只是让 CI 别再每次现造一把。
+!/tools/make-apk-keystore.ps1
+# 密钥形态扫描器。它自己必须是**被扫的对象**（写坏了形状规则会当场红），所以它得进
+# 版本库、进 CI 那次 checkout。纯标准库、只读文件，不碰网络也不写盘。
+!/tools/secret_scan.py
+server.log
+tunnel.log
+PATH_backup_*.txt
+path_fix.ps1
+path_inspect.ps1
+_diag_*.py
+_verify_*.py
+
+# Windows 自己写错的缓存目录，不是本项目的产物
+# 某处把 %SystemDrive% 当成**字面量**用了（没被环境变量展开），于是 Windows 把
+# ProgramData\Microsoft\Windows\Caches\ 下的图标/命名空间缓存（cversions.2.db 等
+# 四个 .db，约 976KB）写进了仓库根下一个真名叫 "%SystemDrive%" 的目录。全仓 grep 过，
+# 没有任何代码引用它；它是活动系统缓存，删了会被 Windows 再造，所以只挡不追。
+# 这条是控制"别进版本库"，不是"别存在"。
+/%SystemDrive%/
+
+# 用户自己的产品逻辑与判断，不属于代码：这份规划书里是路线、代拍的决策和对几条
+# 商业边界的取舍，仓库是公开的，推上去等于把他的思路公开。只挡不删——文件留在
+# 工作区里给人看。往这条边上靠的新文档（场景设计、他自己的备考数据、任何
+# "我们的打法"）同样别 add；纯工程实现不受这条影响。
+/docs/项目规划书.md
+
+# 并行的工作区（git worktree）：每个都是自己那份检出，绝不该被别的检出跟踪。
+# 不加这条，另一个会话里 `git add -A` 会把整棵 worktree 卷进提交。
+/.worktrees/
+
+# GitHub check-run 的响应 dump，含 client_id / owner 等仓库元数据
+cr.json
+# 协作运行时目录
+.qoder-collab-runtime/
+.qoder-user-skill-runtime/
+
+# ---------- v0.24 T0.3：快照前的收口增补 ----------
+# T0.2 清单里"默认不进快照"的东西，此前多数只是"恰好没 add"——一次 `git add -A`
+# 就能全部翻进去。这一节把它们从"没提交"变成"提交不了"，并把本机会话产生的
+# 运行时目录一并挡住（.attachments 是消息附件落盘点，里面是真人聊天图）。
+.attachments/
+.mcp-results/
+.workbuddy/
+*.apk
+
+# 本机台架与构建中转目录（都是产物或实验场，不是源码）
+/_local_verify/
+/shell-refs/
+/dist_new/
+/build_stage/
+/build_stage_work/
+# 与 A7 同族：看门狗注册脚本绑本机计划任务与账户，属运维侧，不随源码分发。
+/deploy/register-watchdog.ps1
+
+# 根目录的过程文档与留档：PRD、任务拆解、发布文案、v0.23 过程记录、实测截图。
+# 它们的去处是 docs-internal/ 或本机留档；对外文档只走 docs/ 里清洗过的那几份。
+/PRD-*.md
+/v0.23-*
+/v0.24-*.md
+/plan-inapp-update-*.md
+/progress-report-prompt.md
+/开源发布文案*.md
+/日程页-*
+/code-review-*.md
+/APK正式签名落地指引.md
+
+# docs/ 下的内部报告与 v0.24 过程稿（体检/复检/隐患/待修复清单是内部质量留档；
+# 快照排除清单本身就是这次收口的作业单，更不该随快照走）。
+docs/v0.24-*.md
+docs/代码体检报告-*.md
+docs/代码复检报告-*.md
+docs/安全与稳定性隐患排查报告.md
+docs/待修复清单-*.md

@@ -1,0 +1,45 @@
+Fenver
+Copyright 2026 The Fenver Authors (see git history / README)
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Third-party notices
+-------------------
+
+Fenver bundles or depends on the following third-party components, each under
+its own license. Full license texts are provided with the respective packages
+as installed by the package managers named below; none of them require changes
+to Fenver's own source distribution beyond this notice.
+
+Backend (Python, installed via pip; see backend/requirements.txt):
+  - fastapi, starlette, uvicorn        (MIT / BSD-3-Clause)
+  - openai-python                      (Apache-2.0)
+  - chromadb                           (Apache-2.0)
+  - bcrypt, cryptography               (Apache-2.0 / BSD-3-Clause)
+  - httpx, httpcore, h11               (BSD-3-Clause)
+  - pydantic, pydantic-core            (MIT)
+  - python-dotenv                      (MIT)
+  - tiktoken                           (MIT)
+  - scikit-learn, joblib               (BSD-3-Clause, MIT)
+  - onnxruntime                        (MIT)
+  - numpy, pandas                      (BSD-3-Clause)
+  - requests                           (Apache-2.0)
+
+Desktop packaging (built via PyInstaller):
+  - PyInstaller                        (GPL-2.0+ with a Bootloader Exception
+    permitting distribution of bundled applications; see
+    https://pyinstaller.org for the exact terms)
+
+Android client (installed via Gradle; see android-native/app/build.gradle.kts
+and android/app/build.gradle):
+  - androidx.* (Jetpack Compose, core, activity, etc.)   (Apache-2.0)
+  - google material components                            (Apache-2.0)
+  - okhttp, okio                                          (Apache-2.0)
+  - kotlinx-serialization, kotlinx-coroutines             (Apache-2.0)
+
+Web frontend (PWA) is plain HTML/CSS/JS with no bundled third-party runtime.
+
+Trademark notice: model provider names (DeepSeek, Kimi, Zhipu, SiliconFlow,
+Tongyi, OpenAI, etc.) are trademarks of their respective owners and are used
+here only to describe interoperability.

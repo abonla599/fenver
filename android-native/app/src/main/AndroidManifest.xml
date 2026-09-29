@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 原生客户端只连 https 的自有服务；不开 cleartext，局域网 http 调试走 Web 版 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 13+ 的运行时权限：到点提醒要发通知。首次设提醒时才问。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 精确闹钟（Android 12+ 起是"特殊权限"，不弹框、要去系统设置里给）。
+         拿不到这项授权时 ReminderScheduler 会退回 setAndAllowWhileIdle ——
+         提醒照设，只是可能晚几分钟——设置页「提醒」那一屏会显示当前是哪一档。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 安装期权限、不弹框：AlarmManager 的闹钟重启不保留，靠它把表重排一遍。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 按住说话的录音。运行时才弹框（ChatUi 里在第一次长按时才请求）。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- v0.23 T1.7 应用内更新：Android 8+ 起，发起安装包 Intent 需要这个特殊权限
+         （不弹框，在系统「安装未知应用」页里给）。拿不到时 Updater 不硬闯——
+         抛 SecurityException 会被接住，改弹「去设置」引导对话框。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- v0.23 T2.4 会话导出：DownloadManager 写公共 Downloads 只在 API ≤ 28 上需要
+         旧存储权限；API 29+ 的分区存储下系统下载器自带写入位。maxSdkVersion 封顶
+         28，新系统装了个用不上的危险权限只会吃商店审查。权限被拒时的私有目录
+         兜底在 T2.5（清单：docs/v0.23-研发任务拆解清单.md）。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Android 11+ 的包可见性：SpeechRecognizer 绑的是系统识别服务，
+         不声明这条，isRecognitionAvailable 在部分 ROM 上会假报"没有服务"。 -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 闹钟到点。PendingIntent 显式指向它，Android 8 的隐式广播限制碰不到；
+             exported=false 就够——只被自己的 PendingIntent 唤起。 -->
+        <receiver android:name=".ReminderReceiver" android:exported="false" />
+
+        <!-- 开机重排闹钟。BOOT_COMPLETED 属白名单广播，exported=false 仍收得到。 -->
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- v0.23 T1.7：把壳自己下载的更新包以 content:// 交给系统安装页。
+             与 WebView 壳同一套安全边界（单段路径 + canonical 不逃逸 + 只读 + 文件名
+             必须形如 ai-assistant-native-*.apk），写死在 update/ApkFileProvider.kt 里。
+             exported=false：除了 grantUriPermissions 明确授权的接收方，谁也解析不到；
+             authority 用 applicationId 拼——native 壳与 WebView 壳并存安装时天然不撞。 -->
+        <provider
+            android:name=".update.ApkFileProvider"
+            android:authorities="${applicationId}.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

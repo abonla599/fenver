@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>管理员 · AI 助手</title>
+<!-- 复用 PWA 那一份设计系统：同一进程同源服务，配色/按钮/字号没有第二份真相。
+     admin.css 只补本页自己的骨架（表格、任务卡、弹层），不重定义颜色。 -->
+<link rel="stylesheet" href="/app/style.css">
+<link rel="stylesheet" href="admin.css">
+</head>
+<body class="admin">
+<div class="wrap">
+
+  <!-- 未取到管理员身份时只有这一块可见 -->
+  <section id="gate" class="hidden">
+    <div class="top"><h1>管理员登录</h1></div>
+    <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己那枚会话令牌。口令只在这一次请求的头里出现：服务端认下后换发的是浏览器锁定的会话 Cookie，页面脚本与本机存储都拿不到凭据。</p>
+    <label class="field" style="margin-top:10px">
+      <span>口令</span>
+      <input id="pass" type="password" placeholder=".env 里的 ACCESS_TOKEN" autocomplete="off">
+    </label>
+    <div class="row">
+      <button id="btnLogin" class="btn btn-primary grow" data-icon="login" data-label="进入"></button>
+    </div>
+    <div class="err" id="gateErr"></div>
+  </section>
+
+  <main id="panel" class="hidden">
+    <div class="top">
+      <h1>管理</h1>
+      <span class="who" id="who"></span>
+      <span class="spacer"></span>
+      <button id="btnReload" class="btn btn-ghost btn-small" data-icon="refresh" data-label="刷新"></button>
+      <button id="btnLogout" class="btn btn-ghost btn-small" data-icon="exit" data-label="退出"></button>
+    </div>
+    <div class="err" id="flash"></div>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab active" type="button" data-goto="secUsers" data-icon="users" data-label="用户"></button>
+      <button class="tab" type="button" data-goto="secUsage" data-icon="usage" data-label="用量"></button>
+      <button class="tab" type="button" data-goto="secMemory" data-icon="memory" data-label="记忆"></button>
+      <button class="tab" type="button" data-goto="secTasks" data-icon="tasks" data-label="任务"></button>
+      <button class="tab" type="button" data-goto="secAgent" data-icon="agent" data-label="智能体"></button>
+    </nav>
+
+    <!-- ---------------- 用户 ---------------- -->
+    <section class="sec" id="secUsers">
+      <h2>用户</h2>
+      <p class="pane-note">「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台，上限 8 枚）。「记忆」按人不给数，理由写在记忆那一节。</p>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>用户名</th><th>身份</th><th>状态</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
+        </tr></thead>
+        <tbody id="userRows"></tbody>
+      </table></div>
+    </section>
+
+    <!-- ---------------- 用量 ---------------- -->
+    <section class="sec hidden" id="secUsage">
+      <h2>用量</h2>
+      <p class="pane-note">一行是「这一天 · 这个人 · 这条模型服务」。它由 <code>/v1/chat</code> 的两条路径（非流式与流式）在跑完之后各记一笔，<b>失败的和客户端中途断开的那几次也在账上</b>——只记跑完的那次会系统性低估用量。「智能体」那一节跑的 ReAct 与编排不记：那条链路不经过记账。</p>
+      <div class="row">
+        <span class="dim" style="font-size:12.5px">看哪天</span>
+        <select id="usageDay"></select>
+        <button id="btnUsage" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新读这一天的账"></button>
+      </div>
+      <div class="row" id="usageTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>谁</th><th>模型服务</th><th>谁的钱</th><th>次数</th><th>成 / 败</th><th>token</th><th>工具轮</th><th>账全不全</th>
+        </tr></thead>
+        <tbody id="usageRows"></tbody>
+      </table></div>
+      <p class="pane-note" style="margin-top:10px">token 数一律取上游回传的 <code>usage</code>，服务端不估算：各家分词器不同，本地算出来的数拿去对账是错的。上游没回数字的那几次各项记 0，并在「账全不全」里点出来——那种行的 token 是个<b>下限</b>，不是准确数。日期只认 <code>YYYY-MM-DD</code>，接口也只认 <code>day</code> 这一个参数，所以按人细看就是读完上面这张表，它本来就一人一行。</p>
+    </section>
+
+    <!-- ---------------- 记忆 ---------------- -->
+    <section class="sec hidden" id="secMemory">
+      <h2>记忆</h2>
+      <p class="pane-note">这个页面只读条数：长期记忆正文按人隔离，管理员的身份也只是“另一个用户”，跨人去读别人的记忆内容在这套系统里没有接口，也不该有。 <code>/v1/memory/stats</code> 给的是全库合计，不按人拆分，所以上面那张表的「记忆」栏只能是不支持。</p>
+      <div class="card">
+        <div class="stat"><b id="memTotal">—</b><span id="memNote">条 · 全库合计（不分人）</span></div>
+        <p class="pane-note" id="memCollection" style="margin:8px 0 0"></p>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <input id="decayFactor" class="num" type="number" step="0.01" min="0.1" max="1" value="0.95">
+        <button id="btnDecay" class="btn btn-ghost" data-icon="decay" data-label="衰减我自己记忆的权重"></button>
+      </div>
+      <p class="pane-note" style="margin-top:-4px"><code>/v1/memory/decay</code> 只作用于登录这个页面的人自己的记忆池，选不了别人——按用户逐个衰减没有端点。</p>
+    </section>
+
+    <!-- ---------------- 任务 ---------------- -->
+    <section class="sec hidden" id="secTasks">
+      <h2>任务</h2>
+      <p class="pane-note">编排任务是进程内的一张全局表，条目上没有归属，所以这一面整片挂 require_admin；进程一重启它就空了，这里看到的不是历史归档。</p>
+      <div class="task-list" id="taskList"></div>
+    </section>
+
+    <!-- ---------------- 智能体 ---------------- -->
+    <section class="sec hidden" id="secAgent">
+      <h2>智能体</h2>
+      <p class="pane-note">两条都是同步接口：请求会一直挂着直到跑完或超时，跑的是服务端自己那份上游配置。编排那条会往上面那张任务表里落一条。</p>
+      <textarea id="agentInput" class="req" rows="3" placeholder="要跑的事，例如：查一下明天上海的天气"></textarea>
+      <div class="row">
+        <span class="dim" style="font-size:12.5px">轮数</span>
+        <input id="agentTurns" class="num" type="number" min="1" max="40" value="10">
+        <span class="dim" style="font-size:12.5px">秒数</span>
+        <input id="agentDuration" class="num" type="number" min="10" max="600" value="120">
+        <button id="btnRunAgent" class="btn btn-ghost" data-icon="play" data-label="ReAct 跑一次"></button>
+        <button id="btnOrchestrate" class="btn btn-primary" data-icon="agent" data-label="编排执行"></button>
+      </div>
+      <div class="secret hidden" id="agentOut"></div>
+    </section>
+  </main>
+
+  <!-- 明文只出现在那一次响应里（库里存的是 sha256 摘要），但这一枚不是他的入场券：
+       他自己的密码就能再领一枚，所以措辞不能说成“不发出去他就进不来”。 -->
+  <div id="reveal" class="sheet hidden">
+    <div class="card">
+      <h2>新令牌</h2>
+      <p id="revealNote">这枚令牌的明文只出现在刚才那一次响应里，服务端存的是摘要，关掉这个窗口就再也查不到。这次换发已经把他名下所有旧令牌一起作废，每一台设备都会掉线。掉线不等于进不来：他在 App 里用自己的用户名和密码登录，就能领一枚新的。</p>
+      <div class="secret" id="revealText"></div>
+      <div class="foot">
+        <button id="btnCopy" class="btn btn-primary btn-small" data-icon="copy" data-label="复制"></button>
+        <button id="btnCloseReveal" class="btn btn-ghost btn-small" data-icon="check" data-label="知道了"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 破坏性动作的二次确认：文案要放下“删了什么、留了什么”，window.confirm 放不下 -->
+  <div id="ask" class="sheet hidden">
+    <div class="card">
+      <h2 id="askTitle"></h2>
+      <p id="askBody"></p>
+      <div class="foot">
+        <button id="askCancel" class="btn btn-ghost btn-small" data-icon="close" data-label="取消"></button>
+        <button id="askOk" class="btn btn-small"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail" class="sheet hidden">
+    <div class="card">
+      <h2 id="detailTitle">任务</h2>
+      <div class="secret" id="detailText"></div>
+      <div class="foot">
+        <button id="btnCloseDetail" class="btn btn-ghost btn-small" data-icon="check" data-label="关闭"></button>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="admin.js"></script>
+</body>
+</html>

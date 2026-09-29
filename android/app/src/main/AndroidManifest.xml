@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 网页相机（getUserMedia）需要宿主应用先拿到运行时权限，WebView 才会放行 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Android 13+ 的运行时权限：到点提醒要发通知。首次设提醒时才问。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 精确闹钟（Android 12+ 起是"特殊权限"，不弹框、要去系统设置里给）。
+         要它是因为 2026-09-22 用户报告"设过的提醒从来没响过"：setAndAllowWhileIdle
+         在省电策略下可以晚到几小时，那条"7:30 背词"就永远错过了。
+         拿不到这项授权时 ReminderScheduler 会退回 setAndAllowWhileIdle —— 提醒照设，
+         只是可能晚几分钟——所以这条不是"不给就用不了"，屏幕上那一行会显示当前是哪一档。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 安装期权限、不弹框：AlarmManager 的闹钟重启不保留，靠它把表重排一遍。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 「检查更新」下完 APK 要把它交给系统安装页。声明这条【不等于】能装：
+         Android 8+ 还要用户在「设置 → 安装未知应用」里对本应用点一次允许，
+         没给的话 startActivity 会失败，MainActivity 那里退成一个带「去设置」的对话框。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:usesCleartextTraffic="false"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
+            android:windowSoftInputMode="adjustResize">
+            <!-- adjustResize 必需：否则软键盘直接盖住输入框，手机上没法打字聊天 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 长按应用图标的静态快捷方式（spec §5）：拍照提问 / 新开对话。
+                 API 25 起生效，23-24 上系统直接忽略这个 meta-data，不报错也不显示。
+                 两条都指向本 activity，参数走 android:data（原因写在 res/xml/shortcuts.xml 里）。 -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!-- 系统分享入口（spec §4）：相册/文件/别的 App 里「分享 → AI 助手」落在这里。
+             NoDisplay 意味着它全程不出界面，所以 onCreate 的每条路径都要 finish()。
+             exported=true 是功能要求——启动它的是别的 App，Android 12 起缺这个属性
+             隐式启动直接被拒。
+             只声明 ACTION_SEND：SEND_MULTIPLE 不接（一次一条既够用户表达，也免得一次
+             把 10MB 的队列塞满；真要发多张就分享三次，每次各带一个 id）。
+             text/plain 这一条走的是 EXTRA_TEXT（别的 App 分享文字时几乎不给 EXTRA_STREAM）：
+             入口把它落成 1MB 以内的 UTF-8 小文件，与图片共用同一套 id、TTL 与消费规则。
+             被拒时它也会启动 MainActivity 并带 share_refused=<固定码>——NoDisplay 进程没有窗口，
+             Android 12+ 的文字 Toast 可能被掐，所以那句提示得由网页来画。 -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+        </activity>
+
+        <!-- 壳自己下载的更新包要交给系统安装页：跨进程给 file:// 从 Android 7 起直接抛
+             FileUriExposedException，只能走 content://。现成的 FileProvider 在 androidx 里，
+             会破壳的零第三方依赖纪律，所以这一层是手写的 ApkFileProvider（只读、单段路径、
+             canonical 后仍不许逃出外部私有目录）。exported=false：除了我们随安装 Intent
+             主动 grant 的那一次，谁也解析不到这个 authority。 -->
+        <provider
+            android:name=".ApkFileProvider"
+            android:authorities="${applicationId}.apkprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- 闹钟到点。PendingIntent 是显式指向它的，所以 Android 8 的隐式广播限制碰不到它；
+             exported=false 就够——它只被自己的 PendingIntent 唤起，不给别的 App 开门。 -->
+        <receiver
+            android:name=".ReminderReceiver"
+            android:exported="false" />
+
+        <!-- 开机重排闹钟。BOOT_COMPLETED 属系统白名单内的广播，exported=false 仍收得到。 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 桌面组件（spec §5）。exported=false：摆组件由系统代理（launcher 不直接广播给它，
+             而是经 AppWidgetService 显式投递），不给别的 App 留"伪造一次 UPDATE 把它刷乱"的口。
+             注意 APPWIDGET_UPDATE 单独一个 intent-filter，跨天/换时区那三条另起一个：
+             组件宿主匹配的是 provider 声明里含 APPWIDGET_UPDATE 的过滤器，把无关动作混在
+             同一个过滤器里有被第三方启动器挑剩下的先例，分开写最稳。 -->
+        <receiver
+            android:name=".AssistantWidget"
+            android:exported="false"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <!-- "今日"跨天必须换内容。AppWidgetProvider 的默认 onReceive 只认 ACTION_APPWIDGET_*，
+                 这三个动作投递进来它什么都不做，所以 AssistantWidget 覆写了 onReceive 来接。
+                 动作串要逐字对上 Java 常量：Intent.ACTION_TIME_CHANGED 的值是
+                 android.intent.action.TIME_SET（名字里有 CHANGED、值里是 SET，就差在这），
+                 照着常量名写成 TIME_CHANGED 的过滤器永远不会被投递，而编译器一声都不吭。
+                 这几条是系统级（protected）广播，且落在 Android 8 隐式广播限制的豁免清单里，
+                 清单声明的接收器【应该】收得到——但个别 ROM 会不会投仍然只能实机验，
+                 所以另外给了 updatePeriodMillis=30 分钟这条不依赖广播的兜底，
+                 以及开机重排时顺手刷一次（BootReceiver）。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_assistant_info" />
+        </receiver>
+    </application>
+</manifest>

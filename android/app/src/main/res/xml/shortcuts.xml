@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 长按图标的静态快捷方式（spec §5，API 25 起生效；23-24 上系统直接忽略这个 meta-data，
+     不报错也不显示——所以这两条是"锦上添花"，不是任何功能的前提）。零代码、零依赖。
+
+     参数为什么走 android:data 而不是 <extra> 子标签：shortcuts.xml 的 <intent> 由
+     系统的 XmlIntents 解析，它认 android:data 这一串【属性】，而嵌套标签在旧版本上
+     没有稳定记录可查——解析器遇到不认的子标签是【抛异常】，整个文件一起废掉，
+     两条快捷方式同时消失。本机没有实机可验，所以选那个只用到属性的形状：
+     assistant://open/camera 与 assistant://open/new_chat 由 ShellBridge 的
+     ShellEvents.fromOpenUri 折成与桌面组件同一个 open_from 事件（白名单仍在原处）。
+
+     android:targetPackage / targetClass 把 applicationId 与包名【第二次】写了一遍：
+     改包名时这里要同步改，漏了的表现是"点了快捷方式没反应"，不崩也不报错。
+     留字面量是因为 shortcuts.xml 没有 BuildConfig 那种派生渠道。
+
+     这个文件仍然是一次赌注（本机没有实机可证 android:data 被不被解析），所以 v0.13 之后
+     加了不依赖它的两道兜底：接收侧 ShellEvents.fromLaunchExtras 把 extra 与 data 两种形状
+     折进同一个白名单判据；冷启动时 ShortcutFallback 读回系统解析结果，发现参数丢了
+     （或整个文件被拒）就用 Java 建的动态快捷方式补上缺的那几条。两条都不经过这个 XML。 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="open_camera"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_camera"
+        android:shortcutShortLabel="@string/shortcut_camera_short"
+        android:shortcutLongLabel="@string/shortcut_camera_long"
+        android:shortcutDisabledMessage="@string/shortcut_camera_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/camera" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="open_new_chat"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_send"
+        android:shortcutShortLabel="@string/shortcut_chat_short"
+        android:shortcutLongLabel="@string/shortcut_chat_long"
+        android:shortcutDisabledMessage="@string/shortcut_chat_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/new_chat" />
+    </shortcut>
+
+    <!-- 第三个入口：整个功能都活在原生侧（拉发布页、弹确认框、下 APK、起安装页），
+         所以它【不】会产生发给网页的事件——ShellEvents.fromOpenFrom 故意不认这个值。
+         图标用 ic_menu_manage：这个 jar 里没有 ic_menu_refresh（javap 查过 android.R$drawable），
+         写错一个 drawable 名的表现是 CI 的 assembleDebug 直接红。 -->
+    <shortcut
+        android:shortcutId="open_check_update"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_menu_manage"
+        android:shortcutShortLabel="@string/shortcut_update_short"
+        android:shortcutLongLabel="@string/shortcut_update_long"
+        android:shortcutDisabledMessage="@string/shortcut_update_short">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetPackage="xyz.fenever.assistant"
+            android:targetClass="xyz.fenever.assistant.MainActivity"
+            android:data="assistant://open/check_update" />
+    </shortcut>
+</shortcuts>

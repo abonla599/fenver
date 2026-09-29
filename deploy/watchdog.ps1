@@ -1,0 +1,607 @@
+﻿#Requires -Version 5.1
+<#
+==============================================================================
+AI 智能助手 —— 崩溃守护看门狗
+（单次巡检：进程不在就拉起，拉起就记账，连续失败会熔断）
+==============================================================================
+
+它补的是 2026-09-19 那次事故的洞：run_backend.exe（PID 89476）在 11:59:31 之
+后消失，data/backend.log 里没有任何 "Shutting down" / "Finished server process"
+——正常退出流程一步都没走，就是被硬杀或崩了。而登录自启那条快捷方式
+（shell:startup → tools/start-ai-stack.bat）只在【登录那一刻】跑一次，跑完就退
+场，之后没有任何人负责"进程没了再拉起来"。下一次有进程是 14:39:02（PID
+111764，人工重启），中间约 2.5 小时 ai.fenever 域名是无人知晓的停机窗口。
+
+四条设计取舍，改这个脚本前请先读：
+
+1) 单次巡检、不常驻。每次运行只"看一眼 → 必要时拉一把 → 记一行日志 → 退出"。
+   看门狗自己常驻的话，它死了谁盯？交给计划任务每分钟唤醒一次，"谁守护守护
+   进程"外包给操作系统，链路最短，也天然被限了速。
+2) 只启动，从不杀进程。本脚本不会 Stop 任何东西，对正在服务好友的进程零干扰。
+3) 判定"活着"看**可执行文件全路径 / 命令行**，不只进程名。隧道那条尤其重要：
+   本机此刻还挂着两个 quick 隧道的 cloudflared 残留进程，只按名字找会让命名
+   隧道的死活被它们盖掉。
+4) 拉起要计预算（默认每小时 3 次）。exe 本身坏了会"起来就崩"，不限次就是一分钟
+   一次的无限重启风暴。到上限就停手并把话说清楚，等人来看——守护的底线是
+   别把故障放大成日志洪水。
+
+日志：data\watchdog.log（超 1MB 滚一份 .1）
+状态：data\watchdog-state.json（拉起预算 + 告警节流时间戳）
+两个文件都在 data/ 下，而 data/ 已经整体 gitignore，不会污染仓库。
+
+------------------------------------------------------------------------------
+用法
+------------------------------------------------------------------------------
+  # 空跑：只判断、只往控制台打印，不拉起、不写日志、不写状态。现网在跑也安全。
+  powershell -NoProfile -ExecutionPolicy Bypass -File <项目根>\deploy\watchdog.ps1 -DryRun
+
+  # 真跑一次（想确认它确实拉得起来时用）
+  powershell -NoProfile -ExecutionPolicy Bypass -File <项目根>\deploy\watchdog.ps1
+
+------------------------------------------------------------------------------
+注册成计划任务（每分钟一次；登录型任务，不用存密码）—— 请本人确认后执行
+------------------------------------------------------------------------------
+必须经 deploy\watchdog-hidden.vbs 这一层，不要把 action 直接写成 powershell.exe。
+原因：-WindowStyle Hidden 是 PowerShell 在控制台窗口**已经创建并显示之后**才生效的，
+而本机默认终端是 Windows Terminal，所以任务每分钟闪一次约 2 秒的终端窗口。
+wscript 是 GUI 子系统宿主，自己不分控制台，Run(..., 0, ...) 把 SW_HIDE 在
+CreateProcess 那一刻就传下去，窗口从一开始就是隐藏的。实测记录见 git 提交说明。
+
+  schtasks /Create /F /TN "AI助手-崩溃守护" /SC MINUTE /MO 1 ^
+    /TR "wscript.exe \"<项目根>\deploy\watchdog-hidden.vbs\""
+
+  schtasks /Query /TN "AI助手-崩溃守护" /V /FO LIST     # 看它注册成什么样
+  schtasks /Run     /TN "AI助手-崩溃守护"               # 立刻手动触发一次
+  schtasks /Delete  /TN "AI助手-崩溃守护" /F            # 卸载
+
+同一件事的 PowerShell 写法（能把"hidden / 错过就补跑 / 不许并发"表达得更准）：
+
+  $act  = New-ScheduledTaskAction -Execute 'wscript.exe' `
+          -Argument '"<项目根>\deploy\watchdog-hidden.vbs"'
+  $trig = New-ScheduledTaskTrigger -Once -At '00:00' -RepetitionInterval (New-TimeSpan -Minutes 1)
+  $set  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+          -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+  Register-ScheduledTask -TaskName 'AI助手-崩溃守护' -Action $act -Trigger $trig -Settings $set -Principal $prin
+
+（-MultipleInstances IgnoreNew 与脚本里的单实例锁是同一件事的两道保险，见下面主流程注释。）
+
+注意：计划任务指向的是**仓库里的这个 .ps1**，不是 dist\ 里的副本，理由见文件末尾注释。
+#>
+[CmdletBinding()]
+param(
+    # 项目根：默认取本脚本所在目录的上一级——脚本跟着仓库走，不写死任何机器路径
+    # （这份文件随开源快照分发）。只有把脚本拷到别处跑才需要显式传。
+    [string] $ProjectRoot = '',
+
+    # 后端监听端口。进程在但端口没监听时只告警、不重启（见下面 Test-PortListening 的注释）。
+    [int] $Port = 8000,
+
+    # 熔断阈值：同一目标一小时内最多自动拉起几次。
+    [int] $MaxRestartsPerHour = 3,
+
+    # 拉起后多少秒内没看到进程就算这次失败（PyInstaller onedir 的 exe 起不来会很快退出）。
+    [int] $StartGraceSec = 15,
+
+    # Cloudflare 命名隧道名（tools/start-ai-stack.bat 里 `tunnel run` 后面那个）。
+    [string] $TunnelName = 'ai-assistant',
+
+    # cloudflared 的 metrics 端口（~\.cloudflared\config.yml 里那行 metrics:）。
+    # 有这个才问得出"隧道到底连上边缘了没有"——见下面 Test-TunnelReady 的注释。
+    [int] $TunnelMetricsPort = 35467,
+
+    # 本脚本自己拉起的那一个用这个端口。为什么不用主端口：cloudflared 起不来时
+    # 第一件事就是 metrics 监听失败（实测 "failed to bind to address 127.0.0.1:35467"），
+    # 而"进程在但不服务"这条升级路径【不杀旧进程】——旧的那个还占着主端口，
+    # 新起的如果抢同一个端口就会立刻退出，等于升级动作静默失败。
+    # 实测过一次：日志写着"已拉起"，进程表里却只有原来那一个。
+    [int] $TunnelAltMetricsPort = 35468,
+
+    # 连续多少次问不到 /ready 才按"隧道对外不可用"处理。取 3 = 三分钟：
+    # 网络抖一下、cloudflared 自己正在重连的时候，不该被看门狗抢着加塞。
+    [int] $TunnelUnreadyRestarts = 3,
+
+    # 只管后端、不管隧道时用这个（隧道归另一套守护时）。
+    [switch] $SkipTunnel,
+
+    # 空跑：不拉起、不写日志、不写状态，只把判断结果打到控制台。
+    [switch] $DryRun
+)
+
+$ErrorActionPreference = 'Stop'
+
+if (-not $ProjectRoot) {
+    # $PSScriptRoot = deploy\，上一级就是项目根。取不到（被 -Command 内联调用）时
+    # 宁可现在就说清楚，也不要拿着空根去 data\ 里瞎写。
+    if (-not $PSScriptRoot) {
+        Write-Error '定不出项目根：请经文件路径调用（-File），或显式传 -ProjectRoot。'
+        exit 2
+    }
+    $ProjectRoot = Split-Path -Parent $PSScriptRoot
+}
+
+if ($DryRun) {
+    # 空跑是人在控制台跟前看的。控制台默认按 GBK 解释字节，中文会糊成一团，
+    # 这里把它切到 UTF-8（等价于命令行那句 `chcp 65001`）。
+    # 真跑时不动它：计划任务里没有控制台给人看。
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+}
+
+# ---------------------------------------------------------------- 路径与常量
+$BackendExe      = Join-Path $ProjectRoot 'dist\run_backend\run_backend.exe'
+$TunnelExe       = Join-Path $ProjectRoot 'tools\cloudflared.exe'
+$DataDir         = Join-Path $ProjectRoot 'data'
+$LogPath         = Join-Path $DataDir 'watchdog.log'
+$StatePath       = Join-Path $DataDir 'watchdog-state.json'
+$LogMaxBytes     = 1MB
+$WarnRepeatMins  = 15   # 同一条告警最多每 15 分钟说一次，别把真信号埋进重复行
+
+# ------------------------------------------------------------------ 日志函数
+function Write-Log {
+    param([string] $Level, [string] $Message)
+
+    if ($DryRun) {
+        Write-Host ('[{0}] {1}' -f $Level, $Message)
+        return
+    }
+    $line = '[{0}] {1,-7} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    try {
+        if (-not (Test-Path -LiteralPath $DataDir)) {
+            New-Item -ItemType Directory -Path $DataDir | Out-Null
+        }
+        # 滚存方式与 run_backend.py 里那套一致：超 1MB 先转成 .1，无人清理也不会无限长。
+        if ((Test-Path -LiteralPath $LogPath) -and
+            ((Get-Item -LiteralPath $LogPath).Length -gt $LogMaxBytes)) {
+            Move-Item -LiteralPath $LogPath -Destination "$LogPath.1" -Force
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    } catch {
+        # 日志写不下去不该让守护本身停摆，退化成控制台输出。
+        Write-Host ('看门狗日志写失败（{0}）：{1}' -f $_.Exception.Message, $line)
+    }
+}
+
+# ---------------------------------------------------- 状态（预算 + 告警节流）
+function Read-State {
+    # 返回 hashtable。文件坏掉/不存在都按"空账"处理：宁可多给一次重启机会，
+    # 也不要因为一个 JSON 逗号让守护从此不再拉人。
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $StatePath)) { return $result }
+    try {
+        $raw = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $result }
+        foreach ($prop in (ConvertFrom-Json $raw).PSObject.Properties) {
+            # @() 包一层是必要的：JSON 里只剩一条记录时 ConvertFrom-Json 给的是标量字符串，
+            # 后面所有按数组处理的地方都会把它当成"一串可拼接的字符"来对待。
+            $result[$prop.Name] = @($prop.Value)
+        }
+    } catch {
+        Write-Log 'WARN' ('状态文件读不了，按空账重新开始：{0}' -f $_.Exception.Message)
+    }
+    return $result
+}
+
+function Save-State {
+    param([hashtable] $State)
+    if ($DryRun) { return }
+    try {
+        $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    } catch {
+        Write-Log 'WARN' ('状态文件写不下去：{0}' -f $_.Exception.Message)
+    }
+}
+
+function Get-LaunchCount {
+    # 只数"最近 1 小时内"的拉起次数，更早的不作数——服务自己稳了就该重新拿到额度。
+    # 故意只返回一个数字：标量在函数返回时不会被摊平，天然安全。
+    param([hashtable] $State, [string] $Key)
+    $cutoff = (Get-Date).AddHours(-1)
+    $count = 0
+    foreach ($item in @($State[$Key])) {
+        $t = [datetime]::MinValue
+        if ($item -and [datetime]::TryParse([string]$item, [ref]$t) -and $t -gt $cutoff) { $count++ }
+    }
+    return $count
+}
+
+function Add-LaunchRecord {
+    # 剪掉过期旧账 + 记下这一次。全程直接改 hashtable，绝不把数组当返回值传来传去：
+    # PowerShell 会把函数返回的单元素数组摊平成标量，而 标量 + 标量 是**字符串拼接**
+    # 不是数组追加 —— 实测过一次就写出 "2026-..+08:002026-..+08:00" 这种一条假记录，
+    # 于是预算恒为 0、熔断永不触发，看门狗最重要的一条保护被静默拆掉。
+    param([hashtable] $State, [string] $Key)
+    $cutoff = (Get-Date).AddHours(-1)
+    $list = New-Object System.Collections.ArrayList
+    foreach ($item in @($State[$Key])) {
+        $t = [datetime]::MinValue
+        if ($item -and [datetime]::TryParse([string]$item, [ref]$t) -and $t -gt $cutoff) {
+            [void]$list.Add([string]$item)
+        }
+    }
+    [void]$list.Add((Get-Date).ToString('o'))
+    $State[$Key] = $list.ToArray()   # 赋值不过管道，数组还是数组
+}
+
+function Test-ShouldLog {
+    # 告警节流：同一件事每分钟刷一条，真告警就会淹水。首次说、之后每 $WarnRepeatMins 分钟再说一次。
+    param([hashtable] $State, [string] $Key)
+    $last = [datetime]::MinValue
+    $raw = [string]$State[$Key]
+    if ($raw -and -not [datetime]::TryParse($raw, [ref]$last)) { $last = [datetime]::MinValue }
+    if ($last -ne [datetime]::MinValue -and ((Get-Date) - $last).TotalMinutes -lt $WarnRepeatMins) {
+        return $false
+    }
+    $State[$Key] = (Get-Date).ToString('o')
+    return $true
+}
+
+# ------------------------------------------------------------------ 探活函数
+function Test-PortListening {
+    # 只用 TcpClient 连一下，不依赖 Get-NetTCPConnection（各版本 Windows 上不一定有）。
+    # 用途有两个：拉起后确认真的在服务；以及发现"进程还在但端口不通"的卡死形状。
+    param([int] $PortNumber)
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $wait = $client.BeginConnect('127.0.0.1', $PortNumber, $null, $null)
+        return ($wait.AsyncWaitHandle.WaitOne(700) -and $client.Connected)
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
+}
+
+function Test-TunnelServed {
+    # 两个 metrics 端口里【任何一个】回 /ready 200，就算这条隧道对外可服务：
+    # 开机那个占 35467，看门狗补的那个占 35468，谁活着都算数。
+    param([int[]] $PortNumbers)
+    foreach ($portNumber in $PortNumbers) {
+        if (Test-TunnelReady -PortNumber $portNumber) { return $true }
+    }
+    return $false
+}
+
+function Test-TunnelReady {
+    # cloudflared 的 /ready 只在【至少一条 connector 连上边缘】时回 200。
+    # 为什么非要有这一条：2026-09-20 那次 ai.fenever.xyz 出 Error 1033（边缘上没有活的
+    # connector），而 cloudflared 进程一直活着、本脚本每分钟巡检一次全绿、零告警——
+    # 因为"进程在不在"量不出"链路通不通"。那种故障唯一的可见形状就是 /ready 不通。
+    #
+    # 走 127.0.0.1 是本机回环，不依赖出口网络：出口断了的时候 /ready 会连着不通，
+    # 那正是该报警的时候，而不是"探测失败所以别看"。
+    param([int] $PortNumber)
+    try {
+        $resp = Invoke-WebRequest -Uri ('http://127.0.0.1:{0}/ready' -f $PortNumber) `
+                                  -TimeoutSec 3 -UseBasicParsing
+        return ($resp.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+function Get-BackendSelfCheck {
+    # /health 回的是逐项自检（模型服务/密钥库/账本/记忆后端/限流账/数据落点），
+    # 不再只有一句 healthy。
+    #
+    # 为什么看门狗要读它：这一轮加的东西全都能在「进程活着」的状态下坏掉——密钥库
+    # 文件读不动、账本写不进去、嵌入后端降级成全零伪嵌入、新写的限流账没登记。
+    # 只看进程在不在，就等于 2026-09-20 那次 Error 1033 的翻版：每分钟巡检全绿，
+    # 而外面已经不对了。
+    #
+    # 判据只能从 checks 里读，不能靠 HTTP 状态码：后端刻意让 /health 永远 200，
+    # 因为坏的是配置，重启修不好它，而「非 200 就拉起」会把正在进行的对话一起带走。
+    param([int] $PortNumber)
+    try {
+        $resp = Invoke-WebRequest -Uri ('http://127.0.0.1:{0}/health' -f $PortNumber) `
+                                  -TimeoutSec 5 -UseBasicParsing
+        return ($resp.Content | ConvertFrom-Json)
+    } catch {
+        # 连不上、超时都不在这里报警：那是端口探测（Test-PortListening）与
+        # Invoke-Guard 的活。这里再报一次只会让同一个故障有两串日志。
+        return $null
+    }
+}
+
+function Get-Counter {
+    # 读一个存在状态文件里的整数计数。
+    # 为什么要单独写一个函数而不是 [int]$State[$Key]：Read-State 对每个值都套了一层
+    # `@(...)`（那是给拉起记录数组准备的，见它的注释），于是这里读回来的是
+    # "只有一个元素的数组"，而 [int]@(...) 在 PowerShell 里是直接抛异常的——
+    # 实测症状：看门狗每次巡检都在隧道那一步报
+    # 「无法将"System.Object[]"…转换为"System.Int32"」，然后整轮 catch 掉，
+    # 后端守得好好的，隧道那条从此再没被执行过。
+    param([hashtable] $State, [string] $Key)
+    $raw = $State[$Key]
+    if ($raw -is [array]) { $raw = if ($raw.Count -gt 0) { $raw[0] } else { $null } }
+    $n = 0
+    if ($raw -and [int]::TryParse([string]$raw, [ref]$n)) { return $n }
+    return 0
+}
+
+function Set-Counter {
+    # 存成字符串：与 Test-ShouldLog 的写法一致，且被 Read-State 的 @() 包一层之后
+    # 仍是"一个元素的字符串数组"，Get-Counter 取得回来。
+    param([hashtable] $State, [string] $Key, [int] $Value)
+    $State[$Key] = [string]$Value
+}
+
+function Get-BackendProcess {
+    # 按 exe 全路径认，别只认进程名：别处一个同名 run_backend.exe 会让守护以为
+    # 服务还活着，于是真的那一个死了它也不拉。
+    Get-CimInstance Win32_Process -Filter "Name = 'run_backend.exe'" |
+        Where-Object {
+            $_.ExecutablePath -and
+            ($_.ExecutablePath.TrimEnd('\') -ieq $BackendExe.TrimEnd('\'))
+        }
+}
+
+function Get-TunnelProcess {
+    param([string] $Name)
+    # 必须匹配命令行里的 `tunnel run <name>`：机器上可能残留 quick 隧道
+    # （`cloudflared.exe tunnel --url http://127.0.0.1:8000`），只按进程名找会把
+    # 命名隧道的死活被残留进程盖掉。
+    Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" |
+        Where-Object { $_.CommandLine -match ('tunnel\s+run\s+' + [regex]::Escape($Name)) }
+}
+
+# -------------------------------------------------------- 核心：拉一把 + 记账
+function Invoke-Guard {
+    param(
+        [hashtable] $State,
+        [string] $Key,
+        [string] $Title,
+        [scriptblock] $Probe,   # 返回"活着"的进程对象；空 = 死了
+        [scriptblock] $Launch,  # 返回 Start-Process -PassThru 的对象
+        # 只在调用方明确要求时才探端口。隧道那条不许传：cloudflared 是往外连的，
+        # 本机 8000 通不通跟它活没活着是两件事，拿后端的标准去量它会天天误报。
+        [int] $CheckPort = 0,
+        # "进程在，但已经不提供服务"的第二判据：返回 $true/$false。
+        # 传了它就要给 LivenessKey（连续不通的计数放哪儿）与阈值。
+        [scriptblock] $LivenessProbe = $null,
+        [string] $LivenessKey = '',
+        [int] $LivenessThreshold = 3
+    )
+
+    $probeResult = & $Probe
+    $found = @($probeResult)
+    if ($found.Count -gt 0) {
+        # 活着时端口只用来"看一眼"，绝不因为端口一时不通去重启：
+        # 冷启动/依赖加载慢的时候端口本来就还没起，重启会把一个只是慢的服务打断，
+        # 而"事件循环被卡死"那种形状（524 那次）留证据比自动开刀更安全。
+        $pids = ($found | ForEach-Object ProcessId) -join ', '
+
+        # —— 第二判据：进程在不代表还在服务 ——
+        # 与上面那条"端口一时不通不重启"不矛盾，差别在【连续】与【量的是谁】：
+        # /ready 量的就是这条隧道对外的可用性本身，没有它就没有别的信号可看。
+        # 攒够 LivenessThreshold 次才动手，是为了给 cloudflared 自己的重连留时间。
+        # 默认不升级；只有"进程在但连续 N 次不服务"才把它置真，让下面那段
+        # "活着就 return"的常规收尾跳过，从而落到共用的拉起分支上去。
+        # （上一版这里漏了这个开关：WARN 打出来了，函数却照样 return，
+        # 于是"检测到了但什么都不做"——正是这次要修的那个形状。）
+        $escalate = $false
+        if ($LivenessProbe) {
+            $ready = $true
+            try { $ready = & $LivenessProbe } catch { $ready = $false }
+            $misses = Get-Counter -State $State -Key $LivenessKey
+            if ($ready) {
+                if ($misses -gt 0) {
+                    Write-Log 'INFO' ("$Title 重新可服务（此前连续 $misses 次 /ready 不通已恢复）")
+                }
+                Set-Counter -State $State -Key $LivenessKey -Value 0
+            } else {
+                $misses += 1
+                Set-Counter -State $State -Key $LivenessKey -Value $misses
+                if ($misses -lt $LivenessThreshold) {
+                    if (Test-ShouldLog -State $State -Key ("seen:unready:" + $Key)) {
+                        Write-Log 'WARN' ("$Title 进程在（PID $pids）但 /ready 不通，" +
+                                          "已连续 $misses/$LivenessThreshold 次 —— 还没到动手门槛，" +
+                                          "cloudflared 可能正在自己重连。")
+                    }
+                    return
+                }
+                $why = ("进程在（PID $pids）但连续 $misses 次 /ready 不通")
+                Write-Log 'WARN' ("$Title $why —— 按【隧道对外不可用】处理，再起一个 connector。" +
+                                  "旧的那个【不杀】（本脚本只启动、从不杀进程），而多条 connector " +
+                                  "指向同一条隧道是 Cloudflare 支持的形态，" +
+                                  "不是抢端口。旧进程为什么挂着不重连，看 data\cloudflared.log。")
+                Set-Counter -State $State -Key $LivenessKey -Value 0
+                $escalate = $true      # 往下走，与"进程不在"共用同一份预算和熔断
+            }
+        }
+
+        if (-not $escalate) {
+            $listening = $true
+            if ($CheckPort -gt 0) { $listening = Test-PortListening -PortNumber $CheckPort }
+
+            if (-not $listening) {
+                if (Test-ShouldLog -State $State -Key ("seen:port:" + $Key)) {
+                    Write-Log 'WARN' ("$Title 进程在（PID $pids）但 127.0.0.1:$CheckPort 连不通，" +
+                                      "可能是卡死或还在启动中。本条按 ${WarnRepeatMins} 分钟一次提醒，" +
+                                      "守护不会自动重启它。")
+                }
+            } elseif ($DryRun) {
+                # 空跑是给人当"现在到底什么状态"用的，这种时候要说清楚，别只回两行沉默。
+                Write-Log 'INFO' ("$Title 存活：PID $pids" +
+                                  $(if ($CheckPort -gt 0) { "，127.0.0.1:$CheckPort 可连接" } else { '' }))
+            }
+            return
+        }
+    }
+
+    $recent = Get-LaunchCount -State $State -Key $Key
+    if ($recent -ge $MaxRestartsPerHour) {
+        # 熔断。一小时内已经拉了这么多次还不住，说明不是偶发崩溃，而是 exe 本身
+        # 起不来（端口被占、缺文件、磁盘满、重建到一半）。继续一分钟一次地拉只会
+        # 把故障放大成日志洪水，所以停手等人工。
+        if (Test-ShouldLog -State $State -Key ("seen:cap:" + $Key)) {
+            Write-Log 'ERROR' ("熔断：$Title 最近 1 小时内已拉起 $recent 次仍没活住，" +
+                               "停止自动重启，需要人工介入。先看 data\backend.log 和 $LogPath。" +
+                               "确认排查完想恢复自动守护：删掉 $StatePath 里的 '$Key' 那一项" +
+                               "（或整个文件删掉，等于重新计时）。")
+        }
+        return
+    }
+
+    # 走到这里有两个原因：进程真的不在，或者进程在但已经不服务（$why 由上面那条写）。
+    # 文案不能写死"不在运行"——那会让人在排查时先去找一个根本没死的进程。
+    if (-not $why) { $why = '不在运行' }
+
+    if ($DryRun) {
+        Write-Log 'INFO' ("[空跑] $Title $why —— 本该拉起它（本小时第 $($recent + 1)/$MaxRestartsPerHour 次），本次不执行。")
+        return
+    }
+
+    Write-Log 'INFO' ("$Title $why，拉起中（本小时第 $($recent + 1)/$MaxRestartsPerHour 次）")
+
+    # 先记账、再启动：万一拉起的瞬间机器断电/被强杀，这一次也算已花掉的额度，
+    # 反过来（先启动后记账）会让最坏情况变成"预算永远涨不上去 → 无限重启"。
+    Add-LaunchRecord -State $State -Key $Key
+    Save-State -State $State
+
+    try {
+        $started = & $Launch
+
+        # 等到看见进程为止（PyInstaller 的 exe 起不来会很快退出，不必等很久）。
+        $deadline = (Get-Date).AddSeconds($StartGraceSec)
+        $alivePid = $null
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 800
+            $check = & $Probe
+            if (@($check).Count -gt 0) { $alivePid = (@($check) | ForEach-Object ProcessId) -join ', '; break }
+        }
+
+        if ($alivePid) {
+            $note = '端口未探（该目标不做端口判定）'
+            if ($CheckPort -gt 0) {
+                if (Test-PortListening -PortNumber $CheckPort) {
+                    $note = "127.0.0.1:$CheckPort 已可连接"
+                } else {
+                    $note = "端口 $CheckPort 暂未监听（后端冷启动还要几秒，下一次巡检会确认）"
+                }
+            }
+            Write-Log 'INFO' ("$Title 已拉起：PID $alivePid（启动进程 PID $($started.Id)），$note")
+        } else {
+            Write-Log 'ERROR' ("$Title 拉起后 ${StartGraceSec}s 内没看到进程，这次算失败（预算已计一次）。" +
+                               "如果反复走到这一行，多半是 exe 本身起不来，看 data\backend.log。")
+        }
+    } catch {
+        Write-Log 'ERROR' ("$Title 拉起动作本身失败：{0}" -f $_.Exception.Message)
+    }
+}
+
+# --------------------------------------------------------------------- 主流程
+# 单实例锁：计划任务理论上不会重叠，但机器睡眠唤醒 / 手动跑一次都可能撞上。
+# 两个看门狗同时"发现进程不在 → 各拉一次"会起出两个后端，第二个抢不到 8000 端口
+# 直接崩，日志里多一条莫名其妙的错误。抢不到锁就走人，什么都别做。
+$lock = New-Object System.Threading.Mutex($false, 'Local\AIAssistant-Watchdog')
+$acquired = $false
+try {
+    $acquired = $lock.WaitOne(0, $false)
+    if (-not $acquired) {
+        Write-Log 'INFO' '已有另一个看门狗在跑，本次直接退出。'
+        return
+    }
+
+    Write-Log 'INFO' ('---- 巡检开始{0} ----' -f $(if ($DryRun) { '（空跑模式）' } else { '' }))
+
+    $state = Read-State
+
+    if (-not (Test-Path -LiteralPath $BackendExe)) {
+        # exe 不见的多半是 PyInstaller 正在重建（dist\run_backend 每次重建会被整体删掉）。
+        # 这时候硬拉只会刷一串失败记录，所以只说清楚、不动预算。注意不 return：
+        # 后端在重建不代表隧道也不用守，一起停了反而制造第二次无人知晓的停机。
+        if (Test-ShouldLog -State $state -Key 'seen:no-backend-exe') {
+            Write-Log 'ERROR' ("后端 exe 不存在：$BackendExe —— 若在重建 EXE，重建完自然恢复；" +
+                               "若不是，说明产物被误删，需要从上一次可用版本恢复。本次不尝试拉起后端。")
+        }
+    } else {
+        Invoke-Guard -State $state -Key 'backend' -Title '后端 run_backend.exe' -CheckPort $Port `
+            -Probe { Get-BackendProcess } `
+            -Launch {
+                Start-Process -FilePath $BackendExe -WorkingDirectory $ProjectRoot `
+                    -WindowStyle Hidden -PassThru
+            }
+
+        # 进程活着只算及格。接着问一句"东西齐不齐"——上面那些故障没有任何一种会让
+        # 进程消失，所以这一段不是 Invoke-Guard 的补充，是另一种判据。
+        # 只记日志、不动拉起预算：自检报 broken 时拉起一个新进程，得到的是一模一样的
+        # broken，而这一轮对话的人莫名其妙就断了。
+        $health = Get-BackendSelfCheck -PortNumber $Port
+        if ($health) {
+            foreach ($item in $health.checks.PSObject.Properties) {
+                if ($item.Value.status -eq 'ok') { continue }
+                if (-not (Test-ShouldLog -State $state -Key ('seen:health-' + $item.Name))) { continue }
+                $level = 'WARN'
+                if ($item.Value.status -eq 'broken') { $level = 'ERROR' }
+                Write-Log $level ('后端自检报出 ' + $item.Value.status + '：' + $item.Name +
+                                  '（' + $item.Value.detail + '）—— 这类故障进程照样活着，' +
+                                  '重启修不好它，需要人去配置或磁盘上改。')
+            }
+        }
+    }
+
+    if (-not $SkipTunnel) {
+        if (Test-Path -LiteralPath $TunnelExe) {
+            # 隧道挂了 = 域名对外 502/连不上，而后端可能活得好好的。只守后端的话，
+            # 这种"服务在、外面进不来"的故障依旧无人知晓，所以一起盯。
+            Invoke-Guard -State $state -Key 'tunnel' -Title "Cloudflare 命名隧道 $TunnelName" `
+                -Probe { Get-TunnelProcess -Name $TunnelName } `
+                -LivenessProbe { Test-TunnelServed -PortNumbers @($TunnelMetricsPort, $TunnelAltMetricsPort) } `
+                -LivenessKey 'tunnel-unready' -LivenessThreshold $TunnelUnreadyRestarts `
+                -Launch {
+                    # 一整行写完，不用反引号续行：这个文件里反引号 + 空行的组合实测把
+                    # -ArgumentList 当成了命令名（"无法识别的 cmdlet"），而语法解析是过的——
+                    # 只有真跑一次才暴露，所以这条注释留在这里提醒别再拆回去。
+                    # --metrics 必须放在 `run` 前面：`tunnel run <名> --metrics ...` 会被判成
+                    # "accepts only one argument"，进程立刻退出。实测踩过一次。
+                    $tunnelArgs = @('tunnel', '--metrics', "127.0.0.1:$TunnelAltMetricsPort", 'run', $TunnelName)
+                    # stderr 必须落盘：Start-Process -WindowStyle Hidden 会把子进程的输出整个丢掉，
+                    # 于是"用法错误"这种启动即失败连一行痕迹都不留（上面那条参数顺序的坑就是这么
+                    # 藏了一整轮：日志写着已拉起，进程表里却只有原来那一个）。
+                    # 文件名不带时间戳：Start-Process 每次覆盖写，只留最近一次尝试。
+                    # 带时间戳的话这个文件没人清（本脚本从不删文件），而"哪一次拉起"的时间本来就在
+                    # data\watchdog.log 紧邻的那行里，重复记一遍等于给自己留第二个事实来源。
+                    $errLog = Join-Path $DataDir 'tunnel-launch.stderr.log'
+                    Start-Process -FilePath $TunnelExe -ArgumentList $tunnelArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardError $errLog -PassThru
+                }
+        } else {
+            # tools/cloudflared.exe 不在：按节流提醒，不每分钟刷一条。
+            if (Test-ShouldLog -State $state -Key 'seen:no-tunnel-exe') {
+                Write-Log 'WARN' "找不到 cloudflared（$TunnelExe），本次跳过隧道守护。"
+            }
+        }
+    }
+
+    Save-State -State $state
+    Write-Log 'INFO' '---- 巡检结束 ----'
+} catch {
+    Write-Log 'ERROR' ('看门狗自身出错：{0}' -f $_.Exception.Message)
+} finally {
+    if ($acquired) {
+        $lock.ReleaseMutex()
+        $lock.Dispose()
+    }
+}
+
+<#
+==============================================================================
+为什么这个看门狗不塞进 run_backend.spec（结论：不收，也别收）
+==============================================================================
+1) 它守护的对象正是那份产物。PyInstaller 每次重建会整体删掉 dist\run_backend\
+   ——这个坑 backend/app/core/paths.py 的注释里已经写过一次（"一次构建抹光长期
+   记忆、会话和已配好的模型服务"）。守护被它守护的东西顺带删掉，等于重建完
+   EXE 之后系统静默退回"只有开机自启、没有崩溃守护"的状态，而且没有任何人会
+   被告知——正是本次要拆掉的那个形状。
+2) 故障形状更难发现。计划任务记的是绝对路径；路径一旦随重建消失，任务每分钟
+   失败一次，Event Viewer 里安静地刷错误，对外看到的还是同一段"无人知晓的停机"。
+3) spec 也帮不上它。.spec 的 datas 收的是给 EXE 读的静态资源，一个 .ps1 既不会被
+   Analysis 的依赖分析抓到，也不需要被抓到——它是操作系统层面用 powershell.exe
+   直接解释的脚本，收进产物不产生任何功能收益。
+4) 生命周期本来就该分开。看门狗属于"这台机器怎么把服务撑住"的运维配置，和
+   tools\start-ai-stack.bat（现在那条 .lnk 指向的东西）是同一层：随仓库版本化、
+   指向仓库里的路径、重建产物不影响它。所以它放在 deploy\，由 git 管，不进 dist\。
+
+一句话：守护进程必须活在被守护产物的生命周期之外。
+==============================================================================
+#>
+
