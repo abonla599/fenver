@@ -208,7 +208,7 @@ public class ReleasePlanTest {
                 + "\"https://github.com/abonla599/ai-assistant/releases/download/v0.15/fenver-0.15.apk\"},");
         ReleasePlan.Decision both = ReleasePlan.decide("0.14", bothAssets);
         assertEquals(ReleasePlan.Kind.AVAILABLE, both.kind);
-        assertTrue(both.url.endsWith("fenver-0.15.apk"), "两个名都挂着时挑的不是新名");
+        assertTrue("两个名都挂着时挑的不是新名", both.url.endsWith("fenver-0.15.apk"));
     }
 
     // ---------- 第二条信任规则：自家字节出口 = APP_URL 同源 + 精确路径（T1.5） ----------
