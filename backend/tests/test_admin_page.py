@@ -412,5 +412,40 @@ def test_usage_reads_the_name_table_after_users_load():
         "用量又被并回同一批并发了：两个函数同时起跑，名字表多半还是空的"
     assert inner.index("loadUsers") < inner.index("loadUsage"), \
         "名字表还没填就去渲染「谁」那一栏，第一次进去会满屏裸 id"
-    assert js.count('"/v1/admin/users"') == 1, \
-        "user_id→用户名 有了第二个取法：两处各自刷新就是第二个真相"
+    assert js.count('req("/v1/admin/users")') == 1, \
+        "user_id→用户名 有了第二个读法：两处各自刷新就是第二个真相（建号那条 POST 不算）"
+
+
+# ---------- v0.24 阶段3 T3.2：账号那一节接上 T3.1 的四个动作 ----------
+
+
+def test_t31_account_actions_are_wired_and_double_confirmed():
+    """建号、重置口令、首登旗标、注册开关都得有真入口；写操作先过弹窗再动笔。
+
+    这条锁的形状与 T3.2 验收一致：ask() 排在 req() 之前（二次确认），成功后
+    立刻重读列表（loadUsers），随机初始口令由浏览器现生成并只在弹窗/一次性
+    reveal 里出现。文案里那句「每一台设备都掉线」对着 auth.py 的
+    admin_reset_password 写：它清的是整张令牌表——实现哪天改动，这里和后端
+    行为测试会一起说话。
+    """
+    js, html = _js(), _html()
+    for needle in ("reset-password", '"首登须改密"', "crypto.getRandomValues",
+                   "registration_open", '"/v1/config"', '"userplus"'):
+        assert needle in js, f"{needle} 不在 admin.js 里：T3.1 的按钮是假的"
+    for fn in ("createUser", "resetPw", "toggleReg"):
+        body = re.search(r"async function " + fn + r"[^\n{]*\{([\s\S]*?)\n  \}", js)
+        assert body, fn + " 不像原来的形状了，这条锁要跟着改而不是删"
+        inner = body.group(1)
+        assert "ask(" in inner and "req(" in inner, f"{fn} 没有二次确认"
+        assert inner.index("ask(") < inner.index("req("), f"{fn} 没确认就写"
+        assert "flash(" in inner, f"{fn} 做完不吭声"
+    assert "loadUsers()" in re.search(
+        r"async function createUser[\s\S]*?\n  \}", js).group(0), "建号后列表没即时刷新"
+    assert "loadUsers()" in re.search(
+        r"async function resetPw[\s\S]*?\n  \}", js).group(0), "重置后列表没即时刷新"
+    assert "每一台设备都掉线" in js, "重置口令的弹窗得说清令牌全废——那是后端真做了的事"
+    assert "<th>注册于</th>" in html and "fmtTime(u.created_at)" in js, \
+        "PRD 要的注册时间列不见了"
+    assert "userSearch" in js and "userSearchNote" in js, "账号搜索不见了"
+    assert "他自己填用户名和密码就能用" not in js, \
+        "注册默认关闭之后，这句空列表文案在说谎"

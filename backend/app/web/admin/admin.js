@@ -52,6 +52,9 @@
     decay:   ["M12 5v9", "M8 10.5l4 4 4-4", "M5 19h14"],
     // 用量：三根柱子。与 PWA 那套同一口径（24 视图、1.7 描边、currentColor 上色）
     usage:   ["M6 20V11", "M12 20V4.5", "M18 20v-6"],
+    userplus:["M4 20v-1.4A4.6 4.6 0 0 1 8.6 14h2.8A4.6 4.6 0 0 1 16 18.6V20",
+              "M9.3 11.3a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z",
+              "M18.5 7.5v5M16 10h5"],
     close:   ["M6 6l12 12M18 6L6 18"],
   };
 
@@ -211,30 +214,49 @@
   // user_id → 用户名。用量那一节要把账本上的 id 翻成看得懂的人名，读的就是这张表。
   // 只有 loadUsers 写它：别处再 fetch 一次 /v1/admin/users 就是第二个真相。
   let nameById = {};
+  let allUsers = [];                 // 列表原样留着：筛选在前端做，不为一个搜索框再开一条后端信道
+
+  function renderUsers() {
+    const q = $("userSearch").value.trim().casefold();
+    const shown = q ? allUsers.filter((u) => (u.username || "").casefold().includes(q))
+                    : allUsers;
+    $("userSearchNote").textContent = q
+      ? "共 " + allUsers.length + " 人，匹配 " + shown.length + " 人"
+      : "";
+    const tbody = $("userRows");
+    tbody.textContent = "";
+    if (!allUsers.length) {
+      tbody.appendChild(emptyRow("还没有注册用户。管理员在这里建号；或者打开下面的注册开关，让人自己注册。", 8));
+      return;
+    }
+    if (!shown.length) {
+      tbody.appendChild(emptyRow("没有用户名里带「" + q + "」的人。", 8));
+      return;
+    }
+    shown.forEach((u) => tbody.appendChild(userRow(u)));
+  }
 
   async function loadUsers() {
     const { users } = await req("/v1/admin/users");
+    allUsers = users || [];
     nameById = {};
-    (users || []).forEach((u) => { nameById[u.user_id] = u.username; });
-    const tbody = $("userRows");
-    tbody.textContent = "";
-    if (!users || !users.length) {
-      tbody.appendChild(emptyRow("还没有注册用户。把地址发给谁，他自己填用户名和密码就能用。", 7));
-      return;
-    }
-    users.forEach((u) => tbody.appendChild(userRow(u)));
+    allUsers.forEach((u) => { nameById[u.user_id] = u.username; });
+    renderUsers();
   }
 
   function userRow(u) {
     const name = u.username;
-    const uid = encodeURIComponent(u.user_id);
     const tr = document.createElement("tr");
 
     tr.appendChild(cell("td", name, "name"));
     tr.appendChild(cell("td", u.role === "admin" ? "管理员" : "用户"));
     const st = cell("td");
     st.appendChild(cell("span", u.disabled ? "已停用" : "正常", "tag" + (u.disabled ? " off" : "")));
+    if (u.must_change_password) {
+      st.appendChild(cell("span", "首登须改密", "tag warn"));
+    }
     tr.appendChild(st);
+    tr.appendChild(cell("td", fmtTime(u.created_at)));
     tr.appendChild(cell("td", String(u.sessions ?? "—")));
     tr.appendChild(cell("td", fmtTime(u.last_seen)));
     // /v1/admin/users 只报令牌数，记忆按人几条后端不给；这里不猜、不算，直接说不支持。
@@ -243,12 +265,99 @@
     const acts = cell("td", undefined, "acts");
     acts.appendChild(btn(u.disabled ? "power" : "stop", u.disabled ? "恢复" : "停用",
       "btn btn-small btn-ghost", (e) => busy(e.currentTarget, () => toggleUser(u))));
-    acts.appendChild(btn("key", "换发令牌", "btn btn-small btn-ghost",
+    acts.appendChild(btn("key", "重置口令", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => resetPw(u))));
+    acts.appendChild(btn("refresh", "换发令牌", "btn btn-small btn-ghost",
       (e) => busy(e.currentTarget, () => rotate(u))));
     acts.appendChild(btn("trash", "删号", "btn btn-small btn-ghost",
       (e) => busy(e.currentTarget, () => remove(u))));
     tr.appendChild(acts);
     return tr;
+  }
+
+  const PW_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  function randomPassword(len) {
+    // 建号/重置时由浏览器现生成一枚初始口令：它注定要被本人在首登换掉，
+    // 但"管理员现场编一个"往往是 second-horse——随机且避开易混字符是下限。
+    const bytes = new Uint8Array(len);
+    crypto.getRandomValues(bytes);
+    let out = "";
+    for (let i = 0; i < len; i++) out += PW_ALPHABET[bytes[i] % PW_ALPHABET.length];
+    return out;
+  }
+
+  async function createUser() {
+    const username = $("newUser").value.trim();
+    const password = $("newPass").value.trim();
+    if (!username || !password) { flash("用户名和初始口令都要填", true); return; }
+    const ok = await ask(
+      "建号「" + username + "」？",
+      "这会多出一个普通用户身份。初始口令经了管理员的手，所以它带着「首登须改密」：本人第一次登录后必须换成自己的。建号不会发任何会话令牌。",
+      "建号", "userplus", false);
+    if (!ok) return;
+    await req("/v1/admin/users", { method: "POST", body: { username, password } });
+    $("newUser").value = "";
+    $("newPass").value = "";        // 明文不在输入框里等第二眼
+    flash("已建号「" + username + "」——把口令交给本人，他首登必须改");
+    await loadUsers();
+  }
+
+  async function resetPw(u) {
+    const fresh = randomPassword(12);
+    const ok = await ask(
+      "重置「" + u.username + "」的登录口令？",
+      "新口令会现生成为 " + fresh + "（这一步就把它写进对方账号）。他名下每一枚会话令牌当场作废，"
+      + "每一台设备都掉线；下次登录必须先用这枚口令，然后被要求改成自己的。"
+      + "这句提醒不是装饰：口令经了你的手的这段时间里，它其实也是你知道的秘密。",
+      "重置", "key", true);
+    if (!ok) return;
+    await req("/v1/admin/users/" + encodeURIComponent(u.user_id) + "/reset-password",
+      { method: "POST", body: { new_password: fresh } });
+    reveal(fresh);
+    flash("已重置；口令只在这一次弹出里出现");
+    await loadUsers();
+  }
+
+  /* ---------- 注册开关（读 /v1/config，写走 /v1/admin/config） ---------- */
+
+  let regOpen = null;
+  function regLabel() {
+    const b = $("btnRegToggle");
+    b.textContent = "";
+    b.appendChild(iconWrap("check"));
+    b.appendChild(labelSpan(regOpen === null ? "注册开关：读取中"
+      : regOpen ? "自助注册：开着，点一下关掉" : "自助注册：关着（管理员建号），点一下打开"));
+  }
+
+  async function loadConfig() {
+    try {
+      const cfg = await req("/v1/config");
+      regOpen = !!cfg.registration_open;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      regOpen = null;
+      $("regNote").textContent = "读不到配置：" + e.message;
+    }
+    regLabel();
+  }
+
+  async function toggleReg() {
+    if (regOpen === null) { flash("配置还没读出来，先点重新载入", true); return; }
+    const ok = await ask(
+      regOpen ? "关掉自助注册？" : "打开自助注册？",
+      regOpen
+        ? "关掉之后，陌生人拿到地址也注册不了；已建出来的账号不受影响，照常登录。以后随时可以在这里再打开。"
+        : "打开之后，任何拿到这个地址的人都能自己注册一个账号并开始对话——模型的花费记在你这台服务上。"
+        + "只发给可信的人时再考虑打开；平时建议关着，由你在上面建号。",
+      regOpen ? "关掉注册" : "打开注册", "check", regOpen);
+    if (!ok) return;
+    const r = await req("/v1/admin/config", { method: "POST", body: { registration_open: !regOpen } });
+    if (r.rejected && r.rejected.length) {
+      $("regNote").textContent = "后端没接受这些键：" + r.rejected.join(", ");
+    }
+    regOpen = !!(r.config && r.config.registration_open);
+    regLabel();
+    flash(regOpen ? "自助注册已打开" : "自助注册已关闭");
   }
 
   async function toggleUser(u) {
@@ -531,7 +640,7 @@
 
   async function refresh() {
     await loadUsers();          // 用量那一节的「谁」要读它填的名字表，所以不能并到下一行里
-    await Promise.all([loadMemory(), loadTasks(), loadUsage()]);
+    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadConfig()]);
   }
 
   $("btnLogin").addEventListener("click", async () => {
@@ -581,6 +690,10 @@
   $("btnCloseDetail").addEventListener("click", () => $("detail").classList.add("hidden"));
 
   $("btnDecay").addEventListener("click", (e) => busy(e.currentTarget, decay));
+  $("btnCreateUser").addEventListener("click", (e) => busy(e.currentTarget, createUser));
+  $("newPass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnCreateUser").click(); });
+  $("userSearch").addEventListener("input", renderUsers);
+  $("btnRegToggle").addEventListener("click", (e) => busy(e.currentTarget, toggleReg));
   // 换日期就重新读一次：这本账一天一答，前端不按人细算，也不做"切天不重新请求"的乐观更新。
   $("usageDay").addEventListener("change", (e) => {
     usageDay = e.target.value;

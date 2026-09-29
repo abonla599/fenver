@@ -47,10 +47,23 @@
     <!-- ---------------- 用户 ---------------- -->
     <section class="sec" id="secUsers">
       <h2>用户</h2>
-      <p class="pane-note">「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台，上限 8 枚）。「记忆」按人不给数，理由写在记忆那一节。</p>
+      <p class="pane-note">「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台，上限 8 枚）。「记忆」按人不给数，理由写在记忆那一节。状态栏的「首登须改密」意思是：这个口令是别人替他设定的，他自己换过一次口令之前，这个旗标不会消。</p>
+      <div class="row">
+        <input id="newUser" type="text" placeholder="新用户名" autocomplete="off">
+        <input id="newPass" type="text" placeholder="初始口令（交给本人，首登必须改）" autocomplete="off">
+        <button id="btnCreateUser" class="btn btn-primary btn-small" data-icon="userplus" data-label="建号"></button>
+      </div>
+      <div class="row">
+        <input id="userSearch" type="text" placeholder="按用户名筛选" autocomplete="off">
+        <span class="dim" id="userSearchNote"></span>
+      </div>
+      <div class="row">
+        <button id="btnRegToggle" class="btn btn-ghost btn-small" data-icon="check" data-label="注册开关：读取中"></button>
+        <span class="dim" id="regNote"></span>
+      </div>
       <div class="table-wrap"><table>
         <thead><tr>
-          <th>用户名</th><th>身份</th><th>状态</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
+          <th>用户名</th><th>身份</th><th>状态</th><th>注册于</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
         </tr></thead>
         <tbody id="userRows"></tbody>
       </table></div>
@@ -93,7 +106,7 @@
     <!-- ---------------- 任务 ---------------- -->
     <section class="sec hidden" id="secTasks">
       <h2>任务</h2>
-      <p class="pane-note">编排任务是进程内的一张全局表，条目上没有归属，所以这一面整片挂 require_admin；进程一重启它就空了，这里看到的不是历史归档。</p>
+      <p class="pane-note">编排任务从 v0.24 起落盘：重启之后这张表还在，进程里跑的从来不是历史归档的全部。进行中的任务在恢复时会被标成“被重启打断”，不会自动续跑——要你手动重发。</p>
       <div class="task-list" id="taskList"></div>
     </section>
 
