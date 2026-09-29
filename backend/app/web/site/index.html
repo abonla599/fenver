@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>AI 智能助手：一个记得住你的在线助手</title>
-<meta name="description" content="注册就能用的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆，每个人各用各的。">
+<title>Fenver：跑在你自己服务器上的 AI 智能助手</title>
+<meta name="description" content="开源的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆，数据待在你自己的服务器上。">
 <meta name="theme-color" content="#0b0e15">
 <link rel="stylesheet" href="/site/site.css">
 <script>
@@ -26,7 +26,7 @@
 <a class="skip" href="#can-do">跳到正文</a>
 
 <nav class="topbar" aria-label="页面导航">
-  <span class="brand">AI 智能助手</span>
+  <span class="brand">Fenver</span>
   <ul class="navlinks">
     <li><a href="#can-do">能做什么</a></li>
     <li><a href="#shell-only">移动端功能</a></li>
@@ -42,8 +42,8 @@
 </nav>
 
 <header class="hero">
-  <h1>AI 智能助手</h1>
-  <p class="lede">一个你自己注册就能用的助手。它记得住你说过的事，能算数，能读你发过去的文件，每个人各用各的、互不串味。</p>
+  <h1>Fenver</h1>
+  <p class="lede">一个记得住你的 AI 智能助手，代码全开源。它记得住你说过的事，能算数，能读你发过去的文件，每个人各用各的、互不串味。</p>
   <p class="cta">
     <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版</a>
     <a class="btn" href="/site/android.apk" download>安卓版</a>
@@ -115,6 +115,19 @@
     <li><strong>扫描版 PDF</strong>：图片式的 PDF 要先经过 OCR，今天还不行。有文字层的 PDF 可以直接读，整页贴图的 Word 也一样读不出。</li>
     <li><strong>离线使用</strong>：没有。界面和数据都在线上，断网就只能等着。</li>
   </ul>
+</section>
+
+<section id="open-source">
+  <h2>开源了</h2>
+  <p class="note">整个助手——后端、网页版、安卓壳——代码全公开，Apache-2.0 协议。</p>
+  <ul class="cards">
+    <li class="reveal"><h3>想自己架一份</h3><p>仓库里的 docs/INSTALL.md 把 venv 与 Docker 两条路都写全了。开源版默认关闭自助注册：谁装谁就是管理员，建号发给自己想给的人。</p></li>
+    <li class="reveal"><h3>用着在线的这份</h3><p>不用动任何代码。更新通道已经指向新仓库，老用户照常收更新，不需要重装。</p></li>
+  </ul>
+  <p class="cta">
+    <a class="btn primary" href="https://github.com/abonla599/fenver">GitHub · abonla599/fenver</a>
+    <a class="btn" href="https://github.com/abonla599/fenver/discussions/1">发布公告</a>
+  </p>
 </section>
 
 <section id="faq">

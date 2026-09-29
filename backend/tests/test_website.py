@@ -179,6 +179,33 @@ def test_the_android_button_downloads_through_our_own_endpoint():
     assert "github.com/abonla599/fenver" in page, "源码入口还在，别顺手把它也删了"
 
 
+def test_the_brand_says_fenver():
+    """v0.24 定名落地：品牌位（标题、导航、首屏 h1）都得是 Fenver，
+    而描述性词「AI 智能助手」留在 title/lede 里——test_api 与 test_integration
+    还在拿它钉根路径，两处说的必须是同一件事。"""
+    page = _page()
+    assert "<h1>Fenver</h1>" in page, "首屏大标题还没换名"
+    assert 'class="brand">Fenver<' in page, "导航品牌位还没换名"
+    assert "AI 智能助手" in page, "描述词不该被品牌名顶掉——它还是这个产品是什么的答案"
+
+
+def test_open_source_section_states_license_build_path_and_registration():
+    """开源区块的三句实话：协议、自建文档指针、注册口径。
+
+    每一条都对着仓库里的真实状态：LICENSE 是 Apache-2.0；docs/INSTALL.md 存在
+    （T2.6 交付物）；config_store 默认 registration_open=False、管理员建号。
+    页面写了但后端不是——那是本文件从第一天就防的谎形。
+    """
+    page = _page()
+    anchor = page.find('<section id="open-source">')
+    assert anchor != -1, "站已开源，官网却不提：开源区块不见了"
+    body = page[anchor:page.find("</section>", anchor)]
+    assert "Apache-2.0" in body
+    assert "INSTALL.md" in body
+    assert "默认关闭自助注册" in body, "开源版注册口径不许写反：默认是关"
+    assert "github.com/abonla599/fenver" in body
+
+
 def test_the_page_never_states_a_version_number():
     """页脚原先写着「当前版本 v0.13」,而 v0.14 已经在昨天发出去了——那句话现在就是谎。
 
