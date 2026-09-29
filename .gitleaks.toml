@@ -1,0 +1,16 @@
+# gitleaks 门禁配置。默认规则全用，只开一个口子：
+# backend/tests/ 测试树里的假密钥占位（sk-e2e-…、isolation-pw-123、扫描器自测样本）。
+# 这条边界不是新发明——tools/secret_scan.py 早就规定"行内放过只在测试树里有效"，
+# 两边说的是同一件事：真凭据绝不允许出现在任何地方；测试夹具的假形状是必需品，
+# 因为不写假 key 就测不了"真 key 该被拦下来"。
+# 测试树之外，默认规则一字不改地跑。
+title = "fenver gitleaks 门禁配置"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "假密钥只认测试树；测试树另有 secret_scan 的行内 allow 标记兜纪律"
+paths = [
+  '''^backend/tests/''',
+]
