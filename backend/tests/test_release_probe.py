@@ -442,32 +442,69 @@ def test_fetch_asset_follows_the_hop_to_the_host_github_really_redirects_to(monk
 # ---------- 资产名三层对齐：工作流发的名字 = 后端挑的名字 = 壳认的名字（T1.7/T1.8） ----------
 
 def test_the_asset_name_is_the_one_the_workflow_publishes():
-    """`ai-assistant-native-<版本>.apk` 由发布流水线写、后端 _pick_asset 挑、壳 ReleasePlan 认。
+    """`fenver-<版本>.apk`（现行）与 `ai-assistant-native-<版本>.apk`（旧名兜底）由发布流水线写、
+    后端 _pick_asset 挑、壳 ReleasePlan 认——三份字面量并排钉成同一组。
 
-    2026-09-25 起工作流发的是原生包，资产名前缀换成了 ai-assistant-native-；
-    当时后端与壳还按旧名找，漂移的表现不是哪一环报错，而是【官网按钮与 App 内更新
-    双双静默退回发布页】——每份 JSON 都"合法"，只是没人能找到那个资产。
-    与 v0.22 那次 302 白名单事故同一课。所以这里把三份字面量并排钉成同一个。
+    2026-09-25 起工作流发 ai-assistant-native-；v0.24 定名后改发 fenver-，旧名继续认
+    （历史发布不会改名重发）。当年漂移的教训原样适用：漂了不报错，是官网按钮与 App 内
+    更新双双静默退回发布页。与 v0.22 那次 302 白名单事故同一课。
     """
     from pathlib import Path
 
     repo = Path(releases.__file__).resolve().parents[3]
     wf = (repo / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
-    assert 'file="ai-assistant-native-${ver}.apk"' in wf, \
-        "发布流不再发 ai-assistant-native-<版本>.apk 了？那这一整串判据要三处一起改"
-    assert 'cp android-native/app/build/outputs/apk/release/app-release.apk \\\n             "ai-assistant-native-' in wf \
+    assert 'file="fenver-${ver}.apk"' in wf, \
+        "发布流不再发 fenver-<版本>.apk 了？那这一整串判据要三处一起改"
+    assert 'cp android-native/app/build/outputs/apk/release/app-release.apk \\\n             "fenver-' in wf \
         or 'cp android-native/app/build/outputs/apk/release/app-release.apk' in wf, \
         "发布流不再从 android-native 打包了"
 
-    assert releases.ASSET_PREFIX == "ai-assistant-native-", \
-        "后端挑的名字漂了，要和上面工作流发的字面量一起改"
-    assert releases._ASSET_NAME_RE.pattern.startswith(r"^ai-assistant-native-"), \
-        "后端形状正则与 ASSET_PREFIX 不是一套了"
+    assert releases.ASSET_PREFIX == "fenver-", \
+        "后端挑的现行名漂了，要和上面工作流发的字面量一起改"
+    assert releases.LEGACY_ASSET_PREFIX == "ai-assistant-native-", \
+        "旧名兜底没了：挂在 Releases 里的历史资产会全被判成不可安装"
+    assert releases._ASSET_NAME_RE.fullmatch("fenver-0.24.0.apk"), "正则不认现行名"
+    assert releases._ASSET_NAME_RE.fullmatch("ai-assistant-native-0.23.17.apk"), "正则不认旧名"
+    assert not releases._ASSET_NAME_RE.fullmatch("evil;x\".apk"), "形状正则放宽了：Content-Disposition 安全边界失守"
 
     plan = (repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
             / "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
-    assert 'APK_PREFIX = "ai-assistant-native-"' in plan, \
-        "壳认的资产名前缀与发布/后端不是同一个了"
+    assert 'APK_PREFIX = "fenver-"' in plan, \
+        "壳认的现行资产名前缀与发布/后端不是同一个了"
+    assert 'LEGACY_APK_PREFIX = "ai-assistant-native-"' in plan, \
+        "壳不认旧名了：装 0.23.x 的人查更新会当场变红（对用户则是永不弹卡）"
+
+
+# ---------- v0.24 改名：新名优先、旧名兜底 ----------
+
+def test_the_new_asset_name_is_preferred_when_both_exist(monkeypatch):
+    """同一个发布同时挂着新旧两个名时，挑的是 fenver- 那一个。
+
+    这不是洁癖：改名过渡期我们真的会这么挂（v0.23.17 演练发布补挂新名），
+    挑错一个，官网按钮递出去的文件名就还带着旧产品名。
+    """
+    both = {"tag_name": "v0.24.0", "html_url": "https://github.com/o/r/releases/tag/v0.24.0",
+            "assets": [
+                {"name": "ai-assistant-native-0.24.0.apk", "size": 1,
+                 "browser_download_url": "https://github.com/o/r/releases/download/v0.24.0/ai-assistant-native-0.24.0.apk"},
+                {"name": "fenver-0.24.0.apk", "size": 2,
+                 "browser_download_url": "https://github.com/o/r/releases/download/v0.24.0/fenver-0.24.0.apk"}]}
+    monkeypatch.setattr(releases, "_fetch_repo", lambda repo: (both, ""))
+    picked = releases._pick_asset(both, "0.24.0")
+    assert picked["name"] == "fenver-0.24.0.apk"
+
+
+def test_the_legacy_asset_name_still_downloads(monkeypatch):
+    """只有旧名的历史发布必须照取：改名不砍老下载，这是"老用户不重装"的另一半。"""
+    only_legacy = {"tag_name": "v0.23.17",
+                   "html_url": "https://github.com/o/r/releases/tag/v0.23.17",
+                   "assets": [{"name": "ai-assistant-native-0.23.17.apk", "size": 2,
+                               "browser_download_url": "https://github.com/o/r/releases/download/v0.23.17/ai-assistant-native-0.23.17.apk"}]}
+    assert releases._pick_asset(only_legacy, "0.23.17")["name"] == "ai-assistant-native-0.23.17.apk"
+    fake = _Urlopen(only_legacy)
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    plan, reason = releases.download_plan()
+    assert plan and plan["name"] == "ai-assistant-native-0.23.17.apk", reason
 
 
 def test_the_native_shell_ships_byte_identical_core_classes():

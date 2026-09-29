@@ -22,17 +22,19 @@ public final class ReleasePlan {
     public static final String REPO = "ai-assistant";
 
     /**
-     * 资产名与 {@code .github/workflows/release-apk.yml} 真实产出的那一个逐字对齐：
-     * 2026-09-25 起发布流水线发的是原生客户端包 {@code ai-assistant-native-<版本>.apk}。
+     * v0.24 定名后现行名是 {@code fenver-<版本>.apk}（发布流水线自 v0.24 起发这个名字）；
+     * 2026-09-25 起挂在 Releases 里的旧名 {@code ai-assistant-native-<版本>.apk} 继续认——
+     * 历史发布不会改名重发，砍掉旧名等于把老 tag 的更新全判成"没有可安装资产"。
      *
      * <p>这里不再有"去哪问"的地址：2026-09-23 起这条链路的问与取都收在自家服务器
      * （{@code BuildConfig.UPDATE_INFO_URL} / {@code UPDATE_APK_URL}），壳不再直连
      * GitHub 的发布接口——那一跳曾被 ROM 里的下载通道劫持。这一层只负责对
      * 透传回来的 JSON 做判断，所以"全仓（壳源码）不出现任何 GitHub API 地址"
-     * 本身成了新的锁。后端拼同一个名字在 {@code releases.ASSET_PREFIX}，
+     * 本身成了新的锁。后端拼同一组名字在 {@code releases.ASSET_PREFIXES}，
      * 两边各有一条测试数着工作流写的那一个字面量。
      */
-    public static final String APK_PREFIX = "ai-assistant-native-";
+    public static final String APK_PREFIX = "fenver-";
+    public static final String LEGACY_APK_PREFIX = "ai-assistant-native-";
 
     /**
      * 透传回来的 JSON 里那个 {@code browser_download_url} 仍然按这一套校验。
@@ -101,6 +103,12 @@ public final class ReleasePlan {
         return APK_PREFIX + version + ".apk";
     }
 
+    /** 现行名在前、旧名兜底：与后端 {@code releases.asset_names} 同一优先级。 */
+    public static String[] assetNames(String version) {
+        return new String[]{APK_PREFIX + version + ".apk",
+                            LEGACY_APK_PREFIX + version + ".apk"};
+    }
+
     /**
      * 给调用方留一个造 UNUSABLE 的口子：连不上、超时这类事实只有 Activity 知道，
      * 但三态的判据必须留在这层，别让它退化成"出错了就当没更新"。
@@ -146,7 +154,8 @@ public final class ReleasePlan {
         Object assets = rel.get("assets");
         if (!(assets instanceof List)) return unusable("发布里没有资产清单");
         Decision picked = pickAsset((List<?>) assets, version, appUrl);
-        if (picked == null) return unusable("没有名为 " + assetName(version) + " 的可安装资产");
+        if (picked == null) return unusable("没有名为 " + assetName(version)
+                + "（或旧名）的可安装资产");
 
         String body = text(rel.get("body"));
         return new Decision(Kind.AVAILABLE, version, picked.url, picked.sizeBytes,
@@ -172,22 +181,24 @@ public final class ReleasePlan {
     }
 
     /**
-     * 在资产里找那一个【名字精确等于】{@code ai-assistant-native-<version>.apk} 的。
+     * 在资产里找那一个【名字精确等于】{@code fenver-<version>.apk} 的；找不到再认
+     * 旧名 {@code ai-assistant-native-<version>.apk}。新名在前是优先级，不是兼容开关。
      *
      * <p>不按"扩展名是 .apk 就取第一个"办：一次发布可以同时挂着 mapping.txt、别的平台的产物、
      * 或者上一次误传的文件，而这里挑中的东西是要弹给系统去安装的。名字对上版本号顺带钉住了
      * "这个包就是这一版"，链式改错 tag 与资产名时这里会先变红。
      */
     private static Decision pickAsset(List<?> assets, String version, String appUrl) {
-        String want = assetName(version);
-        for (Object item : assets) {
-            if (!(item instanceof Map)) continue;
-            Map<?, ?> asset = (Map<?, ?>) item;
-            if (!want.equals(text(asset.get("name")))) continue;
-            String url = text(asset.get("browser_download_url"));
-            if (!downloadUrlIsTrusted(url, want, appUrl)) return null;
-            return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")),
-                    null, null, null);
+        for (String want : assetNames(version)) {
+            for (Object item : assets) {
+                if (!(item instanceof Map)) continue;
+                Map<?, ?> asset = (Map<?, ?>) item;
+                if (!want.equals(text(asset.get("name")))) continue;
+                String url = text(asset.get("browser_download_url"));
+                if (!downloadUrlIsTrusted(url, want, appUrl)) return null;
+                return new Decision(Kind.AVAILABLE, version, url, number(asset.get("size")),
+                        null, null, null);
+            }
         }
         return null;
     }

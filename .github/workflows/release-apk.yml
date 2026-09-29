@@ -240,8 +240,8 @@ jobs:
         run: |
           set -eu
           cp android-native/app/build/outputs/apk/release/app-release.apk \
-             "ai-assistant-native-${GITHUB_REF_NAME#v}.apk"
-          ls -l "ai-assistant-native-${GITHUB_REF_NAME#v}.apk"
+             "fenver-${GITHUB_REF_NAME#v}.apk"
+          ls -l "fenver-${GITHUB_REF_NAME#v}.apk"
 
       # 手工 Run workflow 只用来验签名链，绝不发版：dispatch 事件里没有 tag，
       # Release 的名字与包里 versionName 无从对上，发出去就是一个名字错乱的公开版本。
@@ -253,7 +253,7 @@ jobs:
           set -eu
           tag="$GITHUB_REF_NAME"
           ver="${tag#v}"
-          file="ai-assistant-native-${ver}.apk"
+          file="fenver-${ver}.apk"
           # 每个版本的变更清单单独存一个文件，不焊死在这段 YAML 里。上一版把
           # "v0.13 实测 97,835 字节""从 0.13 起壳自己也有功能了"写进模板，于是往后
           # 每次发版都在替旧版本说话；现在谁发版谁写自己那份 docs/releases/v<版本>.md。

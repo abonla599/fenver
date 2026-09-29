@@ -62,7 +62,7 @@ class ApkFileProvider : ContentProvider() {
         if (uri.pathSegments.size != 1) return null
         val name = uri.lastPathSegment
         if (name.isNullOrEmpty() || name == "." || name == "..") return null
-        if (!name.startsWith(APK_NAME_PREFIX) || !name.endsWith(".apk")) return null
+        if (!APK_NAME_PREFIXES.any { name.startsWith(it) } || !name.endsWith(".apk")) return null
         val root = rootDir() ?: return null
         val candidate = File(root, name)
         val rootPath = root.canonicalPath
@@ -87,7 +87,8 @@ class ApkFileProvider : ContentProvider() {
     companion object {
         /** manifest 里注册的是 `${applicationId}.apkprovider`；拼 URI 用同一个后缀常量。 */
         const val AUTHORITY_SUFFIX = ".apkprovider"
-        const val APK_NAME_PREFIX = "ai-assistant-native-"
+        // 现行名（v0.24 定名）在前、旧名兜底：与 ReleasePlan.assetNames 同一组前缀
+        val APK_NAME_PREFIXES = listOf("fenver-", "ai-assistant-native-")
         const val APK_MIME = "application/vnd.android.package-archive"
 
         fun uriForFile(context: Context, fileName: String): Uri =
