@@ -315,6 +315,23 @@ class ResetRequest(BaseModel):
     new_answers: Optional[List[str]] = None
 
 
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    password: str
+    # 与注册同一套纪律：不给就空着（新账号没有自助找回，靠管理员重置），
+    # 给就必须满三条（半套凭据更糟）。Optional 区分"没带"与"带了三条"。
+    security_answers: Optional[List[str]] = None
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 @router.post("/v1/auth/register")
 def register(req: RegisterRequest, request: Request):
     """开放注册：用户名 + 自设密码，成功即发一枚会话令牌（注册即登录）。
@@ -428,6 +445,28 @@ def reset(req: ResetRequest, request: Request):
     return {"status": "password_reset"}
 
 
+@router.post("/v1/auth/change-password")
+def change_password(req: ChangePasswordRequest, request: Request,
+                    principal: Principal = CurrentPrincipal):
+    """本人改密（v0.24 T3.1 首登闭环）：出示当前会话 + 原口令，换掉口令并清旗标。
+
+    与三题自助 reset 的两处刻意不同：
+    ① reset 是"口令可能泄露"的自救，名下**全部**设备掉线；这里把正在用的这一枚
+       留下（keep_token 就是调用方自己出示的凭据），其余作废——动机不同，惩罚面不同。
+    ② reset 对免凭据访客说话，措辞必须同形同耗时；这里的失败措辞可以说实话
+       （"原口令不正确"），因为对面已经出示过有效会话，不构成新的探测信道。
+       状态码走 reauth 标记而不是文案相等——与 taken/charge 同一纪律（终审 F4）。
+    """
+    try:
+        record = _store().change_password(
+            principal.user_id, req.current_password, req.new_password,
+            keep_token=authz._credential(request))
+    except AuthError as e:
+        raise HTTPException(status_code=401 if e.reauth else 422, detail=e.reason)
+    return {"status": "password_changed",
+            "must_change_password": bool(record.get("must_change_password"))}
+
+
 @router.get("/v1/auth/me")
 def me(principal: Principal = CurrentPrincipal):
     """前端用它确认"我到底是谁"——凭据被解析成谁，只有这里说得准。"""
@@ -469,6 +508,9 @@ def _public_user(record: dict) -> dict:
         "username": record.get("username"),
         "role": record.get("role"),
         "disabled": record.get("disabled"),
+        # v0.24 T3.1：管理端要看得出"这个号还在用别人设定的口令"——旗标本身
+        # 不是秘密，它由首登改密流程负责消掉。
+        "must_change_password": bool(record.get("must_change_password")),
         "created_at": record.get("created_at"),
         # last_seen 粗粒度是设计使然：存储层为不把鉴权变成热路径写盘，把落盘
         # 节流到一小时以上，所以它读作"上次看见它至少是一小时前"，不是在线状态。
@@ -535,9 +577,45 @@ def list_users(_: Principal = RequireAdmin):
     return {"users": [_public_user(u) for u in _store().list_users()]}
 
 
+@router.post("/v1/admin/users")
+def create_user(req: AdminCreateUserRequest, _: Principal = RequireAdmin):
+    """管理员建号（v0.24 T3.1）。role 不在请求体里——与停用/轮换同一套纪律。
+
+    撞名给 409 一句实话且不计费：这不是免凭据端点，能走到这里的人已经出示了
+    管理员身份，"用户名探测器"的攻击面在这里不存在。形状问题一律 422，说的
+    都是调用方自己改得好的事。
+    """
+    try:
+        record = _store().admin_create_user(
+            req.username, req.password, req.security_answers)
+    except AuthError as e:
+        raise HTTPException(status_code=409 if e.taken else 422, detail=e.reason)
+    return _public_user(record)
+
+
 @router.post("/v1/admin/users/{user_id}/disable")
-def disable_user(user_id: str, _: Principal = RequireAdmin):
+def disable_user(user_id: str, actor: Principal = RequireAdmin):
+    """停用一个人。三种"不"各有各的话，不许糊成一句。
+
+    路由层先看记录，为的是把 404/400 说得准：存储层的闸门（管理员禁不掉，R2
+    决策——比 PRD 的"最后一个管理员不许停用"更严）返回的是同一个 False，
+    照旧翻译成"用户不存在"就会把人引向一个根本没消失的人。自己停用自己也一样：
+    那是操作者手滑，400 一句"不能停用自己"，不是 404。
+    真停用的生效形状（下一个请求即 401）由存储层的停用判定保证，
+    判据在 test_disable_online_user_then_next_request_is_401_then_enable_restores。
+    """
+    record = next((u for u in _store().list_users() if u.get("user_id") == user_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user_id == actor.user_id:
+        raise HTTPException(status_code=400, detail="不能停用自己")
+    if record.get("role") == "admin":
+        raise HTTPException(status_code=400, detail=(
+            "管理员账号不允许停用：全站能恢复访问的身份只有这一个，"
+            "要换管理员请改 users.json，不走停用"))
     if not _store().disable_user(user_id):
+        # 服务层闸门（test_admin_cannot_be_disabled_at_the_service_layer）之外的
+        # 唯一 False：记录恰好在两次读之间被删了。说实情，不装成功。
         raise HTTPException(status_code=404, detail="用户不存在")
     return {"status": "disabled", "user_id": user_id}
 
@@ -548,6 +626,24 @@ def enable_user(user_id: str, _: Principal = RequireAdmin):
     if not _store().enable_user(user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
     return {"status": "enabled", "user_id": user_id}
+
+
+@router.post("/v1/admin/users/{user_id}/reset-password")
+def reset_user_password(user_id: str, req: AdminResetPasswordRequest,
+                        _: Principal = RequireAdmin):
+    """管理员替某人重置口令：名下令牌全部作废 + 首登必须改密。
+
+    响应里不回显新口令，也不发新令牌——重置的语义是"他得自己设一遍"，
+    管理员拿到他的会话等于又造了一个"口令经了别人手还一直用下去"的账号。
+    """
+    try:
+        ok = _store().admin_reset_password(user_id, req.new_password)
+    except AuthError as e:
+        raise HTTPException(status_code=422, detail=e.reason)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"status": "password_reset", "user_id": user_id,
+            "must_change_password": True}
 
 
 @router.post("/v1/admin/users/{user_id}/rotate-token")

@@ -192,11 +192,15 @@ class AuthError(Exception):
     第五种内部原因一旦新增就静默落到 else 那一支——不计费，还把它原话说给一个免凭据端点。
     """
 
-    def __init__(self, reason: str, *, taken: bool = False, charge: bool = False):
+    def __init__(self, reason: str, *, taken: bool = False, charge: bool = False,
+                 reauth: bool = False):
         super().__init__(reason)
         self.reason = reason
         self.taken = taken
         self.charge = charge
+        # v0.24 T3.1：本人改密这一支的"要重新出示凭据"标记（原口令不对、或
+        # 身份已不在库里）——HTTP 层据此发 401，不靠 reason 等于哪句文案判。
+        self.reauth = reauth
 
 
 def _quarantine(path: str, why: str) -> None:
@@ -540,6 +544,98 @@ class AuthStore:
             record["status"] = "active"
             self._flush()
             return True
+
+    def admin_create_user(self, username: str, password: str,
+                          security_answers: list = None) -> dict:
+        """管理端建号（v0.24 T3.1）：初始口令由管理员设定，新账号首登必须改密。
+
+        与 register 同一个形状闸门与"慢哈希挪到锁外"的纪律；两处刻意的不同：
+        ① 不发会话令牌——建号动作是管理操作，执行者没有以新身份登录的资格；
+        ② must_change_password 恒为 True：口令经了别人的手，就还不属于这个人的秘密。
+        找回答案依旧可选、给就给满三条（与 register 同一判据）。role 无从传入：
+        这个函数与它上面的 HTTP 面都造不出管理员。
+        """
+        cleaned = self._normalize_username(username)
+        pw = self._check_password_shape(password)
+        keys = None
+        if security_answers is not None:
+            keys = _check_answer_shapes(security_answers)
+        pw_hash = hash_password(pw)
+        answer_hashes = [hash_password(k) for k in keys] if keys is not None else None
+
+        lc = cleaned.casefold()
+        with self._lock:
+            if any(u.get("username_lc") == lc for u in self._users.values()):
+                raise AuthError("该用户名已存在", taken=True)
+            record = {
+                "user_id": self._new_user_id(),
+                "username": cleaned,
+                "username_lc": lc,
+                "pw_hash": pw_hash,
+                "tokens": [],
+                "role": "user",
+                "disabled": False,
+                "status": "active",
+                "must_change_password": True,
+                "created_at": _now(),
+                "last_used_at": _now(),
+            }
+            if answer_hashes is not None:
+                record["answer_hashes"] = answer_hashes
+            self._users[record["user_id"]] = record
+            self._flush()
+            return dict(record)
+
+    def admin_reset_password(self, user_id: str, new_password: str) -> bool:
+        """管理员替某人重置口令：名下令牌全部作废，并要求该人首登改密。
+
+        形状校验在读库之前——"新口令太短"是管理员自己的手滑，不该先替对方回答
+        "这个人存在吗"。不碰 disabled：重置口令与解除停用是两件事，混在一起
+        等于把停用闸门只对 login 生效的老病重新生一遍（对照 test_auth.py 的
+        结构性锁）。落盘走 _flush 的原子写，与全库同一口径。
+        """
+        pw = self._check_password_shape(new_password)
+        pw_hash = hash_password(pw)
+        with self._lock:
+            record = self._users.get(user_id)
+            if record is None:
+                return False
+            record["pw_hash"] = pw_hash
+            record["tokens"] = []
+            record["must_change_password"] = True
+            self._flush()
+            return True
+
+    def change_password(self, user_id: str, current_password: str,
+                        new_password: str, keep_token: str = None) -> dict:
+        """本人出示原口令改密：除 keep_token 外名下其余会话作废，并清改密旗标。
+
+        与三题自助 reset 的"全端掉线"刻意不同：这里的动机通常是"换个口令"而不是
+        "口令可能泄露"，把正在敲键的这台设备一起踢下线是 rude 且没必要。
+        失败措辞可以说实话：这是一个已出示有效会话凭据的端点，"原口令不正确"
+        不构成新的免凭据信道。状态码靠 reauth 标记传递，不靠文案相等判——
+        与 taken/charge 同一纪律（终审 F4）。
+        """
+        new_pw = self._check_password_shape(new_password)
+        new_hash = hash_password(new_pw)
+        keep_digest = hash_token(keep_token) if keep_token else None
+        with self._lock:
+            record = self._users.get(user_id)
+            if record is None:
+                raise AuthError("身份已不在库里，请重新登录", reauth=True)
+            if not _check_password(current_password, record.get("pw_hash")):
+                raise AuthError("原口令不正确", reauth=True)
+            record["pw_hash"] = new_hash
+            if keep_digest is not None:
+                # 留下调用方这一枚、作废其余——filter 的方向就是这句："留匹配、
+                # 删不匹配"。写反过一次，症状是改密的这台设备自己先掉线。
+                record["tokens"] = [s for s in (record.get("tokens") or [])
+                                    if _token_matches(s, keep_digest)]
+            else:
+                record["tokens"] = []
+            record["must_change_password"] = False
+            self._flush()
+            return dict(record)
 
     def set_must_change_password(self, user_id: str, flag: bool = True) -> bool:
         """给"管理员建号/重置口令后首登必须改密"预留的服务层开关（R2 用）。"""

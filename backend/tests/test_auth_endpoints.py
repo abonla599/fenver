@@ -777,6 +777,8 @@ def test_admin_endpoints_reject_non_admin(client, enforced):
 
 @pytest.mark.parametrize("method,path", [
     ("get", "/v1/admin/users"),
+    ("post", "/v1/admin/users"),
+    ("post", "/v1/admin/users/u_some/reset-password"),
     ("post", "/v1/admin/users/u_some/disable"),
     ("post", "/v1/admin/users/u_some/enable"),
     ("post", "/v1/admin/users/u_some/rotate-token"),
@@ -813,6 +815,7 @@ def test_user_list_never_leaks_credentials():
         assert word not in text, f"用户列表把内部字段 {word} 交了出去"
     row = [u for u in res.json()["users"] if u["user_id"] == created["user_id"]][0]
     assert set(row) == {"user_id", "username", "role", "disabled",
+                        "must_change_password",
                         "created_at", "last_seen", "sessions"}
 
 
