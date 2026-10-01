@@ -47,7 +47,7 @@ cd backend
 
 只监听 127.0.0.1 意味着只有本机可访问，这是默认也是建议。要给别人用，先读完 [DEPLOY.md](DEPLOY.md) 的 HTTPS 一节再开口 `--host 0.0.0.0`。
 
-流式回答有个计费防护默认值：关掉页面后最多再跑完当前这一轮就停；30 秒内重开可以接着看（改法：`data/config.json` 的 `stream_no_reader_grace_seconds`，或 `.env` 里 `STREAM_NO_READER_GRACE_SECONDS` 覆盖，0 表示不留宽限）。
+流式回答有个计费防护默认值：关掉页面后最多再跑完当前这一轮就停，不会因为你不在就接着起新轮子花钱；默认 120 秒内重开可以接着看（改法：`data/config.json` 的 `stream_no_reader_grace_seconds`，或 `.env` 里 `STREAM_NO_READER_GRACE_SECONDS` 覆盖，0 表示不留宽限）。
 
 ### 4. 注册没开，怎么进第一个账号
 
