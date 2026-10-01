@@ -372,7 +372,6 @@ def test_cancel_really_stops_generation_and_no_further_step_bills(client, real_s
     assert _wait_until(lambda: run.last_seq >= 2, why="生产者没把正文推上缓冲"), \
         "两秒内没看到 content 事件，替身或生产者线程坏了"
 
-    before = usage.snapshot()
     res = client.post(f"/v1/chat/stream/{run.run_id}/cancel")
     assert res.status_code == 200, res.text
     assert res.json()["status"] == "cancelled", res.text
@@ -394,6 +393,10 @@ def test_cancel_really_stops_generation_and_no_further_step_bills(client, real_s
     assert row is not None, "取消的这一轮在账本上应该有一行（花了的就是花了）"
     assert row["calls"] == 1 and row["failed"] == 1 and row["ok"] == 0, row
     assert row["total_tokens"] == 12, f"账取上游回传的 usage，不是估算：{row}"
+
+    # 基线取在"这一轮已经结清"之后：before→after 量的是取消**之后**的步骤（重连、
+    # 续播、再取消）的增量。取早了会把本轮自己该结的那笔账算成"取消后的新增"。
+    before = usage.snapshot()
 
     # 「后续步骤」：重连续播 + 再取消一次——账本纹丝不动，消息也不许多写一条
     rejoin = client.post("/v1/chat/stream",
