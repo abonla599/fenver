@@ -131,4 +131,28 @@ def days() -> list:
         return sorted(_days)
 
 
+def snapshot_for_user(user_id: str, day: str = None) -> list:
+    """某个人的那几行账（v0.25 R4a 读面）：把 (天, 人, provider) 中间那层键钉死成调用者。
+
+    只加读、不动写：`record_call` 与上面既有 `snapshot` 一个字不改，这里读同一份 `_days`。
+    归属过滤放在账本层而不是路由层：记账写进去的 `user_id` 就是"这行属于谁"的唯一权威，
+    读的时候照用它钉行，路由层拿不到、也就不该由路由层来转述。
+    没账就是空列表：R4a 的判据是"零要读成零，不是读成错"。
+    """
+    target = day or datetime.now().astimezone().strftime("%Y-%m-%d")
+    with _lock:
+        rows = []
+        for pid, row in sorted(_days.get(target, {}).get(user_id, {}).items()):
+            item = dict(row)
+            item.update({"day": target, "provider_id": pid})
+            rows.append(item)
+        return rows
+
+
+def days_for_user(user_id: str) -> list:
+    """这个人有哪几天留了账——只含他自己的天，给日期选择器用，不替别人报户口。"""
+    with _lock:
+        return sorted(day for day, per_user in _days.items() if user_id in per_user)
+
+
 restore()
