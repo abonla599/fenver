@@ -42,6 +42,7 @@
    authz._PROTECTED_PREFIXES 放行，契约按 /v1 过滤，两条锁的差集就是无人区，
    新加一个顶层前缀（/api/... 这种）会同时落在两把锁之外。
 """
+import inspect
 import sys
 from pathlib import Path
 
@@ -64,6 +65,9 @@ from app.main import app
 from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_ID_CHARS, TICKET_ID_RE
 
 GUARD_CALLABLES = {current_principal, require_admin}
+# v0.25 R1：任务/智能体这一族在"每条路由都要声明身份"之外，另加一道"必须判归属"。
+# 前缀沿用旧 admin-only 条的口径（/v1/agent、/v1/tasks），一族都不能少。
+TASK_SURFACE_PREFIXES = ("/v1/agent", "/v1/tasks")
 # 非 /v1 的系统端点：健康检查与静态首页。契约刻意只管 /v1——它们是运维探针和
 # PWA 外壳，卷进"公开面清单"只会让人以为这里还能再加一个免鉴权端点。
 EXEMPT_PATHS = {"/", "/health"}
@@ -181,6 +185,28 @@ def _identity_gaps(app_obj=None):
             if route.path not in PUBLIC_PATHS
             and route.path not in PUBLIC_ROUTE_TEMPLATES
             and not (_route_guards(route) & GUARD_CALLABLES)]
+
+
+def _task_surface_gaps(app_obj=None) -> list:
+    """任务/智能体端点族里丢了锁的条目，带原因点名（缺鉴权 / 缺归属）。
+
+    归属这一半的判据是"端点体源码里真的出现 principal.user_id"：一个只声明身份
+    却不看身份的端点，与没有身份在任务表上等价——这正是本任务要防的出血点。
+    源码判据确实脆（重命名变量会误报），但误报在这一族上是有价的：仓库里已有
+    同法先例（test_task_store 钉 "user_id=principal.user_id" 那句），而行为层的
+    跨用户反例另有 test_v025_task_ownership_contract.py 兜着，两层各测各的。
+    """
+    gaps = []
+    for route in _v1_routes(app_obj):
+        if not route.path.startswith(TASK_SURFACE_PREFIXES):
+            continue
+        if not (_route_guards(route) & GUARD_CALLABLES):
+            gaps.append(f"{_describe(route)} 缺鉴权：未声明任何身份守卫")
+            continue
+        if "principal.user_id" not in inspect.getsource(route.dependant.call):
+            gaps.append(f"{_describe(route)} 缺归属：身份已声明，端点体却没有用 "
+                        "principal.user_id 判定任务属于谁")
+    return gaps
 
 
 def _unclaimed_paths(app_obj) -> set:
@@ -409,19 +435,50 @@ def test_admin_surface_never_settles_for_mere_identity():
     assert not weak, f"管理端点未要求管理员角色：{sorted(weak)}"
 
 
-def test_agent_and_task_surface_is_admin_only():
-    """智能体与任务表：require_admin 是这里唯一不撒谎的守卫，别让它在无人注意时降级。
+def test_task_surface_declares_identity_and_checks_ownership():
+    """v0.25 R1：任务/智能体这一面对登录用户开放，代价是归属判定成为硬契约。
 
-    task_store 是进程级全局 dict、条目没有 owner，所以"声明了身份"的主契约对它是瞎的：
-    换成 current_principal 照样绿，而任何注册用户都能列出、取消、删除别人的任务。
-    这里刻意只盯"降级"这一种改法（带身份却不带管理员），而不是把路径清单钉死——
-    把这些遗留端点整个删掉是好事，不该被这条测试判红；漏挂守卫自有主契约说话。
-    哪天要给普通用户开这一面，先给 task 加归属（与会话同一套规则），再来改这里。
+    这一条替代的是 `test_agent_and_task_surface_is_admin_only`——旧条自己的文末就写着
+    "哪天要给普通用户开这一面，先给 task 加归属（与会话同一套规则），再来改这里"。
+    改这里之前归属已经先有了：Task 必填 user_id、启动恢复把无主旧条目认给部署者
+    主账号，所以"降级为普通用户可用"不再是危险改法；现在危险的是**反向**的两种改法：
+    1. 摘掉守卫（缺鉴权）——主契约那条会点名，这里按族再钉一遍，红话说到具体门；
+    2. 挂着 current_principal 却把身份丢掉（`_: Principal`）或端点体里不做属主判定
+       （缺归属）——依赖树看起来合规，实际任何注册用户都能读/取消别人的任务。
+       这正是旧条 docstring 里"契约对无主任务是瞎的"那一格的镜像：任务有了主，
+       瞎的那半改由"端点体必须真的用 principal.user_id 判属主"来补。
+    判据的可信度由下一条的探针自证。行为层的跨用户反例不在这里，在
+    tests/test_v025_task_ownership_contract.py。
     """
-    demoted = [_describe(r) for r in _v1_routes()
-               if (r.path.startswith("/v1/agent") or r.path.startswith("/v1/tasks"))
-               and require_admin not in _route_guards(r)]
-    assert not demoted, f"任务/智能体端点被降级为普通用户可用：{sorted(demoted)}"
+    assert not _task_surface_gaps(), \
+        f"任务/智能体这一面丢了锁：{sorted(_task_surface_gaps())}"
+
+
+def test_the_task_surface_lock_bites_both_ways():
+    """上一条不许是空锁：当场造两条违规探针挂进真路由表，要求各自被点名。
+
+    - 缺鉴权：一条 /v1/tasks* 前缀下、依赖树里什么守卫都没有的路由；
+    - 缺归属：挂了 current_principal、但端点体从头到尾不看 principal.user_id 的路由
+      ——那正是"先放开、归属后补"的形状，本版本明确不接受。
+    探针在 finally 里摘干净，与 websocket/顶层前缀那两条自测同一个做法。
+    """
+    async def bare(task_id: str):
+        return {"task_id": task_id}
+
+    async def identity_only(task_id: str, _: Principal = CurrentPrincipal):
+        return {"task_id": task_id}
+
+    gaps_probe = APIRoute("/v1/tasks-probe-bare", bare, methods=["GET"])
+    owner_probe = APIRoute("/v1/tasks-probe-no-owner", identity_only, methods=["GET"])
+    app.router.routes.extend([gaps_probe, owner_probe])
+    try:
+        named = _task_surface_gaps()
+    finally:
+        app.router.routes.remove(gaps_probe)
+        app.router.routes.remove(owner_probe)
+    assert any("缺鉴权" in g for g in named), f"摘掉守卫没被抓出来，鉴权那半是空锁：{named}"
+    assert any("缺归属" in g for g in named), f"身份被丢弃没被抓出来，归属那半是空锁：{named}"
+    assert not _task_surface_gaps(), "临时探针没摘干净，会污染后面的用例"
 
 
 def test_every_public_path_is_a_real_route():
