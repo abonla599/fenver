@@ -142,3 +142,12 @@ docs/代码体检报告-*.md
 docs/代码复检报告-*.md
 docs/安全与稳定性隐患排查报告.md
 docs/待修复清单-*.md
+
+# 发版证据与状态轮询的过程文件：只在本机留档，不进仓库（和上面 v0.23/v0.24 过程稿同一条边界）。
+/v0241-*.md
+/v0.24.*-更新说明.md
+/automation-task-status-loop.md
+
+# 构建与试跑的中间目录：正式产物在 GitHub Release，本机这些只是过程残渣。
+/java-smoke/
+/dist_stage*/
