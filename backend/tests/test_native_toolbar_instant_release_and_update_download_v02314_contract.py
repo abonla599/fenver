@@ -127,9 +127,13 @@ def test_stale_apk_swept_on_boot_with_version_gate():
     # 「新版本的安装包要直接自动删除掉」+ 不拆正在装的那次升级
     assert re.search(r"Prefs\.init\(applicationContext\)[\s\S]{0,300}sweepStaleApks\(applicationContext\)", MAIN), \
         "冷启动就扫包，不等用户手动清"
-    assert "ReleasePlan.APK_PREFIX" in MAIN and \
-        re.search(r'\.startsWith\(ReleasePlan\.APK_PREFIX\)', MAIN), \
-        "只碰自家下载目录的包，别人家的文件一个字节都不许动"
+    # v0.24 换品牌名之后这里必须是 APK_PREFIXES（新名 + 过渡期旧名）：这台机器上
+    # 躺着的大概率还是 0.23.x 那次下载留下的 ai-assistant-native-*，只扫新名等于
+    # 把「装完自动删包」那条承诺在老包上悄悄作废——白占 7 MB，且看起来什么都没坏。
+    assert "ReleasePlan.APK_PREFIXES" in MAIN and \
+        re.search(r"for \(prefix in ReleasePlan\.APK_PREFIXES\)", MAIN) and \
+        re.search(r'\.startsWith\(prefix\)', MAIN), \
+        "只碰自家下载目录的包（两名各扫一遍），别人家的文件一个字节都不许动"
     assert re.search(r"ReleasePlan\.compare\(v, BuildConfig\.VERSION_NAME\) <= 0\) f\.delete\(\)", MAIN), \
         "版本闸：只删已装完（≤ 当前版本）的旧账；比当前新的包是路上/待装的升级，留下"
     assert '".apk.part"' in MAIN or ".apk.part" in MAIN, \

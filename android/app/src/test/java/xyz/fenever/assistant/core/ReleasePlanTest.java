@@ -19,6 +19,14 @@ public class ReleasePlanTest {
     private static final String GOOD_URL =
             "https://github.com/abonla599/ai-assistant/releases/download/v0.15/ai-assistant-native-0.15.apk";
 
+    /** v0.24 起正式发布的仓与包名。GOOD_URL 保留旧仓旧名：它同时是"旧 release 长什么样"的样本。 */
+    private static final String FENVER_URL =
+            "https://github.com/abonla599/fenver/releases/download/v0.24/fenver-0.24.apk";
+
+    /** 同一次发布里那个"给老壳的别名"资产：仓是新仓，名字是旧名字。 */
+    private static final String LEGACY_URL_024 =
+            "https://github.com/abonla599/fenver/releases/download/v0.24/ai-assistant-native-0.24.apk";
+
     // ---------- 版本比较：字符串比会错的那一类 ----------
 
     @Test
@@ -125,6 +133,48 @@ public class ReleasePlanTest {
         assertEquals(98765L, d.sizeBytes);
     }
 
+    @Test
+    public void whenAReleaseCarriesBothNamesTheNewOneWins() {
+        // v0.24 起同一版挂两个资产名（字节相同），旧名只喂改名字前装机的壳。
+        // 顺序反过来 = 新壳把包下成 ai-assistant-native-*，而文件门与冷启动清扫
+        // 都按新名的形状在算账，两边开始互相看不见对方留下的文件。
+        String json = "{"
+                + "\"tag_name\":\"v0.24\",\"draft\":false,\"prerelease\":false,\"body\":\"说明\","
+                + "\"assets\":["
+                + "{\"name\":\"ai-assistant-native-0.24.apk\",\"browser_download_url\":\""
+                + LEGACY_URL_024 + "\",\"size\":1}"
+                + ",{\"name\":\"fenver-0.24.apk\",\"browser_download_url\":\"" + FENVER_URL + "\",\"size\":98765}"
+                + "]}";
+        ReleasePlan.Decision d = ReleasePlan.decide("0.23", json);
+        assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        assertEquals(FENVER_URL, d.url);
+        assertEquals(98765L, d.sizeBytes);
+    }
+
+    @Test
+    public void bothOfficialReposAreOfficialAndNothingElseIs() {
+        // 改名那天正式发布的仓从 abonla599/ai-assistant 换成 abonla599/fenver。
+        // 只认新仓 = 手里还装着 v0.23 的人查不到任何旧 release；只认旧仓 = v0.24 起
+        // 全量断更。所以两条前缀必须【同时】有效，而别人的仓一条都不行。
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(GOOD_URL, "ai-assistant-native-0.15.apk"));
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(FENVER_URL, "fenver-0.24.apk"));
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(
+                "https://github.com/someone-else/fenver/releases/download/v0.24/fenver-0.24.apk",
+                "fenver-0.24.apk"));
+        // 仓对、名字对不上版本号：仍是"这不是这一版"，两条前缀都不是放宽匹配的理由。
+        assertFalse(ReleasePlan.downloadUrlIsTrusted(FENVER_URL, "fenver-0.23.apk"));
+    }
+
+    @Test
+    public void aReleasePublishingOnlyTheLegacyNameStillUpdates() {
+        // 改名不断链的另一半：v0.23 及更早的那些 release 只有旧名，而装着老壳的手机
+        // 唯一能问的就是它们。判成 UNUSABLE 不报错，只是那个人永远升不上来。
+        ReleasePlan.Decision d = ReleasePlan.decide("0.14", release("v0.15", GOOD_URL,
+                "ai-assistant-native-0.15.apk", 103_000L, "说明", false, false));
+        assertEquals(ReleasePlan.Kind.AVAILABLE, d.kind);
+        assertEquals(GOOD_URL, d.url);
+    }
+
     // ---------- 下载地址：每一项都要过 ----------
 
     @Test
@@ -189,26 +239,14 @@ public class ReleasePlanTest {
     public void theOnlyAssetShapeIsTheVersionNamedApk() {
         // 这一层不再持有"去哪问"的地址（v0.19 起问与取都在自家服务器，
         // "壳源码不出现 GitHub API 地址" 由 backend/tests/test_android_shell.py 数着）；
-        // 留在这里的是"只要那一个资产名"的形状。v0.24 定名：现行名 fenver-，旧名兜底。
+        // 留在这里的是"只要那一个资产名"的形状。
+        // v0.24 起 assetName 返回的是**主名**：本机下载文件就叫这个，冷启动清扫与
+        // FileProvider 的文件门都按 APK_PREFIXES（主名 + 别名）两把一起认。
         assertTrue(ReleasePlan.assetName("0.15").equals("fenver-0.15.apk"));
-        assertTrue(ReleasePlan.assetNames("0.15")[0].equals("fenver-0.15.apk"));
-        assertTrue(ReleasePlan.assetNames("0.15")[1].equals("ai-assistant-native-0.15.apk"));
-    }
-
-    @Test
-    public void legacyAssetNameStillResolvesAndNewNameWins() {
-        // 只有旧名的历史发布照弹更新（改名不砍老用户）；两个名都在时取新名。
-        ReleasePlan.Decision legacy = ReleasePlan.decide("0.14",
-                release("v0.15", GOOD_URL, "ai-assistant-native-0.15.apk", 1L, null, false, false));
-        assertEquals(ReleasePlan.Kind.AVAILABLE, legacy.kind);
-        String bothAssets = release("v0.15", GOOD_URL, "ai-assistant-native-0.15.apk", 1L, null, false, false);
-        // 在同一条 JSON 里再挂一个新名的资产，判"新名优先"
-        bothAssets = bothAssets.replace("\"assets\":[",
-                "\"assets\":[{\"name\":\"fenver-0.15.apk\",\"size\":2,\"browser_download_url\":"
-                + "\"https://github.com/abonla599/ai-assistant/releases/download/v0.15/fenver-0.15.apk\"},");
-        ReleasePlan.Decision both = ReleasePlan.decide("0.14", bothAssets);
-        assertEquals(ReleasePlan.Kind.AVAILABLE, both.kind);
-        assertTrue("两个名都挂着时挑的不是新名", both.url.endsWith("fenver-0.15.apk"));
+        assertTrue(ReleasePlan.assetName("0.15")
+                .startsWith(ReleasePlan.APK_PREFIX));
+        assertTrue(ReleasePlan.APK_PREFIXES[0].equals(ReleasePlan.APK_PREFIX)
+                && ReleasePlan.APK_PREFIXES[1].equals(ReleasePlan.LEGACY_APK_PREFIX));
     }
 
     // ---------- 第二条信任规则：自家字节出口 = APP_URL 同源 + 精确路径（T1.5） ----------

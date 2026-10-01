@@ -441,70 +441,94 @@ def test_fetch_asset_follows_the_hop_to_the_host_github_really_redirects_to(monk
 
 # ---------- 资产名三层对齐：工作流发的名字 = 后端挑的名字 = 壳认的名字（T1.7/T1.8） ----------
 
-def test_the_asset_name_is_the_one_the_workflow_publishes():
-    """`fenver-<版本>.apk`（现行）与 `ai-assistant-native-<版本>.apk`（旧名兜底）由发布流水线写、
-    后端 _pick_asset 挑、壳 ReleasePlan 认——三份字面量并排钉成同一组。
+# v0.24 起同一版发**两个**资产名（品牌换 Fenver，新名做主名；旧名留作别名）。
+# 顺序即优先级：两个都在时取新名，只有旧名时取旧名。
+ASSET_PAIR = ("fenver-", "ai-assistant-native-")
 
-    2026-09-25 起工作流发 ai-assistant-native-；v0.24 定名后改发 fenver-，旧名继续认
-    （历史发布不会改名重发）。当年漂移的教训原样适用：漂了不报错，是官网按钮与 App 内
-    更新双双静默退回发布页。与 v0.22 那次 302 白名单事故同一课。
+
+def _asset(name, url=None):
+    return {"name": name, "size": 102_400,
+            "browser_download_url": url or f"https://github.com/o/r/releases/download/v0.24/{name}"}
+
+
+def test_the_asset_name_is_the_one_the_workflow_publishes():
+    """两名一对字面量，钉在四份文本上（工作流 cp、工作流上传、后端、壳）。
+
+    2026-09-25 那次漂移的教训照搬：工作流换成发原生包、前缀改成 ai-assistant-native-，
+    而后端与壳还按旧名找——表现不是哪一环报错，是【官网按钮与 App 内更新双双静默退回
+    发布页】，每份 JSON 都"合法"，只是没人能找到那个资产（与 v0.22 的 302 白名单同一课）。
+    这次改名同时动三处，而且多了"老壳只认旧名"这条硬约束，所以把顺序也钉上：
+    少发一个名字 = 有一代人升不上来；顺序反了 = 新壳装到别名那份（同一个字节流，
+    但落在手机上叫错名字，sweepStaleApks 与文件门都会开始互相打架）。
     """
     from pathlib import Path
 
     repo = Path(releases.__file__).resolve().parents[3]
     wf = (repo / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
-    assert 'file="fenver-${ver}.apk"' in wf, \
-        "发布流不再发 fenver-<版本>.apk 了？那这一整串判据要三处一起改"
-    assert 'cp android-native/app/build/outputs/apk/release/app-release.apk \\\n             "fenver-' in wf \
-        or 'cp android-native/app/build/outputs/apk/release/app-release.apk' in wf, \
-        "发布流不再从 android-native 打包了"
 
-    assert releases.ASSET_PREFIX == "fenver-", \
-        "后端挑的现行名漂了，要和上面工作流发的字面量一起改"
-    assert releases.LEGACY_ASSET_PREFIX == "ai-assistant-native-", \
-        "旧名兜底没了：挂在 Releases 里的历史资产会全被判成不可安装"
-    assert releases._ASSET_NAME_RE.fullmatch("fenver-0.24.0.apk"), "正则不认现行名"
-    assert releases._ASSET_NAME_RE.fullmatch("ai-assistant-native-0.23.17.apk"), "正则不认旧名"
-    assert not releases._ASSET_NAME_RE.fullmatch("evil;x\".apk"), "形状正则放宽了：Content-Disposition 安全边界失守"
+    staged = re.findall(r'cp "\$apk" "([^"]+)"', wf)
+    assert staged == [p + "${ver}.apk" for p in ASSET_PAIR], \
+        f"发布流 Stage 那步 cp 出的两个名字漂了：{staged}"
+    # cp 两份不等于发两份：真正决定用户能看到什么的是挂上 Release 的那串参数。
+    assert 'gh release upload "$tag" "$file" "$legacy" --clobber' in wf, \
+        "重发版时不再同传两名：已装机的 0.23.x 老壳在新仓里会拿不到这一版"
+    assert '"$file" "$legacy" --title' in wf, \
+        "首发时不再同传两名：第一次发出去只有新名字，老壳永远停在 0.23.x"
+    named = re.findall(r'^\s*(?:file|legacy)="([^"]+)"\s*$', wf, re.M)
+    assert named == staged, f"工作流里 cp 的名字与挂出去的名字不是一对：{staged} vs {named}"
+
+    assert releases.ASSET_PREFIXES == ASSET_PAIR, "后端认的两个前缀漂了，要和上面一起改"
+    assert releases.asset_names("0.24.0") == tuple(p + "0.24.0.apk" for p in ASSET_PAIR), \
+        "后端拼出来的两个名字与顺序漂了"
+    assert releases._ASSET_NAME_RE.match("fenver-0.24.0.apk") is not None
+    assert releases._ASSET_NAME_RE.match("ai-assistant-native-0.24.0.apk") is not None
+    assert releases._ASSET_NAME_RE.match("totally-other-0.24.0.apk") is None, \
+        "形状正则放宽到任意前缀了：它唯一的活儿就是只认这两个名字（防响应头注入）"
 
     plan = (repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
             / "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
-    assert 'APK_PREFIX = "fenver-"' in plan, \
-        "壳认的现行资产名前缀与发布/后端不是同一个了"
-    assert 'LEGACY_APK_PREFIX = "ai-assistant-native-"' in plan, \
-        "壳不认旧名了：装 0.23.x 的人查更新会当场变红（对用户则是永不弹卡）"
+    shell = tuple(re.findall(r'String (?:APK_PREFIX|LEGACY_APK_PREFIX) = "([^"]+)"', plan))
+    assert shell == ASSET_PAIR, f"壳认的两个前缀与发布/后端不是同一对：{shell}"
+    assert "APK_PREFIXES = {APK_PREFIX, LEGACY_APK_PREFIX}" in plan, \
+        "壳里的优先级顺序漂了：两个名字都在时取哪个，就由这行字面量决定"
+
+    # 仓名与资产名是同一条纪律的两半：改名那天正式发布的仓换了，而旧仓里那些
+    # release 的 browser_download_url 永远长成旧仓的路径。后端按 candidate_repos()
+    # 两个仓轮着问，壳就必须两个仓的前缀都认——只认一边都是全量断更，而且不报错。
+    shell_repos = tuple(re.findall(r'String (?:REPO|LEGACY_REPO) = "([^"]+)"', plan))
+    from app.core import config_store
+    server_repos = tuple(r.split("/")[1] for r in
+                         ([config_store.DEFAULTS["update_repo"]] + [releases.LEGACY_REPO]))
+    assert set(shell_repos) == set(server_repos), \
+        f"壳认的仓与后端问的仓不是一对：壳 {shell_repos} vs 服务端 {server_repos}"
+    assert releases.LEGACY_REPO == "abonla599/ai-assistant", \
+        "旧仓名改了等于把历史上每一个 release 的官方地址判成别人的"
 
 
-# ---------- v0.24 改名：新名优先、旧名兜底 ----------
+def test_a_release_carrying_both_names_resolves_to_the_new_one():
+    """同包两名都在：后端必须挑新名——旧名那份只是给老壳的兜底，不是第二个版本。
 
-def test_the_new_asset_name_is_preferred_when_both_exist(monkeypatch):
-    """同一个发布同时挂着新旧两个名时，挑的是 fenver- 那一个。
-
-    这不是洁癖：改名过渡期我们真的会这么挂（v0.23.17 演练发布补挂新名），
-    挑错一个，官网按钮递出去的文件名就还带着旧产品名。
+    反过来说更重要：这一版在 GitHub 上是两个资产、一个字节流。若挑的顺序不稳，
+    官网按钮与 App 内更新可能一个给人 fenver-、一个给人 ai-assistant-native-，
+    两边缓存不同步时表现就是"下了两次同一个包，还各自说自己是新的"。
     """
-    both = {"tag_name": "v0.24.0", "html_url": "https://github.com/o/r/releases/tag/v0.24.0",
-            "assets": [
-                {"name": "ai-assistant-native-0.24.0.apk", "size": 1,
-                 "browser_download_url": "https://github.com/o/r/releases/download/v0.24.0/ai-assistant-native-0.24.0.apk"},
-                {"name": "fenver-0.24.0.apk", "size": 2,
-                 "browser_download_url": "https://github.com/o/r/releases/download/v0.24.0/fenver-0.24.0.apk"}]}
-    monkeypatch.setattr(releases, "_fetch_repo", lambda repo: (both, ""))
-    picked = releases._pick_asset(both, "0.24.0")
-    assert picked["name"] == "fenver-0.24.0.apk"
+    old_first = {"assets": [_asset(ASSET_PAIR[1] + "0.24.0.apk"),
+                            _asset(ASSET_PAIR[0] + "0.24.0.apk")]}
+    picked = releases._pick_asset(old_first, "0.24.0")
+    assert picked and picked["name"] == ASSET_PAIR[0] + "0.24.0.apk", picked
 
 
-def test_the_legacy_asset_name_still_downloads(monkeypatch):
-    """只有旧名的历史发布必须照取：改名不砍老下载，这是"老用户不重装"的另一半。"""
-    only_legacy = {"tag_name": "v0.23.17",
-                   "html_url": "https://github.com/o/r/releases/tag/v0.23.17",
-                   "assets": [{"name": "ai-assistant-native-0.23.17.apk", "size": 2,
-                               "browser_download_url": "https://github.com/o/r/releases/download/v0.23.17/ai-assistant-native-0.23.17.apk"}]}
-    assert releases._pick_asset(only_legacy, "0.23.17")["name"] == "ai-assistant-native-0.23.17.apk"
-    fake = _Urlopen(only_legacy)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
-    plan, reason = releases.download_plan()
-    assert plan and plan["name"] == "ai-assistant-native-0.23.17.apk", reason
+def test_a_release_with_only_the_legacy_name_still_resolves():
+    """只挂旧名的那一版（v0.23 及更早，以及任何一次漏发别名的应急发版）照样要挑得出来。
+
+    这条是"改名不断链"里【已装机老壳】那一半：老壳只会按旧名找，而它找的 release
+    正是这一份。把它判成"没有可安装资产"不报错，只是那一代人从此停在原地。
+    """
+    only_old = {"assets": [_asset(ASSET_PAIR[1] + "0.23.17.apk"), {"name": "mapping.txt"}]}
+    picked = releases._pick_asset(only_old, "0.23.17")
+    assert picked and picked["name"] == ASSET_PAIR[1] + "0.23.17.apk", picked
+    # 正对照：换个版本号就找不到——匹配仍是"名字精确对上版本"，不是"看着像 apk 就拿"。
+    assert releases._pick_asset(only_old, "0.24.0") is None
 
 
 def test_the_native_shell_ships_byte_identical_core_classes():

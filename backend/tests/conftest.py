@@ -45,6 +45,10 @@ os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
 os.environ["USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "usage.json")
 os.environ["SCHEDULE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "schedule.json")
 
+# 审计账本也是进程级单例：不指走，测试里的每一次管理端动作都会盖上真实的
+# data/audit.jsonl。隔离判据在 test_test_isolation.py，新增可重定向的存储时那里会红。
+os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_DATA_DIR, "audit.jsonl")
+
 # v0.24 T1.4：运行时配置同样是指不走的进程级单例。指到临时目录之外，还要显式
 # 把注册打开——产品默认注册是关的（D9：开源版"给你自己用"），而既有的注册/登录
 # 用例全部从"注册可用"出发；注册关闭本身由契约测试单独判（test_v024_foundation_contract）。

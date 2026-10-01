@@ -163,7 +163,7 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
                  "模型服务配置": "providers.json", "附件": "uploads",
                  "长期记忆向量库": "chroma_db", "任务清单": "tasks.json",
                  "用量账本": "usage.json", "日程": "schedule.json",
-                 "运行时配置": "config.json"}
+                 "运行时配置": "config.json", "审计流水": "audit.jsonl"}
     # 反馈与偏好是导入期算好的模块常量，指不走环境变量，所以不在 FILENAMES 里
     assert set(FILENAMES) | {"反馈原文", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \
         f"存储清单与文件名表对不上：{set(FILENAMES) ^ (set(DATA_PATH_ENV_VARS) - {'反馈原文', '偏好摘要'})}"

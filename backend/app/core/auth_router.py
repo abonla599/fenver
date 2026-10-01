@@ -23,6 +23,8 @@ from pydantic import BaseModel
 from app.core import authz, usage
 # v0.24 T1.4：注册闸门与配置端点读的是同一份 config_store，不在路由层留第二默认值。
 from app.core import config_store
+# v0.24 T3.4：管理端每一次账号改动都往 audit.jsonl 追加一条（只增、脱敏在这一层里）。
+from app.core import audit
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
 from app.core.auth import AuthError
@@ -578,7 +580,7 @@ def list_users(_: Principal = RequireAdmin):
 
 
 @router.post("/v1/admin/users")
-def create_user(req: AdminCreateUserRequest, _: Principal = RequireAdmin):
+def create_user(req: AdminCreateUserRequest, actor: Principal = RequireAdmin):
     """管理员建号（v0.24 T3.1）。role 不在请求体里——与停用/轮换同一套纪律。
 
     撞名给 409 一句实话且不计费：这不是免凭据端点，能走到这里的人已经出示了
@@ -590,6 +592,9 @@ def create_user(req: AdminCreateUserRequest, _: Principal = RequireAdmin):
             req.username, req.password, req.security_answers)
     except AuthError as e:
         raise HTTPException(status_code=409 if e.taken else 422, detail=e.reason)
+    # 只记"谁建了哪个 id"：口令是调用方带上来的，一次都不上盘——after 走的是公开展望，
+    # 里面本来就没有凭据字段，audit._redact 那把键名黑名单是第二道，不是第一道。
+    audit.log(actor, "user.create", target=record["user_id"], after=_public_user(record))
     return _public_user(record)
 
 
@@ -617,20 +622,22 @@ def disable_user(user_id: str, actor: Principal = RequireAdmin):
         # 服务层闸门（test_admin_cannot_be_disabled_at_the_service_layer）之外的
         # 唯一 False：记录恰好在两次读之间被删了。说实情，不装成功。
         raise HTTPException(status_code=404, detail="用户不存在")
+    audit.log(actor, "user.disable", target=user_id)
     return {"status": "disabled", "user_id": user_id}
 
 
 @router.post("/v1/admin/users/{user_id}/enable")
-def enable_user(user_id: str, _: Principal = RequireAdmin):
+def enable_user(user_id: str, actor: Principal = RequireAdmin):
     # 轮换令牌不再顺手解除停用，因此撤销必须有对称的还原动作。
     if not _store().enable_user(user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
+    audit.log(actor, "user.enable", target=user_id)
     return {"status": "enabled", "user_id": user_id}
 
 
 @router.post("/v1/admin/users/{user_id}/reset-password")
 def reset_user_password(user_id: str, req: AdminResetPasswordRequest,
-                        _: Principal = RequireAdmin):
+                        actor: Principal = RequireAdmin):
     """管理员替某人重置口令：名下令牌全部作废 + 首登必须改密。
 
     响应里不回显新口令，也不发新令牌——重置的语义是"他得自己设一遍"，
@@ -642,17 +649,23 @@ def reset_user_password(user_id: str, req: AdminResetPasswordRequest,
         raise HTTPException(status_code=422, detail=e.reason)
     if not ok:
         raise HTTPException(status_code=404, detail="用户不存在")
+    # after 只写"这一格被改过"这件事的形状，不写内容：新口令是请求体带上来的。
+    audit.log(actor, "user.reset-password", target=user_id,
+              after={"must_change_password": True})
     return {"status": "password_reset", "user_id": user_id,
             "must_change_password": True}
 
 
 @router.post("/v1/admin/users/{user_id}/rotate-token")
-def rotate_user_token(user_id: str, _: Principal = RequireAdmin):
+def rotate_user_token(user_id: str, actor: Principal = RequireAdmin):
     """强制全端重登：旧令牌全部作废，且停用状态原样保留。"""
     try:
-        return {"token": _store().rotate_token(user_id)}
+        token = _store().rotate_token(user_id)
     except AuthError:
         raise HTTPException(status_code=404, detail="用户不存在")
+    # 记"发生了换发"，绝不记那枚新令牌——明文只该出现在这一次 HTTP 响应里。
+    audit.log(actor, "user.rotate-token", target=user_id)
+    return {"token": token}
 
 
 @router.delete("/v1/admin/users/{user_id}")
@@ -661,6 +674,8 @@ def remove_user(user_id: str, actor: Principal = RequireAdmin):
         raise HTTPException(status_code=400, detail="不能删除自己")
     if not _store().delete_user(user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
+    # 删号是不可逆的：审计是它唯一的存照，这里必须落一条，哪怕只是"谁删了哪个 id"。
+    audit.log(actor, "user.delete", target=user_id)
     return {"status": "deleted", "user_id": user_id}
 
 
@@ -687,8 +702,21 @@ def get_config(_: Principal = CurrentPrincipal):
 
 
 @router.post("/v1/admin/config")
-def update_config(req: ConfigUpdateRequest, _: Principal = RequireAdmin):
+def update_config(req: ConfigUpdateRequest, actor: Principal = RequireAdmin):
     """改配置并落盘。未知/类型不对的键原样退回，不静默吞。"""
+    before = config_store.read()
     partial = {k: v for k, v in req.model_dump().items() if v is not None}
     cfg, rejected = config_store.apply_update(partial)
+    # 每一次配置写都进账，不因为"值恰好没变"而消音：排障要知道的是"谁在什么时候试图
+    # 动过全站闸门"，改前改后各是什么——即便这次按下没改变结果，按下本身就是该留痕的
+    # 运营动作。被拒的键一并记下，那正是"有人想改改不动"的证据。
+    audit.log(actor, "config.update", before=before, after=cfg,
+              detail="被拒的键：" + ", ".join(sorted(rejected)) if rejected else "")
     return {"config": cfg, "rejected": rejected}
+
+
+@router.get("/v1/admin/audit")
+def read_audit(limit: int = 200, _: Principal = RequireAdmin):
+    """只读地看这份只增账：最新在下（read() 已按正序返回）。没有删除路由——
+    能从界面删掉的证据就不是证据。"""
+    return {"entries": audit.read(limit=min(max(1, limit), 1000))}

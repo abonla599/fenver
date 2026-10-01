@@ -44,16 +44,20 @@ class MainActivity : ComponentActivity() {
 private fun sweepStaleApks(ctx: android.content.Context) {
     val dir = ctx.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: return
     val files = dir.listFiles() ?: return
-    for (f in files) {
-        val n = f.name
-        if (!n.startsWith(ReleasePlan.APK_PREFIX)) continue
-        val part = n.endsWith(".apk.part")
-        if (!part && !n.endsWith(".apk")) continue
-        val v = n.removePrefix(ReleasePlan.APK_PREFIX)
-            .removeSuffix(if (part) ".apk.part" else ".apk")
-        if (!Regex("[0-9][0-9A-Za-z.\\-]*").matches(v)) continue
-        runCatching {
-            if (ReleasePlan.compare(v, BuildConfig.VERSION_NAME) <= 0) f.delete()
+    // 两个前缀都要扫：v0.24 起新包叫 fenver-*，可这台机器上躺着的大概率还是
+    // 0.23.x 那一次下载留下的 ai-assistant-native-*。只扫新名的话，改名这一次
+    // 顺手把"装完自动删包"那条承诺在老包上作废了——7 MB 白占着，而它看起来什么都没坏。
+    for (prefix in ReleasePlan.APK_PREFIXES) {
+        for (f in files) {
+            val n = f.name
+            if (!n.startsWith(prefix)) continue
+            val part = n.endsWith(".apk.part")
+            if (!part && !n.endsWith(".apk")) continue
+            val v = n.removePrefix(prefix).removeSuffix(if (part) ".apk.part" else ".apk")
+            if (!Regex("[0-9][0-9A-Za-z.\\-]*").matches(v)) continue
+            runCatching {
+                if (ReleasePlan.compare(v, BuildConfig.VERSION_NAME) <= 0) f.delete()
+            }
         }
     }
 }

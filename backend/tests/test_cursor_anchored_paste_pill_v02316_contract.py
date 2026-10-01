@@ -100,8 +100,10 @@ def test_keyboard_signal_round16_suite_not_regressed():
 
 def test_version_bumped_and_release_notes_brief():
     gradle = _read(BUILD)
-    assert "versionCode 40" in gradle and 'versionName "0.23.17"' in gradle, \
-        "第 18 轮版本推进（39→40 / 0.23.16→0.23.17）：版本号跟最新轮走，旧版留档不回改"
+    # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
+    # 第 17 轮把它推到 39，v0.24.0 推到 41。下面断的是现在那一格，不是当年那一轮。
+    assert "versionCode 41" in gradle and 'versionName "0.24.0"' in gradle, \
+        "gradle 那一格漂了：这一版应是 41 / 0.24.0，且必须与 docs/releases/v0.24.0.md 同时存在"
     doc = _read(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)

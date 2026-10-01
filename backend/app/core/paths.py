@@ -94,6 +94,7 @@ DATA_PATH_ENV_VARS = {
     "反馈原文": "FEEDBACK_FILE",
     "偏好摘要": "PREFERENCE_FILE",
     "运行时配置": "CONFIG_DB_PATH",
+    "审计流水": "AUDIT_LOG_PATH",
 }
 
 
@@ -116,6 +117,7 @@ def resolve_all_data_paths() -> list:
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
     from app.preference_analyzer import PREFERENCE_FILE
     from app.agents.task_store import _default_path as tasks_path
+    from app.core.audit import _default_path as audit_path
     from app.core.schedule import _default_path as schedule_path
     from app.core.usage import _default_path as usage_path
     from app.session.session_store import _default_path as sessions_path
@@ -132,6 +134,7 @@ def resolve_all_data_paths() -> list:
         "反馈原文": FEEDBACK_FILE,
         "偏好摘要": PREFERENCE_FILE,
         "运行时配置": config_path(),
+        "审计流水": audit_path(),
     }
     # 按 DATA_PATH_ENV_VARS 的顺序出：日志行序稳定，两份日志才比得出差别
     return [(label, resolved[label]) for label in DATA_PATH_ENV_VARS]

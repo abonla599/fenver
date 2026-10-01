@@ -328,7 +328,7 @@ def release_latest(have: str = None):
 
 # 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
 @app.get("/v1/update/info")
-def update_info():
+def update_info(request: Request):
     """壳「检查更新」的数据源：原样的 GitHub 发布 JSON + 顶层 `apk_sha256`。
 
     为什么壳不自己问 GitHub 的发布接口：手机到 GitHub 的链路要过运营商、代理与各家
@@ -342,13 +342,33 @@ def update_info():
     AC-4 的后半句「不伪装最新」在这一头还意味着：GitHub 恢复前，超过缓存期的旧快照
     对这条端点等同于读不出来（判据在 `releases.latest_release_manifest`，
     钉在 test_update_channel 的 stale 用例组）。
+
+    搬仓以后这条还要多做一件小事：把**旧名**那枚资产的下载地址换成自家代取端点
+    （`releases.route_legacy_asset_to_self_host`）。0.23.x 及更早的壳把 GitHub 路径
+    白名单写死成旧仓，装进手机就改不动了；它们只认旧名，所以只要看见自家出口地址
+    照样能收这一版。来源取自请求自己的 Host 头——壳是照 `Prefs.baseUrl` 打到这台
+    机器的，同源判据比的正是那个主机，拼不出合格来源（本地 http、带端口）就不换。
     """
     from fastapi.responses import JSONResponse
     from app.core import releases
-    manifest, reason = releases.latest_release_manifest()
+    manifest, reason = releases.latest_release_manifest(_self_origin(request))
     if manifest is None:
         return JSONResponse(status_code=502, content={"detail": f"问不到发布信息：{reason}"})
     return manifest
+
+
+def _self_origin(request: Request) -> str:
+    """这台服务器在这一次请求里的"https://主机"来源；不合格就是空串（＝什么都不换）。
+
+    只认 Host 头不认 `request.url`：生产是 TLS 在前面的反代终结的，容器里看到的是
+    http，而壳那条同源判据比的是它自己配置的 `https://` 主机。带端口或 userinfo 的
+    主机在这里会被 `self_hosted_apk_url` 判死，所以本机开发（localhost:8000）走的是
+    "不换"这一档——老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的地址
+    换成一条不能用的。
+    """
+    host = (request.headers.get("host") or "").strip()
+    proto = (request.headers.get("x-forwarded-proto") or "https").split(",")[0].strip().lower()
+    return f"{proto}://{host}" if proto == "https" and host else ""
 
 # ---------- 聊天接口 ----------
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
@@ -615,7 +635,7 @@ def replace_session_messages(session_id: str, req: SessionMessagesRequest,
 # ---------- 日程（"今天该干什么"那份清单） ----------
 # 归属人一律从凭据里取（principal.user_id），请求体与查询串里都没有 user_id 这个口子：
 # 与记忆/会话/附件同一口径，见 app/core/schedule.py 的模块注释。
-from app.core import schedule
+from app.core import audit, schedule
 
 
 class ScheduleItem(BaseModel):
@@ -790,16 +810,19 @@ def list_providers(_: Principal = RequireAdmin):
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
-def add_provider(req: ProviderRequest, _: Principal = RequireAdmin):
+def add_provider(req: ProviderRequest, actor: Principal = RequireAdmin):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # after 走 _public：密钥在这一层就已经是掩码，审计要的是"这一格被建过"。
+    audit.log(actor, "provider.create", target=saved["id"],
+              after=provider_store._public(saved))
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.put("/v1/providers/{provider_id}")
 def update_provider(provider_id: str, req: ProviderRequest,
-                          _: Principal = RequireAdmin):
+                          actor: Principal = RequireAdmin):
     _owner_gate(provider_id, "", require_own=False)
     record = req.model_dump()
     record["id"] = provider_id
@@ -807,19 +830,23 @@ def update_provider(provider_id: str, req: ProviderRequest,
         saved = provider_store.upsert(record)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit.log(actor, "provider.update", target=provider_id,
+              after=provider_store._public(saved))
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/providers/{provider_id}")
-def remove_provider(provider_id: str, _: Principal = RequireAdmin):
+def remove_provider(provider_id: str, actor: Principal = RequireAdmin):
     _owner_gate(provider_id, "", require_own=False)
     if provider_store.delete(provider_id):
+        audit.log(actor, "provider.delete", target=provider_id)
         return {"status": "deleted", "id": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
-def set_default_provider(provider_id: str, _: Principal = RequireAdmin):
+def set_default_provider(provider_id: str, actor: Principal = RequireAdmin):
     _owner_gate(provider_id, "", require_own=False)
     if provider_store.set_default(provider_id):
+        audit.log(actor, "provider.set-default", target=provider_id)
         return {"status": "ok", "default": provider_id}
     raise HTTPException(status_code=404, detail="模型服务不存在")
 

@@ -287,3 +287,140 @@ def test_draft_and_vless_tags_pass_through_untouched(client, enforced, monkeypat
     assert body["tag_name"] == "0.19", "tag 被改写：壳里 normalizeTag 的判据对不上号了"
     assert body["draft"] is True, "draft 被吞：壳会把草稿版当成可装版本放行"
     assert body["apk_sha256"] == DIGEST
+
+
+# ---------- 改名过渡期：旧名那枚资产换到自家出口（0.23.x 的更新链不断） ----------
+# 0.23.x 及更早的壳把 GitHub 路径白名单写死成旧仓，装进手机就改不动。发布搬到
+# abonla599/fenver 之后，它们读到的那条 browser_download_url 会被自己的判据打成
+# UNUSABLE——这不是推演，是 2026-09-30 拿 HEAD(=0.23.17) 的 ReleasePlan + MiniJson
+# 真跑 decide 量出来的（新仓双名/只挂新名两档 UNUSABLE，旧仓路径与自家出口两档
+# AVAILABLE）。修法是服务端把**旧名**那一枚的地址换成壳本来就信的同源出口。
+# 下面钉的是：换得准（只换那一枚）、换得窄（四种不该换的情况都不换）、不脏缓存。
+
+@pytest.fixture
+def published_in_new_repo(monkeypatch):
+    """把配置指回**新仓**——现网 v0.24 起就是这么发的。
+
+    conftest 那份测试配置里 update_repo 还是旧仓，而"货在哪个仓"正是这条改写的第一
+    个闸；不改这一处，下面每一档都会因为"还在旧仓"而天然不换，锁就成了空转。
+    """
+    from app.core import config_store
+    monkeypatch.setattr(config_store, "update_repo",
+                        lambda: config_store.DEFAULTS["update_repo"])
+
+
+FENVER_APK = "https://github.com/abonla599/fenver/releases/download/v0.24.0/fenver-0.24.0.apk"
+LEGACY_APK = ("https://github.com/abonla599/fenver/releases/download/v0.24.0"
+              "/ai-assistant-native-0.24.0.apk")
+
+
+def _dual_named_release():
+    """v0.24 起真实发布形状：同一版并挂两名，外加一枚不相干的 mapping.txt。"""
+    return {"tag_name": "v0.24.0",
+            "html_url": "https://github.com/abonla599/fenver/releases/tag/v0.24.0",
+            "assets": [{"name": "mapping.txt", "size": 9,
+                        "browser_download_url": "https://github.com/abonla599/fenver/releases/download/v0.24.0/mapping.txt"},
+                       {"name": "fenver-0.24.0.apk", "size": 98304,
+                        "browser_download_url": FENVER_APK},
+                       {"name": "ai-assistant-native-0.24.0.apk", "size": 98304,
+                        "browser_download_url": LEGACY_APK}]}
+
+
+def _assets_by_name(body):
+    return {a["name"]: a["browser_download_url"] for a in body["assets"]}
+
+
+def test_the_legacy_named_asset_moves_to_the_self_hosted_exit(published_in_new_repo, client, enforced, monkeypatch):
+    """只有旧名那一枚换成自家出口；新名与别的资产一个字节都不动。
+
+    新壳优先取新名，走的仍是 GitHub 直连（一台机器替人搬字节这段只兜还没升级的人）；
+    mapping.txt 是控制组：证明这里换的是"那一枚资产"，不是"这个 release 的所有地址"。
+    """
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_dual_named_release()))
+    out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    assert out.status_code == 200, out.text
+    got = _assets_by_name(out.json())
+    assert got["ai-assistant-native-0.24.0.apk"] == "https://ai.fenever.xyz/site/android.apk"
+    assert got["fenver-0.24.0.apk"] == FENVER_APK, "新名不该被换：那是新壳的直连通道"
+    assert got["mapping.txt"].endswith("/mapping.txt"), "非 APK 的资产不在改写范围内"
+
+
+@pytest.mark.parametrize("host", ["localhost:8000", "user@ai.fenever.xyz", "ai.fenever.xyz:8443"])
+def test_an_origin_the_shell_would_not_trust_leaves_every_url_alone(        host, published_in_new_repo, client, enforced, monkeypatch):
+    """控制组：拼不出合格来源（本机开发、带端口、带 userinfo）时一个都不换。
+
+    壳那条同源判据只要 https、默认端口、纯主机。把一条它不会信的地址换上去，等于
+    把"本来能用的 GitHub 地址"换成"用不了的自家地址"——那比不改更糟。
+    """
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_dual_named_release()))
+    out = client.get("/v1/update/info", headers={"host": host})
+    assert out.status_code == 200, out.text
+    got = _assets_by_name(out.json())
+    assert got["ai-assistant-native-0.24.0.apk"] == LEGACY_APK
+    assert got["fenver-0.24.0.apk"] == FENVER_APK
+
+
+def test_a_release_carrying_only_the_legacy_name_is_passed_through(        published_in_new_repo, client, enforced, monkeypatch):
+    """改名之前的老发布（只有一枚旧名）不换：没有"新仓地址老壳读不懂"这个问题。"""
+    rel = _dual_named_release()
+    rel["assets"] = [a for a in rel["assets"] if a["name"] != "fenver-0.24.0.apk"]
+    monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(rel))
+    out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    assert _assets_by_name(out.json())["ai-assistant-native-0.24.0.apk"] == LEGACY_APK
+
+
+def test_a_release_still_hosted_in_the_legacy_repo_is_passed_through(
+        client, enforced, monkeypatch):
+    """货还在旧仓时不换：老壳的白名单本来就认那条路径，换了只是白占服务器带宽。"""
+    from app.core import config_store
+    monkeypatch.setattr(config_store, "update_repo", lambda: releases.LEGACY_REPO)
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_dual_named_release()))
+    out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    assert out.status_code == 200, out.text
+    got = _assets_by_name(out.json())
+    assert got["ai-assistant-native-0.24.0.apk"] == LEGACY_APK
+    assert releases._repo_of_payload == releases.LEGACY_REPO, "这条演的是'货从旧仓来'"
+
+
+def test_the_rewrite_never_mutates_the_cached_snapshot(published_in_new_repo, client, enforced, monkeypatch):
+    """改写只发生在返回给这一次请求的那份拷贝上。
+
+    `_payload["raw"]` 是全端点共用的缓存：把它原地改了，下一个不认自家出口的调用方
+    （官网按钮、卡片）就会拿到一条本该由 GitHub 直连的地址——症状是代取白跑一趟。
+    """
+    fake = _Urlopen(_dual_named_release())
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    assert _assets_by_name(out.json())["ai-assistant-native-0.24.0.apk"].endswith("/site/android.apk")
+    cached = _assets_by_name(releases._payload["raw"])
+    assert cached["ai-assistant-native-0.24.0.apk"] == LEGACY_APK, "缓存里那份必须还是原样"
+    assert cached["fenver-0.24.0.apk"] == FENVER_APK
+
+
+@pytest.mark.parametrize("origin,expect", [
+    ("https://ai.fenever.xyz", "https://ai.fenever.xyz/site/android.apk"),
+    ("https://ai.fenever.xyz/", "https://ai.fenever.xyz/site/android.apk"),
+    ("", ""), ("http://ai.fenever.xyz", ""), ("https://ai.fenever.xyz:8443", ""),
+    ("https://ai.fenever.xyz/extra", ""), ("https://user@ai.fenever.xyz", ""),
+])
+def test_the_self_hosted_origin_is_accepted_only_in_the_shape_the_shell_trusts(origin, expect):
+    """自家出口地址的合格线：https + 纯主机 + 那一条固定路径，别的形状一律拼不出。"""
+    assert releases.self_hosted_apk_url(origin) == expect
+
+
+def test_the_self_hosted_apk_path_is_the_same_string_in_the_server_the_route_and_the_shell():
+    """三处同名锁：换出去的地址必须是壳写死的那条路径、也必须是真注册了的那条路由。
+
+    少一个字符的症状不是报错，是老壳对着一句"看起来是下载地址"的东西回 UNUSABLE。
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    router = (root / "backend" / "app" / "web" / "web_router.py").read_text(encoding="utf-8")
+    assert f'@app.get("{releases.SELF_APK_PATH}"' in router, "自家出口没真注册在这条路径上"
+    for shell in ("android", "android-native"):
+        java = (root / shell / "app" / "src" / "main" / "java" / "xyz" / "fenever" /
+                "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
+        assert f'SELF_APK_PATH = "{releases.SELF_APK_PATH}"' in java, f"{shell} 的那条路径对不上"

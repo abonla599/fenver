@@ -19,12 +19,25 @@ import java.util.Map;
 public final class ReleasePlan {
 
     public static final String OWNER = "abonla599";
-    public static final String REPO = "ai-assistant";
+    public static final String REPO = "fenver";
+    /** 改名前的仓名。留着的理由与 {@link #LEGACY_APK_PREFIX} 同一个方向，但这一条更硬：
+     *  v0.23 及更早的每一个 Release 都挂在旧仓下，它们的 {@code browser_download_url}
+     *  永远长成 {@code /abonla599/ai-assistant/releases/download/…}——把旧仓名从白名单里
+     *  摘掉，等于让手里还装着旧版的所有人一夜之间"这一版没有可安装的安卓包"。
+     *  两个仓名一起认，与后端 {@code releases.candidate_repos()} 是同一对。 */
+    public static final String LEGACY_REPO = "ai-assistant";
+    /** 顺序只是可读性：新仓在前。两条路径前缀【都】算官方地址，不存在优先级。 */
+    public static final String[] REPOS = {REPO, LEGACY_REPO};
 
     /**
-     * v0.24 定名后现行名是 {@code fenver-<版本>.apk}（发布流水线自 v0.24 起发这个名字）；
-     * 2026-09-25 起挂在 Releases 里的旧名 {@code ai-assistant-native-<版本>.apk} 继续认——
-     * 历史发布不会改名重发，砍掉旧名等于把老 tag 的更新全判成"没有可安装资产"。
+     * 资产名与 {@code .github/workflows/release-apk.yml} 真实产出的那一个逐字对齐。
+     * 2026-09-25 起发的是原生客户端包 {@code ai-assistant-native-<版本>.apk}；
+     * v0.24 阶段4 收口起换品牌名 {@code fenver-<版本>.apk}，旧名作为**别名同包**继续发一份。
+     *
+     * <p>为什么旧名不能直接删：已经装在用户手机上的 0.23.x 壳把 {@link #LEGACY_APK_PREFIX}
+     * 写死在它那一版的挑资产、验名、给下载文件起名三处，而这一版改不了它。只发新名的话，
+     * 老用户点「检查更新」看到的是"没有可安装资产"——不报错，只是永远升不上来。
+     * 所以 {@link #pickAsset} 两趟：新名优先、旧名兜底。
      *
      * <p>这里不再有"去哪问"的地址：2026-09-23 起这条链路的问与取都收在自家服务器
      * （{@code BuildConfig.UPDATE_INFO_URL} / {@code UPDATE_APK_URL}），壳不再直连
@@ -34,17 +47,30 @@ public final class ReleasePlan {
      * 两边各有一条测试数着工作流写的那一个字面量。
      */
     public static final String APK_PREFIX = "fenver-";
+    /** 过渡期别名：老壳唯一认得的前缀，发布流水线与它同包两名一起上传。 */
     public static final String LEGACY_APK_PREFIX = "ai-assistant-native-";
+    /** 挑选顺序就是这条数组的顺序：新名在前，只有旧名时旧名兜底。 */
+    public static final String[] APK_PREFIXES = {APK_PREFIX, LEGACY_APK_PREFIX};
 
     /**
      * 透传回来的 JSON 里那个 {@code browser_download_url} 仍然按这一套校验。
      * 壳现在下载走自家服务器钉死的地址、并不用这个 url，留着的理由是纵深防御：
      * 一份连"官方下载地址"都被人改花了的 JSON，本来就不该被当成可信发布信息。
      * GitHub 哪天换了主机的话这里会明确报"地址不在白名单里"，而不是静默放行。
+     *
+     * <p>官方路径前缀认两条（{@link #REPOS}），因为合法的正式发布确实散在两个仓里：
+     * v0.23 及以前在旧仓，v0.24 起在新仓。这里若只留一条，改名那天就是全量断更。
      */
     private static final String ALLOWED_HOST = "github.com";
-    private static final String ALLOWED_PATH_PREFIX =
-            "/" + OWNER + "/" + REPO + "/releases/download/";
+    private static final String[] ALLOWED_PATH_PREFIXES = allowedPathPrefixes();
+
+    private static String[] allowedPathPrefixes() {
+        String[] out = new String[REPOS.length];
+        for (int i = 0; i < REPOS.length; i++) {
+            out[i] = "/" + OWNER + "/" + REPOS[i] + "/releases/download/";
+        }
+        return out;
+    }
 
     /**
      * 第二条信任规则（v0.23 T1.5 / R5-AC-3）：**与 APP_URL 同源**且路径【恰好等于】
@@ -103,12 +129,6 @@ public final class ReleasePlan {
         return APK_PREFIX + version + ".apk";
     }
 
-    /** 现行名在前、旧名兜底：与后端 {@code releases.asset_names} 同一优先级。 */
-    public static String[] assetNames(String version) {
-        return new String[]{APK_PREFIX + version + ".apk",
-                            LEGACY_APK_PREFIX + version + ".apk"};
-    }
-
     /**
      * 给调用方留一个造 UNUSABLE 的口子：连不上、超时这类事实只有 Activity 知道，
      * 但三态的判据必须留在这层，别让它退化成"出错了就当没更新"。
@@ -154,9 +174,12 @@ public final class ReleasePlan {
         Object assets = rel.get("assets");
         if (!(assets instanceof List)) return unusable("发布里没有资产清单");
         Decision picked = pickAsset((List<?>) assets, version, appUrl);
-        if (picked == null) return unusable("没有名为 " + assetName(version)
-                + "（或旧名）的可安装资产");
-
+        if (picked == null) {
+            // 这句会原样出现在「检查更新失败：…」后面，所以两个找过的名字都得说：
+            // 只报新名的话，看到的人（以及以后查这件事的人）会以为旧名那一趟没跑。
+            return unusable("这一版没有可安装的安卓包：找过 " + assetName(version)
+                    + " 与 " + LEGACY_APK_PREFIX + version + ".apk");
+        }
         String body = text(rel.get("body"));
         return new Decision(Kind.AVAILABLE, version, picked.url, picked.sizeBytes,
                 truncate(body), null, digestOrNull(text(rel.get("apk_sha256"))));
@@ -181,15 +204,18 @@ public final class ReleasePlan {
     }
 
     /**
-     * 在资产里找那一个【名字精确等于】{@code fenver-<version>.apk} 的；找不到再认
-     * 旧名 {@code ai-assistant-native-<version>.apk}。新名在前是优先级，不是兼容开关。
+     * 在资产里找这一版那个包，两趟：先新名 {@code fenver-<version>.apk}，再旧名别名。
      *
      * <p>不按"扩展名是 .apk 就取第一个"办：一次发布可以同时挂着 mapping.txt、别的平台的产物、
      * 或者上一次误传的文件，而这里挑中的东西是要弹给系统去安装的。名字对上版本号顺带钉住了
      * "这个包就是这一版"，链式改错 tag 与资产名时这里会先变红。
+     *
+     * <p>两趟而不是一把 {@code startsWith}：新壳装新名、老包只挂旧名时兜底装得上，
+     * 而"两个都在"的时候必须取新名——那才是这一次改名想让所有人看见的那个名字。
      */
     private static Decision pickAsset(List<?> assets, String version, String appUrl) {
-        for (String want : assetNames(version)) {
+        for (String prefix : APK_PREFIXES) {
+            String want = prefix + version + ".apk";
             for (Object item : assets) {
                 if (!(item instanceof Map)) continue;
                 Map<?, ?> asset = (Map<?, ?>) item;
@@ -230,7 +256,7 @@ public final class ReleasePlan {
         // 第一条（原样保留）：GitHub 官方发布路径 + 资产名精确匹配。
         if (!ALLOWED_HOST.equalsIgnoreCase(url.getHost())) return false;
         if (url.getPort() != -1) return false;                 // 带端口的不是那个下载入口
-        if (path == null || !path.startsWith(ALLOWED_PATH_PREFIX)) return false;
+        if (path == null || !startsWithAny(path)) return false;
         if (path.contains("..")) return false;
         int slash = path.lastIndexOf('/');
         return slash >= 0 && path.length() > slash + 1
@@ -240,6 +266,14 @@ public final class ReleasePlan {
     /** 兼容旧调用与既有测试的两参形状：没有 appUrl 就没有第二条规则。 */
     static boolean downloadUrlIsTrusted(String raw, String expectedName) {
         return downloadUrlIsTrusted(raw, expectedName, null);
+    }
+
+    /** 路径以【任意一条】官方前缀开头就算这一项过——两条前缀的来历见 {@link #REPOS}。 */
+    private static boolean startsWithAny(String path) {
+        for (String prefix : ALLOWED_PATH_PREFIXES) {
+            if (path.startsWith(prefix)) return true;
+        }
+        return false;
     }
 
     /** url 的主机是否【就是】appUrl 那一族说的主机：https、默认端口、host 精确相等。 */

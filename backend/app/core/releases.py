@@ -79,16 +79,29 @@ ASSET_TIMEOUT_SECONDS = 20.0
 APK_MAX_BYTES = 16 * 1024 * 1024
 MAX_HOPS = 3
 # 这个形状同时保证它放进 Content-Disposition 是安全的：没有 CR/LF、没有引号、没有分号。
-# 前缀与发布流水线真实产出的资产名逐字对齐（判据在
-# test_the_asset_name_is_the_one_the_workflow_publishes，漂了的不是报错，是官网按钮与
-# App 内更新双双静默退回发布页）。v0.24 定名后现行名是 `fenver-<版本>.apk`；
-# 2026-09-25 起挂在 Releases 里的旧名 `ai-assistant-native-<版本>.apk` 继续认——
-# 历史发布不会改名重发，砍掉旧名等于把老 tag 的下载全变成退回发布页。
-_ASSET_NAME_RE = re.compile(r"^(?:fenver|ai-assistant-native)-[0-9][0-9A-Za-z.\-]*\.apk$")
-# 资产名的前缀只在这里写一次；(新名, 旧名) 的次序就是挑选的优先级。
-ASSET_PREFIX = "fenver-"
-LEGACY_ASSET_PREFIX = "ai-assistant-native-"
+# 前缀与发布流水线真实产出的资产名逐字对齐（判据见
+# test_the_asset_name_is_the_one_the_workflow_publishes），漂了的不是报错，
+# 是官网按钮与 App 内更新双双静默退回发布页。
+#
+# v0.24 阶段4 收口（用户点名"APK 产物文件名按新品牌名规则同步，下载端与构建端一致"）：
+# 正式名换 `fenver-<版本>.apk`。**但旧名必须作为别名一并发布**，不是兼容洁癖：
+# 已经装在用户手机上的 0.23.x 壳把 `ai-assistant-native-` 写死在挑资产、验名、
+# 给下载文件起名三处，改不了。只发新名的话，老用户点「检查更新」看到的是
+# "没有可安装资产"——不报错，只是永远升不上来，正是 T2.7 列为本版最高风险的那个形状。
+# 别名的退场条件：在线老壳（< v0.24）清零，或 v0.25 起明确放弃对 0.23.x 的直升。
+ASSET_PREFIX = "fenver-"                        # 我们在发的这个名字
+LEGACY_ASSET_PREFIX = "ai-assistant-native-"    # 老壳唯一认得的那个名字，过渡期同包两名
 ASSET_PREFIXES = (ASSET_PREFIX, LEGACY_ASSET_PREFIX)
+_ASSET_NAME_RE = re.compile(r"^(?:fenver|ai-assistant-native)-[0-9][0-9A-Za-z.\-]*\.apk$")
+
+
+def asset_names(version: str) -> tuple:
+    """这一版所有可接受的资产名，按优先级排：新名在前、旧名兜底。
+
+    顺序就是判据：一份 release 同时挂着两名（v0.24 起就是这么发的）时取新名，
+    只有旧名时取旧名——后者正是 0.23.x 老包在新仓里唯一拿得到的东西。
+    """
+    return tuple(prefix + version + ".apk" for prefix in ASSET_PREFIXES)
 
 _lock = threading.Lock()
 _payload = None                 # 上一次**成功**拉到的那份
@@ -143,20 +156,17 @@ def normalize_version(text) -> str:
     return value[1:] if value[:1] in ("v", "V") else value
 
 
-def asset_names(version: str):
-    """这一版可能挂着的资产名，按优先级排：现行名在前，旧名兜底。"""
-    return [prefix + version + ".apk" for prefix in ASSET_PREFIXES]
-
-
 def _pick_asset(body: dict, version: str):
-    """只取名字**精确等于** `fenver-<version>.apk` 或旧名那一个的资产，新名优先。
+    """在资产里找这一版那个包：新名优先、旧名兜底，两个都只认**名字精确等于**。
 
     与壳里 `ReleasePlan.pickAsset` 同一个理由：一次发布可以同时挂着 mapping.txt、
     别的平台的产物或上一次误传的文件，而这里挑中的东西是要弹给人去安装的。
     名字对上版本号顺带钉住了"这个包就是这一版"。
+    两趟而不是一趟 `in`：一趟没法表达"两个名字都在时取哪一个"。
     """
+    assets = body.get("assets") or []
     for want in asset_names(version):
-        for asset in (body.get("assets") or []):
+        for asset in assets:
             if isinstance(asset, dict) and asset.get("name") == want:
                 return asset
     return None
@@ -225,7 +235,7 @@ def apk_sha256(body_text) -> str:
     return m.group(1) if m else ""
 
 
-def latest_release_manifest():
+def latest_release_manifest(origin: str = ""):
     """壳「检查更新」要的那份 JSON：原样透传 + 顶层多一枚 `apk_sha256`。
 
     返回 (dict, reason)。拉不到时 (None, 理由)——调用方必须把这句理由原样带给人，
@@ -236,6 +246,10 @@ def latest_release_manifest():
     "现在有没有新版"，把 GitHub 断供前攒下的旧货当最新发出去，恰恰是把"我读不到"
     伪装成"你已是最新"——AC-4 的后半个词是这么被违反的。卡片端点不收紧，是因为
     它拉不到就不弹，旧快照撑死多弹一句"去下载"，方向上仍是真话。
+
+    `origin` 与 `repo` 是调用方（那条端点）带进来的这次请求的来源，见
+    `route_legacy_asset_to_self_host`：两个条件都对上才把旧名那枚资产的下载地址换成
+    自家出口，否则一个字节都不动——透传仍然是默认行为，改名只是它的一条过渡期例外。
     """
     snapshot, reason, stale = _snapshot()
     if not snapshot:
@@ -248,7 +262,77 @@ def latest_release_manifest():
         return None, "发布快照里没有原样 JSON（内部状态坏了）"
     manifest = dict(raw)
     manifest["apk_sha256"] = apk_sha256(raw.get("body"))
+    route_legacy_asset_to_self_host(manifest, origin, _preferred_repo())
     return manifest, ""
+
+
+# 自家代取端点。这一串不是我们随口起的名字，是量产壳里写死的第二条信任规则
+# （`ReleasePlan.SELF_APK_PATH`），也是 web_router 注册的那条路由——三处必须一字
+# 不差，钉在 test_update_channel 的对齐锁里。少一个字符的症状不是报错，是老壳对着一
+# 个"看起来是下载地址"的东西回一句 UNUSABLE。
+SELF_APK_PATH = "/site/android.apk"
+
+
+def self_hosted_apk_url(origin: str) -> str:
+    """把调用方的来源拼成自家出口地址；来源不合格时返回空串（＝不换）。
+
+    合格线照抄壳的判据，因为这条 URL 最终是过壳的闸的：必须 https、主机里不许带端口
+    或 userinfo。本地开发用 http://localhost:8000 时这里必然回空串——那正是想要的：
+    老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的 GitHub 地址换成
+    一条用不了的。
+    """
+    value = (origin or "").strip()
+    if not value.startswith("https://"):
+        return ""
+    host = value[len("https://"):].strip("/")
+    if not host or "/" in host or ":" in host or "@" in host:
+        return ""
+    return "https://" + host + SELF_APK_PATH
+
+
+def route_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> int:
+    """只把**旧名**那一枚资产的 `browser_download_url` 换成自家出口，返回改了几枚。
+
+    为什么只动旧名：搬到新仓以后，0.23.x 及更早的壳会读到 `/abonla599/fenver/...`
+    这样的地址，而它们的 GitHub 路径白名单在装进手机那一刻就定死了是旧仓，改不动。
+    2026-09-30 用 HEAD(=0.23.17) 那份 ReleasePlan + MiniJson 真跑过 `decide`：
+    新仓双名与新仓只挂新名两档都是 UNUSABLE，只有"旧仓那条路径"和"自家出口"是
+    AVAILABLE。所以这里给旧名换到自家出口（老壳本来就信这条同源规则），新名原样
+    留 GitHub 直连——新壳优先取新名，一台机器的带宽只兜住还没升级的那批人，而且
+    这层转发改不动字节校验：装进手机的仍然是 Release 正文那行 APK-SHA256 对上号的
+    同一串字节。
+
+    两个条件都对上才动手，为的是把"透传"留在默认位：
+    * `repo` 仍是旧仓时不换——老壳的白名单本来就认那条路径，换了只是白占服务器带宽；
+    * 这一版只挂了一枚旧名时不换——那是改名之前的老发布，本就没有换的必要。改名
+      之后我们发的每一版都是双名，所以需要这层转换的那批发布必然满足它。
+
+    必须**换了再返回**而不是改缓存里那份：`manifest` 的 `assets` 是从 `_payload` 的
+    原样 JSON 浅拷来的，原地改会把换过的地址带给下一个没给 origin 的调用方。
+    """
+    url = self_hosted_apk_url(origin)
+    if not url:
+        return 0
+    if repo == LEGACY_REPO:
+        return 0
+    version = normalize_version(manifest.get("tag_name"))
+    fresh, legacy = asset_names(version)         # 改名之后恒是两名，顺序即优先级
+    assets = manifest.get("assets")
+    if not isinstance(assets, list):
+        return 0
+    if not any(isinstance(item, dict) and item.get("name") == fresh for item in assets):
+        return 0
+    changed = 0
+    copied = []
+    for asset in assets:
+        if isinstance(asset, dict) and asset.get("name") == legacy:
+            asset = dict(asset)
+            asset["browser_download_url"] = url
+            changed += 1
+        copied.append(asset)
+    if changed:
+        manifest["assets"] = copied
+    return changed
 
 
 def _snapshot() -> tuple:
@@ -336,8 +420,8 @@ def download_plan():
     的是"陌生人的浏览器从我们这台服务器落下哪个字节流"，所以任何一项对不上都宁可拒：
     调用方拿不到 plan 就退回发布页，而不是硬编一个地址给人。
 
-    资产名必须等于 `fenver-<这一版>.apk`（或改名前的旧名 `ai-assistant-native-<这一版>.apk`，
-    与 `_pick_asset` 同一优先级）：一次发布可以同时挂着 mapping.txt、
+    资产名必须等于 `fenver-<这一版>.apk`（或过渡期的那一个旧名别名，见 `asset_names`）：
+    一次发布可以同时挂着 mapping.txt、
     别的平台的产物或上一次误传的旧包（`_pick_asset` 同一个理由），而且这条正则顺带
     保证了它放进 Content-Disposition 是安全的——没有 CR/LF、没有引号、没有分号。
     """

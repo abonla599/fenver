@@ -59,7 +59,8 @@ public final class ApkDownloader {
      * @param url            钉死的下载地址（调用方负责它已过白名单——这里不复核，
      *                       免得"信任判断"出现第二处真相；白名单只在 {@link ReleasePlan}）
      * @param temp           {@code <name>.apk.part} 半截位
-     * @param target         最终的 {@code fenver-<version>.apk}（旧名 {@code ai-assistant-native-} 同形）
+     * @param target         最终的 {@code fenver-<version>.apk}（名字由调用方按
+     *                       {@link ReleasePlan#assetName} 拼，这里不认形状）
      * @param maxBytes       体积硬上限（与后端 releases.APK_MAX_BYTES 同一个数）
      * @param expectedSha256 发布校验值；null 直接拒——没有对账对象的下载就是上次事故的原样
      * @param progress       可空（台架/不需要进度的调用方）

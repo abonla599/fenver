@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import xyz.fenever.assistant.core.ReleasePlan
 import java.io.File
 import java.io.FileNotFoundException
 
@@ -18,7 +19,8 @@ import java.io.FileNotFoundException
  * 与旧壳 android/.../ApkFileProvider.java 同一套边界，三条少一处都是一个可读任意路径的口子：
  * ① manifest 里 exported=false——除了我们主动 grant 的接收方，谁也解析不到这个 authority；
  * ② 只接受单段路径，canonical 后必须仍落在外部私有下载目录内（挡 ../ 与软链接逃逸），
- *    且文件名必须是 ai-assistant-native-*.apk——半截 .part 与顺手别的文件都递不出去；
+ *    且文件名必须是更新包那一个形状（`fenver-*.apk`，或过渡期同包并发的旧名别名，
+ *    见 `ReleasePlan.APK_PREFIXES`）——半截 .part 与顺手别的文件都递不出去；
  * ③ 只给读，openFile 收非 "r" 模式直接抛。
  *
  * 不引 androidx.core 的 FileProvider：一个目录一个形状的读取，手写的表面比配置
@@ -62,7 +64,7 @@ class ApkFileProvider : ContentProvider() {
         if (uri.pathSegments.size != 1) return null
         val name = uri.lastPathSegment
         if (name.isNullOrEmpty() || name == "." || name == "..") return null
-        if (!APK_NAME_PREFIXES.any { name.startsWith(it) } || !name.endsWith(".apk")) return null
+        if (APK_NAME_PREFIXES.none { name.startsWith(it) } || !name.endsWith(".apk")) return null
         val root = rootDir() ?: return null
         val candidate = File(root, name)
         val rootPath = root.canonicalPath
@@ -87,8 +89,13 @@ class ApkFileProvider : ContentProvider() {
     companion object {
         /** manifest 里注册的是 `${applicationId}.apkprovider`；拼 URI 用同一个后缀常量。 */
         const val AUTHORITY_SUFFIX = ".apkprovider"
-        // 现行名（v0.24 定名）在前、旧名兜底：与 ReleasePlan.assetNames 同一组前缀
-        val APK_NAME_PREFIXES = listOf("fenver-", "ai-assistant-native-")
+
+        /** 更新包的名字前缀：唯一真相在共享判断核 `ReleasePlan.APK_PREFIXES`（新名 + 过渡期旧名）。
+         *  这里不再自己抄一份字符串——改名那次事故（2026-09-25）留下的教训就是
+         *  "发布的名字、后端挑的名字、壳认的名字"三处各写各的，漂了不报错，
+         *  只是安装页永远拿不到文件。 */
+        val APK_NAME_PREFIXES: List<String> = ReleasePlan.APK_PREFIXES.toList()
+
         const val APK_MIME = "application/vnd.android.package-archive"
 
         fun uriForFile(context: Context, fileName: String): Uri =
