@@ -12,6 +12,26 @@ from app.core import usage   # 账本：两条聊天路径共用一个口径，�
 from app.tools.executor import execute_tool
 
 
+class StreamCancelled(Exception):
+    """用户按了"停止"（cancel 端点翻标志并尽力关连接）：生成线在此收口。
+
+    与"读者断开"是两回事——v0.25 R3 起断线不再打断生产（续播靠这个前提），
+    所以这个异常只有一个成因：显式取消。调用方（main.py 的生产线程）据此发
+    cancelled 终帧而不是 error，账照已消费的部分结清，下一轮 create() 不发生。
+    """
+
+
+def _close_quietly(stream) -> None:
+    """尽力关闭上游流：close 可能不存在（测试假流）、可能已关、可能层里报错。
+    取消方不该因为"关连接"这一下再炸出第二个异常——标志位才是主判据。"""
+    try:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
+
+
 def stream_chat(
     model: str,
     messages: List[Dict[str, Any]],
@@ -21,6 +41,8 @@ def stream_chat(
     tools: Optional[List[Dict]] = None,
     max_tool_turns: int = 5,
     user_id: str = None,
+    cancel_event=None,
+    on_upstream_start=None,
 ) -> Generator[str, None, None]:
     """流式生成 AI 回复，逐块产出文本；给了 tools 就带上工具循环。
 
@@ -35,6 +57,15 @@ def stream_chat(
     tools 默认 None 而不是自动装配：非流式那条路（ChatPipeline）一直是把工具传给
     模型的，这里曾经一个 tools 形参都没有，于是只走流式的界面上，工具等于不存在——
     模型如实回答"我无法调用外部计算器工具"。要不要给工具由调用方决定。
+
+    cancel_event / on_upstream_start（v0.25 R3，都默认 None，直连调用方不受影响）：
+    取消要能真的停下来，靠两件事——轮首与逐块检查 cancel_event（保证**下一个**
+    付费 create() 不发生），以及 on_upstream_start 把手里正在读的上游连接交出去
+    （交给 stream_runs.StreamRun，取消端点从另一个线程尽力 close 它）。
+    诚实的边界：close 一条正被阻塞读取的连接不保证立刻打断那次读，所以取消最迟
+    在下一个块到达或读超时（build_client 默认 120s）生效；被保证的是不再新增
+    一次付费调用。工具回灌后的下一轮在 create() 之前就被拦下——那才是"重复计费"
+    的真正来源。
     """
     provider = store.resolve(provider_id, legacy_model=model)
     client = build_client(provider)
@@ -49,6 +80,10 @@ def stream_chat(
     ok = True
     try:
         for _ in range(turns):
+            # 轮首先查再 create：取消之后不许再有新一轮付费调用。这一句是
+            # "取消后账本增量 = 0"里被数学上保证的那一半。
+            if cancel_event is not None and cancel_event.is_set():
+                raise StreamCancelled()
             kwargs: Dict[str, Any] = {
                 "model": provider["model"],
                 "messages": msgs,
@@ -65,6 +100,16 @@ def stream_chat(
                 kwargs["tool_choice"] = "auto"
 
             stream = client.chat.completions.create(**kwargs)
+            # 把手里的连接交给要停它的人（交接失败不影响本轮内容，吞掉即可）；
+            # create 与首块之间也可能正好被取消，交完句柄立刻查一次。
+            if on_upstream_start is not None:
+                try:
+                    on_upstream_start(stream)
+                except Exception:
+                    pass
+            if cancel_event is not None and cancel_event.is_set():
+                _close_quietly(stream)
+                raise StreamCancelled()
 
             text = ""
             # 工具调用在流式里是按 index 分片回来的：id/name 通常只在第一片，
@@ -72,38 +117,63 @@ def stream_chat(
             calls: Dict[int, Dict[str, str]] = {}
 
             rounds += 1
-            for chunk in stream:
-                # usage 通常在最后一个块里，而那个块的 choices 是空数组——
-                # 先读账再 continue，否则永远读不到。
-                u = getattr(chunk, "usage", None)
-                if u is not None:
-                    billed["prompt_tokens"] += getattr(u, "prompt_tokens", 0) or 0
-                    billed["completion_tokens"] += getattr(u, "completion_tokens", 0) or 0
-                    billed["total_tokens"] += getattr(u, "total_tokens", 0) or 0
-                    details = getattr(u, "completion_tokens_details", None)
-                    billed["reasoning_tokens"] += (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
-                    pdetails = getattr(u, "prompt_tokens_details", None)
-                    billed["cached_tokens"] += (getattr(pdetails, "cached_tokens", 0) or 0) if pdetails else 0
-                if not getattr(chunk, "choices", None):
-                    continue
-                delta = getattr(chunk.choices[0], "delta", None)
-                if delta is None:
-                    continue
-                piece = getattr(delta, "content", None)
-                if piece:
-                    text += piece
-                    yield piece
-                for tc in (getattr(delta, "tool_calls", None) or []):
-                    slot = calls.setdefault(getattr(tc, "index", 0) or 0,
-                                            {"id": "", "name": "", "arguments": ""})
-                    if getattr(tc, "id", None):
-                        slot["id"] = tc.id
-                    fn = getattr(tc, "function", None)
-                    if fn is not None:
-                        if getattr(fn, "name", None):
-                            slot["name"] += fn.name
-                        if getattr(fn, "arguments", None):
-                            slot["arguments"] += fn.arguments
+            try:
+                for chunk in stream:
+                    # 逐块检查取消标志——诚实边界：这里的"立刻"是"下一个块到达
+                    # 时立刻"；close() 常常（不保证）让读侧当场报错，那条路走下面
+                    # 的 except 归类。
+                    if cancel_event is not None and cancel_event.is_set():
+                        _close_quietly(stream)
+                        raise StreamCancelled()
+                    # usage 通常在最后一个块里，而那个块的 choices 是空数组——
+                    # 先读账再 continue，否则永远读不到。
+                    u = getattr(chunk, "usage", None)
+                    if u is not None:
+                        billed["prompt_tokens"] += getattr(u, "prompt_tokens", 0) or 0
+                        billed["completion_tokens"] += getattr(u, "completion_tokens", 0) or 0
+                        billed["total_tokens"] += getattr(u, "total_tokens", 0) or 0
+                        details = getattr(u, "completion_tokens_details", None)
+                        billed["reasoning_tokens"] += (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
+                        pdetails = getattr(u, "prompt_tokens_details", None)
+                        billed["cached_tokens"] += (getattr(pdetails, "cached_tokens", 0) or 0) if pdetails else 0
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    delta = getattr(chunk.choices[0], "delta", None)
+                    if delta is None:
+                        continue
+                    piece = getattr(delta, "content", None)
+                    if piece:
+                        text += piece
+                        yield piece
+                    for tc in (getattr(delta, "tool_calls", None) or []):
+                        slot = calls.setdefault(getattr(tc, "index", 0) or 0,
+                                                {"id": "", "name": "", "arguments": ""})
+                        if getattr(tc, "id", None):
+                            slot["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                slot["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                slot["arguments"] += fn.arguments
+            except StreamCancelled:
+                raise
+            except BaseException:
+                # 取消时 close 一条正在读的连接，在 read 侧多半炸出一个底层异常
+                # （httpx 的 StreamClosed 之类）：标志位翻着的时候炸的，算取消，
+                # 不算模型故障——账仍然在下面 finally 里结，但调用方发的是
+                # cancelled 终帧，不是 error。
+                if cancel_event is not None and cancel_event.is_set():
+                    raise StreamCancelled() from None
+                raise
+            finally:
+                # 正常读干、取消、异常三条路都过这一遍：连接不该靠 GC 收场。
+                _close_quietly(stream)
+
+            # 自然读完但取消恰好在这之后到达：工具回灌前再查一次。跑工具本身
+            # 不再花上游的钱，但回灌之后必进下一轮 create()——在这里掐死最干净。
+            if cancel_event is not None and cancel_event.is_set():
+                raise StreamCancelled()
 
             if not calls:
                 return
@@ -131,8 +201,9 @@ def stream_chat(
         ok = False
         raise
     finally:
-        # 客户端中途断开走的是 GeneratorExit，也会落到这里。那一半的消耗同样要记账，
-        # 而且要记成 failed——只记跑完的那一次会系统性低估，也永远看不见故障率。
+        # v0.25 R3 起这条路上的"读者断开"不再终结生成（生产线程抽干为止），
+        # 落到 failed 的成因改为取消与真故障。半截消耗同样要记账：那一半的 token
+        # 是真花出去了，只记跑完的那一次会系统性低估，也永远看不见故障率。
         usage.record_call(user_id=user_id or "unattributed",
                           provider_id=provider["id"],
                           paid_by=provider.get("paid_by") or "operator",
