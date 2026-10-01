@@ -26,23 +26,34 @@ def build_version() -> str:
 
     找两处：项目根（源码跑与打包版向上找到的同一个根），以及 EXE 自己旁边
     （把 dist\\run_backend 整目录拷走时，version.txt 会跟着一起走）。
+
+    **冻结版里这两处的优先级不一样**，这一条是现网踩出来的：换包时构建在别处
+    （工作树）做，落地却跑在项目根，根上留着上一版构建生成的 version.txt——它比
+    包内那份新一次构建的戳更陈旧，却排在前面，于是 /health 与「设置 → 关于」
+    齐声把 v0.24.1 报成 v0.24.0。代码与戳的同源关系只存在于包里：打包版先认
+    随包一起构建的那份，项目根那份只在包内没戳时才当补充。
     """
-    candidates = []
+    root_candidates = []
     try:
-        candidates.append(os.path.join(data_root(), VERSION_FILE))
+        root_candidates.append(os.path.join(data_root(), VERSION_FILE))
     except Exception:
         pass
+
+    bundle_candidates = []
     try:
         import sys
         # 打包版：spec 把 version.txt 列进 datas，落地位置是 _internal\ 根下（= _MEIPASS），
         # 跟着 EXE 一起被拷走时也还在 exe 同级。两处都找一下，少一处就少一种"拷走了就没版本"。
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            candidates.append(os.path.join(meipass, VERSION_FILE))
+            bundle_candidates.append(os.path.join(meipass, VERSION_FILE))
         if getattr(sys, "frozen", False):
-            candidates.append(os.path.join(os.path.dirname(sys.executable), VERSION_FILE))
+            bundle_candidates.append(os.path.join(os.path.dirname(sys.executable), VERSION_FILE))
     except Exception:
         pass
+
+    # 非冻结（源码跑）时 bundle_candidates 是空的，顺序与从前一模一样
+    candidates = bundle_candidates + root_candidates if bundle_candidates else root_candidates
 
     for path in candidates:
         try:

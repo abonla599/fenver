@@ -576,6 +576,44 @@ def test_the_build_stamp_comes_from_a_file_we_generate_at_build_time(tmp_path, m
     assert not os.path.exists(os.path.join(os.path.dirname(buildinfo.__file__), "version.txt"))
 
 
+def test_a_frozen_package_trusts_its_own_stamp_over_a_stale_root_one(tmp_path, monkeypatch):
+    """换包时根上那份 version.txt 可能是上一版构建留下的，冻结版不许认它。
+
+    这是 v0.24.1 换包当天真撞过的形状：包在 `_internal\\` 里带的是 v0.24.1，
+    运行根上留着 v0.24.0，于是 `/health` 与「设置 → 关于」齐声报错——而代码确实是
+    新代码，人看到的却是"换包没换成功"。判据只有一条：**跟代码同源的那份优先**，
+    包内没有戳才轮到项目根那份补充。
+    """
+    import sys as _sys
+    from app.core import buildinfo
+
+    bundle = tmp_path / "internal"
+    bundle.mkdir()
+    (bundle / "version.txt").write_text("v0.24.1\n", encoding="utf-8")
+    root = tmp_path / "runtime"
+    root.mkdir()
+    (root / "version.txt").write_text("v0.24.0\n", encoding="utf-8")
+
+    monkeypatch.setattr(buildinfo, "data_root", lambda: str(root))
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    monkeypatch.setattr(_sys, "_MEIPASS", str(bundle), raising=False)
+    buildinfo.build_version.cache_clear()
+    assert buildinfo.build_version() == "v0.24.1", "冻结版读了根上那份陈旧的戳：版本号成了第二个事实来源"
+
+    # 包里没带戳（应急构建忘了生成）时，退回项目根那份，不许直接空白
+    (bundle / "version.txt").unlink()
+    buildinfo.build_version.cache_clear()
+    assert buildinfo.build_version() == "v0.24.0", "包内无戳时项目根那份兜底也断了"
+
+    # 源码跑（未冻结）时顺序一字未动：只认项目根那份
+    monkeypatch.setattr(_sys, "frozen", False, raising=False)
+    monkeypatch.delattr(_sys, "_MEIPASS", raising=False)
+    (bundle / "version.txt").write_text("v9.99\n", encoding="utf-8")
+    buildinfo.build_version.cache_clear()
+    assert buildinfo.build_version() == "v0.24.0", "源码跑被包内路径抢了顺序"
+    buildinfo.build_version.cache_clear()
+
+
 def test_the_packaging_spec_lists_the_version_file(tmp_path):
     """spec 漏列 version.txt，冻结版就读不到构建戳，而这不会让任何测试变红。
 

@@ -44,7 +44,8 @@ cloudflared tunnel run fenver
 
 ```
 App「检查更新」→ 你的后端 /v1/update/check → 按 data/config.json 的 update_repo 探测
-                                        ↳ 失败自动回退 abonla599/ai-assistant（旧仓兜底）
+                                        ↳ 失败自动回退 abonla599/ai-assistant（旧仓兜底；
+                                          该仓自 v0.24.1 起私有，对新部署等于没有这条兜底）
 ```
 
 - `update_repo` 默认 `abonla599/fenver`；**你自己 fork 部署的话，把它改成你自己的 `用户/仓库`**，否则用户会收到别人家的更新包。改法：`POST /v1/admin/config` `{"update_repo":"you/fenver"}`，或删掉 `data/config.json` 里这个键用默认。
