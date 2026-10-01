@@ -636,7 +636,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         """R3b-1 的钱闸·判据侧：检查点在 streaming.py 的轮次边界（付费边界）。
 
         宽限期单一真相：config_store.stream_no_reader_grace_seconds()（env
-        STREAM_NO_READER_GRACE_SECONDS > data/config.json > 默认 30 秒）。
+        STREAM_NO_READER_GRACE_SECONDS > data/config.json > 默认 120 秒）。
         窗口内读者回来（含 Last-Event-ID 续播）一切照常；没回来就借既有的
         取消路径收场——翻标志、尽力关连接、半句在落盘闩下进会话、账照常
         结清——绝不 fork 第二套"超时"语义。

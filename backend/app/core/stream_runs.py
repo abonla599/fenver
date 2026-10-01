@@ -14,7 +14,7 @@
 - 但"关页面不再顺手掐死"不等于"关页面可以无限跑"（v0.25 R3b 补的钱闸）：
   第一个付费轮之后，每要起飞新一轮都必须有活读者挂在电上（attach_reader/
   detach_reader 由 sse_frames 进出，续播的重连也算读者回来）。1→0 起算宽限
-  （config_store.stream_no_reader_grace_seconds，默认 30 秒），窗口里没人回来，
+  （config_store.stream_no_reader_grace_seconds，默认 120 秒），窗口里没人回来，
   就借**同一条**取消路径收场（翻标志、尽力关连接、半句在落盘闩下存会话、账
   照常结），不另起第二套"超时"语义。封顶是"已在飞行中的那一轮流完并结账、
   新的轮次为零"——断线本身不免费，close 一条正阻塞在 read 上的连接在这套

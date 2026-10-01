@@ -26,8 +26,12 @@ DEFAULTS = {
     "registration_open": False,
     "update_repo": "abonla599/fenver",
     # v0.25 R3b：流式断线后"没有读者的宽限期"（秒）。单一真相就是这里——
-    # 读取统一走 stream_no_reader_grace_seconds()，别处不许再写 30 这个数。
-    "stream_no_reader_grace_seconds": 30.0,
+    # 读取统一走 stream_no_reader_grace_seconds()，别处不许再写这个数。
+    # 为什么是 120 而不是 30（产品定的口径，别再当省钱旋钮调小）：省钱的是
+    # streaming.py 轮次边界上的钱闸——没有活读者就不起飞新一轮，这一条与宽限期
+    # 长短无关；宽限期决定的是"你离开多久之后我们还替你接着跑"。接个电话、锁屏
+    # 看一眼、页面重进，都是几十秒量级，30 秒会把答案停在半路而一分钱没多省。
+    "stream_no_reader_grace_seconds": 120.0,
 }
 
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
@@ -123,7 +127,7 @@ def update_repo() -> str:
 
 
 def stream_no_reader_grace_seconds() -> float:
-    """流式"没有活读者"的宽限期（秒）——全场唯一读数口径，默认 30。
+    """流式"没有活读者"的宽限期（秒）——全场唯一读数口径，默认 120（省钱的是轮次边界钱闸，不是这个窗口）。
 
     优先级与注册开关同一套路：环境变量 STREAM_NO_READER_GRACE_SECONDS 显式设了
     说话（每次现读，改了不必重启），否则 data/config.json 的

@@ -551,12 +551,12 @@ def test_regenerate_style_second_ask_is_a_real_paid_call(client, real_stream,
 
 def test_grace_window_comes_from_config_file_and_env(client, real_stream, clean_usage,
                                                      grace_env, config_file_grace):
-    """默认 30；config.json 的值说了算；env 压过文件——三层都是既有通道的口径。
+    """默认 120；config.json 的值说了算；env 压过文件——三层都是既有通道的口径。
 
     行为面钉两侧：文件给 0.2 → 真的很快停；文件给 300 → 1.5 秒时还活着（计时器
     在等，不是装样子），随后手动取消收尾。用假的"读盘成功"糊弄不算数。
     """
-    assert config_store.stream_no_reader_grace_seconds() == 30.0, "默认必须是 30 秒"
+    assert config_store.stream_no_reader_grace_seconds() == 120.0, "默认必须是 120 秒：宽限期不是省钱旋钮，省钱的是轮次边界钱闸"
 
     # 文件通道（顺带钉形状的宽容度：JSON 里的 int 30 也是合法数字）
     v = config_file_grace({"registration_open": True,
