@@ -218,7 +218,10 @@ def test_task_agent_prompt_hides_unavailable_tools(monkeypatch):
 
     captured = {}
 
-    def fake_llm(model, messages):
+    def fake_llm(model, messages, provider_id=None, user_id=None):
+        # 形参跟着真函数长（与 conftest 里 fake_stream 同一条规矩）：
+        # v0.25 R1 给 get_llm_response 加了发起人门牌，桩少两个参数就等于
+        # 这条用例替所有人把新形状当场 TypeError。
         captured["messages"] = messages
         return "完成了。"
 

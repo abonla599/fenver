@@ -8,6 +8,7 @@ from .task_store import Task, TaskStatus, task_store
 from .planner import Planner
 from .executor import Executor
 from ..core.llm_client import get_llm_response
+from ..core.providers import scrub_secrets
 
 
 class Orchestrator:
@@ -19,7 +20,8 @@ class Orchestrator:
         self.executor = Executor(model)
 
     def run(self, goal: str, task_id: Optional[str] = None,
-            user_id: Optional[str] = None) -> Dict[str, Any]:
+            user_id: Optional[str] = None,
+            provider_id: Optional[str] = None) -> Dict[str, Any]:
         """
         执行任务的主方法
         Args:
@@ -27,6 +29,9 @@ class Orchestrator:
             task_id: 可选，如果提供则尝试恢复已有任务
             user_id: 这个任务属于谁。必填（Task 会拒收空归属）——恢复已有任务时
                 不新建设象，所以只有新建那一路用得上，但签名上不给默认值才是真话
+            provider_id: 发起人在端点里解析出的模型服务。建任务时随 Task 落盘；
+                恢复已有任务时认**任务自己记的那条**——续跑别人的当下默认，
+                等于让下一次调用花在一个没点头的人身上
         Returns:
             包含任务状态和结果的字典
         """
@@ -41,6 +46,9 @@ class Orchestrator:
         if task_id and task_id in task_store and \
                 task_store[task_id].user_id == (user_id or "").strip():
             task = task_store[task_id]
+            # 恢复的是那条任务自己记的 provider：发起人事后换了默认模型，
+            # 不该让半途续跑的调用改花在一个没点头的人/配置上
+            provider_id = task.provider_id or provider_id
 
             # ⭐ 检查是否已被取消
             if task.cancelled or task.status == TaskStatus.CANCELLED:
@@ -70,9 +78,24 @@ class Orchestrator:
             else:
                 print(f"[Orchestrator] 恢复任务: {task.task_id}, 进度: {task.current_subtask}/{len(task.subtasks)}")
         else:
-            # 创建新任务
-            plan = self.planner.plan(goal)
-            task = Task(goal=goal, subtasks=plan, user_id=user_id)
+            # 创建新任务。计划这一步也是真金白银的调用：出网按发起人的池子走
+            # （user_id/provider_id 往下传），配不成人话错误由端点层兜在
+            # ProviderError→400 之前（v0.25 R1）。规划这一步坏掉时**没有任务**
+            # 可标 failed——原先它会裸着抛出端点变 500，这里收成一个带 scrub
+            # 的失败形状。
+            try:
+                plan = self.planner.plan(goal, user_id=user_id, provider_id=provider_id)
+            except Exception as e:
+                error_msg = scrub_secrets(f"{type(e).__name__}: {e}")
+                print(f"[Orchestrator] 计划生成失败: {error_msg}")
+                return {
+                    "task_id": None,
+                    "status": "failed",
+                    "goal": goal,
+                    "error": error_msg,
+                }
+            task = Task(goal=goal, subtasks=plan, user_id=user_id,
+                        provider_id=provider_id)
             task_store[task.task_id] = task
             print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
 
@@ -105,7 +128,9 @@ class Orchestrator:
                 # 再印一遍。留下的几行只报 id 与状态变化——那是返回值里没有的东西。
                 # 使用Executor（内部调用ReAct Agent）执行单个子任务
                 # user_id 往下传：子任务里的工具要知道是谁在调（needs_user 那类不给身份就拒绝）
-                result = self.executor.execute_task(subtask, user_id=task.user_id)
+                # provider_id 认任务自己那一条：整趟任务的钱都记在发起人的账上
+                result = self.executor.execute_task(subtask, user_id=task.user_id,
+                                                    provider_id=task.provider_id)
 
                 # 保存结果
                 task.results.append(result)
@@ -122,7 +147,9 @@ class Orchestrator:
                 messages=[
                     {"role": "system", "content": "你是一个善于总结的助手，请将以下子任务的执行结果整合成一个完整、清晰的回答。"},
                     {"role": "user", "content": summary_prompt}
-                ]
+                ],
+                provider_id=task.provider_id,
+                user_id=task.user_id,
             )
 
             # 保存最终答案
@@ -142,7 +169,10 @@ class Orchestrator:
 
         except Exception as e:
             # --- 5. 异常处理 ---
-            error_msg = str(e)
+            # 出口与落盘共用同一句 scrub 过的话：底层异常原文可能带着上游回显的
+            # Authorization，而这个 dict 会直接进 HTTP 响应体（约束：错误出口
+            # 不许原文回显）。
+            error_msg = scrub_secrets(f"{type(e).__name__}: {e}")
             print(f"[Orchestrator] 任务执行出错: {error_msg}")
 
             task.status = TaskStatus.FAILED
