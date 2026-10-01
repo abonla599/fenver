@@ -429,6 +429,7 @@ def _self_origin(request: Request) -> str:
     return f"{proto}://{host}" if proto == "https" and host else ""
 
 # ---------- 聊天接口 ----------
+from app.core import credits
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)
 from app.core.uploads import (store as upload_store, build_user_content,
@@ -525,10 +526,27 @@ def _require_session_owner(session_id, principal: Principal) -> None:
         raise HTTPException(status_code=404, detail="会话不存在")
 
 
+def _shadow_gate(principal: Principal) -> None:
+    """影子护栏的请求入口前置判定（v0.25 T5.20）：在第一个付费轮出网之前先看线。
+
+    与轮次边界上的 before_round 判据是同一条规则的两个位置（入口拦截 + 轮内拦截），
+    不是两座互不知情的闸——轮首那一个闸在 streaming.py 检查点、政策在这里，
+    本函数只负责"连第一条消息都不该出网"的情况。护栏默认关（0），开着且当日
+    影子合计到线才拦。
+
+    402 Payment Required 取其本义"额度闸"：这不是刷屏（那是 429 的地盘），
+    更不是错误码dump——detail 就是用户看到的整句人话，停在「等待你确认是否
+    继续」上。被拦下的这一次对 usage.json 零增量：先判断、再出网。
+    """
+    if credits.shadow_limit_exceeded(principal.user_id):
+        raise HTTPException(status_code=402, detail=credits.SHADOW_STOP_MESSAGE)
+
+
 @app.post("/v1/chat")
 def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrincipal):
     _throttle_chat(http, principal)
     _require_session_owner(request.session_id, principal)
+    _shadow_gate(principal)   # 入口先过线：到线就不出网，这一次账本零增量
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
@@ -635,6 +653,12 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     def before_round():
         """R3b-1 的钱闸·判据侧：检查点在 streaming.py 的轮次边界（付费边界）。
 
+        两个判据、一个钩子（v0.25 R4b 并行安全边界 7）：
+        1) 影子积分护栏（shadow_limit_exceeded）——到线就不出网；
+        2) 有没有活读者（wait_for_reader）——没读者不留窗口空转。
+        它们回答的是同一个问题「这一轮该不该花钱出网」，必须挂在同一个
+        before_round 上、走同一条取消出口；不许在轮首另起第二座互不知情的闸。
+
         宽限期单一真相：config_store.stream_no_reader_grace_seconds()（env
         STREAM_NO_READER_GRACE_SECONDS > data/config.json > 默认 120 秒）。
         窗口内读者回来（含 Last-Event-ID 续播）一切照常；没回来就借既有的
@@ -645,6 +669,11 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         为零"。它**不**让断线免费——close() 一条正阻塞在 read 上的连接在这套
         SDK 下不可证明地即时，所以在飞行中的那一轮照常付账。
         """
+        if credits.shadow_limit_exceeded(principal.user_id):
+            if not run.cancel_event.is_set():
+                run.stop_cause = "shadow_daily_limit"
+                run.cancel()
+            return False
         grace = config_store.stream_no_reader_grace_seconds()
         if run.wait_for_reader(grace):
             return True
@@ -704,9 +733,14 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
             sessions_store.add_message(run.session_id, principal.user_id,
                                        "assistant", full_text,
                                        run.message_id, used_memory_ids)
+        # 到线的成因决定那句话：影子护栏停在「等待你确认是否继续」上（卡片 §3-2），
+        # 断线仍停在原来那句上——同一个出口、两条实话，不许合并成一句含糊的"已取消"。
+        stop_message = (credits.SHADOW_STOP_MESSAGE
+                        if run.stop_cause == "shadow_daily_limit"
+                        else "已取消：生成停在块边界，未再发起新的付费调用")
         run.append({"type": "cancelled", "full_text": full_text,
                     "message_id": run.message_id,
-                    "message": "已取消：生成停在块边界，未再发起新的付费调用"})
+                    "message": stop_message})
         # R3b-3 的收尾 done：旧客户端从 cancelled 身上得不到"结束"，必须给一条
         # 它今天就认的 done；停的信息只加新字段，不改旧骨架。
         run.append({"type": "done", "full_text": full_text,
@@ -763,6 +797,10 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
     # 归属必须在这里判，不能在生成侧判：流一开始 HTTP 状态就锁死在 200，
     # 那时再发现 session_id 不是你的，只能静默不落盘（原先正是这样）。
     _require_session_owner(request.session_id, principal)
+
+    # 影子护栏的入口前置判定：到线就 402 停在人话上，run 根本不创建、上游一次
+    # 都不碰——轮内到线由 before_round 的同一判据停（两处一个规则，不是两座闸）。
+    _shadow_gate(principal)
 
     # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
     try:
@@ -1010,6 +1048,10 @@ class ProviderRequest(BaseModel):
     # 「上下文长度」滑杆封顶。钳制/非法值判据只写在 providers._validate 一处。
     max_context_k: Optional[int] = None
     is_default: bool = False
+    # v0.25 R4b T5.3：单价配置面。形状/三态校验全在 credits.parse_pricing，
+    # 这里只开一格传送。None（没填）= 不改（与 paid_by 同一条"旧表单不许洗值"
+    # 纪律，见 update 路由的 exclude_none）；显式 {} = 主动取消定价（回到未定价）。
+    pricing: Optional[dict] = None
 
 def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
     """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
@@ -1050,16 +1092,34 @@ def add_provider(req: ProviderRequest, actor: Principal = RequireAdmin):
 @app.put("/v1/providers/{provider_id}")
 def update_provider(provider_id: str, req: ProviderRequest,
                           actor: Principal = RequireAdmin):
-    _owner_gate(provider_id, "", require_own=False)
-    record = req.model_dump()
+    existing = _owner_gate(provider_id, "", require_own=False)
+    # exclude_none：请求里没带的字段 = "这次没动它"，不是"把它清空"。
+    # pricing 与 paid_by 同一条纪律——旧表单不认识单价，一次普通改名
+    # 绝不能把「有价」洗成「未定价」（那是把真花费报成算不出）。
+    record = req.model_dump(exclude_none=True)
     record["id"] = provider_id
     try:
         saved = provider_store.upsert(record)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _audit_pricing_change(actor, provider_id, existing, saved)
     audit.log(actor, "provider.update", target=provider_id,
               after=provider_store._public(saved))
     return {"status": "saved", "provider": provider_store._public(saved)}
+
+
+def _audit_pricing_change(actor, provider_id: str, existing: dict, saved: dict) -> None:
+    """单价一旦真的变了，必须在 audit.jsonl 里能回答：谁、把哪格、从多少改到多少。
+    没变不落条——审计流不是活动日志，『成本怎么突然变了』要的是可核对的变更史，
+    每存一次配置都冒一行会把真变更淹掉。before/after 只带 pricing 这一维
+    （_public 那层没有密钥明文，这里连对象都不带，只带钱）。"""
+    before = (existing or {}).get("pricing")
+    after = (saved or {}).get("pricing")
+    if before == after:
+        return
+    audit.log(actor, "provider.pricing.update", target=provider_id,
+              before={"pricing": before}, after={"pricing": after},
+              detail=credits.describe_pricing_change(before, after))
 
 @app.delete("/v1/providers/{provider_id}")
 def remove_provider(provider_id: str, actor: Principal = RequireAdmin):
@@ -1144,14 +1204,19 @@ def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipa
 @app.put("/v1/me/providers/{provider_id}")
 def update_my_provider(provider_id: str, req: ProviderRequest,
                        principal: Principal = CurrentPrincipal):
-    _owner_gate(provider_id, principal.user_id, require_own=True)
-    record = req.model_dump()
+    existing = _owner_gate(provider_id, principal.user_id, require_own=True)
+    # exclude_none 的口径与管理员面一致：没带 pricing = 保留原值。
+    record = req.model_dump(exclude_none=True)
     record["id"] = provider_id
     record.update(owner=principal.user_id, paid_by="user", is_default=False)
     try:
         saved = provider_store.upsert(record)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # 私有单价同样进审计：属主改的是"自己烧多少积分"的尺子，影子、倍率、
+    # 护栏都跟着它重算——跨用户看不了内容，但变更史必须在（管理员排账时
+    # 这是唯一能说"哪天这把尺子换过"的地方）。
+    _audit_pricing_change(principal, provider_id, existing, saved)
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/me/providers/{provider_id}")
