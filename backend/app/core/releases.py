@@ -84,22 +84,32 @@ MAX_HOPS = 3
 # 是官网按钮与 App 内更新双双静默退回发布页。
 #
 # v0.24 阶段4 收口（用户点名"APK 产物文件名按新品牌名规则同步，下载端与构建端一致"）：
-# 正式名换 `fenver-<版本>.apk`。**但旧名必须作为别名一并发布**，不是兼容洁癖：
-# 已经装在用户手机上的 0.23.x 壳把 `ai-assistant-native-` 写死在挑资产、验名、
-# 给下载文件起名三处，改不了。只发新名的话，老用户点「检查更新」看到的是
-# "没有可安装资产"——不报错，只是永远升不上来，正是 T2.7 列为本版最高风险的那个形状。
-# 别名的退场条件：在线老壳（< v0.24）清零，或 v0.25 起明确放弃对 0.23.x 的直升。
-ASSET_PREFIX = "fenver-"                        # 我们在发的这个名字
-LEGACY_ASSET_PREFIX = "ai-assistant-native-"    # 老壳唯一认得的那个名字，过渡期同包两名
+# 正式名换 `fenver-<版本>.apk`。
+#
+# v0.24.1（用户决定"迁移期双名资产不发了"）：**一次发布只挂新名这一个资产**。
+# 老壳（0.23.x 及更早）仍然不断链，但兜底的手段从"仓库里多发一份字节相同的别名"
+# 换成"服务端在给壳的那份 JSON 里现造一枚旧名条目"——见 `alias_legacy_asset_to_self_host`。
+# 为什么这一半挪进服务端才是对的：
+# * 旧名那枚资产在 GitHub 上从来不是给任何人点的，它唯一的读者是老壳按名字挑资产。
+#   把它做成一份公开文件，等于把一条只该出现在机器间接口里的适配层挂到用户看得见的位置，
+#   还让人以为一次发布有两个版本的包；
+# * 挪进 JSON 以后，退场只是删一段代码，不用再回收一个已经发出去的资产；
+# * 读的这一侧照旧两名都认：历史上每一版真实挂过什么名字，就还得能读出来
+#   （0.23.x 在旧仓里只有旧名；v0.24.0 那一版两名都发过）。
+ASSET_PREFIX = "fenver-"                        # 唯一发出去的那个名字
+LEGACY_ASSET_PREFIX = "ai-assistant-native-"    # 老壳唯一认得的名字：只在读与合成里活着
+PUBLISH_ASSET_PREFIXES = (ASSET_PREFIX,)        # 发布流水线真正 cp 与 upload 的名字
+# 读侧优先级：新名在前。两名并挂的发布（只有 v0.24.0 这么发过）取新名。
 ASSET_PREFIXES = (ASSET_PREFIX, LEGACY_ASSET_PREFIX)
 _ASSET_NAME_RE = re.compile(r"^(?:fenver|ai-assistant-native)-[0-9][0-9A-Za-z.\-]*\.apk$")
 
 
 def asset_names(version: str) -> tuple:
-    """这一版所有可接受的资产名，按优先级排：新名在前、旧名兜底。
+    """这一版所有**可读**的资产名，按优先级排：新名在前、旧名兜底。
 
-    顺序就是判据：一份 release 同时挂着两名（v0.24 起就是这么发的）时取新名，
-    只有旧名时取旧名——后者正是 0.23.x 老包在新仓里唯一拿得到的东西。
+    顺序就是判据：一份 release 同时挂着两名（只有 v0.24.0 这么发过）时取新名，
+    只有旧名时取旧名——后者正是 0.23.x 那批发布的全部形状，它们永远躺在旧仓里。
+    这里不是"该发哪几个名字"：发出去的那一个由 `PUBLISH_ASSET_PREFIXES` 决定。
     """
     return tuple(prefix + version + ".apk" for prefix in ASSET_PREFIXES)
 
@@ -248,8 +258,8 @@ def latest_release_manifest(origin: str = ""):
     它拉不到就不弹，旧快照撑死多弹一句"去下载"，方向上仍是真话。
 
     `origin` 与 `repo` 是调用方（那条端点）带进来的这次请求的来源，见
-    `route_legacy_asset_to_self_host`：两个条件都对上才把旧名那枚资产的下载地址换成
-    自家出口，否则一个字节都不动——透传仍然是默认行为，改名只是它的一条过渡期例外。
+    `alias_legacy_asset_to_self_host`：两个条件都对上才给老壳递一枚指向自家出口的
+    旧名资产，否则一个字节都不动——透传仍然是默认行为，改名只是它的一条过渡期例外。
     """
     snapshot, reason, stale = _snapshot()
     if not snapshot:
@@ -262,7 +272,7 @@ def latest_release_manifest(origin: str = ""):
         return None, "发布快照里没有原样 JSON（内部状态坏了）"
     manifest = dict(raw)
     manifest["apk_sha256"] = apk_sha256(raw.get("body"))
-    route_legacy_asset_to_self_host(manifest, origin, _preferred_repo())
+    alias_legacy_asset_to_self_host(manifest, origin, _preferred_repo())
     return manifest, ""
 
 
@@ -290,25 +300,37 @@ def self_hosted_apk_url(origin: str) -> str:
     return "https://" + host + SELF_APK_PATH
 
 
-def route_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> int:
-    """只把**旧名**那一枚资产的 `browser_download_url` 换成自家出口，返回改了几枚。
+def alias_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> int:
+    """给**老壳**凑齐它那一枚旧名资产，地址指自家出口；返回这次改或加了几枚。
 
-    为什么只动旧名：搬到新仓以后，0.23.x 及更早的壳会读到 `/abonla599/fenver/...`
-    这样的地址，而它们的 GitHub 路径白名单在装进手机那一刻就定死了是旧仓，改不动。
-    2026-09-30 用 HEAD(=0.23.17) 那份 ReleasePlan + MiniJson 真跑过 `decide`：
-    新仓双名与新仓只挂新名两档都是 UNUSABLE，只有"旧仓那条路径"和"自家出口"是
-    AVAILABLE。所以这里给旧名换到自家出口（老壳本来就信这条同源规则），新名原样
-    留 GitHub 直连——新壳优先取新名，一台机器的带宽只兜住还没升级的那批人，而且
-    这层转发改不动字节校验：装进手机的仍然是 Release 正文那行 APK-SHA256 对上号的
-    同一串字节。
+    两种形状都要照顾，因为它们分属改名的前后两段：
+    * 这一版在 GitHub 上真挂了旧名（只有 v0.24.0 那一版这么发过）：把它的
+      `browser_download_url` 换成自家出口；
+    * 这一版只挂新名（v0.24.1 起这是唯一的发布形状）：从新名那枚**合成**一枚旧名条目。
+      壳读的是这份 JSON，不是 GitHub 的资产表——旧名从来只是它挑资产的钥匙
+      （`ReleasePlan.pickAsset` 按 `ai-assistant-native-<版本>.apk` 精确匹配名字），
+      钥匙由服务端递给老壳，仓库就不必再挂那份谁也不会点开的重复文件。
 
-    两个条件都对上才动手，为的是把"透传"留在默认位：
+    为什么必须换、必须合成，而不是原样透传：0.23.x 及更早的壳把 GitHub 路径白名单写死
+    成旧仓，装进手机那一刻就改不动；搬到新仓以后 `github.com/abonla599/fenver/...`
+    会被它自己的判据打成 UNUSABLE。2026-09-30 用 HEAD(=0.23.17) 那份 ReleasePlan +
+    MiniJson 真跑过 `decide`：新仓双名与新仓只挂新名两档都是 UNUSABLE，只有"旧仓那条
+    路径"和"自家出口"是 AVAILABLE。所以老壳能用回来的地址只有自家这一条，而它要求先
+    看见那个旧名字。
+
+    条件都对上才动手，为的是把"透传"留在默认位：
     * `repo` 仍是旧仓时不换——老壳的白名单本来就认那条路径，换了只是白占服务器带宽；
-    * 这一版只挂了一枚旧名时不换——那是改名之前的老发布，本就没有换的必要。改名
-      之后我们发的每一版都是双名，所以需要这层转换的那批发布必然满足它。
+    * 合成那一枚只在新名那枚真存在时发生——新名是"这是改名之后我们发的那一版"的凭据，
+      凭它才有可靠的体积与类型可抄。仓库里只挂旧名的发布（应急漏发）走上面那条换地址。
 
-    必须**换了再返回**而不是改缓存里那份：`manifest` 的 `assets` 是从 `_payload` 的
-    原样 JSON 浅拷来的，原地改会把换过的地址带给下一个没给 origin 的调用方。
+    合成那枚只带壳会读的字段（名字、地址、体积、类型），体积取自新名那枚：猜一个 size
+    会让那句"约 9 MB"变成假话。新名那枚原样留着 GitHub 直连——新壳走直连，一台机器的
+    带宽只兜住还没升级的那批人；而且这层转发改不动字节校验：装进手机的仍然是 Release
+    正文那行 APK-SHA256 对上号的同一串字节。
+
+    必须**改了再返回**而不是改缓存里那份：`manifest` 的 `assets` 是从 `_payload` 的
+    原样 JSON 浅拷来的，原地改会把换过的地址带给下一个没给 origin 的调用方——官网那颗
+    按钮与 `download_plan` 要的始终是 GitHub 真地址，换成自家出口就是自己给自己发请求。
     """
     url = self_hosted_apk_url(origin)
     if not url:
@@ -316,20 +338,31 @@ def route_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> i
     if repo == LEGACY_REPO:
         return 0
     version = normalize_version(manifest.get("tag_name"))
-    fresh, legacy = asset_names(version)         # 改名之后恒是两名，顺序即优先级
+    if not version:
+        return 0
+    fresh, legacy = asset_names(version)         # 新名在前：它的存在是"改名之后的发布"的凭据
     assets = manifest.get("assets")
     if not isinstance(assets, list):
         return 0
-    if not any(isinstance(item, dict) and item.get("name") == fresh for item in assets):
-        return 0
-    changed = 0
-    copied = []
+    fresh_entry = None
+    copied, changed = [], 0
     for asset in assets:
-        if isinstance(asset, dict) and asset.get("name") == legacy:
-            asset = dict(asset)
-            asset["browser_download_url"] = url
-            changed += 1
+        if isinstance(asset, dict):
+            if asset.get("name") == fresh:
+                fresh_entry = asset
+            if asset.get("name") == legacy:
+                asset = dict(asset)
+                asset["browser_download_url"] = url
+                changed += 1
         copied.append(asset)
+    if not changed and isinstance(fresh_entry, dict):
+        # 只挂新名的那一版：给老壳补一枚旧名条目。补在末尾，新名那枚的位置不动。
+        copied.append({"name": legacy,
+                       "browser_download_url": url,
+                       "size": fresh_entry.get("size"),
+                       "content_type": fresh_entry.get("content_type") or
+                                       "application/vnd.android.package-archive"})
+        changed = 1
     if changed:
         manifest["assets"] = copied
     return changed

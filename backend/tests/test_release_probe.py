@@ -439,10 +439,12 @@ def test_fetch_asset_follows_the_hop_to_the_host_github_really_redirects_to(monk
     assert data == b"ok", f"相对跳转没接住（真实响应里这种写法很常见）：{data!r} / {why}"
 
 
-# ---------- 资产名三层对齐：工作流发的名字 = 后端挑的名字 = 壳认的名字（T1.7/T1.8） ----------
+# ---------- 资产名对齐：工作流发的名字 = 后端挑的名字 = 壳认的名字（T1.7/T1.8） ----------
 
-# v0.24 起同一版发**两个**资产名（品牌换 Fenver，新名做主名；旧名留作别名）。
-# 顺序即优先级：两个都在时取新名，只有旧名时取旧名。
+# v0.24.0 那一版曾同发两个资产名（品牌换 Fenver，新名做主名、旧名留作别名）；
+# v0.24.1 起**只发新名一个**，旧名那枚改由服务端在给老壳的 JSON 里现合成。
+# 这里仍留着这一对，是因为**读**的这一侧两名都还得认：0.23.x 那批发布只有旧名，
+# 而 v0.24.0 是唯一一名双发的历史版本。顺序即优先级：两个都在时取新名。
 ASSET_PAIR = ("fenver-", "ai-assistant-native-")
 
 
@@ -452,14 +454,20 @@ def _asset(name, url=None):
 
 
 def test_the_asset_name_is_the_one_the_workflow_publishes():
-    """两名一对字面量，钉在四份文本上（工作流 cp、工作流上传、后端、壳）。
+    """只发一个名字这件事，钉在四份文本上（工作流 cp、工作流上传、后端、壳）。
 
     2026-09-25 那次漂移的教训照搬：工作流换成发原生包、前缀改成 ai-assistant-native-，
     而后端与壳还按旧名找——表现不是哪一环报错，是【官网按钮与 App 内更新双双静默退回
     发布页】，每份 JSON 都"合法"，只是没人能找到那个资产（与 v0.22 的 302 白名单同一课）。
-    这次改名同时动三处，而且多了"老壳只认旧名"这条硬约束，所以把顺序也钉上：
-    少发一个名字 = 有一代人升不上来；顺序反了 = 新壳装到别名那份（同一个字节流，
-    但落在手机上叫错名字，sweepStaleApks 与文件门都会开始互相打架）。
+
+    v0.24.1 的改动把"发几个名字"收紧成一个，所以这里的锁也跟着换边：
+    * 工作流只 cp / 只 upload 新名那一份，仓库里不许再出现第二份字节相同的公开文件；
+    * 后端 `PUBLISH_ASSET_PREFIXES` 必须与工作流真发的那一个逐字相同——多一个就意味着
+      有一枚名字后端会去 GitHub 找、而发布流永远不产它（那是静默退回发布页的形状）；
+      少一个则反之。
+    * **老壳那一半挪进接口层**：旧名不再是仓库里的文件，而是 /v1/update/info 返回时
+      合成的一枚条目，所以这条锁必须同时要求后端源码里有那次合成。断言本体在
+      test_update_channel.py（拿真壳判断核跑的台架在 docs 里指认的那两个文件）。
     """
     from pathlib import Path
 
@@ -467,19 +475,24 @@ def test_the_asset_name_is_the_one_the_workflow_publishes():
     wf = (repo / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
 
     staged = re.findall(r'cp "\$apk" "([^"]+)"', wf)
-    assert staged == [p + "${ver}.apk" for p in ASSET_PAIR], \
-        f"发布流 Stage 那步 cp 出的两个名字漂了：{staged}"
-    # cp 两份不等于发两份：真正决定用户能看到什么的是挂上 Release 的那串参数。
-    assert 'gh release upload "$tag" "$file" "$legacy" --clobber' in wf, \
-        "重发版时不再同传两名：已装机的 0.23.x 老壳在新仓里会拿不到这一版"
-    assert '"$file" "$legacy" --title' in wf, \
-        "首发时不再同传两名：第一次发出去只有新名字，老壳永远停在 0.23.x"
+    assert staged == [p + "${ver}.apk" for p in releases.PUBLISH_ASSET_PREFIXES], \
+        f"发布流 Stage 那步 cp 出的名字漂了：{staged}"
+    # cp 一份不等于发一份：真正决定用户能看到什么的是挂上 Release 的那串参数。
+    assert 'gh release upload "$tag" "$file" --clobber' in wf, \
+        "重发版时多传了文件：别名那枚早就不该出现在发布页上"
+    assert '"$file" --title' in wf, \
+        "首发时多传了文件：同上"
     named = re.findall(r'^\s*(?:file|legacy)="([^"]+)"\s*$', wf, re.M)
     assert named == staged, f"工作流里 cp 的名字与挂出去的名字不是一对：{staged} vs {named}"
+    assert "$legacy" not in wf, "工作流里还留着旧名那枚变量：别名发布没被真撤干净"
 
-    assert releases.ASSET_PREFIXES == ASSET_PAIR, "后端认的两个前缀漂了，要和上面一起改"
+    assert releases.PUBLISH_ASSET_PREFIXES == ("fenver-",), \
+        "后端认为会发出去的名字与工作流对不上"
+    assert releases.ASSET_PREFIXES == ASSET_PAIR, "后端读的两个前缀漂了，要和上面一起改"
     assert releases.asset_names("0.24.0") == tuple(p + "0.24.0.apk" for p in ASSET_PAIR), \
         "后端拼出来的两个名字与顺序漂了"
+    assert "alias_legacy_asset_to_self_host" in Path(releases.__file__).read_text(encoding="utf-8"), \
+        "老壳那枚旧名条目的合成不在后端里：仓库只发一个新名之后，0.23.x 会看不见可装资产"
     assert releases._ASSET_NAME_RE.match("fenver-0.24.0.apk") is not None
     assert releases._ASSET_NAME_RE.match("ai-assistant-native-0.24.0.apk") is not None
     assert releases._ASSET_NAME_RE.match("totally-other-0.24.0.apk") is None, \

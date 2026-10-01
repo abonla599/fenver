@@ -241,17 +241,19 @@ jobs:
           set -eu
           apk=android-native/app/build/outputs/apk/release/app-release.apk
           ver="${GITHUB_REF_NAME#v}"
-          # v0.24 把品牌名换成 Fenver，资产主名跟着变成 fenver-<版本>.apk。但已经装在
-          # 用户手机上的 0.23.x 壳把旧前缀写死在三处（挑资产、文件门、给下载文件起名），
-          # 而那几行代码不在我们手里——收不回来。所以过渡期**同一个包发两个名字**：
-          # 新壳按新名取，老壳按旧名兜底，两份字节完全相同（同一个 cp 源）。
-          # 判断端（backend/app/core/releases.py 的 ASSET_PREFIXES 与共享判断核
-          # ReleasePlan.APK_PREFIXES）认的就是这两份；三处一起改，锁在
-          # backend/tests/test_release_probe.py::test_the_asset_name_is_the_one_the_workflow_publishes。
+          # v0.24 把品牌名换成 Fenver，资产主名跟着变成 fenver-<版本>.apk。
+          # v0.24.1 起**一次发布只挂这一个名字**（用户决定：迁移期那份别名的产物不发）。
+          # 已装机的 0.23.x 老壳仍然把旧前缀写死在挑资产、文件门、给下载文件起名三处，
+          # 而那几行代码不在我们手里——收不回来。但这件事不需要仓库配合：老壳读的从来
+          # 不是 GitHub 的资产表，是 /v1/update/info 透传给它的那份 JSON，所以旧名那枚
+          # 由服务端在返回时现合成（backend/app/core/releases.py 的
+          # alias_legacy_asset_to_self_host）。少发一份公开文件，少一个"这两个包是不是
+          # 两个版本"的疑问；老壳那侧的判据一字未动。
+          # 锁在 backend/tests/test_release_probe.py::
+          # test_the_asset_name_is_the_one_the_workflow_publishes：这里 cp 几个名字，
+          # 后端就得只认 PUBLISH_ASSET_PREFIXES 那一个。
           cp "$apk" "fenver-${ver}.apk"
-          cp "$apk" "ai-assistant-native-${ver}.apk"
-          cmp "fenver-${ver}.apk" "ai-assistant-native-${ver}.apk"   # 两名必须是同一个字节流
-          ls -l "fenver-${ver}.apk" "ai-assistant-native-${ver}.apk"
+          ls -l "fenver-${ver}.apk"
 
       # 手工 Run workflow 只用来验签名链，绝不发版：dispatch 事件里没有 tag，
       # Release 的名字与包里 versionName 无从对上，发出去就是一个名字错乱的公开版本。
@@ -263,9 +265,9 @@ jobs:
           set -eu
           tag="$GITHUB_REF_NAME"
           ver="${tag#v}"
-          # 主名给新壳与官网按钮，别名只管喂已装机的 0.23.x（见上面 Stage 那步的理由）。
+          # 只发这一个名字（v0.24.1 起）：老壳那枚旧名条目由服务端在 /v1/update/info 里
+          # 现合成，仓库里不留第二份字节相同的文件。理由写在上面 Stage 那步。
           file="fenver-${ver}.apk"
-          legacy="ai-assistant-native-${ver}.apk"
           # 每个版本的变更清单单独存一个文件，不焊死在这段 YAML 里。上一版把
           # "v0.13 实测 97,835 字节""从 0.13 起壳自己也有功能了"写进模板，于是往后
           # 每次发版都在替旧版本说话；现在谁发版谁写自己那份 docs/releases/v<版本>.md。
@@ -285,9 +287,10 @@ jobs:
           ## 安装（安卓）
 
           1. 下载下面的 \`${file}\`（全原生安卓客户端，约 9 MB——准确体积以 GitHub
-             在文件旁标出的数字为准，别信任何散文里写的）。同一版还会挂着
-             \`${legacy}\`：那是改名前的旧名字，字节与上面那个完全相同，只给
-             0.23.x 及更早的壳兜底用，新装的人认 \`${file}\` 就够了
+             在文件旁标出的数字为准，别信任何散文里写的）。改名前的那个旧名字
+             \`ai-assistant-native-…\` 从这一版起**不再挂在发布页上**：它从来不是给人
+             点的文件，已经装在手机上的 0.23.x 由服务端在检查更新时自己拿到自家出口
+             地址，升级路径不断。新装的人认 \`${file}\` 就够了
           2. 传到手机后点开安装。系统会提示"禁止安装未知来源应用"——去
              **设置 → 应用 → 允许来自此来源的安装**，勾选一次即可
           3. 打开应用会进入登录界面：已有账号直接登录；没有就点「立即注册」，
@@ -323,15 +326,14 @@ jobs:
           # 必须在**签名之后**算：签名过程会改文件，签之前算的摘要和 Release 上
           # 那个字节流永远对不上。缺行或形状不对时壳的行为是"拒装并说清楚"，
           # 不是猜一个值；所以这里算不出来（sha256sum 缺失）就该让这一步红掉。
-          # 只算主名那一份：别名是同一个 cp 源复制出来的，Stage 那步已经 cmp 过；
-          # 挂两份字节相同的包，校验值行当然只有一份真相。
+          # 只算那一份：这个 release 上就只有一个 APK，校验值行也就是唯一那份真相。
           set -- $(sha256sum "$file")
           printf '\nAPK-SHA256: %s\n' "$1" >> notes.md
           grep -c '^APK-SHA256: [0-9a-f]\{64\}$' notes.md | grep -q '^1$' \
             || { echo "::error::校验值行没写进去或形状不对，壳会把这版判成不可安装"; exit 1; }
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$file" "$legacy" --clobber
+            gh release upload "$tag" "$file" --clobber
             gh release edit "$tag" --notes-file notes.md
           else
-            gh release create "$tag" "$file" "$legacy" --title "Fenver $ver（安卓原生）" --notes-file notes.md
+            gh release create "$tag" "$file" --title "Fenver $ver（安卓原生）" --notes-file notes.md
           fi

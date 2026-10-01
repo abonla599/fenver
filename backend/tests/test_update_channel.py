@@ -289,7 +289,7 @@ def test_draft_and_vless_tags_pass_through_untouched(client, enforced, monkeypat
     assert body["apk_sha256"] == DIGEST
 
 
-# ---------- 改名过渡期：旧名那枚资产换到自家出口（0.23.x 的更新链不断） ----------
+# ---------- 改名过渡期：旧名那枚资产从自家出口给老壳（改地址或现合成） ----------
 # 0.23.x 及更早的壳把 GitHub 路径白名单写死成旧仓，装进手机就改不动。发布搬到
 # abonla599/fenver 之后，它们读到的那条 browser_download_url 会被自己的判据打成
 # UNUSABLE——这不是推演，是 2026-09-30 拿 HEAD(=0.23.17) 的 ReleasePlan + MiniJson
@@ -330,6 +330,22 @@ def _assets_by_name(body):
     return {a["name"]: a["browser_download_url"] for a in body["assets"]}
 
 
+def _single_named_release():
+    """v0.24.1 起的真实发布形状：GitHub 上只有新名一枚 APK。"""
+    return {"tag_name": "v0.24.1",
+            "html_url": "https://github.com/abonla599/fenver/releases/tag/v0.24.1",
+            "assets": [{"name": "mapping.txt", "size": 9,
+                        "browser_download_url": "https://github.com/abonla599/fenver/releases/download/v0.24.1/mapping.txt"},
+                       {"name": "fenver-0.24.1.apk", "size": 98304,
+                        "content_type": "application/vnd.android.package-archive",
+                        "browser_download_url":
+                            "https://github.com/abonla599/fenver/releases/download/v0.24.1/fenver-0.24.1.apk"}]}
+
+
+SINGLE_NEW_APK = ("https://github.com/abonla599/fenver/releases/download/v0.24.1"
+                  "/fenver-0.24.1.apk")
+
+
 def test_the_legacy_named_asset_moves_to_the_self_hosted_exit(published_in_new_repo, client, enforced, monkeypatch):
     """只有旧名那一枚换成自家出口；新名与别的资产一个字节都不动。
 
@@ -344,6 +360,63 @@ def test_the_legacy_named_asset_moves_to_the_self_hosted_exit(published_in_new_r
     assert got["ai-assistant-native-0.24.0.apk"] == "https://ai.fenever.xyz/site/android.apk"
     assert got["fenver-0.24.0.apk"] == FENVER_APK, "新名不该被换：那是新壳的直连通道"
     assert got["mapping.txt"].endswith("/mapping.txt"), "非 APK 的资产不在改写范围内"
+
+
+def test_a_release_with_only_the_new_name_gains_a_legacy_alias(published_in_new_repo, client, enforced, monkeypatch):
+    """GitHub 上只挂新名（v0.24.1 起的唯一发布形状）：服务端给老壳现合成一枚旧名条目。
+
+    这是"双名资产不发了"那半边改动的正锁。老壳 `pickAsset` 只按
+    `ai-assistant-native-<版本>.apk` 精确匹配名字，名字对不上就直接 UNUSABLE——
+    不报错，只是那一代人从此再也升不上来。仓库不再挂那份没人点的别名之后，
+    这把钥匙只能由读得懂 JSON 的这一侧递出去。
+    体积必须取自新名那枚：写一个猜出来的 size 会让安装对话框里那句体积变成假话。
+    """
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_single_named_release()))
+    out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    assert out.status_code == 200, out.text
+    body = out.json()
+    got = _assets_by_name(body)
+    assert got["ai-assistant-native-0.24.1.apk"] == "https://ai.fenever.xyz/site/android.apk"
+    assert got["fenver-0.24.1.apk"] == \
+        "https://github.com/abonla599/fenver/releases/download/v0.24.1/fenver-0.24.1.apk", \
+        "新名那枚不该被动：那是新壳的 GitHub 直连通道"
+    assert len(body["assets"]) == 3, f"只补一枚旧名条目，不是把资产表重写一遍：{body['assets']}"
+    alias = [a for a in body["assets"] if a["name"] == "ai-assistant-native-0.24.1.apk"][0]
+    assert alias["size"] == 98304, "合成那枚的体积没跟新名对上"
+
+
+def test_the_alias_is_added_once_across_repeated_checks(published_in_new_repo, client, enforced, monkeypatch):
+    """十分钟内反复点「检查更新」不许把别名一枚枚叠上去。
+
+    症状不是报错，是资产表越查越长、体积与名字成对重复——老壳按第一个匹配取值，
+    一旦叠出顺序变化就会挑到没有地址的那枚。这条锁验的是"合成只发生在返回给这一次
+    请求的拷贝上"，缓存里那份原样不动。
+    """
+    fake = _Urlopen(_single_named_release())
+    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    for _ in range(3):
+        body = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"}).json()
+        assert len([a for a in body["assets"]
+                    if a["name"] == "ai-assistant-native-0.24.1.apk"]) == 1
+    assert len(fake.calls) == 1, f"缓存没接住重复检查，多跑了 {len(fake.calls) - 1} 次出站"
+    assert len(releases._payload["raw"]["assets"]) == 2, "缓存被污染：里面不该有合成的那枚"
+
+
+def test_the_synthesized_alias_never_leaks_into_the_site_proxy(published_in_new_repo, client, enforced, monkeypatch):
+    """官网那颗按钮与代取端点要的始终是 GitHub 真地址，绝不会被换成自家出口。
+
+    这是这条链上唯一能把自己绕死的形状：`/site/android.apk` 代取时如果照着这份被换过的
+    快照去找地址，它就会朝自己发请求——症状是下载转圈到超时，而每一步都"合法"。
+    """
+    monkeypatch.setattr(releases.urllib.request, "urlopen",
+                        _Urlopen(_single_named_release()))
+    client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
+    plan, why = releases.download_plan()
+    assert plan, why
+    assert plan["url"] == \
+        "https://github.com/abonla599/fenver/releases/download/v0.24.1/fenver-0.24.1.apk"
+    assert plan["name"] == "fenver-0.24.1.apk"
 
 
 @pytest.mark.parametrize("host", ["localhost:8000", "user@ai.fenever.xyz", "ai.fenever.xyz:8443"])
@@ -362,13 +435,23 @@ def test_an_origin_the_shell_would_not_trust_leaves_every_url_alone(        host
     assert got["fenver-0.24.0.apk"] == FENVER_APK
 
 
-def test_a_release_carrying_only_the_legacy_name_is_passed_through(        published_in_new_repo, client, enforced, monkeypatch):
-    """改名之前的老发布（只有一枚旧名）不换：没有"新仓地址老壳读不懂"这个问题。"""
+def test_a_release_carrying_only_the_legacy_name_in_the_new_repo_is_also_rescued(
+        published_in_new_repo, client, enforced, monkeypatch):
+    """新仓里只挂旧名那一枚（应急发版漏了新名）照样要换到自家出口。
+
+    这一档原本被当成"不用换"，理由是"那是改名之前的老发布"。那个理由站不住：
+    真正住在旧仓的老发布由上一条 `repo == LEGACY_REPO` 的闸挡住（老壳的白名单本来就
+    认那条路径），能走到这一档的只可能是**货已在新仓、名字还是旧名**——那条地址
+    对老壳同样读不懂，不换就是让这一版对 0.23.x 静默消失。v0.24.1 起仓库只发新名，
+    反过来"只发旧名"就成了纯人工失误的形状，更该被这条兜住而不是放过。
+    """
     rel = _dual_named_release()
     rel["assets"] = [a for a in rel["assets"] if a["name"] != "fenver-0.24.0.apk"]
     monkeypatch.setattr(releases.urllib.request, "urlopen", _Urlopen(rel))
     out = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"})
-    assert _assets_by_name(out.json())["ai-assistant-native-0.24.0.apk"] == LEGACY_APK
+    got = _assets_by_name(out.json())
+    assert got["ai-assistant-native-0.24.0.apk"] == "https://ai.fenever.xyz/site/android.apk"
+    assert len(out.json()["assets"]) == 2, "旧名本来就在，只换地址、不再补一枚"
 
 
 def test_a_release_still_hosted_in_the_legacy_repo_is_passed_through(
