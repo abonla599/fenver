@@ -126,63 +126,197 @@ const API = (() => {
     return res.status === 204 ? null : res.json();
   }
 
-  /* 流式对话。POST 无法用 EventSource，故手工读流并按空行分帧。
-   * 服务端 error 事件带 retryable=false：原因已给出，上层不应再重试。
+  /* 断线不重跑整轮的可续播内核（v0.25 web · T2.4/T2.8）。
+   *
+   * 老行为：流尾没拿到 done 就抛 retryable=true，上层据此整段 POST 回 /v1/chat 重发
+   * 这一轮——用户一关页面/断线就是重复计费 + 重复入库。后端已把协议定稿（每帧带
+   * `id: <run_id>:<seq>`、续播走 Last-Event-ID、续不上回 410、被停的流以旧解析器认得的
+   * done 收尾），这里把网页这一侧接上去：断线先带游标重开同一条流端点续播剩下的帧；
+   * 服务端说续不上（410）或试到次数上限，就交一句"去会话里取回"的实话
+   * （err.needHistory=true、retryable=false），绝不回头重发生成。
+   *
+   * 刻意把 open/sleep/onChunk/onStatus/onRun/onUnknown/maxAttempts/resumeStatus 全从 deps
+   * 进来，只为了让测试能用 node 真跑这份控制流（见 test_web_pwa 的 _run_stream_js）：
+   * "断线到底走了续播还是重发、退避有没有真在退、410 是不是转取历史"读源码读不出对错。
    */
-  async function streamChat({ model, provider, messages, attachments, sessionId, signal }, onChunk) {
-    let res;
-    try {
-      res = await fetch("/v1/chat/stream", {
-        method: "POST",
-        signal,
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") },
-        body: JSON.stringify({
-          model, provider, messages,
-          attachments: attachments || [],
-          session_id: sessionId,
-        }),
-      });
-    } catch (e) { NetMinder.note(e); throw e; }
-    if (!res.ok || !res.body) {
-      const err = await parseError(res);
-      err.retryable = true;      // 通道层面失败，可退回非流式
-      throw err;
-    }
-    NetMinder.ok();
+  const STREAM_RESUME_STATUS = "连接断了，正在接着上次的进度取回…";
+  // 重连次数上限。这不是"省钱旋钮"：宽限期长短与花销由服务端的轮次边界钱闸决定，和这里
+  // 试几次无关；上限存在的意义只是"别无限期敲一条已经续不上的门"，到点转取历史。
+  const STREAM_RESUME_MAX_ATTEMPTS = 5;
 
-    const reader = res.body.getReader();
+  function defaultSleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  async function runResilientStream(deps) {
+    const open = deps.open;
+    const onChunk = deps.onChunk;
+    const onStatus = deps.onStatus;
+    const onRun = deps.onRun;
+    const onUnknown = deps.onUnknown;
+    // 全部依赖收在这一处，runResilientStream 因此能被单独取出来用 node 真跑（见测试）：
+    // 兜底值都写死在这里，不引用模块作用域的名字，否则单独执行它会在提取体外炸出 ReferenceError。
+    const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+    // 兜底值写成字面量而不是引模块作用域的常量：runResilientStream 要能被单独取出来
+    // 用 node 跑，引用体外名字会让单独执行时炸出 ReferenceError（那句话的唯一出处仍是上面
+    // 的 STREAM_RESUME_STATUS，由调用方 streamChat 传进来，这里不复制第二份）。
+    const maxAttempts = deps.maxAttempts === undefined ? 5 : deps.maxAttempts;
+    const resumeStatus = deps.resumeStatus;
+    const BACKOFF_BASE_MS = 500;
+
     const decoder = new TextDecoder("utf-8");
-    let buf = "";
-    let finished = null;
+    const unknown = [];
+    let runId = "";
+    let lastEventId = "";       // "<run_id>:<seq>"，续播时放进 Last-Event-ID
+    let resumable = true;       // 收到 cannot_resume 置 false：这一轮续不上了
+    let attempt = 0;            // 已经续播过几次
 
     for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const line = frame.split("\n").find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        let evt;
-        try { evt = JSON.parse(line.slice(5).trim()); } catch (_) { continue; }
-        if (evt.type === "content") onChunk(evt.text || "");
-        else if (evt.type === "done") finished = evt;
-        else if (evt.type === "error") {
-          const err = new Error(evt.message || "模型返回错误");
-          err.retryable = false;
-          throw err;
+      let buf = "";
+      let res;
+      try {
+        res = await open(lastEventId || null);
+      } catch (e) {
+        // open 抛出 = 这一枪根本没到服务端（断网 / DNS / 连不上）。
+        // 从没握手成功 = 还没开这一轮，退避后重开一次同一条流端点是安全的；
+        // 已经拿到过 run_id = 服务端正在跑这一轮，只能带游标续播，不能重发生成。
+        if (attempt < maxAttempts) {
+          attempt += 1;
+          if (runId && onStatus) onStatus(resumeStatus);
+          await sleep(BACKOFF_BASE_MS * Math.pow(2, attempt - 1));
+          continue;
+        }
+        const err = new Error("连不上服务端，这一轮没能接上：不用重发原文，结果会写进会话历史，刷新会话取回");
+        err.kind = "need-history";
+        err.needHistory = true;
+        err.retryable = false;
+        throw err;
+      }
+
+      if (!res.ok || !res.body) {
+        // 410 是明确的"续不上，别重发，去会话里取"；其它非 2xx 是这一轮请求本身的问题。
+        // 两种都不回头重发生成；有 run_id 且没到上限的意外状态，当作断线退避后重试。
+        const status = res.status;
+        if (status !== 410 && runId && resumable && attempt < maxAttempts) {
+          attempt += 1;
+          if (onStatus) onStatus(resumeStatus);
+          await sleep(BACKOFF_BASE_MS * Math.pow(2, attempt - 1));
+          continue;
+        }
+        const err = new Error(status === 410
+          ? "这一轮接不上了：不用重发原文，结果会写进会话历史，刷新会话取回"
+          : "这一轮没能开始：服务端没有接受这次请求");
+        err.kind = "need-history";
+        err.needHistory = true;
+        err.retryable = false;
+        err.status = status;
+        throw err;
+      }
+
+      const reader = res.body.getReader();
+      let terminal = null;
+      readLoop:
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const lines = frame.split("\n");
+          const idLine = lines.find((l) => l.startsWith("id:"));
+          const dataLine = lines.find((l) => l.startsWith("data:"));
+          if (idLine) lastEventId = idLine.slice(3).trim();
+          if (!dataLine) continue;
+          let evt;
+          try { evt = JSON.parse(dataLine.slice(5).trim()); } catch (_) { continue; }
+          // run_id 从 id 行或帧里的 run_id 字段拿，拿到一次就交给上层做"停止"的目标。
+          if (evt && evt.run_id && !runId) { runId = evt.run_id; if (onRun) onRun(runId); }
+          else if (!runId && idLine) {
+            runId = idLine.slice(3).trim().split(":")[0];
+            if (onRun) onRun(runId);
+          }
+          const type = evt && evt.type;
+          if (type === "content") {
+            if (onChunk) onChunk(evt.text || "");
+          } else if (type === "done") {
+            terminal = evt;              // completed / cancelled / cannot_resume 都以 done 收尾
+            break readLoop;
+          } else if (type === "cancelled") {
+            // 停止或宽限到点：半句已产出，后面紧跟一条 done 收尾，这里不单独终结。
+          } else if (type === "cannot_resume") {
+            resumable = false;
+          } else if (type === "error") {
+            const err = new Error(evt.message || "模型返回错误");
+            err.kind = "error";
+            err.retryable = false;       // 原因已给出：不该再重发整轮去二次付费
+            throw err;
+          } else if (type === "start") {
+            // 带 message_id/model/run_id；run_id 已在上面捕获。
+          } else {
+            // 认不出的帧：不静默丢——记下来上报，同时不打断正常收尾。
+            unknown.push(evt);
+            if (onUnknown) onUnknown(evt);
+          }
         }
       }
+
+      if (terminal) return { done: terminal, unknown };
+
+      // 连接关闭却没有终帧 = 断线。拿不到 run_id、或服务端已说续不上，就没有可续播的东西：
+      // 转取历史，绝不重发生成。否则带游标退避重开续播，试到上限同样转取历史。
+      if (!runId || !resumable) {
+        const err = new Error("这一轮接不上了：不用重发原文，结果会写进会话历史，刷新会话取回");
+        err.kind = "need-history";
+        err.needHistory = true;
+        err.retryable = false;
+        throw err;
+      }
+      if (attempt >= maxAttempts) {
+        const err = new Error("试了几次都没能接上这一轮：不用重发原文，结果会写进会话历史，刷新会话取回");
+        err.kind = "need-history";
+        err.needHistory = true;
+        err.retryable = false;
+        throw err;
+      }
+      attempt += 1;
+      if (onStatus) onStatus(resumeStatus);
+      await sleep(BACKOFF_BASE_MS * Math.pow(2, attempt - 1));
+      // 回到 for(;;)：下一次 open 带上 lastEventId 续播
     }
-    if (!finished) {
-      const err = new Error("流式响应未正常结束");
-      err.retryable = true;
-      throw err;
-    }
-    return finished;
+  }
+
+  /* 流式对话。POST 无法用 EventSource，故手工读流并按空行分帧（分帧/续播/退避在上面的
+   * 内核里）。open 把"重开同一条流"封成一个函数：首次带原文 body 开轮，续播带 Last-Event-ID
+   * 头重开——服务端据此只补缓冲帧，不叫模型、不重记账。onStatus/onRun/onUnknown 由界面传入，
+   * 分别用于人话状态、记住 run_id（给"停止"打 cancel）、上报看不懂的帧。
+   */
+  async function streamChat(opts, onChunk) {
+    const open = async (lastEventId) => {
+      const headers = { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") };
+      if (lastEventId) headers["Last-Event-ID"] = lastEventId;   // 续播凭据：<run_id>:<seq>
+      let res;
+      try {
+        res = await fetch("/v1/chat/stream", {
+          method: "POST",
+          signal: opts.signal,
+          credentials: "same-origin",
+          headers,
+          body: JSON.stringify({
+            model: opts.model, provider: opts.provider, messages: opts.messages,
+            attachments: opts.attachments || [],
+            session_id: opts.sessionId,
+          }),
+        });
+      } catch (e) { NetMinder.note(e); throw e; }
+      if (res.ok && res.body) NetMinder.ok();
+      return res;
+    };
+    const out = await runResilientStream({
+      open, onChunk, onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
+      sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
+      resumeStatus: STREAM_RESUME_STATUS,
+    });
+    return out.done;   // 兼容旧调用点：done 里有 message_id/model/full_text/status
   }
 
   /* 图片预览：改用 Cookie 会话后 <img> 那条老问题换了答案——fetch 带
@@ -290,6 +424,11 @@ const API = (() => {
       request("/v1/sessions/" + encodeURIComponent(id) + "/messages", { method: "PUT", body: { messages } }),
     chat: (payload) => request("/v1/chat", { method: "POST", body: payload }),
     streamChat,
+    /* "停止"是一个显式动作，不再只是关页面的副作用：带 run_id 打服务端取消，翻标志、
+     * 尽力当场关上游、下一个付费轮不发生（见 core/stream_runs.py + main.py 的 cancel 端点）。
+     * 归属判定在服务端：不是你的/不存在的 run_id 都是同一句 404，cancel 不是探测信道。 */
+    cancelStreamRun: (runId) =>
+      request("/v1/chat/stream/" + encodeURIComponent(runId) + "/cancel", { method: "POST" }),
 
     /* 记忆：身份只来自访问令牌，这些函数不收任何身份参数（也不该收）。 */
     addMemory: (content) =>
