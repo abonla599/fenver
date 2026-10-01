@@ -43,6 +43,7 @@ def stream_chat(
     user_id: str = None,
     cancel_event=None,
     on_upstream_start=None,
+    before_round=None,
 ) -> Generator[str, None, None]:
     """流式生成 AI 回复，逐块产出文本；给了 tools 就带上工具循环。
 
@@ -66,6 +67,14 @@ def stream_chat(
     在下一个块到达或读超时（build_client 默认 120s）生效；被保证的是不再新增
     一次付费调用。工具回灌后的下一轮在 create() 之前就被拦下——那才是"重复计费"
     的真正来源。
+
+    before_round（v0.25 R3b，默认 None，直连调用方不受影响）：第一个付费轮之后、
+    每一次新一轮 create() 之前的闸门，返回 False 即按取消收场。判据归调用方
+    （main.py 用它查"这轮还有没有活读者"），检查点必须放在这里——因为这个循环
+    的结构就是"付费边界"本身，放在别处都隔着一次 create()。它与 cancel_event
+    共用同一条 StreamCancelled 出口：宽限到点不是第二套"超时"语义，就是把既有
+    取消路径按下去的手。诚实边界与上面同一句：能保证的是"已在飞行中的那一流完、
+    结账，新的轮次为零"，不能承诺断线即刻免费。
     """
     provider = store.resolve(provider_id, legacy_model=model)
     client = build_client(provider)
@@ -83,6 +92,14 @@ def stream_chat(
             # 轮首先查再 create：取消之后不许再有新一轮付费调用。这一句是
             # "取消后账本增量 = 0"里被数学上保证的那一半。
             if cancel_event is not None and cancel_event.is_set():
+                raise StreamCancelled()
+            # R3b-1 的钱闸（检查点在此、判据在调用方）：第一个付费轮不查——
+            # 用户刚 POST 过，首轮本就是被同意发起的，且读者的 attach 是端点
+            # 返回之后的异步事件，拿首轮去等它是把协议竞态当产品前提。此后
+            # 每一轮都要过闸门；闸门等待尊重 1→0 的宽限窗（不忙轮询，挂 cond）。
+            # 封顶："已在飞行中的那一轮流完并结账，新的轮次为零"——不承诺即刻
+            # 掐断阻塞读，断线不免费。
+            if rounds > 0 and before_round is not None and not before_round():
                 raise StreamCancelled()
             kwargs: Dict[str, Any] = {
                 "model": provider["model"],

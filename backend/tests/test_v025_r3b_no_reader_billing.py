@@ -265,6 +265,14 @@ def _tool_pipe():
         save_interaction=lambda *a: None)
 
 
+def _launch(run, user_text="帮我算"):
+    """直启生产线程（不开 HTTP 首轮），时机确定——同 Lane B 的做法。"""
+    return launch_stream_run(run, provider_store.resolve("fake-model"),
+                             [{"role": "user", "content": user_text}], user_text,
+                             Principal("default_user", "本机管理员", "admin"),
+                             _tool_pipe(), [])
+
+
 class _Reader:
     """用真 sse_frames 生成器握着一个"活读者"：next 进场即 attach，close 即 detach。
 
@@ -304,9 +312,7 @@ def _expired_run(client, real_stream, sid, gate_seconds=0.5):
                         free=2, gate_seconds=gate_seconds)
     completions = real_stream([gated, [_chunk(content="不该出现的第二轮")]])
     run = stream_runs.create_run(user_id="default_user", session_id=sid)
-    launch_stream_run(run, provider_store.resolve("fake-model"),
-                      [{"role": "user", "content": "帮我算"}], "帮我算",
-                      Principal("default_user", "本机管理员", "admin"), _tool_pipe(), [])
+    _launch(run)
     reader = _Reader(run)
     assert reader.next_frame() is not None, "首帧都没拿到，读者夹具坏了"
     _wait_until(lambda: run.last_seq >= 2, why="第一轮正文没进缓冲")
@@ -368,6 +374,7 @@ def test_reconnect_within_grace_replays_and_finishes_without_extra_charge(
     completions = real_stream([gated, [_chunk(content="记下了"), _usage_chunk(3, 4)]])
     sid = client.post("/v1/sessions", headers=BOOT).json()["session_id"]
     run = stream_runs.create_run(user_id="default_user", session_id=sid)
+    _launch(run)
 
     reader = _Reader(run)
     reader.next_frame()                       # attach：SSE 连接进场
@@ -438,6 +445,7 @@ def test_stopped_streams_end_in_a_frame_old_clients_honor(client, real_stream,
     real_stream([gated])
     sid = client.post("/v1/sessions", headers=BOOT).json()["session_id"]
     run = stream_runs.create_run(user_id="default_user", session_id=sid)
+    _launch(run)
     reader = _Reader(run)
     reader.next_frame()
     _wait_until(lambda: run.last_seq >= 2, why="正文没进缓冲")
@@ -526,11 +534,16 @@ def test_regenerate_style_second_ask_is_a_real_paid_call(client, real_stream,
     assert len(completions.calls) == 2, \
         "第二次开问是新的付费轮，任何去重/缓存都不许吞掉它"
     assert _usage_row("default_user")["calls"] == 2, "两次问，两笔账"
+    # 会话尾形与基线一致（这条判据防的是 R3b 的任何机制把第二轮"优化"掉）：
+    # 客户端的 PUT 截掉了旧答案，第二轮的流照常把 user+assistant 写回来——
+    # 最后一条必须是第二轮的真答案，且带第二轮自己的 message_id。
     msgs = _session_rows(client, sid)
-    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"], msgs
-    assert msgs[3]["content"] == "重新生成的答案"
+    assert msgs[-1]["role"] == "assistant" and \
+        msgs[-1]["content"] == "重新生成的答案", msgs
     done2 = [d for _, d in _frames(res2.text)][-1]
-    assert done2["type"] == "done" and done2["message_id"] != \
+    assert done2["type"] == "done" and done2["message_id"] == msgs[-1]["message_id"], \
+        "done 里的 message_id 要指得回落盘的那条助手消息"
+    assert done2["message_id"] != \
         [d for _, d in _frames(res1.text)][-1]["message_id"], "每个 run 自己的 message_id"
 
 
@@ -565,6 +578,7 @@ def test_grace_window_comes_from_config_file_and_env(client, real_stream, clean_
     completions2 = real_stream([gated, [_chunk(content="第二轮")]])
     sid2 = client.post("/v1/sessions", headers=BOOT).json()["session_id"]
     run2 = stream_runs.create_run(user_id="default_user", session_id=sid2)
+    _launch(run2)
     reader = _Reader(run2)
     reader.next_frame()
     _wait_until(lambda: run2.last_seq >= 2, why="正文没进缓冲")
@@ -587,6 +601,7 @@ def test_explicit_cancel_stops_instantly_even_with_long_grace(client, real_strea
                         gate_seconds=8.0)
     completions = real_stream([gated])
     run = stream_runs.create_run(user_id="default_user")
+    _launch(run)
     reader = _Reader(run)
     reader.next_frame()
     _wait_until(lambda: run.last_seq >= 2, why="正文没进缓冲")
@@ -617,6 +632,7 @@ def test_cancel_during_grace_wait_does_not_wait_for_the_window(client, real_stre
     real_stream([gated, [_chunk(content="第二轮")]])
     sid = client.post("/v1/sessions", headers=BOOT).json()["session_id"]
     run = stream_runs.create_run(user_id="default_user", session_id=sid)
+    _launch(run)
     reader = _Reader(run)
     reader.next_frame()
     _wait_until(lambda: run.last_seq >= 2, why="正文没进缓冲")

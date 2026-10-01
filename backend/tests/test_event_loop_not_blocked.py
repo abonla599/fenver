@@ -152,7 +152,7 @@ def test_health_is_answerable_while_a_stream_is_stalled(monkeypatch):
 
     def stalled_stream(model, messages, provider_id=None, temperature=0.7,
                        max_tokens=4096, tools=None, max_tool_turns=5, user_id=None,
-                       cancel_event=None, on_upstream_start=None):
+                       cancel_event=None, on_upstream_start=None, before_round=None):
         return StalledChunks()
 
     monkeypatch.setattr(streaming, "stream_chat", stalled_stream)

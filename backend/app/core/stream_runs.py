@@ -11,6 +11,14 @@
   也还在跑。这正是"可续播"的前提：**读者离开不再顺手掐死生产**——若一断就停，
   续播就必须重新叫上游，等于又收一次钱。因此"停止生成"从本版起是一个显式动作
   （POST /v1/chat/stream/{run_id}/cancel），不再是"关页面"的副作用。
+- 但"关页面不再顺手掐死"不等于"关页面可以无限跑"（v0.25 R3b 补的钱闸）：
+  第一个付费轮之后，每要起飞新一轮都必须有活读者挂在电上（attach_reader/
+  detach_reader 由 sse_frames 进出，续播的重连也算读者回来）。1→0 起算宽限
+  （config_store.stream_no_reader_grace_seconds，默认 30 秒），窗口里没人回来，
+  就借**同一条**取消路径收场（翻标志、尽力关连接、半句在落盘闩下存会话、账
+  照常结），不另起第二套"超时"语义。封顶是"已在飞行中的那一轮流完并结账、
+  新的轮次为零"——断线本身不免费，close 一条正阻塞在 read 上的连接在这套
+  SDK 下不可证明地即时。
 - 活不过"重启"：这张表整体消失。重启后的重连拿到的是 410 cannot_resume，
   客户端被明确告知**不要重发**——结果本身在 sessions.json（消息照常落盘）、
   钱在 usage.json（账照常结清），刷新会话就能取回。
@@ -75,6 +83,10 @@ class StreamRun:
         self.cancel_event = threading.Event()       # 取消标志：生产侧逐块检查
         self._upstream = None                       # 正在读的 openai Stream（尽力关闭用）
         self._message_saved = False
+        # —— R3b 读者在场面（护在同一个 cond 上，不引第二把锁）——
+        self._readers = 0                           # 正握着 SSE 连接的读者数
+        self.no_reader_since = None                 # 1→0 的时刻（monotonic）；有读者即 None
+        self.stop_cause = None                      # 停的成因（"no_reader"）；None=没人标注过
 
     # ---------- 生产侧 ----------
 
@@ -110,6 +122,54 @@ class StreamRun:
             self._message_saved = True
             return True
 
+    # ---------- 读者侧（R3b） ----------
+
+    def attach_reader(self) -> None:
+        """一条 SSE 连接进场：计数 +1，并把 1→0 的宽限计时器**停表**。
+
+        续播（Last-Event-ID）走的也是 sse_frames，因此"窗口内重开接着看"
+        不需要任何额外接线——重连的 attach 就是取消计时器的那个动作。
+        """
+        with self.cond:
+            self._readers += 1
+            self.no_reader_since = None
+            self.cond.notify_all()
+
+    def detach_reader(self) -> None:
+        """一条 SSE 连接结束（含客户端断开的 GeneratorExit）：计数 -1，落到 0 时起表。"""
+        with self.cond:
+            self._readers = max(0, self._readers - 1)
+            if self._readers == 0:
+                self.no_reader_since = time.monotonic()
+            self.cond.notify_all()
+
+    def has_reader(self) -> bool:
+        with self.cond:
+            return self._readers > 0
+
+    def wait_for_reader(self, grace_seconds: float) -> bool:
+        """阻塞等"有活读者"，窗口从 1→0 那一刻起算；不忙轮询，全靠 cond 通知。
+
+        True  = 读者在场或窗口内回来了；
+        False = 窗口耗尽仍未回来，或期间有人显式取消（等待者被 cancel 的
+                notify 叫醒，由调用方看标志位区分成因）。
+        从未有过读者的 run 走到这里才起表：没有 1→0 就没有天然窗口起点，
+        以本次轮次边界起算是最不坏的解释（不阻塞正常装配，也不无限悬着）。
+        """
+        with self.cond:
+            if self._readers > 0:
+                return True
+            if self.no_reader_since is None:
+                self.no_reader_since = time.monotonic()
+            deadline = self.no_reader_since + max(0.0, float(grace_seconds))
+            while self._readers == 0 and not self.cancel_event.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                # 1 秒上限只是兜底（同 sse_frames 的规矩）：attach/cancel 都 notify
+                self.cond.wait(min(remaining, 1.0))
+            return self._readers > 0
+
     # ---------- 取消侧 ----------
 
     def attach_upstream(self, stream) -> None:
@@ -141,6 +201,9 @@ class StreamRun:
         self.cancel_event.set()
         self.abort_upstream()
         with self.cond:
+            # R3b：显式取消要能立刻叫醒正挂在 wait_for_reader 里的生产线程——
+            # "停止"仍是即时动作，不吃宽限窗。
+            self.cond.notify_all()
             return "warning" if self.finished else "cancelled"
 
 
@@ -198,31 +261,50 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
     同步生成器：StreamingResponse 会把每次迭代丢进线程池——一个读者占一个池线程,
     与改造前"生成器自己拉着模型读"占用相同；结构上多出来的只有生产线程。
     读者因客户端断开被 close 时，cond.wait 随线程栈一起退出，run 不受影响。
+
+    R3b：这条生成器就是"活读者"的定义——进场 attach、以任何方式离场 detach
+    （正常耗尽、显式 close、断开引发的 GeneratorExit 都走同一个 finally）。
+    首帧 yield 之前完成 attach，因此握连接的语义与判据里"实际持有连接的
+    SSE 生成器"逐字对应；续播同样经这里，重连即停宽限计时器。
     """
-    while True:
-        with run.cond:
-            gap = bool(run.events) and run.events[0]["seq"] > cursor + 1
-            batch = [] if gap else [e for e in run.events if e["seq"] > cursor]
-            finished = run.finished
-            last = run.last_seq
-            if not gap and not batch and not finished:
-                # 1 秒的超时只是兜底：append/finish 都 notify，正常等待不该走到它
-                run.cond.wait(1.0)
+    run.attach_reader()
+    try:
+        while True:
+            with run.cond:
                 gap = bool(run.events) and run.events[0]["seq"] > cursor + 1
                 batch = [] if gap else [e for e in run.events if e["seq"] > cursor]
                 finished = run.finished
                 last = run.last_seq
-        if gap:
-            # 在线读者被缓冲的裁减追上了：明说续不上，别将错就错——这条帧没有
-            # seq，因为它不属于缓冲里那个连续的事件流
-            yield ("data: " + json.dumps({
-                "type": "cannot_resume", "code": "cannot_resume", "resumable": False,
-                "run_id": run.run_id,
-                "message": "服务端缓冲已装不下你断点之后的全部事件：不要重发原文，"
-                           "结果会写进会话历史，刷新会话取回"}) + "\n\n")
-            return
-        for e in batch:
-            yield _frame(run.run_id, e["seq"], e["payload"])
-            cursor = e["seq"]
-        if finished and cursor >= last:
-            return
+                if not gap and not batch and not finished:
+                    # 1 秒的超时只是兜底：append/finish 都 notify，正常等待不该走到它
+                    run.cond.wait(1.0)
+                    gap = bool(run.events) and run.events[0]["seq"] > cursor + 1
+                    batch = [] if gap else [e for e in run.events if e["seq"] > cursor]
+                    finished = run.finished
+                    last = run.last_seq
+            if gap:
+                # 在线读者被缓冲的裁减追上了：明说续不上，别将错就错——这条帧没有
+                # seq，因为它不属于缓冲里那个连续的事件流
+                yield ("data: " + json.dumps({
+                    "type": "cannot_resume", "code": "cannot_resume", "resumable": False,
+                    "run_id": run.run_id,
+                    "message": "服务端缓冲已装不下你断点之后的全部事件：不要重发原文，"
+                               "结果会写进会话历史，刷新会话取回"}) + "\n\n")
+                # R3b-3：cannot_resume 是旧客户端（api.js 只认 content/done/error）
+                # 看不懂的类型——若以此收尾，旧客户端按"没有 done"判 retryable，
+                # 会把整轮重发回 /v1/chat 再付一次钱。补一条同为连接级（不占缓冲
+                # 序号）的 done 终帧：停的信息放进新字段，旧解析器只取它认的骨架。
+                yield ("data: " + json.dumps({
+                    "type": "done", "status": "cannot_resume",
+                    "stopped_reason": "buffer_gap", "resumable": False,
+                    "run_id": run.run_id, "message_id": run.message_id,
+                    "message": "本连接因追不上服务端缓冲而结束：不要重发原文，"
+                               "结果会写进会话历史，刷新会话取回"}) + "\n\n")
+                return
+            for e in batch:
+                yield _frame(run.run_id, e["seq"], e["payload"])
+                cursor = e["seq"]
+            if finished and cursor >= last:
+                return
+    finally:
+        run.detach_reader()
