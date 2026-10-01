@@ -89,17 +89,17 @@ def test_stranger_cannot_read_or_cancel(client, enforced, two_users):
 
     # 属主自己：读得到、取消得动（对照，防止"一律 404"也过这条）
     assert client.get(f"/v1/tasks/{mine.task_id}", headers=ha).status_code == 200
+    assert client.get(f"/v1/tasks/{theirs.task_id}", headers=hb).status_code == 200
     res = client.post(f"/v1/tasks/{mine.task_id}/cancel", headers=ha)
     assert res.status_code == 200, res.text
     assert ts.get_task(mine.task_id).cancelled is True
 
     # 陌生人：三种方法、同一句话、同一个 404；不许有 403
     for headers, method, path in (
-            (hb, "get", f"/v1/tasks/{theirs.task_id}"),
+            (ha, "get", f"/v1/tasks/{theirs.task_id}"),
             (ha, "post", f"/v1/tasks/{theirs.task_id}/cancel"),
             (ha, "delete", f"/v1/tasks/{theirs.task_id}")):
-        res = getattr(client, method)(path, headers=headers) if headers else \
-            getattr(client, method)(path)
+        res = getattr(client, method)(path, headers=headers)
         assert res.status_code == 404, f"{method} {path} -> {res.status_code} {res.text}"
 
     assert ts.get_task(theirs.task_id).cancelled is False, "陌生人的 cancel 竟改动了任务"
@@ -284,8 +284,15 @@ def test_llm_calls_in_a_task_use_the_initiators_pool_and_default(client, enforce
 
 def test_task_llm_falls_back_to_shared_default_without_a_pref(client, enforced,
                                                               two_users, monkeypatch):
-    """没设过默认的人用站级共享默认——回落要有，但回落的是**他的池子**里的默认。"""
+    """没设过默认的人用他池子里的站级默认——回落要有，但回落的是**这个人**的默认。
+
+    期望值从 provider_store.default_for 现算而不是抄一个 "fake-model"：进程级
+    store 里躺着谁先前的用例造的配置，测试环境说了不算，"这个人不指定时用哪条"
+    的唯一权威就是它（providers.py 注释里那条承诺，这里替它站岗）。
+    """
     ha, uid_a, _, _ = two_users
+    expected = provider_store.default_for(uid_a)
+    assert expected is not None, "测试环境的池子里没有可用默认，这条用例失去对象"
     seen = []
     fake = conftest._FakeClient()
 
@@ -297,9 +304,11 @@ def test_task_llm_falls_back_to_shared_default_without_a_pref(client, enforced,
     monkeypatch.setattr(llm_client, "build_client", spy_build)
     res = client.post("/v1/agent/orchestrate", json={"goal": "排一下"}, headers=ha)
     assert res.status_code == 200, res.text
-    assert seen and all(p["id"] == "fake-model" for p in seen)
+    assert seen and all(p["id"] == expected["id"] for p in seen), \
+        f"没设偏好的人该落在他自己的默认上：实际用了 {[p['id'] for p in seen]}"
     rows = [r for r in usage.snapshot() if r["user_id"] == uid_a]
-    assert rows and rows[0]["paid_by"] == "operator", "共享默认的账是 operator 垫的"
+    assert rows, "调用发生了却没人记账"
+    assert rows[0]["paid_by"] == (expected.get("paid_by") or "operator")
 
 
 def test_no_provider_says_human_words_not_a_500(client, enforced, two_users):

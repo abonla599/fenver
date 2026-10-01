@@ -122,7 +122,10 @@ def _stub_orchestrator(monkeypatch):
     from app.agents.orchestrator import Orchestrator
 
     orch = Orchestrator()
-    monkeypatch.setattr(orch.planner, "plan", lambda goal: [])   # 空计划：不碰执行器
+    # 形参跟着真函数长（v0.25 R1 起 plan 收 user_id/provider_id）：桩少一个
+    # 参数，红出来的就不是产品坏了，是这条用例自己的口径旧了。
+    monkeypatch.setattr(orch.planner, "plan",
+                        lambda goal, user_id=None, provider_id=None: [])
     return orch
 
 

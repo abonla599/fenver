@@ -119,7 +119,8 @@ def test_the_orchestrator_bills_the_task_to_whoever_asked_for_it(monkeypatch):
     from app.agents.orchestrator import Orchestrator
 
     orch = Orchestrator()
-    monkeypatch.setattr(orch.planner, "plan", lambda goal: [])
+    monkeypatch.setattr(orch.planner, "plan",
+                        lambda goal, user_id=None, provider_id=None: [])
     result = orch.run(goal="随便排一下", user_id="u-9")
     tid = result.get("task_id")
     assert tid, result

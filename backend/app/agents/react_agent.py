@@ -6,6 +6,7 @@ import time
 import json
 from typing import List, Dict, Any, Optional
 from app.core.llm_client import get_llm_response
+from app.core.providers import scrub_secrets
 from app.tools.executor import execute_tool
 from app.tools.registry import get_available_tools_schema
 
@@ -50,7 +51,8 @@ class ReActAgent:
         task: str,
         context: Optional[List[Dict[str, str]]] = None,
         max_duration: int = 120,
-        user_id: str = None
+        user_id: str = None,
+        provider_id: str = None
     ) -> str:
         """
         执行任务的主方法
@@ -59,7 +61,9 @@ class ReActAgent:
             context: 可选的上下文消息列表
             max_duration: 最大执行时间（秒），默认120秒
             user_id: 这次运行属于谁。needs_user 类工具（读日程/读记忆）由执行器
-                用这个值覆盖模型给的参数；不传的话这些工具只能落在 default_user 上
+                用这个值覆盖模型给的参数；不传的话这些工具只能落在 default_user 上。
+                它同时是账本上那一人（v0.25 R1：/v1/agent/run 对登录用户开放）
+            provider_id: 发起人解析出的模型服务；None 时按他的默认与池子走
         Returns:
             最终答案字符串
         """
@@ -95,7 +99,9 @@ class ReActAgent:
                 
                 # 尝试强制总结当前已有的信息
                 try:
-                    summary = self._force_summarize(messages, task)
+                    summary = self._force_summarize(messages, task,
+                                                    user_id=user_id,
+                                                    provider_id=provider_id)
                     return f"{timeout_msg}\n\n{summary}"
                 except:
                     return timeout_msg
@@ -109,10 +115,14 @@ class ReActAgent:
                 response = get_llm_response(
                     model=self.model,
                     messages=messages,
-                    temperature=0.7
+                    temperature=0.7,
+                    provider_id=provider_id,
+                    user_id=user_id,
                 )
             except Exception as e:
-                error_msg = f"调用LLM出错: {str(e)}"
+                # 这句话会原样进 /v1/agent/run 的响应体：上游把 Authorization
+                # 打印回来不是假设，出口先过 scrub_secrets（约束：错误文案不裸走）。
+                error_msg = f"调用LLM出错: {scrub_secrets(str(e))}"
                 if self.verbose:
                     print(f"[ReActAgent] ❌ {error_msg}")
                 return error_msg
@@ -180,7 +190,8 @@ class ReActAgent:
             print(f"[ReActAgent] ⚠️ 达到最大轮次 {self.max_turns}，强制总结")
         
         try:
-            return self._force_summarize(messages, task)
+            return self._force_summarize(messages, task, user_id=user_id,
+                                         provider_id=provider_id)
         except:
             return "抱歉，任务执行达到最大轮次限制，未能得出完整结论。"
 
@@ -249,7 +260,8 @@ class ReActAgent:
         except Exception:
             return []
 
-    def _force_summarize(self, messages: List[Dict], task: str) -> str:
+    def _force_summarize(self, messages: List[Dict], task: str,
+                         user_id: str = None, provider_id: str = None) -> str:
         """强制总结当前对话"""
         summary_prompt = f"请基于以上对话历史，对任务「{task}」给出你目前能得出的最佳答案。即使信息不完整，也请尽量提供有价值的内容。"
         
@@ -259,5 +271,7 @@ class ReActAgent:
         return get_llm_response(
             model=self.model,
             messages=summarize_messages,
-            temperature=0.5
+            temperature=0.5,
+            provider_id=provider_id,
+            user_id=user_id,
         )
