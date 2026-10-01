@@ -3686,11 +3686,12 @@ const SC = JSON.parse(process.argv[3]);
 
 const PREAMBLE = `
 const enc = new TextEncoder();
+const NL = String.fromCharCode(10);   // 别在这里写反斜杠换行：它会塌成真换行把生成的代码截断
 function blockToText(b) {
   let s = "";
-  if (b.id) s += "id: " + b.id + "\n";
-  if (b.data !== undefined && b.data !== null) s += "data: " + JSON.stringify(b.data) + "\n";
-  return s + "\n";
+  if (b.id) s += "id: " + b.id + NL;
+  if (b.data !== undefined && b.data !== null) s += "data: " + JSON.stringify(b.data) + NL;
+  return s + NL;
 }
 const openCalls = [];
 let oi = 0;
@@ -3705,9 +3706,11 @@ function open(lastEventId) {
     let i = 0;
     resp.body = { getReader() {
       return { read() {
-        return Promise.resolve(i < blocks.length
-          ? { value: enc.encode(blocks[i]), done: false }
-          : { value: undefined, done: true });
+        if (i < blocks.length) {
+          const v = enc.encode(blocks[i]); i += 1;   // 必须推进游标，否则 read 永远回第一帧
+          return Promise.resolve({ value: v, done: false });
+        }
+        return Promise.resolve({ value: undefined, done: true });
       } };
     } };
   } else {
