@@ -609,9 +609,13 @@ def test_护栏打开时第二个付费轮在轮次边界被拦_读者在场也�
     或"停了但成因不是影子"翻红。"""
     shadow_limit_env(1.0)
     grace_env(60)
+    # 到线的种子行落在另一个已定价 provider 上：usage 按 (user, provider) 并桶，
+    # 若种子也记在 round-priced 上，"只有起飞的那一轮结账"就无法用 calls 恰为 1 判。
+    priced_providers("seed-overlimit", {"mode": "token", "currency": "CNY",
+                                        "input_per_m": 1000.0, "output_per_m": 4000.0})
+    _today_row(USER, "seed-overlimit", prompt=100_000, completion=10_000)
     priced_providers("round-priced", {"mode": "token", "currency": "CNY",
                                       "input_per_m": 1000.0, "output_per_m": 4000.0})
-    _today_row(USER, "round-priced", prompt=100_000, completion=10_000)
     completions = real_stream([
         [_chunk(content="第一轮的半句"), _usage_chunk(9, 9), _tool_call_chunk()],
         [_chunk(content="不该出现的第二轮"), _usage_chunk(1, 1)],
@@ -648,6 +652,10 @@ def test_轮首只有一个闸_影子与读者是同一钩子的两个判据而�
     该不该花钱出网』的问题被拆成了两半。"""
     import inspect
     import app.core.streaming as streaming
+    # conftest 的 autouse 桩挂在模块属性上（streaming.stream_chat = fake_stream），
+    # 直接 inspect 会扫到桩。与 real_stream 同一招：reload 换回真函数再读源码——
+    # 本用例只读源码、不发调用，reload 不影响任何行为判据。
+    importlib.reload(streaming)
     src = inspect.getsource(streaming.stream_chat)
     assert src.count("before_round()") == 1, src
     import app.main as m
