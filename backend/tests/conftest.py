@@ -183,8 +183,11 @@ def _isolated_throttle():
     # APK 代取那本不在 _LEDGERS 里（它在 web_router，窗口/上限都不同），但它同样是
     # 跨用例的进程内状态：不清的话，任何多点几次下载的用例会把 127.0.0.1 这一个
     # 来源攒到 429，饿死后面真点按钮的用例。加新闸门时这里跟着长。
+    # 2026-10-01 跟着长的正是那一档"60 秒同版接力"：上一条用例成功取回的字节会替
+    # 下一条把代取整个跳过——于是一条钉"取不到字节必须退发布页"的用例会拿着接力
+    # 里的 200 红得莫名其妙。走 reset_apk_gates_for_tests()，让新增的闸门自动跟着清。
     from app.web import web_router
-    web_router._APK_DOWNLOADS.clear()
+    web_router.reset_apk_gates_for_tests()
     # 工具频控账本同一性质（tools/executor 的滑动窗口，进程内、10 分钟不自动松）：
     # 任何多用了几次 execute_code 的用例会把 "anon" 攒到闸门阈值，后面断言"代码跑
     # 出来了"的用例会拿到一句"调用过于频繁"。

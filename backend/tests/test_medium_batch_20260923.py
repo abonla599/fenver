@@ -62,29 +62,49 @@ def _apk_env(monkeypatch, plan=None, data=b"APK"):
     if plan is None:
         plan = ({"url": "https://github.com/o/r/releases/download/v0.19/ai-assistant-native-0.19.apk",
                  "name": "ai-assistant-native-0.19.apk", "size": 3, "version": "0.19"}, "")
+    trips = []
+
+    def fetch(url):
+        trips.append(url)
+        return (data, "")
+
     monkeypatch.setattr(releases, "download_plan", lambda: plan)
-    monkeypatch.setattr(releases, "fetch_asset", lambda url: (data, ""))
+    monkeypatch.setattr(releases, "fetch_asset", fetch)
+    return trips
 
 
 def test_apk_fetch_is_throttled_per_source(monkeypatch):
-    """一小时 3 次：够真人换机重下，脚本每 3 次得换一枚真实访客 IP。"""
-    _apk_env(monkeypatch)
+    """一小时 6 次：够真人换机重下与一次失败后的重试，脚本每 6 次得换一枚真实访客 IP。
+
+    6 次里只有第一次真朝 GitHub 跑（后面五次走 60 秒接力），但**每次都扣格子**：
+    这一格量的是"这个来源从我们这儿搬走了多少出口字节"，不是"GitHub 被打了几趟"。
+    """
+    trips = _apk_env(monkeypatch)
     c = peer_client(("203.0.113.7", 7777))
-    for i in range(3):
+    for i in range(6):
         assert c.get("/site/android.apk").status_code == 200, i
     res = c.get("/site/android.apk")
     assert res.status_code == 429
     assert int(res.headers["retry-after"]) > 0
+    assert len(trips) == 1, f"接力没接住，多跑了 {len(trips) - 1} 次 GitHub"
+    from app.web import web_router
+    assert len(web_router._APK_DOWNLOADS["203.0.113.7"]) == 6, \
+        "接力那几次没扣格子：这一格量的是出口字节，不是 GitHub 趟数"
     # 节流按来源：另一个来源照旧能下
     other = peer_client(("203.0.113.8", 8888))
     assert other.get("/site/android.apk").status_code == 200
 
 
 def test_apk_single_flight_falls_back_without_billing_the_budget(monkeypatch):
-    """槽位被占：不排队（排队=把攻击者的积压搬进线程池），直接 302 发布页；
-    而且这一支没朝 GitHub 跑，不扣来客的格子。"""
+    """槽位被占且等不到（接力也没有）：退 302 发布页，而且这一支没回字节，不扣格子。
+
+    等待是有界的（APK_SLOT_RETRIES × APK_SLOT_WAIT_SECONDS），这里把它压成一次极短的
+    等待：测的是"等不到就退、且不计费"，不是真睡六秒。
+    """
     from app.web import web_router
-    _apk_env(monkeypatch)
+    monkeypatch.setattr(web_router, "APK_SLOT_RETRIES", 1)
+    monkeypatch.setattr(web_router, "APK_SLOT_WAIT_SECONDS", 0.05)
+    trips = _apk_env(monkeypatch)
     c = peer_client(("203.0.113.9", 9999))
     assert web_router._APK_SLOTS.acquire(blocking=False)
     try:
@@ -97,6 +117,51 @@ def test_apk_single_flight_falls_back_without_billing_the_budget(monkeypatch):
     # 释放后恢复正常，且第一次成功只扣一格
     assert c.get("/site/android.apk").status_code == 200
     assert len(web_router._APK_DOWNLOADS["203.0.113.9"]) == 1
+    assert len(trips) == 1
+
+
+def test_apk_relay_serves_the_next_device_without_the_slot(monkeypatch):
+    """60 秒内的第二个人不再抢槽、不再朝 GitHub 跑：同屋两台设备不该互相撞失败。
+
+    这一条修的正是"0.23.x 老壳的自动更新撞上一台浏览器正在下载"那个形状：老壳的
+    字节出口就是这条路由，撞闸换回 302（发布页 HTML）时它的摘要核对会直接拒装——
+    效果没坏，但那一次点击是白费的。
+    """
+    from app.web import web_router
+    trips = _apk_env(monkeypatch)
+    first = peer_client(("203.0.113.11", 11111))
+    assert first.get("/site/android.apk").status_code == 200
+    assert web_router._APK_SLOTS.acquire(blocking=False), "上一条没把槽还回来"
+    try:
+        second = peer_client(("203.0.113.12", 12121))
+        res = second.get("/site/android.apk", follow_redirects=False)
+        assert res.status_code == 200, "接力没生效：有人在途时第二台设备被 302 掉了"
+        assert res.content == b"APK"
+        assert res.headers["content-type"] == web_router.APK_MEDIA_TYPE
+    finally:
+        web_router._APK_SLOTS.release()
+    assert len(trips) == 1, f"第二台又跑了一趟 GitHub：{trips}"
+    assert len(web_router._APK_DOWNLOADS["203.0.113.12"]) == 1, "接力回字节也要扣格子"
+
+
+def test_apk_relay_is_keyed_by_version_not_by_url(monkeypatch):
+    """新版一发布，接力里那批旧字节当场作废：绝不可能把上一版递给这一版的人。
+
+    这是这条缓存唯一能把自己害死的方式——按 URL/按"最新"存就会跨版本复用。
+    HTTP 侧照旧 no-cache，所以浏览器那层没多留任何东西。
+    """
+    from app.core import releases
+    from app.web import web_router
+    _apk_env(monkeypatch)
+    assert peer_client(("203.0.113.13", 13131)).get("/site/android.apk").status_code == 200
+    assert web_router._relay_get("0.19"), "刚取回的字节没进接力"
+    newer = ({"url": "https://github.com/o/r/releases/download/v0.20/ai-assistant-native-0.20.apk",
+              "name": "ai-assistant-native-0.20.apk", "size": 3, "version": "0.20"}, "")
+    monkeypatch.setattr(releases, "download_plan", lambda: newer)
+    assert web_router._relay_get("0.20") is None, "换版本还命中旧字节"
+    assert peer_client(("203.0.113.14", 14141)).get("/site/android.apk").status_code == 200
+    assert web_router._relay_get("0.19") is None, "旧版那批字节该被顶掉，不是并排存着"
+    assert web_router._relay_get("0.20"), "新版没接上力"
 
 
 def test_failed_no_plan_never_touches_the_slot_or_budget(monkeypatch):

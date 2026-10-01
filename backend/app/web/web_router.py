@@ -222,23 +222,36 @@ SITE_DIR = _site_dir()
 # ---------- 「安卓版」那颗按钮的闸门（审查 #8，2026-09-23） ----------
 # 免鉴权 + 一次点击最多搬 16MB 过内存、还要替来客朝 GitHub 跑一趟——原先没有任何
 # 并发/频率闸门：一个人写个循环就能把出口带宽和内存按住，全站陪着他卡。
-# 两把闸，各挡一种形状：
-# ① 按来源 IP 限频：一小时 3 次够真人"换了手机再下一次"，脚本则要每 3 次换一枚真 IP；
-#    来源取 auth_router._client_ip 那一个口径（必经 Cloudflare 时才认 CF-Connecting-IP），
-#    不在此处重写第二份取 IP 的逻辑——两边一漂移，闸门就挡错人。
-# ② 单飞行槽位：同一时刻最多一个人真正在代取。槽位被占**不排队**——排队等于把
-#    攻击者的积压搬进线程池，那正是这笔 DoS 的另一半；拿不到槽就退回发布页，
-#    与"取不到"同一个退路，最坏情况不比以前差。
-# 只有真开了代取才扣格子：GitHub 挂了不该把点按钮的真人锁在门外。
+# 三样东西，各挡一种形状：
+# ① 按来源 IP 限频：一小时 6 次够真人"换了手机再下一次"和一次失败后的重试，脚本则要
+#    每 6 次换一枚真 IP；来源取 auth_router._client_ip 那一个口径（必经 Cloudflare 时
+#    才认 CF-Connecting-IP），不在此处重写第二份取 IP 的逻辑——两边一漂移，闸门就挡错人。
+#    **每一次真回字节都扣格子，包括从下面③的接力里拿到的**：这一格量的是"这个来源
+#    从我们这儿搬走了多少出口字节"，不是"GitHub 被打了几趟"。
+# ② 单飞行代取：同一时刻最多一个人真正朝 GitHub 跑。槽位被占时**只多等一小段**
+#    （APK_SLOT_RETRIES × APK_SLOT_WAIT_SECONDS，默认 2×3s）再退——不是排队：那等于把
+#    攻击者的积压搬进线程池；但 0.23.x 老壳的自动更新恰恰是从自家出口取字节，一次
+#    浏览器下载把它撞成 302（HTML）就是一次白失败的尝试，而这一等只在"真的有人在途"
+#    时发生，攻击者想让我们多睡 3 秒也得先花掉自己的格子。
+# ③ 60 秒接力缓存：把刚取回的那一版字节留给紧跟其后的第二台设备。它同时消掉
+#    ②的等待与一次 GitHub 往返，键是版本号而不是 URL：新版一发布键就变，旧字节自然
+#    作废，不可能把上一版递给这一版的人（HTTP 侧照旧 no-cache，浏览器不许自己留）。
+# 只有真开了代取才扣格子的老口径改成了"真回了字节就扣"：退路（没有快照、拿不到槽）
+# 依旧一格不扣，所以 ①③ 各自的红线都没动。
 APK_WINDOW_SECONDS = 3600
-APK_MAX_PER_SOURCE = 3
+APK_MAX_PER_SOURCE = 6
 MAX_TRACKED_APK_SOURCES = 4096
 _APK_DOWNLOADS = defaultdict(list)
 _APK_SLOTS = threading.Semaphore(1)
+APK_SLOT_RETRIES = 2
+APK_SLOT_WAIT_SECONDS = 3.0
+APK_RELAY_TTL_SECONDS = 60.0
+_APK_RELAY: dict = {}              # version -> (monotonic, name, bytes)
+_APK_RELAY_LOCK = threading.Lock()
 
 
 def _apk_throttled(ip: str) -> int:
-    """还让不让这个来源开代取；让则返回 0，否则返回 Retry-After 秒数。"""
+    """还让不让这个来源再搬一次；让则返回 0，否则返回 Retry-After 秒数。"""
     now = time.monotonic()
     recent = [t for t in _APK_DOWNLOADS[ip] if now - t < APK_WINDOW_SECONDS]
     _APK_DOWNLOADS[ip] = recent
@@ -248,6 +261,32 @@ def _apk_throttled(ip: str) -> int:
     if len(recent) >= APK_MAX_PER_SOURCE:
         return max(1, int(APK_WINDOW_SECONDS - (now - min(recent))) + 1)
     return 0
+
+
+def _relay_get(version: str):
+    """这一版刚取回来的字节还在不在；返回 (name, data) 或 None。"""
+    with _APK_RELAY_LOCK:
+        hit = _APK_RELAY.get(version)
+    if not hit:
+        return None
+    bought_at, name, data = hit
+    if time.monotonic() - bought_at >= APK_RELAY_TTL_SECONDS:
+        return None
+    return name, data
+
+
+def _relay_put(version: str, name: str, data: bytes) -> None:
+    """只留最新那一版：留着旧版就是白占 16MB，而没有任何人会再要它。"""
+    with _APK_RELAY_LOCK:
+        _APK_RELAY.clear()
+        _APK_RELAY[version] = (time.monotonic(), name, data)
+
+
+def reset_apk_gates_for_tests() -> None:
+    """把三样闸门的进程级状态一次清空（测试用它等价于"换一台刚起来的机器"）。"""
+    with _APK_RELAY_LOCK:
+        _APK_RELAY.clear()
+    _APK_DOWNLOADS.clear()
 
 
 def install_site(app: FastAPI) -> None:
@@ -277,9 +316,11 @@ def install_site(app: FastAPI) -> None:
         事件循环干活（判据在 tests/test_event_loop_not_blocked.py 的名单里）。
         reason 一律打进日志：EXE 是隐藏窗口起的，不打印就只剩人猜是哪一层坏了。
 
-        2026-09-23（审查 #8）起带两道闸：按来源限频 + 单飞行代取，见
-        _APK_DOWNLOADS 上面那段。退路不变：拿不到真字节一律 302 发布页或 429，
-        绝不回 200 空文件。
+        2026-09-23（审查 #8）起带闸，2026-10-01 补齐第三档：按来源限频 + 有界的
+        单飞行等待 + 60 秒同版接力，见 _APK_DOWNLOADS 上面那段。退路不变：拿不到真
+        字节一律 302 发布页或 429，绝不回 200 空文件。这一条同时是 0.23.x 老壳
+        「检查更新」的字节出口（`releases.SELF_APK_PATH`），所以那两档闸撞到它时
+        的代价被特意压低：一次撞闸只是慢一点或多扣一格，不再是一次必然失败的下载。
         """
         plan, why = releases.download_plan()
         if not plan:
@@ -289,8 +330,29 @@ def install_site(app: FastAPI) -> None:
         if (retry_after := _apk_throttled(ip)):
             raise HTTPException(status_code=429, detail="下载尝试过于频繁，请稍后再试",
                                 headers={"Retry-After": str(retry_after)})
-        if not _APK_SLOTS.acquire(blocking=False):
-            print("[site] 代取 APK 已有他人在途，退回发布页", flush=True)
+
+        def served(name: str, data: bytes):
+            return Response(content=data, media_type=APK_MEDIA_TYPE,
+                            headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                     # 代理的是"最新那一版"，而这份快照 10 分钟才换一次；
+                                     # 缓存这条响应就等于让下一个人下到上一版。
+                                     "Cache-Control": "no-cache",
+                                     "X-Content-Type-Options": "nosniff"})
+
+        # 接力那一档：60 秒内第二个人（同屋第二台设备、老壳失败后的重试）不再占槽、
+        # 不再朝 GitHub 跑，字节直接从这里出去；格子照扣——它量的是出口字节。
+        relay = _relay_get(plan["version"])
+        if relay:
+            _APK_DOWNLOADS[ip].append(time.monotonic())
+            return served(relay[0], relay[1])
+
+        got = False
+        for _ in range(APK_SLOT_RETRIES):
+            if _APK_SLOTS.acquire(timeout=APK_SLOT_WAIT_SECONDS):
+                got = True
+                break
+        if not got:
+            print("[site] 代取 APK 已有他人在途且等不到，退回发布页", flush=True)
             return RedirectResponse(releases.releases_page(), status_code=302)
         try:
             _APK_DOWNLOADS[ip].append(time.monotonic())
@@ -300,11 +362,7 @@ def install_site(app: FastAPI) -> None:
         if data is None:
             print(f"[site] 代取 APK 失败，退回发布页：{why}", flush=True)
             return RedirectResponse(releases.releases_page(), status_code=302)
-        return Response(content=data, media_type=APK_MEDIA_TYPE,
-                        headers={"Content-Disposition": f'attachment; filename="{plan["name"]}"',
-                                 # 代理的是"最新那一版"，而这份快照 10 分钟才换一次；
-                                 # 缓存这条响应就等于让下一个人下到上一版。
-                                 "Cache-Control": "no-cache",
-                                 "X-Content-Type-Options": "nosniff"})
+        _relay_put(plan["version"], plan["name"], data)
+        return served(plan["name"], data)
 
     app.mount("/site", RevalidatingStaticFiles(directory=SITE_DIR), name="site")
