@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 import uvicorn
 
 # ---------- 路径设置 ----------
@@ -125,8 +125,7 @@ from app.memory.memory_router import router as memory_router
 # 身份端点：邀请码注册 + 管理面。哪个端点免凭据由 authz.PUBLIC_PATHS 说了算，
 # 这里只负责挂载，不在此处再判一遍凭据。
 from app.core.auth_router import router as auth_router
-from app.core.auth_router import (chat_allowed, note_chat, chat_retry_after,
-                                  _client_ip, _too_many)
+from app.core.auth_router import throttle_paid_upstream
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_admin, mount_pwa
@@ -196,7 +195,57 @@ from app.core.request_log import RequestTiming
 
 app.add_middleware(RequestTiming)
 
+# 后加的中间件包在先加的**外面**，所以这一条是全场第一道门：超大 JSON 体在解析、
+# 鉴权、记账之前就被挡掉。只认 application/json —— 上传走 multipart，它有自己的
+# MAX_UPLOAD_BYTES(10MB) 判据，在这儿一并卡住会把附件上传直接打死。
+MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+
+
+@app.middleware("http")
+async def reject_oversized_json_body(request: Request, call_next):
+    """声明体积超过 2MB 的 JSON 请求体，落地之前先回 413。
+
+    为什么光有模型层的限条数/限长不够：`/v1/chat` 的上限是 50 条 × 32000 字，
+    乘起来仍是 1.6M 字符；而全仓还有别的字符串字段（feedback 的 comment 等）。
+    一处体积闸门比在每个模型上补一遍 max_length 更不容易漏。
+
+    诚实的边界：这里信的是 `Content-Length` 头。分块传输（`Transfer-Encoding:
+    chunked`）不发这个头，那条路要靠 uvicorn 自己的缓冲上限兜——本闸门挡的是
+    "客户端老老实实声明了要塞 500MB"，不是伪装协议。
+    """
+    if (request.headers.get("content-type") or "").lower().startswith("application/json"):
+        declared = (request.headers.get("content-length") or "").strip()
+        if declared.isdigit() and int(declared) > MAX_JSON_BODY_BYTES:
+            print(f"⚠️ 拒绝超大 JSON 请求体: {request.url.path} 声明 {declared} 字节")
+            return JSONResponse(status_code=413, content={"detail": "请求体过大"})
+    return await call_next(request)
+
 # ---------- 数据模型 ----------
+
+# 一次聊天请求的三条体积闸门。限流挡的是**次数**，这三条挡的是**单次的大小**——
+# 乘起来才是真正花掉的 token 与吃掉的内存；只装前者，20 次/分每次塞几 MB 照样能
+# 把服务打穿。判据集中在 backend/tests/test_request_size_caps.py。
+MAX_CHAT_MESSAGES = 50
+MAX_MESSAGE_CHARS = 32_000
+MAX_CHAT_ATTACHMENTS = 5
+MAX_FEEDBACK_COMMENT_CHARS = 500
+
+
+def _message_text_chars(message) -> int:
+    """一条消息里"文本"的字符数：多模态数组只数 text 部件。
+
+    不数 image_url 里的 base64 是因为那部分本就有 2MB 总体积闸门兜着，而把它按
+    字符算进 32000 的额度，等于让发一张图的用户"一句话都没说"就被判超长。
+    """
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(len(part.get("text", "")) for part in content
+                   if isinstance(part, dict) and part.get("type") == "text")
+    return 0
+
+
 class ChatRequest(BaseModel):
     # 兼容字段：作为 provider 的别名解析。默认从写死的服务商名改为 None（F-1f）：
     # 名字刻在这儿，用户在设置页换了默认 provider 也不会有任何影响——resolve
@@ -204,17 +253,28 @@ class ChatRequest(BaseModel):
     # "碰巧被上游兜住"改成"这里本来就没写"。
     model: Optional[str] = None
     provider: Optional[str] = None        # 模型服务 id（首选）
-    attachments: List[str] = []           # /v1/uploads 返回的附件 id
+    attachments: List[str] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
     messages: list[dict]
     session_id: Optional[str] = None
+
+    @field_validator("messages")
+    @classmethod
+    def _within_size_caps(cls, messages: list) -> list:
+        if len(messages) > MAX_CHAT_MESSAGES:
+            raise ValueError(f"messages 最多 {MAX_CHAT_MESSAGES} 条")
+        if any(_message_text_chars(m) > MAX_MESSAGE_CHARS for m in messages):
+            raise ValueError(f"单条消息文本最多 {MAX_MESSAGE_CHARS} 字")
+        return messages
 
 class FeedbackRequest(BaseModel):
     message_id: str
     rating: int
-    comment: Optional[str] = None
+    # comment 存进 feedback.json，而那个文件是"读全表—追加—写全表"：不限长等于
+    # 让单条点踩备注把整本账撑大，之后每次写入都要重写它。500 字够写一句人话。
+    comment: Optional[str] = Field(None, max_length=MAX_FEEDBACK_COMMENT_CHARS)
 
 class AgentRequest(BaseModel):
-    task: str
+    task: str = Field(..., max_length=MAX_MESSAGE_CHARS)
     max_turns: Optional[int] = 10
     max_duration: Optional[int] = 120
     # provider id（或旧式模型名）；留空走默认配置。端点原先向上写死
@@ -405,11 +465,11 @@ def _throttle_chat(http: Request, principal: Principal) -> None:
 
     顺序是**先判断、再记账、才叫模型**——反过来写的话，被挡下的那一次也会把
     真金白银花出去，而那正是这本账要挡的事。判据在 test_chat_throttle.py 里。
+
+    实现搬到 `app.core.auth_router.throttle_paid_upstream`：账本必须只有一处，
+    否则记忆接口那条同样出网的通道可以绕开它（v0.24.1 体检查实的问题）。
     """
-    ip = _client_ip(http)
-    if not chat_allowed(ip, principal.user_id):
-        raise _too_many(chat_retry_after(ip, principal.user_id))
-    note_chat(ip, principal.user_id)
+    throttle_paid_upstream(http, principal)
 
 
 def _prepare_chat(request: ChatRequest, principal: Principal):

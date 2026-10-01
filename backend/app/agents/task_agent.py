@@ -29,7 +29,9 @@ class TaskAgent:
         self.system_prompt = system_prompt
         self.user_id = user_id
         self.max_turns = 8
-        self.verbose = True
+        # 与 ReActAgent 同一个口径：这两行 print 打的是工具入参与结果原文，
+        # 默认关掉；调试时把它翻成 True 即可，不必再往源码里塞临时输出。
+        self.verbose = False
 
     def run(self, task: str) -> str:
         return self._run_fallback(task)
