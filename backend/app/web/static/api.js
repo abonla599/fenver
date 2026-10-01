@@ -230,6 +230,11 @@ const API = (() => {
     resetPassword: (username, answers, new_password) =>
       request("/v1/auth/reset", { method: "POST",
         body: { username, answers, new_password } }),
+    /* 首登强制改密（v0.24 T3.3）：管理员建号/重置发出的初始密码没有配套的找回答案，
+     * 答案通道救不了这种号——持旧密换新密是它唯一的自救路径，后端只认当前会话。 */
+    changePassword: (old_password, new_password) =>
+      request("/v1/auth/change-password", { method: "POST",
+        body: { old_password, new_password } }),
     me: () => request("/v1/auth/me"),
     logout: (token) => logout(token),
     // 定义在上面的 adopt()：注册/登录拿到明文后的第一步就是把它收编成 Cookie，

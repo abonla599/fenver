@@ -121,6 +121,24 @@
         <input type="file" id="fileInput" hidden multiple
                accept=".txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.log,.ini,.cfg,.html,.css,.py,.js,.ts,.c,.h,.cpp,.java,.go,.rs,.sh,.bat,.ps1,.sql,.xml,.pdf,.docx">
 
+        <!-- v0.24 T3.3 首登强制改密：管理员建号发的是服务端生成的随机初始密码，
+             这种号没有找回答案，"旧密换新密"是它唯一的自救路径。默认 hidden，
+             由 app.js 在登录后（响应体旗子）与冷启动认人后（/v1/auth/me 旗子）拉起。 -->
+        <div class="modal hidden" id="pwModal" role="dialog" aria-modal="true" aria-label="先改掉初始密码">
+          <div class="modal-card pw-card">
+            <p class="pw-title">先改掉初始密码</p>
+            <p class="pw-note">这个账号是管理员建好的，你正用的是服务端生成的随机初始密码——它没留找回问题，忘了就只能再找管理员。换成自己的密码之后，随时用密码进来，这个弹窗也不会再拦你。</p>
+            <input id="pwOld" type="password" placeholder="旧密码（就是初始密码）" autocomplete="current-password">
+            <input id="pwNew" type="password" placeholder="新密码：至少 8 个字符" autocomplete="new-password">
+            <input id="pwNew2" type="password" placeholder="再输入一遍新密码" autocomplete="new-password">
+            <p class="pw-hint" id="pwHint"></p>
+            <div class="pw-actions">
+              <button type="button" class="btn" id="pwLater">稍后再改</button>
+              <button type="button" class="btn btn-primary" id="pwGo">改密码</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
         <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">
           <div class="cam-card">
@@ -235,6 +253,12 @@
           </div>
 
           <p class="set-group">关于</p>
+          <!-- v0.24 T4.1（D16 保留项）：这一句、下面那行仓库、再下面那行许可证，
+               三件东西是「关于」页对外的门面，必须与 android-native 的 SettingsUi.kt
+               逐字同值——判据在 backend/tests/test_about_page_contract.py。
+               为什么要钉死：同一款软件在手机上说一套、在浏览器里说另一套，用户没有
+               任何办法发现，只有想把代码翻出来看的那个人会撞上。 -->
+          <p class="pane-note">Fenver：跑在你自己服务器上的个人 Agent 助理</p>
           <div class="set-card">
             <!-- 版本只有一个来源：壳通过 capabilities() 报上来的 versionName，而它来自
                  android/app/build.gradle。这里出现不了写死的 "v0.16"——抄一份到前端，
@@ -267,6 +291,16 @@
             <button class="set-row" id="themeBtn">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
               <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <!-- 仓库这一行的地址也是硬写在 markup 里的，理由与上面那颗「去下载页」
+                 同一条：test_frontend_uses_relative_api_paths_only 禁的是前端 JS 出现
+                 绝对 URL，外部链接留在 HTML 里不受它管，也不必绕一层 JS 去拼。
+                 ↗ 后缀表示"点下去离开本应用"（与那棵旧壳退路同一个符号）。 -->
+            <a class="set-row" href="https://github.com/abonla599/fenver" target="_blank" rel="noopener">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 8.5 5 12l4 3.5M15 8.5 19 12l-4 3.5"/></svg></span>
+              <span class="set-lbl">开源仓库</span><span class="set-val">github.com/abonla599/fenver</span><span class="set-go">↗</span></a>
+            <div class="set-row set-plain">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M14.8 9.6a3.4 3.4 0 0 0-5.6 2.4 3.4 3.4 0 0 0 5.6 2.4"/></svg></span>
+              <span class="set-lbl">许可证</span><span class="set-val">Apache-2.0</span></div>
             <div class="set-row set-plain set-only" id="connRow">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 3 2.5 13 0 16M12 4c-2.5 3-2.5 13 0 16"/></svg></span>
               <span class="set-lbl">服务地址</span><span class="set-val" id="connInfo"></span></div>

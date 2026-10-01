@@ -120,6 +120,16 @@ private val SET_PAGES = mapOf(
     "memory" to "长期记忆", "reminders" to "提醒", "schedule" to "日程",
 )
 
+/* v0.24 T4.1（D16 保留项）：「关于」页对外的三句话在这里只写一遍，网页侧
+ * backend/app/web/static/index.html 的「关于」组写的是同一串字面量——
+ * 逐字同值由 backend/tests/test_about_page_contract.py 判。
+ * 为什么值得为三行字立一条锁：手机上说一套、浏览器里说另一套，谁都不会报错，
+ * 只有真想去看代码、去看许可证的那个人会撞上，而那时他已经不信任这一屏了。 */
+private const val ABOUT_TAGLINE = "Fenver：跑在你自己服务器上的个人 Agent 助理"
+private const val ABOUT_REPO_HOST = "github.com/abonla599/fenver"
+private const val ABOUT_REPO_URL = "https://github.com/abonla599/fenver"
+private const val ABOUT_LICENSE = "Apache-2.0"
+
 @Composable
 fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                   onRequireAuth: (String) -> Unit, onOpenUrl: (String) -> Unit,
@@ -241,6 +251,15 @@ private fun SetCard(content: @Composable ColumnScope.() -> Unit) {
 private fun SetGroup(title: String) {
     Text(title, fontSize = 12.5.sp, color = text3Color(),
         modifier = Modifier.padding(start = 2.dp, top = 22.dp, bottom = 8.dp))
+}
+
+/** 网页 .pane-note（13px / --text-2 / 下留白 14px）的原生化，与 SetGroup 同样的左边距。
+ *  v0.24 T4.1 起「关于」用它念那句定位语——那一句在网页里就是组标题下面的一条注脚，
+ *  不是卡片里的一行：它要说的是"这一组在讲什么"，而不是"这里有个能点的东西"。 */
+@Composable
+private fun SetNote(text: String) {
+    Text(text, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 2.dp, bottom = 14.dp))
 }
 
 /** 网页 .set-row：min-height 54、padding 0 14、gap 12、15px 字；last-child 无底边线。
@@ -498,6 +517,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
 
     // —— 关于（renderAboutRows）——
     SetGroup("关于")
+    SetNote(ABOUT_TAGLINE)
     SetCard {
         val shellVer = "v" + BuildConfig.VERSION_NAME
         val versionVal = listOfNotNull(
@@ -540,6 +560,14 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         }) {
             Prefs.themeMode = if (light) "dark" else "light"
         }
+        // 上面那颗「检查更新」全程不跳外部，这两行却是要把人送到 GitHub 上去的——
+        // 它们问的不是"这台机器上的包新不新"，而是"这个项目本身在哪、能不能拿去看"。
+        // ↗ 后缀（网页 .set-go 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
+        SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
+            onOpenUrl(ABOUT_REPO_URL)
+        }
+        SetRow("©", "许可证", plain = true, trailing = "",
+            valSlot = { SetValText(ABOUT_LICENSE) })
         SetRow("◉", "服务地址", plain = true, trailing = "", divider = false, valSlot = {
             SetValText(hostOf(Prefs.baseUrl))
         })

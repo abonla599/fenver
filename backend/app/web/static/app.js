@@ -715,6 +715,50 @@ function applyRole() {
      都不值这一行的信息量 */
   $("userAvatar").textContent = name ? name[0] : "·";
   syncSetIdentity();
+  // 首登强制改密的旗子只在服务端（login 与 me 都报），这里负责"认出人时顺手看一眼"：
+  // 冷启动、刚登录后、换身份后三条路都汇在这一个出口，不必各自再判一遍。
+  if ((state.me || {}).must_change_password) showPwChange();
+}
+
+/* ---------------- 首登强制改密（v0.24 T3.3 管理员建号） ----------------
+ * 管理员建号/重置发出的是服务端生成的随机初始密码，这种号没留找回三题，
+ * 「旧密换新密」是它唯一的自救路径。"稍后再改"只是收掉这一层：旗子还在服务端，
+ * 下一次认人还会再问——提醒不是处置，界面从不假装替他把密码改了。
+ * 三个输入框在卡片收起时一起清空：旧密只用过一次请求 body，不该留在框里等第二眼。
+ */
+function showPwChange() {
+  if (!$("pwModal").classList.contains("hidden")) return;   // 已在屏上：不往层栈里再压一份
+  $("pwHint").textContent = "";
+  $("pwHint").classList.remove("err");
+  $("pwModal").classList.remove("hidden");
+  Layers.open("pw", hidePwChange);
+  $("pwOld").focus();
+}
+
+function hidePwChange() {
+  $("pwModal").classList.add("hidden");
+  ["pwOld", "pwNew", "pwNew2"].forEach((id) => { $(id).value = ""; });
+}
+
+async function submitPwChange() {
+  const hint = $("pwHint");
+  hint.classList.remove("err");
+  const oldP = $("pwOld").value;
+  const p1 = $("pwNew").value;
+  if (!oldP || !p1) { hint.textContent = "旧密码和新密码都要填"; hint.classList.add("err"); return; }
+  if (p1.length < 8) { hint.textContent = "新密码至少要 8 个字符"; hint.classList.add("err"); return; }
+  if (p1 !== $("pwNew2").value) { hint.textContent = "两次输入的新密码不一样"; hint.classList.add("err"); return; }
+  $("pwGo").disabled = true;
+  try {
+    await API.changePassword(oldP, p1);
+    Layers.close("pw");           // 走栈收起：返回键与历史条目才不会和屏幕上的层漂移
+    setStatus("密码已改好，之后就用新密码登录");
+  } catch (e) {
+    hint.textContent = "没能改掉：" + e.message;
+    hint.classList.add("err");
+  } finally {
+    $("pwGo").disabled = false;
+  }
 }
 
 /* ---------------- 模型服务 ---------------- */
@@ -3132,6 +3176,13 @@ function bind() {
   // 提交挂在 form 上而不是某个按钮上：两个框里按回车都该等于点主按钮。
   // 第一步/第二步的分流在 submitAuth 与 submitRecovery 的最前面，不在这里。
   $("authForm").onsubmit = (e) => { e.preventDefault(); submitAuth(); };
+  /* 首登改密卡（v0.24）：三格没挂 form，任何一格按回车都等于点「改密码」；
+     「稍后再改」与返回键、Esc 走的是同一条 Layers.close 的路，不直接 add("hidden")。 */
+  $("pwGo").onclick = () => submitPwChange();
+  $("pwLater").onclick = () => Layers.close("pw");
+  ["pwOld", "pwNew", "pwNew2"].forEach((id) => {
+    $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") submitPwChange(); });
+  });
   renderRecoveryQuestions();
 
   /* Esc 与手机的返回键是同一个动作：退掉最上面一层。写成两段（各自判断该关哪个）就是
