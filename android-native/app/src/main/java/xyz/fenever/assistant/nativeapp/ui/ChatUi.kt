@@ -132,6 +132,7 @@ import xyz.fenever.assistant.nativeapp.ModelInfo
 import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.SessionSummary
 import xyz.fenever.assistant.nativeapp.StoredMessage
+import xyz.fenever.assistant.nativeapp.StreamNeedHistoryException
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
 import xyz.fenever.assistant.nativeapp.theme.WebTokens
@@ -202,6 +203,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var settingsPage by remember { mutableStateOf<String?>(null) }  // null=关；""=一级列表
     var streamJob by remember { mutableStateOf<Job?>(null) }
     var stopRequested by remember { mutableStateOf(false) }
+    // 这一轮的 run_id：从 start 帧/onRun 抓来存着——"停止"要打服务端 cancel 就认它，
+    // 断线续播也认它。没有它就退化成只能本地断连（等于没停生产）。
+    var currentRunId by remember { mutableStateOf<String?>(null) }
     var editingIndex by remember { mutableStateOf<Int?>(null) }
     // v0.23 T2.2 AC-3：提交失败回编辑态时，草稿要原样还在——父侧存一份，
     // 只给 MessageRow 当初始值（子侧照常自己维护输入），重试成功即清空。
@@ -390,69 +394,101 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    /* ---------------- runStream（app.js send/runStream 的移植） ----------------
-     * content 增量 → 局部气泡重画；done → 落 message_id/model；
-     * 流内 error 事件 = 不可重试（⚠️ 占位气泡，不重发，避免重复计费）；
-     * 通道层失败 = 可重试 → 回退非流式 /v1/chat；
-     * 停止 = 半截内容 +「（已停止生成）」照样落本地并持久化（网页 AbortError 一支如此）。 */
+    /* ---------------- runStream（app.js send/runStream 的移植 · v0.25 安卓 T2.4/T2.5/T2.8） ----------------
+     * content 增量 → 局部气泡重画；done 收尾按 status 分流：
+     *   completed → 落 message_id/model；cancelled → 半截 +「（已停止生成）」照样落本地并持久化；
+     *   cannot_resume → 不重发，去会话历史取回这一轮已落库的最终答案；
+     * error 帧（模型真故障）→ ⚠️ 占位气泡，不重发、不取历史；
+     * 流非正常结束（断线）→ Api.streamChat 内核里带 Last-Event-ID 续播，续不上/到上限抛
+     * StreamNeedHistoryException → 去会话里取回。**绝不回头 POST /v1/chat 重发整轮**——
+     * 老代码 `retryable → Api.chat(payload)` 那一手正是断线/退后台时再付一次钱、再落一条
+     * 一样助手消息的病根。停止 = 先打服务端 cancel（run_id 来自 onRun），本地取消只是兜底。 */
     fun streamInto() {
         if (busy) return
         streamJob = scope.launch {
             busy = true; stopRequested = false
+            currentRunId = null
             streamText = ""
             setStatus("生成中…")
             val acc = StringBuilder()
             var doneId: String? = null
             var doneModel: String? = null
+            var doneStatus = ""
+            var doneFullText = ""
             var failed = false
+            var failMsg = ""
             var stopped = false
+            var needHistory = false
             val pid = currentProvider()?.id
             val atts = messages.lastOrNull { it.role == "user" }?.attachments
                 ?.map { it.id } ?: emptyList()
             val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
             try {
-                Api.streamChat(payload).collect { ev ->
+                Api.streamChat(payload,
+                    onStatus = { setStatus(it) },   // 断线重连那句人话直接落状态条
+                    onRun = { currentRunId = it }    // 记住 run_id：停止打 cancel、续播也认它
+                ).collect { ev ->
                     if (stopRequested) throw CancellationException("stop")
                     when (ev) {
-                        is ChatEvent.Start -> Unit
+                        is ChatEvent.Start -> if (ev.runId.isNotEmpty()) currentRunId = ev.runId
                         is ChatEvent.Content -> { acc.append(ev.text); streamText = acc.toString() }
-                        is ChatEvent.Done -> { doneId = ev.messageId; doneModel = ev.model }
-                        is ChatEvent.Failed -> throw ApiException(-1, ev.message)
+                        // cancelled / cannot_resume 都不是终止帧：半句与"续不上"的信号都在流里，
+                        // 等随后那条 done 收尾，这里不单独终结（与网页内核同一语义，别自创）。
+                        is ChatEvent.Cancelled -> Unit
+                        is ChatEvent.CannotResume -> Unit
+                        is ChatEvent.Done -> {
+                            doneId = ev.messageId; doneModel = ev.model
+                            doneStatus = ev.status
+                            if (ev.fullText.isNotEmpty()) doneFullText = ev.fullText
+                        }
+                        is ChatEvent.Failed -> { failed = true; failMsg = ev.message }
+                        // 认不出的帧：不静默丢——内核已落 ChatEvent.Unknown，这里不打断正常收尾。
+                        is ChatEvent.Unknown -> Unit
                     }
                 }
                 NetMinder.noteSuccess()
-                messages = messages + UiMsg("assistant", acc.toString(), doneId,
-                    doneModel?.ifBlank { null })
+                if (failed) {
+                    // error 帧：模型真故障，原因已给出，绝不重发整轮去二次付费。
+                    messages = messages + UiMsg("assistant",
+                        (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + failMsg,
+                        transient = true)
+                    setStatus(failMsg, true)
+                } else when (doneStatus) {
+                    "cancelled" -> {
+                        stopped = true
+                        val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
+                        messages = messages + UiMsg("assistant",
+                            text + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null })
+                        setStatus("已停止生成")
+                    }
+                    "cannot_resume" -> needHistory = true
+                    else -> {
+                        val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
+                        messages = messages + UiMsg("assistant", text, doneId,
+                            doneModel?.ifBlank { null })
+                    }
+                }
             } catch (e: CancellationException) {
+                // 本地取消的兜底一支：只有服务端 cancel 打不出去时才会走到这里。
                 stopped = true
                 messages = messages + UiMsg("assistant",
                     acc.toString() + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null })
                 setStatus("已停止生成")
+            } catch (e: StreamNeedHistoryException) {
+                // 410 / 续不上 / 试到上限：去会话里取回，不重发生成（这一枪到了服务端，不算断网）。
+                needHistory = true
             } catch (e: Exception) {
                 NetMinder.noteFailure(e)
-                val retryable = !(e is ApiException && e.status == -1)
-                val fallback = try {
-                    if (retryable) Api.chat(payload) else null
-                } catch (e2: Exception) {
-                    NetMinder.noteFailure(e2)
-                    if (!logoutIf401(e2)) setStatus(e2.message ?: "", true)
-                    null
-                }
-                if (fallback != null) {
-                    NetMinder.noteSuccess()
-                    messages = messages + UiMsg("assistant", fallback.reply,
-                        fallback.message_id.ifBlank { null })
-                } else {
-                    failed = true
-                    val msg = e.message ?: "请求失败"
-                    messages = messages + UiMsg("assistant",
-                        (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + msg,
-                        transient = true)
-                    if (!logoutIf401(e)) setStatus(msg, true)
-                }
+                failed = true
+                val msg = e.message ?: "请求失败"
+                messages = messages + UiMsg("assistant",
+                    (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + msg,
+                    transient = true)
+                if (!logoutIf401(e)) setStatus(msg, true)
             } finally {
                 streamText = null; busy = false; streamJob = null
             }
+            if (needHistory) pullFromHistory()
             // persistCurrent + loadSessions：标题可能因首条消息被服务端改掉（顶栏要跟着新）
             withContext(NonCancellable) {
                 persist(messages)
@@ -460,6 +496,57 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             }
             if (!failed && !stopped) setStatus("")
         }
+    }
+
+    /* app.js pullFromHistory：断线续不上、或服务端判这一轮不可续播时，去会话历史里取回
+     * 已经落库的助手回复。关键是"不重发生成"：那一轮的钱要么已经花、要么被服务端的轮次
+     * 边界钱闸停在了边界，结果都在 sessions 里；重发只会再付一次、再落一条一样的助手消息。
+     * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。 */
+    suspend fun pullFromHistory() {
+        setStatus("这一轮接不上了，正在去会话里取回结果…")
+        try {
+            val d = Api.getSession(sessionId)
+            val lastAssistant = d.messages.lastOrNull { it.role == "assistant" }
+            if (lastAssistant != null) {
+                messages = messages + UiMsg("assistant", lastAssistant.content,
+                    lastAssistant.message_id, lastAssistant.model)
+                setStatus("")
+            } else {
+                // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
+                val tip = "没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条"
+                messages = messages + UiMsg("assistant", tip, transient = true)
+                setStatus(tip, true)
+            }
+        } catch (e: Exception) {
+            NetMinder.noteFailure(e)
+            messages = messages + UiMsg("assistant",
+                "⚠️ " + (e.message ?: "取回失败"), transient = true)
+            if (!logoutIf401(e)) setStatus(e.message ?: "", true)
+        }
+    }
+
+    /* app.js stop()：「停止」终于是一个动作，不再只是关页面/断连的副作用。
+     * 主路径 = POST /v1/chat/stream/{run_id}/cancel（翻标志、尽力当场关上游、下一个付费轮
+     * 不发生）；本地取消只是兜底——只在客户端断连等于没停生产，还把这个动作伪装成了"关页面"。
+     * 取消成功后不本地断连：那条流会自己收到 cancelled→done 终帧并按 doneStatus=="cancelled"
+     * 正常收尾（半句 +「（已停止生成）」照样落本地）。run_id 由 streamInto 的 onRun 抓来落在
+     * currentRunId 上。次序钉死：服务端取消在本地取消前面。 */
+    fun stopNow() {
+        val rid = currentRunId
+        if (rid != null) {
+            scope.launch {
+                try {
+                    Api.cancelStreamRun(rid)
+                    return@launch          // 服务端已收到取消，让流自己的终帧收尾，不硬断本地连接
+                } catch (e: Exception) {
+                    // 取消这一枪没打出去（网络断了 / run 已终态 404）：落到下面的本地兜底。
+                }
+                stopRequested = true; streamJob?.cancel()
+            }
+            return
+        }
+        // 还没拿到 run_id（这轮尚未握手成功）：没有可取消的服务端 run，只能本地断。
+        stopRequested = true; streamJob?.cancel()
     }
 
     /* app.js send()：空输入且没有附件 → 什么都不做；清单还没回来先补拉一次；
@@ -795,7 +882,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         chipModel = currentProvider()?.name ?: "选择模型",
                         chipVisible = providers.any { it.usable },
                         onToggleChip = { modelMenuOpen = true; attachOpen = false },
-                        onStop = { stopRequested = true; streamJob?.cancel() },
+                        onStop = { stopNow() },
                         onSend = { sendNow(input.text) },
                         canSend = input.text.isNotBlank() || pending.isNotEmpty(),
                         voiceMod = voiceHoldMod,
