@@ -32,6 +32,24 @@ DEFAULTS = {
     # 长短无关；宽限期决定的是"你离开多久之后我们还替你接着跑"。接个电话、锁屏
     # 看一眼、页面重进，都是几十秒量级，30 秒会把答案停在半路而一分钱没多省。
     "stream_no_reader_grace_seconds": 120.0,
+    # v0.25 R4b T5.8：积分的基准价——「1 积分 = 用基准价跑 1000 个混合 token」的锚。
+    # 单一真相就是这一份：展示倍率 = 模型混合单价 ÷ 这里的混合价，结算换算也除这里的
+    # 混合价。刻意不用"默认模型 = 1.0x"那种定义——锚跟着 ★ 漂移，管理员点一下按钮
+    # 全站倍率集体重排，倍率表就再也不能当长期记忆用（卡片 §2.3b / PRD D25 Q-b）。
+    # 示例口径（部署者可改，改的是锚不是公式）：输入 ¥1/百万 + 输出 ¥4/百万 = 1.00x；
+    # mixed_input_output_ratio=4.0 是"展示折算的典型输入:输出 = 4:1"，只进倍率折算，
+    # 结算一律真实 token × 真实单价（D13：倍率不是合同价）。
+    "credit_benchmark": {
+        "currency": "CNY",
+        "input_per_m": 1.0,
+        "output_per_m": 4.0,
+        "mixed_input_output_ratio": 4.0,
+        "tokens_per_credit": 1000,
+    },
+    # v0.25 R4b T5.20：每日影子积分护栏。默认 0 = 只算不拦——本批口径是
+    # 「算得出、看得见、拦得住（默认关）」，开不开是部署者的决定。填正数后，
+    # 某用户当日影子合计到线就停在「等待你确认是否继续」，且不再向模型出网。
+    "credit_shadow_daily_limit": 0.0,
 }
 
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
@@ -147,6 +165,56 @@ def stream_no_reader_grace_seconds() -> float:
         return max(0.0, float(value))
     except (TypeError, ValueError):
         return float(DEFAULTS["stream_no_reader_grace_seconds"])
+
+
+def credit_benchmark() -> dict:
+    """积分基准价（¥→积分的锚）——全场唯一读数口径，credits.py 只从这里取。
+
+    逐键消毒而不是整包信任：data/config.json 是可能被手改的盘上文件，一个坏值
+    （字符串价、负价、0 比例）会把倍率与影子整张表算成鬼话。任何一键读不懂就
+    单独退回默认并 print 一句人话——与"配置文件坏了先备份再按默认跑"同纪律。
+    """
+    raw = read().get("credit_benchmark")
+    defaults = DEFAULTS["credit_benchmark"]
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    out = dict(defaults)
+    for key, default in defaults.items():
+        value = raw.get(key)
+        if key == "currency":
+            text = str(value or "").strip().upper()
+            if text:
+                out["currency"] = text
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) <= 0:
+            if value is not None and value != default:
+                print(f"⚠️ 基准价 {key} 得是正数（收到 {value!r}），按默认 {default} 跑")
+            continue
+        out[key] = float(value) if not isinstance(default, int) else value
+    return out
+
+
+def credit_shadow_daily_limit() -> float:
+    """每日影子积分护栏（0 = 不拦截，默认）。
+
+    优先级与宽限期同一套路：环境变量 CREDIT_SHADOW_DAILY_LIMIT 显式设了说话
+    （每次现读，改了不必重启），否则 data/config.json 说了算。负数按 0 收——
+    "负的额度"不是"倒贴"，是写错了，别让它把每一轮都拦死。
+    """
+    raw = os.getenv("CREDIT_SHADOW_DAILY_LIMIT", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"⚠️ 环境变量 CREDIT_SHADOW_DAILY_LIMIT 不是数（{raw!r}），按下面的口径跑")
+    with _lock:
+        value = _config.get("credit_shadow_daily_limit",
+                            DEFAULTS["credit_shadow_daily_limit"])
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(DEFAULTS["credit_shadow_daily_limit"])
+    return max(0.0, number)
 
 
 def apply_update(partial: dict) -> Tuple[dict, list]:
