@@ -24,7 +24,6 @@ class Executor:
         self.model = model
 
     def execute_task(self, task: str, user_id: str = None) -> str:
-        print(f"  [Executor] 开始执行: {task}")
         agent = TaskAgent(
             name="Executor",
             model=self.model,
@@ -33,6 +32,4 @@ class Executor:
             user_id=user_id,
             system_prompt="你是一个执行助手。用可用工具完成任务，返回简洁准确的结果。"
         )
-        result = agent.run(task)
-        print(f"  [Executor] 完成: {result[:80]}...")
-        return result
+        return agent.run(task)

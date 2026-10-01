@@ -18,7 +18,13 @@ def write_json_atomic(path: str, payload) -> None:
     if directory:
         os.makedirs(directory, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    # 权限必须在这一次 open 里就定下来，而不是"写完再 chmod"：后者的那个瞬间，
+    # providers.json 的明文密钥、users.json 的口令摘要正以 0644 躺在同目录下。
+    # 走 os.open 传 mode 是唯一没有这个窗口的写法（umask 只可能进一步收紧权限，
+    # 不可能放宽，所以这里不必先 umask 再建文件）。这些 JSON 全是服务端私有数据，
+    # 没有任何一个读者在进程外，0600 不牺牲任何功能。
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
         # replace 原子不等于落盘：flush 到 OS、fsync 到磁盘，之后才 replace。
         f.flush()

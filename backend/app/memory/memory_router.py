@@ -1,9 +1,11 @@
 import os
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import uuid
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
+from app.core.auth_router import throttle_paid_upstream
+from app.core.providers import scrub_secrets
 from app.memory.memory_manager import MemoryManager
 from app.memory.ranking import weighted_rank
 
@@ -179,28 +181,52 @@ fake_store = FakeMemoryStore()  # 始终可用
 # 唯一的漏网口子是 metadata：它是自由字典，客户端在里面塞一个 user_id 就能
 # 借"元数据"之名改写归属，所以那条由 _reject_identity_in_metadata 明确拒绝。
 
+# 长度上限不是防"有人话多"，是防一次请求把额度烧穿：summarize=true 时整段 content
+# 会原样进一次上游 chat 调用（memory_manager._summarize），此前这个入口既不封顶也
+# 不计费——把十 MB 文本 POST 过来，就是十 MB 的 prompt 从服务器账上扣走。
+# 8000 字是量级选择而不是精确值：不摘要时存储侧本来就截到 200 字，正常记一条记忆
+# 远用不到这个数；它只保证"摘要一次"的花费有上界。
+MAX_MEMORY_CONTENT_CHARS = 8000
+MAX_MEMORY_QUERY_CHARS = 500
+MAX_MEMORY_IDS = 100
+
+
 class AddMemoryRequest(BaseModel):
-    content: str = Field(..., description="记忆内容", json_schema_extra={"example": "我叫张三，今年25岁"})
+    content: str = Field(..., max_length=MAX_MEMORY_CONTENT_CHARS,
+                         description="记忆内容", json_schema_extra={"example": "我叫张三，今年25岁"})
     metadata: Optional[dict] = Field(None, description="额外的元数据（不得携带身份字段，见 IDENTITY_METADATA_KEYS）")
     summarize: bool = Field(False, description="是否使用AI摘要")
 
 
 class SearchMemoryRequest(BaseModel):
-    query: str = Field(..., description="搜索查询", json_schema_extra={"example": "用户叫什么名字"})
+    query: str = Field(..., max_length=MAX_MEMORY_QUERY_CHARS,
+                       description="搜索查询", json_schema_extra={"example": "用户叫什么名字"})
     top_k: int = Field(3, ge=1, le=20)
 
 
 class DeleteMemoryRequest(BaseModel):
-    memory_ids: List[str] = Field(..., description="要删除的记忆ID列表")
+    memory_ids: List[str] = Field(..., max_length=MAX_MEMORY_IDS,
+                                  description="要删除的记忆ID列表")
 
 
 class UpdateMemoryRequest(BaseModel):
     memory_id: str = Field(..., description="记忆ID")
-    new_content: Optional[str] = Field(None)
+    new_content: Optional[str] = Field(None, max_length=MAX_MEMORY_CONTENT_CHARS)
     new_weight: Optional[float] = Field(None, ge=0.1, le=5.0)
 
 
 # ---------- 辅助函数 ----------
+def _client_detail(text: str) -> str:
+    """给客户端看的那一份错误文本：先脱敏再截断。
+
+    底层报错会带着上游返回的原话进到这里，而 401 之类的回复里往往印着 api key 的
+    前后缀、base_url、甚至请求头。这些正是"错误要说清楚"这个目标不需要、而攻击者
+    很想要的东西。所以完整的原文只往 stdout 走一行日志（运维看那里），响应体里
+    只留 scrub_secrets 过一遍、再截到 200 字的版本——可读性和不泄密在这里不打架。
+    """
+    return scrub_secrets(str(text))[:200]
+
+
 def safe_call(real_method, fake_method, *args, **kwargs):
     """按后端可用性选择实现，不再吞掉真实存储的异常。
 
@@ -210,7 +236,8 @@ def safe_call(real_method, fake_method, *args, **kwargs):
     if memory_manager is not None:
         return real_method(*args, **kwargs)
     if memory_init_error is not None:
-        raise HTTPException(status_code=503, detail=f"记忆服务不可用：{memory_init_error}")
+        raise HTTPException(status_code=503,
+                            detail=f"记忆服务不可用：{_client_detail(memory_init_error)}")
     return fake_method(*args, **kwargs)
 
 
@@ -219,9 +246,11 @@ def _unavailable(stage: str, error: str):
 
     归属过滤后 0 条是一个诚实的回答（那条记忆不是你的），而底层写失败被
     折算成 0 条则会把故障藏进正常回复里——用户会以为记忆还在，实际已经丢了。
+    "说清楚"指的是说清楚**出了什么事**，不是把上游的原封错误流抄给客户：完整
+    文本进日志，响应体走 _client_detail。
     """
     print(f"❌ 记忆{stage}失败: {error}")
-    raise HTTPException(status_code=503, detail=f"记忆{stage}失败：{error}")
+    raise HTTPException(status_code=503, detail=f"记忆{stage}失败：{_client_detail(error)}")
 
 
 # 归属只由凭据推导。metadata 是自由字典，一旦让它带身份键，客户端就能替别人
@@ -244,9 +273,17 @@ def _reject_identity_in_metadata(metadata: Optional[dict]) -> None:
 # 全部是同步 def：这一层每个端点都会碰 chroma（本地 sqlite/persist 文件）或嵌入模型，
 # 都是阻塞调用。async 端点跑在事件循环上，一个慢查询能把整台服务冻住（含 /health），
 # 而同步 def 会被 FastAPI 放进线程池。新增端点沿用同一形式。
+#
+# 哪些端点要 throttle_paid_upstream？判据只有一条：会不会真金白银叫一次外部的
+# 模型服务。/add 和 /search 会（嵌入；/add 在 summarize=true 时还多一次摘要），
+# /update 传了 new_content 也会重新嵌入，所以这三个走对话同一本账。
+# /delete、/list、/decay、/stats 只碰本地 chroma，不计费也不打外网，硬要给它们
+# 加对话限流只会让"删自己的记忆"跟着别人的对话额度一起被 429 掉——那是把守卫
+# 装错地方换来的假安全感。
 
 @router.post("/add")
-def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrincipal):
+def add_memory(req: AddMemoryRequest, http: Request, principal: Principal = CurrentPrincipal):
+    throttle_paid_upstream(http, principal)
     _reject_identity_in_metadata(req.metadata)
 
     def real_add():
@@ -265,7 +302,9 @@ def add_memory(req: AddMemoryRequest, principal: Principal = CurrentPrincipal):
 
 
 @router.post("/search")
-def search_memory(req: SearchMemoryRequest, principal: Principal = CurrentPrincipal):
+def search_memory(req: SearchMemoryRequest, http: Request, principal: Principal = CurrentPrincipal):
+    throttle_paid_upstream(http, principal)
+
     def real_search():
         raw = memory_manager.search_memory(principal.user_id, req.query, req.top_k)
         formatted = []
@@ -321,14 +360,20 @@ def delete_memories(req: DeleteMemoryRequest, principal: Principal = CurrentPrin
 
 
 @router.put("/update")
-def update_memory(req: UpdateMemoryRequest, principal: Principal = CurrentPrincipal):
+def update_memory(req: UpdateMemoryRequest, http: Request, principal: Principal = CurrentPrincipal):
     """改写调用者自己的记忆；别人的 id 在这里就是"不存在"。
 
     与删除同一个洞：原先 update 也根本不认归属。非属主与不存在的 id 得到逐字节
     相同的回复，所以这既不是越权通道，也不是探测他人与否的信道。归属筛选已经下沉
     进 MemoryManager.update_memory（owner 必填），路由只负责把它的三种答案分别映射成
     "更新成功 / 记忆不存在 / 503 说清楚"。
+
+    限流按 new_content 有条件地加：只有改文本才会重新嵌入（= 一次外部调用），
+    单纯调权重的请求不花钱，就不占对话那本账的额度。
     """
+    if req.new_content is not None:
+        throttle_paid_upstream(http, principal)
+
     def real_update():
         result = memory_manager.update_memory(req.memory_id, principal.user_id,
                                               req.new_content, req.new_weight)
@@ -393,8 +438,9 @@ def list_my_memories(limit: int = Query(20, ge=1, le=100),
             return memory_manager.get_user_memories(principal.user_id, limit)
         except Exception as e:
             # MemoryManager 不再 except 掉一切返回 []：故障在这里说清楚，
-            # 而不是伪装成"你没有记忆"这个正常答案。
-            _unavailable("读取", str(e))
+            # 而不是伪装成"你没有记忆"这个正常答案。带上异常类型名是因为 scrub
+            # 之后光看剩余文本常常认不出是谁抛的，而日志里那一行是同一条信息。
+            _unavailable("读取", f"{type(e).__name__}: {e}")
 
     def fake_list():
         return fake_store.list(principal.user_id, limit)

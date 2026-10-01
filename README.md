@@ -76,10 +76,10 @@ backend/            FastAPI 后端（对话、记忆、日程、身份、管理�
   app/web/static/   PWA 前端（手机浏览器直接用，与 API 同源）
 android-native/     安卓原生客户端（Kotlin / Compose）
 docker/             沙箱镜像与部署文件
-docs/               用户手册、安装部署指南、releases/ 更新历史
+docs/               用户手册、安装部署指南、工具接口说明、releases/ 更新历史
 ```
 
-测试全在 `backend/tests/`：约 1150 条，含双端契约测试（网页与安卓的文案、算式、
+测试全在 `backend/tests/`：约 1250 条，含双端契约测试（网页与安卓的文案、算式、
 接口必须一致，漂一个字就红）。跑法：`venv\Scripts\python -m pytest backend/tests -q`。
 
 ## 路线图

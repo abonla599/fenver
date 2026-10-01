@@ -270,6 +270,25 @@ def _too_many(retry_after: int) -> HTTPException:
                          headers={"Retry-After": str(retry_after)})
 
 
+def throttle_paid_upstream(request: Request, principal) -> None:
+    """凡是会真金白银叫一次上游模型的入口，都走这一本账：60 秒 20 次，键 IP + 登录身份。
+
+    顺序必须是**先判断、再记账、才叫模型**——反过来写，被挡下的那一次也会把
+    额度花出去，而那正是这本账要挡的事。
+
+    为什么从 `app/main.py` 的那条私有 helper 提到这里：`/v1/chat` 与 `/v1/chat/stream`
+    一直挂着这本账，而 `/v1/memory/add?summarize=true`（摘要走 chat-completion）与
+    `/v1/memory/search`（查询走云端嵌入）同样出网、同样花钱，却一条都不记账。
+    一个注册用户光发记忆接口就能绕开全站唯一的额度闸门，等于限流形同虚设。
+    账本原语（`chat_allowed`/`note_chat`/`chat_retry_after`）一字未动，
+    `backend/tests/test_chat_throttle.py` 钉的还是那三件事。
+    """
+    ip = _client_ip(request)
+    if not chat_allowed(ip, principal.user_id):
+        raise _too_many(chat_retry_after(ip, principal.user_id))
+    note_chat(ip, principal.user_id)
+
+
 def _attach_session(response: Response, token: str) -> None:
     """把一枚刚被请求头出示过的凭据写进 httpOnly 会话 Cookie。
 
