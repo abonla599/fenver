@@ -62,6 +62,14 @@ docker compose up -d --build
 
 打开 `http://<机器IP>:8000/app/`。数据落在挂载的 `./data/` 与 `./chroma_db/`，删容器不丢记忆。
 
+镜像里的服务进程不是 root（uid 10001）。容器对**挂载进来的目录**有没有写权限，由宿主机上那两个目录的属主决定，所以第一次用这份 compose 前先执行一次：
+
+```bash
+sudo chown -R 10001:10001 data chroma_db
+```
+
+漏掉这一步的症状是容器启动即 `PermissionError`，不会静默丢数据。
+
 注意：**不要**把 docker compose 和裸机 exe/uvicorn 同时起——两个进程同写一份 `data/` 会静默互相覆盖，没有任何报错。一个数据目录只允许一个服务进程。
 
 ## 装完自检

@@ -24,7 +24,11 @@ class ReActAgent:
         self,
         model: str = None,
         max_turns: int = 10,
-        verbose: bool = True
+        # 默认关。这些 print 会把模型回复原文、工具入参与工具结果整段写进 stdout，
+        # 而桌面版部署里 stdout 就是 EXE 旁的日志文件：里面躺着用户查询的内容和
+        # 带路径的参数，却没有人订阅读它。判据是"开着才响"，不是"写着好看"——
+        # 需要看的时候 `ReActAgent(verbose=True)` 一行就回来，删掉反而两失。
+        verbose: bool = False
     ):
         """
         初始化ReAct智能体

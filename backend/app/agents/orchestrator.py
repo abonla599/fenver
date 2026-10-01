@@ -71,7 +71,6 @@ class Orchestrator:
                 print(f"[Orchestrator] 恢复任务: {task.task_id}, 进度: {task.current_subtask}/{len(task.subtasks)}")
         else:
             # 创建新任务
-            print(f"[Orchestrator] 创建新任务，目标: {goal}")
             plan = self.planner.plan(goal)
             task = Task(goal=goal, subtasks=plan, user_id=user_id)
             task_store[task.task_id] = task
@@ -100,9 +99,10 @@ class Orchestrator:
                 idx = task.current_subtask
                 subtask = task.subtasks[idx]
 
-                print(f"[Orchestrator] ========== 执行子任务 {idx+1}/{len(task.subtasks)} ==========")
-                print(f"[Orchestrator] 子任务内容: {subtask}")
-
+                # 这里原来每步还打四行：`===== 执行子任务 i/N =====`、子任务原文、
+                # "完成"、"当前进度 i/N"。它们要么把用户的目标原文抄进日志，要么是
+                # 返回值里本来就有的同一个进度（final 的 results/subtasks/current_subtask）
+                # 再印一遍。留下的几行只报 id 与状态变化——那是返回值里没有的东西。
                 # 使用Executor（内部调用ReAct Agent）执行单个子任务
                 # user_id 往下传：子任务里的工具要知道是谁在调（needs_user 那类不给身份就拒绝）
                 result = self.executor.execute_task(subtask, user_id=task.user_id)
@@ -111,11 +111,7 @@ class Orchestrator:
                 task.results.append(result)
                 task.current_subtask += 1
 
-                print(f"[Orchestrator] 子任务 {idx+1} 完成")
-                print(f"[Orchestrator] 当前进度: {task.current_subtask}/{len(task.subtasks)}")
-
             # --- 4. 所有子任务完成，生成最终汇总 ---
-            print(f"[Orchestrator] ========== 所有子任务完成，开始汇总 ==========")
 
             # 构造汇总提示词
             summary_prompt = self._build_summary_prompt(task)
