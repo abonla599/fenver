@@ -339,7 +339,8 @@ def no_llm_calls(monkeypatch, _stub_llm_calls):
         return real_build(provider)
 
     def spy_stream(model, messages, provider_id=None, temperature=0.7,
-                   max_tokens=4096):
+                   max_tokens=4096, user_id=None,
+                   cancel_event=None, on_upstream_start=None):
         calls.append("stream")
         yield "（测试回复）"
 

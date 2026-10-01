@@ -566,21 +566,161 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
 from fastapi.responses import StreamingResponse
 import json as json_module
 
+# run 的登记表/序号缓冲/续播帧生成都在 app.core.stream_runs（那里的模块文档
+# 把"什么活得过断线、什么活不过重启"写全了）。这里负责产品接线：谁的一轮、
+# 消息落哪、账记在谁头上。
+from app.core import stream_runs
+
+# 续播失败的那一句全场只有一份：不存在 / 不是你的 / 缓冲有空洞 / 已过保留期
+# 逐字节相同——与 _task_for_principal 同一个纪律，run_id 不许成为探测信道。
+CANNOT_RESUME = {"detail": "续播不了：这一轮不属于你、已经不在这台进程里、或缓冲已装不下你要的位置。"
+                           "请不要重发原文——结果已经（或将会）写进会话历史，刷新会话即可取回",
+                 "code": "cannot_resume", "resumable": False}
+
+
+def _parse_last_event_id(raw: str):
+    """SSE 标准头 Last-Event-ID 的形状是 `<run_id>:<seq>`；解不出就 (None, 0)。
+
+    客户端不用 EventSource：这一族是 POST fetch（请求体带着对话内容），所以
+    续播凭据必须由客户端手动放进头里——协议上这是 SSE 的合法用法（EventSource
+    只是自动帮你发这个头的那层糖）。
+    """
+    head, sep, tail = (raw or "").rpartition(":")
+    if not sep:
+        return None, 0
+    try:
+        seq = int(tail)
+    except ValueError:
+        return None, 0
+    if seq < 0:
+        return None, 0
+    return head or None, seq
+
+
+def launch_stream_run(run: "stream_runs.StreamRun", provider, messages, user_text,
+                      principal: Principal, pipe, used_memory_ids) -> threading.Thread:
+    """启动生产线程。与端点分开写，是为了契约测试能在不开 HTTP 流的处境下
+    装配一轮（test_v025_stream_cancel_contract 需要中途取消的确定性时机）。"""
+    t = threading.Thread(target=_produce_stream,
+                         args=(run, provider, messages, user_text, principal,
+                               pipe, used_memory_ids),
+                         daemon=True, name=f"stream-run-{run.run_id[:8]}")
+    t.start()
+    return t
+
+
+def _produce_stream(run, provider, messages, user_text, principal, pipe, used_memory_ids):
+    """把一轮流式对话的每一步都变成带序号的缓冲帧：生产者只此一个线程。
+
+    与改造前的 generate() 的三点不同，每一点都是 R3 判据的正面：
+    1. 读者断开不再终结这里——生成跑完它的；"停止"走 cancel 端点（显式动作）。
+    2. 助手消息只经 claim_message_save() 落一次：续播、多读者、将来的任何
+       重复驱动都写不出第二条（idempotent 落盘）。
+    3. usage 只在 stream_chat 的 finally 里记一次：这个函数整个 run 生命周期
+       只调用它一次，续播走的分支根本不经过这里（见端点的 resume 分支）。
+    取消的半句话也落盘：用户屏幕上已经看到的东西不该在历史里凭空消失——
+    这与"用户消息先落盘"是同一条原则。
+    """
+    from app.core.streaming import stream_chat, StreamCancelled
+
+    status = "failed"
+    full_text = ""
+    try:
+        run.append({"type": "start", "message_id": run.message_id,
+                    "model": provider["model"]})
+
+        # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
+        if run.session_id:
+            sessions_store.add_message(run.session_id, principal.user_id,
+                                       "user", user_text)
+
+        # tools 走的是同一个 pipeline 实例：非流式那条一直把工具传给模型，
+        # 流式这条以前一个都没传，于是界面上工具等于不存在（模型如实说它
+        # 不会用计算器）。清单装配见 ChatPipeline.__init__。
+        for chunk in stream_chat(provider["model"], messages,
+                                 provider_id=provider["id"],
+                                 tools=pipe.tools_schema if pipe else None,
+                                 user_id=principal.user_id,        # 账本要落在人头上
+                                 cancel_event=run.cancel_event,    # 停止的主判据
+                                 on_upstream_start=run.attach_upstream):  # 供当场关闭
+            full_text += chunk
+            run.append({"type": "content", "text": chunk})
+
+        # 保存助手回复到会话（如果提供了 session_id）——闩内只有一次
+        if run.session_id and run.claim_message_save():
+            sessions_store.add_message(
+                run.session_id, principal.user_id, "assistant",
+                full_text, run.message_id, used_memory_ids)
+
+        # 按信号写长期记忆，判据与非流式路径同一处（pipeline.save_interaction）
+        if pipe is not None:
+            try:
+                pipe.save_interaction(user_text)
+            except Exception as e:
+                print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
+                      file=sys.stderr, flush=True)
+
+        run.append({"type": "done", "full_text": full_text,
+                    "message_id": run.message_id, "model": provider["model"]})
+        status = "completed"
+    except StreamCancelled:
+        # 用户按了停止：已经流出去的半句照样落盘（同一个 message_id，反馈仍可
+        # 关联），然后发 cancelled 终帧。账已由 stream_chat 的 finally 结清——
+        # 那是取消前真消费的部分，此后这里不再叫上游（轮首检查拦下下一轮）。
+        if run.session_id and full_text and run.claim_message_save():
+            sessions_store.add_message(run.session_id, principal.user_id,
+                                       "assistant", full_text,
+                                       run.message_id, used_memory_ids)
+        run.append({"type": "cancelled", "full_text": full_text,
+                    "message_id": run.message_id,
+                    "message": "已取消：生成停在块边界，未再发起新的付费调用"})
+        status = "cancelled"
+    except Exception as e:
+        reason = _fail_reason(e)
+        print(f"流式模型调用失败: {reason}", file=sys.stderr, flush=True)
+        run.append({"type": "error", "message": f"模型调用失败：{reason}"})
+        status = "failed"
+    finally:
+        # 无论走到哪条出口，run 必须有终态：没有它，读者会挂在 cond.wait 上，
+        # 那正是旧结构里"连接还开着但再也没动静"的形状。
+        run.finish(status)
+
+
 @app.post("/v1/chat/stream")
 def stream_chat_endpoint(request: ChatRequest, http: Request,
                          principal: Principal = CurrentPrincipal):
-    """流式聊天端点，返回 Server-Sent Events
+    """流式聊天端点，返回 Server-Sent Events（v0.25 R3：带 run_id 与序号，可取消、可续播）。
 
-    端点与 generate() 都必须是同步的：模型 token 是从阻塞 socket 上读出来的，
+    端点与生成侧都必须是同步的：模型 token 是从阻塞 socket 上读出来的，
     留在事件循环里会让一个慢请求冻住整台服务（线上 524）。
+
+    生产者/读者分离（R3 的地基）：上游块由专用生产线程写入 run 缓冲
+    （stream_runs），HTTP 响应只从缓冲读。断线因此不再掐死生成——这是"续播
+    不必重付整轮"的前提；"停止"变成显式动作：POST /v1/chat/stream/{run_id}/cancel。
+
+    续播：带 `Last-Event-ID: <run_id>:<seq>` 头的请求不叫模型、不落消息、不记账，
+    只补发 seq 之后的缓冲帧；续不上（不存在/不是你的/空洞/过期）给逐字节相同的
+    410 cannot_resume——这句话的含义就是"别自动重发原文"。续播不计入付费限流
+    账：它不出网，只读这一进程的内存（防刷屏靠保留窗与缓冲上限，不靠钱闸门）。
     """
-    from app.core.streaming import stream_chat
+    raw = http.headers.get("last-event-id")
+    if raw:
+        run_id, cursor = _parse_last_event_id(raw)
+        run = stream_runs.get_run(run_id) if run_id else None
+        mine = run is not None and (principal.role == "admin"
+                                    or run.user_id == principal.user_id)
+        # 三类"续播不了"合成一句话（CANNOT_RESUME 常量）：拿 410 探 run_id
+        # 存在与否，得到的信息量为零。admin 可跨属主续播，与任务面同权同形。
+        if not mine or not stream_runs.resumable(run, cursor):
+            return JSONResponse(status_code=410, content=CANNOT_RESUME)
+        return StreamingResponse(stream_runs.sse_frames(run, cursor),
+                                 media_type="text/event-stream")
 
     # 节流同样必须在这里判，理由和下面那条归属一样：流一开，状态码就锁死在 200，
     # 那时再挡只能断流，而 429 与 Retry-After 根本送不出去。
     _throttle_chat(http, principal)
 
-    # 归属必须在这里判，不能在 generate() 里判：流一开始 HTTP 状态就锁死在 200，
+    # 归属必须在这里判，不能在生成侧判：流一开始 HTTP 状态就锁死在 200，
     # 那时再发现 session_id 不是你的，只能静默不落盘（原先正是这样）。
     _require_session_owner(request.session_id, principal)
 
@@ -602,50 +742,38 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
             print(f"流式上下文注入失败（不影响本次对话）: {_fail_reason(e)}",
                   file=sys.stderr, flush=True)
 
-    def generate():
-        message_id = str(uuid.uuid4())
-        # 发送开始事件
-        yield f"data: {json_module.dumps({'type': 'start', 'message_id': message_id, 'model': provider['model']})}\n\n"
+    run = stream_runs.create_run(user_id=principal.user_id,
+                                 session_id=request.session_id)
+    launch_stream_run(run, provider, messages, user_text, principal, pipe,
+                      used_memory_ids)
+    return StreamingResponse(stream_runs.sse_frames(run, 0),
+                             media_type="text/event-stream")
 
-        # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
-        if request.session_id:
-            sessions_store.add_message(request.session_id, principal.user_id,
-                                       "user", user_text)
 
-        full_text = ""
-        try:
-            # tools 走的是同一个 pipeline 实例：非流式那条一直把工具传给模型，
-            # 流式这条以前一个都没传，于是界面上工具等于不存在（模型如实说它
-            # 不会用计算器）。清单装配见 ChatPipeline.__init__。
-            for chunk in stream_chat(provider["model"], messages,
-                                     provider_id=provider["id"],
-                                     tools=pipe.tools_schema if pipe else None,
-                                     user_id=principal.user_id):   # 账本要落在人头上
-                full_text += chunk
-                yield f"data: {json_module.dumps({'type': 'content', 'text': chunk})}\n\n"
-            
-            # 保存助手回复到会话（如果提供了 session_id）
-            if request.session_id:
-                sessions_store.add_message(
-                    request.session_id, principal.user_id, "assistant",
-                    full_text, message_id, used_memory_ids)
+@app.post("/v1/chat/stream/{run_id}/cancel")
+def cancel_stream_run(run_id: str, principal: Principal = CurrentPrincipal):
+    """"停止"终于是一个动作：翻标志、尽力当场关闭上游连接、下一轮付费调用不发生。
 
-            # 按信号写长期记忆，判据与非流式路径同一处（pipeline.save_interaction）
-            if pipe is not None:
-                try:
-                    pipe.save_interaction(user_text)
-                except Exception as e:
-                    print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
-                          file=sys.stderr, flush=True)
-            
-            # 发送完成事件
-            yield f"data: {json_module.dumps({'type': 'done', 'full_text': full_text, 'message_id': message_id, 'model': provider['model']})}\n\n"
-        except Exception as e:
-            reason = _fail_reason(e)
-            print(f"流式模型调用失败: {reason}", file=sys.stderr, flush=True)
-            yield f"data: {json_module.dumps({'type': 'error', 'message': f'模型调用失败：{reason}'})}\n\n"
-    
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    归属与 _task_for_principal 同形：非属主与不存在的 id 是同一个 404、同一句话
+    （"运行不存在"），cancel 不是 run_id 探测器；admin 可跨属主取消——与任务面
+    同一权限同一形状。"cancelled" 一词与 TaskStatus.CANCELLED 同一个语义：已花
+    的照账、已产出的照落、下一个付费步骤不再发生。
+
+    真停的位置在 app/core/streaming.py：轮首与逐块的 cancel_event 检查，加上
+    这里经由 StreamRun.abort_upstream 对上游连接的一次尽力 close。诚实边界写在
+    那两处——close 不保证打断正阻塞的读，所以最迟在下一个块或读超时（默认
+    120s）生效；被保证的是取消之后不会再有新的 create()。
+    """
+    run = stream_runs.get_run(run_id)
+    if run is None or (principal.role != "admin" and run.user_id != principal.user_id):
+        raise HTTPException(status_code=404, detail="运行不存在")
+    outcome = run.cancel()
+    if outcome == "warning":
+        return {"status": "warning", "run_id": run_id,
+                "message": f"运行已处于终态: {run.status}，无需取消"}
+    return {"status": "cancelled", "run_id": run_id,
+            "message": "已请求取消：停在下一个块边界，不再发起新的付费调用；"
+                       "流的最后一个事件是 cancelled"}
 
 # ---------- 会话管理 ----------
 # 归属只由 principal 推导：路由不接受任何来自 body/query/path 的 user_id 或
