@@ -23,6 +23,8 @@ from pydantic import BaseModel
 from app.core import authz, usage
 # v0.24 T1.4：注册闸门与配置端点读的是同一份 config_store，不在路由层留第二默认值。
 from app.core import config_store
+# R4a 个人用量面的 provider 显示名要查这份配置——只查 label 一个字段，见 _my_provider_name。
+from app.core import providers
 # v0.24 T3.4：管理端每一次账号改动都往 audit.jsonl 追加一条（只增、脱敏在这一层里）。
 from app.core import audit
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
@@ -591,6 +593,50 @@ def admin_usage(day: str = None, _: Principal = RequireAdmin):
             bucket[field] += row.get(field, 0)
     return {"day": target or _today(), "rows": rows, "totals": totals,
             "days": usage.days()}
+
+
+def _my_provider_name(provider_id: str) -> str:
+    """显示名只取 label 这一个字段：配置整个对象（api_key、base_url 都在里面）
+    不出了这个函数，路由层想"顺手把整个 provider 倒出去"都没机会。
+    条目被删过或从来不是配置里的 id（unknown-provider），名字回落成 id 本身——
+    账上的行不能因为配置被改就凭空蒸发（那是改历史），名字也不该编造第二个事实。
+    """
+    provider = providers.store.get(provider_id)
+    return (provider or {}).get("label") or provider_id
+
+
+@router.get("/v1/me/usage")
+def my_usage(day: str = None, principal: Principal = CurrentPrincipal):
+    """v0.25 R4a：每个人读自己的用量，只有这一面答"我自己"。
+
+    与 /v1/admin/usage 的分工：那边答"所有人"（require_admin 原样保留），这边
+    只认调用者自己——所以这里没有能填别人 id 的参数，"别人的数字"在这张面上
+    根本问不出来；不存在与不是你的同一种回答（200 空表），也就没有拿 403/404
+    的差别当探测器的那种缝。day 的规矩与管理面同一条（只认 YYYY-MM-DD），
+    两边不许漂移。没账的人读成零 + 齐的键："还没用过"是合法状态，不是错误。
+
+    诚实的边界，两句都要说：这里只有次数与 token，钱要等 R4b（没有价格表，
+    本地估算拿去对账是错的，见 usage.py 头部）；`unknown_usage` > 0 的行 token
+    是**下限**——上游没回 usage 的那几次记的是 0，别把它读成"没用过"。
+    """
+    if day is not None and not _DAY_RE.match(day.strip()):
+        raise HTTPException(status_code=400, detail="day 要写成 YYYY-MM-DD")
+    target = day.strip() if day else _today()
+    rows = []
+    for row in usage.snapshot_for_user(principal.user_id, target):
+        item = {"provider": {"id": row["provider_id"],
+                             "name": _my_provider_name(row["provider_id"])},
+                "paid_by": row.get("paid_by", "operator")}
+        for field in usage.FIELDS:
+            item[field] = row.get(field, 0)
+        item["tokens_are_floor"] = item["unknown_usage"] > 0
+        rows.append(item)
+    totals = {field: sum(row[field] for row in rows) for field in usage.FIELDS}
+    totals["tokens_are_floor"] = totals["unknown_usage"] > 0
+    return {"day": target, "days": usage.days_for_user(principal.user_id),
+            "rows": rows, "totals": totals,
+            "note": "token 数一律取上游回传的 usage；tokens_are_floor 为真的行是下限，"
+                    "不是 0。这里没有钱：价格估算随 R4b 才接入。"}
 
 
 @router.get("/v1/admin/users")
