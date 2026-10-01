@@ -211,7 +211,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 说话不再依赖"键盘恰好收着"这种碰运气的手势判定。
     var voiceMode by remember { mutableStateOf(false) }
     // 语音服务自己拒录音时记下它的包名/应用名：输入卡上给直达入口（第 5 轮：必须
-    // 带上目标 App 的名字——用户会去开本 App「AI 助手」自己的麦克风，俩不是一回事）。
+    // 带上目标 App 的名字——用户会去开本 App「Fenver」自己的麦克风，俩不是一回事）。
     var voiceServicePkg by remember { mutableStateOf<String?>(null) }
     var voiceServiceLabel by remember { mutableStateOf<String?>(null) }
     var voiceHintOn by remember { mutableStateOf(false) }
@@ -500,7 +500,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 识别服务自己拒录音（权限明明给了）：不再拉起系统语音界面兜底——那东西在
     // 部分 ROM 上会弹它自己的白框错误「似乎出错了呢(2)」，比不响还吓人
     //（2026-09-28 真机反馈第 3 轮）。第 4 轮：提示中性色 + 直达入口。第 5 轮再修：
-    // 用户拿本 App「AI 助手」的麦克风页来对答案——提示必须点名是哪个语音服务 App，
+    // 用户拿本 App「Fenver」的麦克风页来对答案——提示必须点名是哪个语音服务 App，
     // 入口按钮也带上它的名字；另给一条手动的「系统语音输入」备用通路（用户点按
     // 才拉起，不违反第 3 轮"不自动弹"的教训）。
     voice.onFinal = { t -> voiceHintOn = false; voiceServicePkg = null; engineDeadStreak = 0; sendNow(t) }

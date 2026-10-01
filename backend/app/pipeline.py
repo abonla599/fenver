@@ -47,7 +47,7 @@ def _env_line() -> str:
     """
     ver = build_version()
     shown = ver if ver else "未登记（构建时未带版本戳）"
-    return (f"你运行在「AI 助手」应用内，对话由它的后端服务转发；当前服务端版本：{shown}。"
+    return (f"你运行在「Fenver」应用内，对话由它的后端服务转发；当前服务端版本：{shown}。"
             "被问到这个应用本身、它运行在哪个软件里或它的版本号时，以此为准。")
 
 

@@ -1322,7 +1322,7 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }
                 }.isSuccess
-                if (!ok) onNote("打不开系统那一页，请到系统设置里搜「AI 助手」", true)
+                if (!ok) onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
             })
         ReminderStatusRow("闹钟", exactOk, "能准点", "没给精准闹钟：可能被省电推迟",
             divider = false,
@@ -1339,7 +1339,7 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }
                 }.isSuccess
-                if (!ok) onNote("打不开系统那一页，请到系统设置里搜「AI 助手」", true)
+                if (!ok) onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
             })
     }
     Spacer(Modifier.height(12.dp))

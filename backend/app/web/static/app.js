@@ -1,4 +1,4 @@
-/* AI 智能助手 PWA 主逻辑 */
+/* Fenver PWA 主逻辑 */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -1972,7 +1972,7 @@ function reminderStatusCard(caps) {
     // 点一下就说"已授权"是最容易骗到人的一种假状态。
     btn.onclick = () => {
       const r = SHELL.openSettings(pair[2]);
-      if (!r.ok) setStatus("打不开系统那一页，请到系统设置里搜「AI 助手」", true);
+      if (!r.ok) setStatus("打不开系统那一页，请到系统设置里搜「Fenver」", true);
     };
     row.append(lbl, val, btn);
     card.appendChild(row);
@@ -2098,7 +2098,7 @@ function fmtReminderAt(ms) {
 }
 
 /* ---------------- 壳的系统分享入口 ----------------
- * 相册/文件里点"分享 → AI 助手"，件先躺在壳的待上传队列里；这里把它读出来、
+ * 相册/文件里点"分享 → Fenver"，件先躺在壳的待上传队列里；这里把它读出来、
  * 走**现有**那条 POST /v1/uploads（api.js 的 upload：令牌头、错误解析、附件记录
  * 形状都只对齐一次），拿回附件记录挂进待发送区，然后让壳删掉本地那份。
  */
@@ -3358,7 +3358,7 @@ async function boot() {
   syncPersonaChip();
 
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => {});
-  /* 冷启动时壳里可能已经躺着一件"分享 → AI 助手"送进来的文件（人在没打开网页时就分享了）。
+  /* 冷启动时壳里可能已经躺着一件"分享 → Fenver"送进来的文件（人在没打开网页时就分享了）。
      排在这一段最后：上传要带令牌，认不出人时传上去只会 401。没有桥它第一句就 return。 */
   if (state.me) drainShares();
   /* 「发现版本更新」排在最后一句：它既不阻塞首屏也不分登录态（端点免鉴权，版本号是壳

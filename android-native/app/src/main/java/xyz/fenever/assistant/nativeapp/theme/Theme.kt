@@ -234,7 +234,7 @@ fun AiGlowBackground(content: @Composable BoxScope.() -> Unit) {
 fun AiBrandMark(sizeDp: Int = 44) {
     Image(
         painter = painterResource(xyz.fenever.assistant.nativeapp.R.drawable.app_icon),
-        contentDescription = "AI 助手",
+        contentDescription = "Fenver",
         modifier = Modifier.size(sizeDp.dp)
             .clip(RoundedCornerShape((sizeDp / 3.14f).dp)),
     )

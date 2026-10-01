@@ -48,10 +48,10 @@ fun InstallGuideDialog(onGoSettings: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text(if (noPage) "没能打开系统设置" else "装不了：v$v", fontSize = 17.sp) },
         text = { Text(if (noPage)
-                "这台手机的系统没有给出可以改这个开关的页面。手动到「设置 → 应用 → AI 助手」里" +
+                "这台手机的系统没有给出可以改这个开关的页面。手动到「设置 → 应用 → Fenver」里" +
                 "允许\"安装未知应用\"，再回来点一次立即更新就行。"
             else
-                "这台手机还没允许「AI 助手」安装应用。打开那个开关后再回来点一次立即更新就行。",
+                "这台手机还没允许「Fenver」安装应用。打开那个开关后再回来点一次立即更新就行。",
             fontSize = 14.sp) },
         confirmButton = {
             if (noPage) TextButton(onClick = onDismiss) { Text("好") }

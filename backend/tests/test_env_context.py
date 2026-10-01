@@ -1,4 +1,4 @@
-"""发给模型的那句「你运行在「AI 助手」应用内 … 服务端版本 …」。
+"""发给模型的那句「你运行在「Fenver」应用内 … 服务端版本 …」。
 
 为什么单独锁（与 test_today_context 同一形状的事故账）：用户在该应用里问模型
 「这个软件现在版号是多少」，模型答不出来——它此前收不到任何关于自己所在环境的
@@ -69,7 +69,7 @@ def test_env_anchor_is_injected_bare_and_dressed(monkeypatch):
     text = _sys_text(msgs)
     assert text.split("\n\n")[0] == "今天是 2026-09-23 周三。", \
         f"日期首段被挤掉了：{text!r}"
-    assert "「AI 助手」应用内" in text and "v3.14" in text, f"{DATE_LINE_OK}：{text!r}"
+    assert "「Fenver」应用内" in text and "v3.14" in text, f"{DATE_LINE_OK}：{text!r}"
 
     msgs, _ = ChatPipeline("u_env_dressed").inject_context(
         [{"role": "system", "content": PERSONA},
@@ -77,7 +77,7 @@ def test_env_anchor_is_injected_bare_and_dressed(monkeypatch):
     assert [m["role"] for m in msgs] == ["system", "user"], msgs
     text = msgs[0]["content"]
     assert text.startswith(PERSONA), f"persona 被动过：{text!r}"
-    assert "「AI 助手」应用内" in text[len(PERSONA):], f"环境锚点没追加在 persona 后：{text!r}"
+    assert "「Fenver」应用内" in text[len(PERSONA):], f"环境锚点没追加在 persona 后：{text!r}"
 
 
 # ---------- 3. 接线：两条路都在真发给模型的 messages 上验 ----------

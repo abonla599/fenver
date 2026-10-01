@@ -267,11 +267,11 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
 
             Spacer(Modifier.height(8.dp))
 
-            // .auth-brand：icon 30px 圆角 + 「AI 助手」24px/600 渐变字（面板外）
+            // .auth-brand：icon 30px 圆角 + 「Fenver」24px/600 渐变字（面板外）
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 xyz.fenever.assistant.nativeapp.theme.AiBrandMark(30)
-                xyz.fenever.assistant.nativeapp.theme.GradientText("AI 助手", 24)
+                xyz.fenever.assistant.nativeapp.theme.GradientText("Fenver", 24)
             }
             Spacer(Modifier.height(22.dp))
 

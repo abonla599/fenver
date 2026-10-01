@@ -26,7 +26,7 @@ def test_app_serves_html_shell():
     assert "text/html" in res.headers["content-type"]
     # 判语料的尺子在这里一样要过：这句话写进 HTML 注释里，浏览器一个字都不渲染，
     # 而原始文本断言照样绿。
-    assert "AI 智能助手" in _strip_html_comments(res.text)
+    assert "Fenver" in _strip_html_comments(res.text)
 
 
 def test_static_assets_reachable():

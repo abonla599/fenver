@@ -1,6 +1,6 @@
 {
-  "name": "AI 智能助手",
-  "short_name": "AI助手",
+  "name": "Fenver",
+  "short_name": "Fenver",
   "description": "具备长期记忆与工具调用能力的智能助手",
   "start_url": "./",
   "scope": "./",

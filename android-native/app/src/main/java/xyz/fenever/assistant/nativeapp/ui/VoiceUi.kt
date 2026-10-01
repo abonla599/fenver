@@ -319,7 +319,7 @@ fun rememberVoiceRecorder(): VoiceRecorder {
  * 只能把用户送到那个应用的系统详情页去开（2026-09-28 第 4 轮真机反馈）。
  * 第 5 轮再修：resolveService 在部分 ROM 上返回 null（入口直接消失），兜底改成
  * 枚举两个识别动作的全部候选服务；且入口必须报出目标 App 的名字——用户会拿
- * 本 App（就叫「AI 助手」）的设置页来对答案，不说名字分不清开的是谁的权限。 */
+ * 本 App（就叫「Fenver」）的设置页来对答案，不说名字分不清开的是谁的权限。 */
 fun speechServicePackage(context: Context): String? =
     runCatching {
         @Suppress("DEPRECATION")

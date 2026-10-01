@@ -55,7 +55,7 @@ import xyz.fenever.assistant.nativeapp.SessionSummary
  * 逐处对位（style.css .sidebar/.sb-* 原文数值）：
  * - 底色 --glass（移动端侧栏就是这层毛玻璃的实底近似 #10141D）+ 右描边 --line，
  *   宽 min(84vw, 300px)；
- * - 品牌行 22px 图标 + 15px 渐变字「AI 智能助手」；
+ * - 品牌行 22px 图标 + 15px 渐变字「Fenver」；
  * - nav-item 9/10 内距、12 圆角、图标走 --text-2（不是强调色）；
  * - 搜索框 10 圆角、surface 底 + line 描边（不是胶囊）；
  * - 「会话」sb-label 11px --text-3；日期组头 sb-group 同字号；
@@ -109,7 +109,7 @@ fun SessionDrawer(tick: Int, currentId: String,
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             xyz.fenever.assistant.nativeapp.theme.AiBrandMark(22)
-            xyz.fenever.assistant.nativeapp.theme.GradientText("AI 智能助手", 15)
+            xyz.fenever.assistant.nativeapp.theme.GradientText("Fenver", 15)
             Spacer(Modifier.weight(1f))
             Text("×", fontSize = 20.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
