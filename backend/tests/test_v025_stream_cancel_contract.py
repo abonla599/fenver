@@ -384,8 +384,12 @@ def test_cancel_really_stops_generation_and_no_further_step_bills(client, real_s
     assert len(completions.calls) == 1, \
         f"取消后还发起了新的付费轮：{len(completions.calls)} 次 create()"
 
+    # R3b-3 改写了终帧形状（拆解清单里的显式裁定）：cancelled 仍在，但其后必须
+    # 跟一条旧客户端认得的 done 收尾——否则旧 PWA 把"看不懂的终帧"当成"没有
+    # done"，判 retryable 后整轮重发回 /v1/chat，正是 R3b 要堵的出血点。
     payloads = [e["payload"] for e in run.events]
-    assert payloads[-1]["type"] == "cancelled", f"终帧应是 cancelled：{payloads[-1]}"
+    assert payloads[-2]["type"] == "cancelled" and payloads[-1]["type"] == "done", \
+        f"cancelled 之后必须有 done 收尾：{[p['type'] for p in payloads[-2:]]}"
     assert run.status == "cancelled"
 
     # 账：取消收尾时把那口气的钱结清（一行，failed，数字取上游回传），此后增量必须为 0
@@ -404,7 +408,8 @@ def test_cancel_really_stops_generation_and_no_further_step_bills(client, real_s
                          json={"messages": []})
     assert rejoin.status_code == 200, rejoin.text
     replayed = [d["type"] for _, d in _frames(rejoin.text)]
-    assert replayed == ["content", "cancelled"], replayed
+    # 同上（R3b-3）：重放给升级客户端的尾巴是 cancelled→done，旧客户端只读得到 done
+    assert replayed == ["content", "cancelled", "done"], replayed
     again = client.post(f"/v1/chat/stream/{run.run_id}/cancel", headers=BOOT)
     assert again.json()["status"] == "warning", again.text
 
