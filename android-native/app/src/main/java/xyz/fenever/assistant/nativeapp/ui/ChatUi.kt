@@ -394,6 +394,33 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
+    /* app.js pullFromHistory：断线续不上、或服务端判这一轮不可续播时，去会话历史里取回
+     * 已经落库的助手回复。关键是"不重发生成"：那一轮的钱要么已经花、要么被服务端的轮次
+     * 边界钱闸停在了边界，结果都在 sessions 里；重发只会再付一次、再落一条一样的助手消息。
+     * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。 */
+    suspend fun pullFromHistory() {
+        setStatus("这一轮接不上了，正在去会话里取回结果…")
+        try {
+            val d = Api.getSession(sessionId)
+            val lastAssistant = d.messages.lastOrNull { it.role == "assistant" }
+            if (lastAssistant != null) {
+                messages = messages + UiMsg("assistant", lastAssistant.content,
+                    lastAssistant.message_id, lastAssistant.model)
+                setStatus("")
+            } else {
+                // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
+                val tip = "没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条"
+                messages = messages + UiMsg("assistant", tip, transient = true)
+                setStatus(tip, true)
+            }
+        } catch (e: Exception) {
+            NetMinder.noteFailure(e)
+            messages = messages + UiMsg("assistant",
+                "⚠️ " + (e.message ?: "取回失败"), transient = true)
+            if (!logoutIf401(e)) setStatus(e.message ?: "", true)
+        }
+    }
+
     /* ---------------- runStream（app.js send/runStream 的移植 · v0.25 安卓 T2.4/T2.5/T2.8） ----------------
      * content 增量 → 局部气泡重画；done 收尾按 status 分流：
      *   completed → 落 message_id/model；cancelled → 半截 +「（已停止生成）」照样落本地并持久化；
@@ -495,33 +522,6 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 runCatching { sessions = Api.listSessions() }
             }
             if (!failed && !stopped) setStatus("")
-        }
-    }
-
-    /* app.js pullFromHistory：断线续不上、或服务端判这一轮不可续播时，去会话历史里取回
-     * 已经落库的助手回复。关键是"不重发生成"：那一轮的钱要么已经花、要么被服务端的轮次
-     * 边界钱闸停在了边界，结果都在 sessions 里；重发只会再付一次、再落一条一样的助手消息。
-     * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。 */
-    suspend fun pullFromHistory() {
-        setStatus("这一轮接不上了，正在去会话里取回结果…")
-        try {
-            val d = Api.getSession(sessionId)
-            val lastAssistant = d.messages.lastOrNull { it.role == "assistant" }
-            if (lastAssistant != null) {
-                messages = messages + UiMsg("assistant", lastAssistant.content,
-                    lastAssistant.message_id, lastAssistant.model)
-                setStatus("")
-            } else {
-                // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
-                val tip = "没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条"
-                messages = messages + UiMsg("assistant", tip, transient = true)
-                setStatus(tip, true)
-            }
-        } catch (e: Exception) {
-            NetMinder.noteFailure(e)
-            messages = messages + UiMsg("assistant",
-                "⚠️ " + (e.message ?: "取回失败"), transient = true)
-            if (!logoutIf401(e)) setStatus(e.message ?: "", true)
         }
     }
 
