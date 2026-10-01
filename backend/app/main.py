@@ -28,14 +28,7 @@ if project_root not in sys.path:
 
 # ---------- 可选导入：后台任务模块（本人负责） ----------
 
-# 1. auto_weight_adjuster (假设它在 app 目录下)
-try:
-    from app import auto_weight_adjuster
-except ImportError:
-    auto_weight_adjuster = None
-    print("⚠️ auto_weight_adjuster 未安装，实时反馈监听不可用")
-
-# 2. preference_analyzer：定时任务里唯一真正干活的后台模块。
+# 1. preference_analyzer：定时任务里唯一真正干活的后台模块。
 #    memory_weight_updater 从前也挂在这个 import 上，但它整个模块只有一个 print，
 #    每 300 秒被调用一次、每轮都印一句"执行记忆权重更新"——而它什么都不改。
 #    现在它只提供一句启动时打印的实话（见该文件的模块文档），不再进定时任务。
@@ -49,7 +42,7 @@ except ImportError as e:
 
 from app import memory_weight_updater
 
-# 3. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
+# 2. feedback_storage 和 analyze_and_update_preference (假设它们在 app 目录下)
 # 注意：如果 preference_analyzer 已经在上面导入成功，这里可以直接从 app.preference_analyzer 导入函数
 try:
     from app.feedback_storage import save_feedback, FEEDBACK_FILE
@@ -288,6 +281,7 @@ def start_background_scheduler():
     # 它没做事：调用时没传 callback，auto_weight_adjuster 退化成默认 lambda，只往
     # stdout 印一句"未提供回调函数"。真正改权重的是 /v1/feedback 的同步路径，需求已经
     # 被它覆盖。留着的结果是一行永远在说谎的启动日志——本项目最贵的那类东西。
+    # 线程删除后 auto_weight_adjuster 模块本体就成了零引用死代码，2026-10-01 一并删除。
 
 
 

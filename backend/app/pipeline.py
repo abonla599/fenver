@@ -16,7 +16,6 @@ from app.memory import signals
 from app.preference_analyzer import read_preference
 from app.tools.registry import get_available_tools_schema
 from app.tools.executor import execute_tool
-# from app.agents.react_agent import ReActAgent  # 暂时注释，以后集成
 from app.tools.builtin_tools import *
 
 
