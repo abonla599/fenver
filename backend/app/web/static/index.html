@@ -291,6 +291,13 @@
             <button class="set-row" id="themeBtn">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg></span>
               <span class="set-lbl">外观</span><span class="set-val" id="themeVal">深色</span><span class="set-go">⇅</span></button>
+            <!-- 意见反馈：v0.27 起这一行是**应用内**的一页（openSetPage("feedback")），
+                 提交直达后端 /v1/user-feedback → 管理员收集页，不再跳去仓库 issue。
+                 它是 <button> 不是 <a>：about 页契约只允许本组出现 github.com 一家外链，
+                 内部导航不该有 href。 -->
+            <button class="set-row" id="rowFeedback">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16v12H4z"/><path d="M4 7l8 6 8-6"/></svg></span>
+              <span class="set-lbl">意见反馈</span><span class="set-val">提交问题与建议</span><span class="set-go">›</span></button>
             <!-- 仓库这一行的地址也是硬写在 markup 里的，理由与上面那颗「去下载页」
                  同一条：test_frontend_uses_relative_api_paths_only 禁的是前端 JS 出现
                  绝对 URL，外部链接留在 HTML 里不受它管，也不必绕一层 JS 去拼。
@@ -435,6 +442,32 @@
               <span class="dirty-note" id="schedDirty">尚无修改</span>
               <button class="btn-save" id="schedSaveBtn" disabled>保存</button>
             </div>
+          </div>
+        </section>
+
+        <!-- 意见反馈（v0.27）：应用内的一页，提交直达 /v1/user-feedback → 管理员收集页。
+             形状对齐安卓 FeedbackPage——正文 0/300、截图 0/4、邮箱、整宽提交，
+             成功后回显服务端分配的独立编号（FB-0000NN）。这一版起反馈不再跳仓库 issue，
+             所以这里不出现任何外链：表单控件全在本页，逻辑在 app.js 的反馈模块。 -->
+        <section class="set-page hidden" data-page="feedback" id="paneFeedback">
+          <div class="fb-form">
+            <label class="field"><span>问题描述与建议</span>
+              <textarea id="fbText" rows="6" maxlength="300" placeholder="请描述你遇到的问题和对 Fenver 的建议"></textarea>
+            </label>
+            <p class="fb-count" id="fbTextCount">0/300</p>
+
+            <p class="set-group">截图（最多 4 张）<span class="fb-count" id="fbImgCount">0/4</span></p>
+            <div class="fb-thumbs" id="fbThumbs"></div>
+            <label class="btn fb-pick-btn">＋ 添加截图
+              <input type="file" id="fbImageInput" accept="image/*" multiple hidden>
+            </label>
+
+            <label class="field"><span>邮箱（可选，方便回复你）</span>
+              <input type="email" id="fbEmail" placeholder="you@example.com" autocomplete="email" maxlength="120">
+            </label>
+
+            <button class="btn btn-block btn-primary" id="fbSubmitBtn">提交反馈</button>
+            <p class="pane-note" id="fbStatus"></p>
           </div>
         </section>
         </div>
