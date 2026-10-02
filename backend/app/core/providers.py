@@ -15,6 +15,7 @@ import uuid
 import httpx
 from openai import OpenAI
 
+from app.core import credits
 from app.core.atomic_write import write_json_atomic
 from app.core.paths import data_root, load_project_env
 from app.core.tls import system_ssl_context
@@ -431,6 +432,11 @@ class ProviderStore:
                 # 账本从此是假账。只有调用方明确传了 paid_by 才允许改。
                 if not str(record.get("paid_by") or "").strip():
                     cleaned["paid_by"] = self._items[existing].get("paid_by") or "operator"
+                # 单价与 paid_by 同一条纪律（v0.25 R4b）：旧表单（ProviderRequest）
+                # 不认识 pricing，一次普通的改名保存不该把"有价"洗成"未定价"。
+                # 请求里根本没有 pricing 键 = 保留原值；显式给 null/{} = 主动取消定价。
+                if "pricing" not in record:
+                    cleaned["pricing"] = self._items[existing].get("pricing")
                 self._items[existing] = cleaned
                 if cleaned["is_default"]:
                     self._clear_default_except(cleaned["id"])
@@ -492,6 +498,13 @@ class ProviderStore:
         # owner 只由服务端写路径设置（/v1/me/providers 钉上调用者 user_id）；
         # 这里只做归一，空串 = 全局共享。
         owner = str(record.get("owner") or "").strip()
+        # v0.25 R4b T5.3：单价配置面。校验口径全在 credits.parse_pricing（三态、
+        # 半套价格拒收、per_call 结构预留）——这里只负责把 PricingError 换成
+        # ProviderError，让写路径说人话而不是甩一个内部异常类型。
+        try:
+            pricing = credits.parse_pricing(record.get("pricing"))
+        except credits.PricingError as e:
+            raise ProviderError(str(e))
         return {
             "id": str(record.get("id") or f"p_{uuid.uuid4().hex[:8]}"),
             "label": label,
@@ -503,6 +516,7 @@ class ProviderStore:
             "is_default": bool(record.get("is_default")),
             "paid_by": paid_by,
             "owner": owner,
+            "pricing": pricing,
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
@@ -531,11 +545,16 @@ class ProviderStore:
                 "shared": not self._is_private(p),
                 "usable": usable,
                 "reason": "" if usable else "未配置有效密钥",
+                # v0.25 R4b：/v1/models 里的倍率与定价状态。倍率只用于"选模型时的
+                # 直觉"（卡片 §2.3b），不是合同价；未定价 = "?x"，绝不显示 0.00x。
+                "priced": p.get("pricing") is not None,
+                "multiplier": credits.multiplier_label(p.get("pricing")),
             })
         return items
 
     @staticmethod
     def _public(p: dict) -> dict:
+        pricing = p.get("pricing")
         return {
             "id": p["id"], "label": p["label"], "base_url": p["base_url"],
             "model": p["model"], "supports_vision": p["supports_vision"],
@@ -545,6 +564,12 @@ class ProviderStore:
             "api_key_masked": mask_key(p.get("api_key", "")),
             "has_key": not looks_placeholder(p.get("api_key", "")),
             "paid_by": p.get("paid_by") or "operator",
+            # v0.25 R4b T5.3/T5.8：展示面双端（网页/安卓）都从这里抄原料。
+            # multiplier 是 None 时界面不显示倍率（per_call），"?x" = 未定价；
+            # 单价核对日期与免费截止是「0.00x（1.0 前免费 · 单价核对于 …）」的根据。
+            "pricing": pricing,
+            "priced": pricing is not None,
+            "multiplier": credits.multiplier_label(pricing),
         }
 
     # ---- 探活 ----
