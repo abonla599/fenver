@@ -1699,7 +1699,7 @@ async function sendFeedback(index, rating, btn) {
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
                     persona: "角色设定", memory: "长期记忆", reminders: "提醒",
-                    schedule: "日程" };
+                    schedule: "日程", feedback: "意见反馈" };
 
 function openSettings(page) {
   // 从侧栏点进别的页面，也是离开日程页：先确认，再把弹层换掉。
@@ -1736,6 +1736,113 @@ function openSetPage(name) {
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
 }
 function closeSetPage() { Layers.close("setPage"); }
+
+/* ---------------- 意见反馈（v0.27）----------------
+ * 应用内的一页，提交直达 /v1/user-feedback → 管理员收集页。这一版起反馈不再跳
+ * 仓库 issue，所以这里没有任何外链，也没有把仓库地址读进 JS：正文/邮箱/截图都在
+ * 本机内存里攒着，点提交才组装。图片沿用「先传后附」——每张先 upload() 换成
+ * upload id，再连正文一起 POST；服务端分配独立编号 FB-0000NN。 */
+const FB_TEXT_MAX = 300;   // 与后端 user_feedback_storage.TEXT_MAX 同值，别各写各的
+const FB_IMG_MAX = 4;
+const fbDraft = { images: [] };   // images: [{ file, url }]，url 是缩略图的 objectURL
+
+function fbSetStatus(text, isErr) {
+  const el = $("fbStatus");
+  el.textContent = text || "";
+  el.classList.toggle("err", !!isErr);
+}
+
+function fbRefreshCounters() {
+  $("fbTextCount").textContent = `${$("fbText").value.length}/${FB_TEXT_MAX}`;
+  $("fbImgCount").textContent = `${fbDraft.images.length}/${FB_IMG_MAX}`;
+  $("fbSubmitBtn").disabled = $("fbText").value.trim().length === 0;
+}
+
+function fbRenderThumbs() {
+  const box = $("fbThumbs");
+  box.textContent = "";
+  fbDraft.images.forEach((item, idx) => {
+    const cell = document.createElement("div");
+    cell.className = "fb-thumb";
+    const img = document.createElement("img");
+    img.src = item.url;
+    img.alt = item.file.name;
+    const rm = document.createElement("button");
+    rm.className = "fb-thumb-del";
+    rm.type = "button";
+    rm.setAttribute("aria-label", "移除这张截图");
+    rm.textContent = "×";
+    rm.onclick = () => fbRemoveImage(idx);
+    cell.appendChild(img);
+    cell.appendChild(rm);
+    box.appendChild(cell);
+  });
+  $("fbImageInput").disabled = fbDraft.images.length >= FB_IMG_MAX;
+}
+
+function fbRemoveImage(idx) {
+  const [gone] = fbDraft.images.splice(idx, 1);
+  if (gone) URL.revokeObjectURL(gone.url);
+  fbRenderThumbs();
+  fbRefreshCounters();
+}
+
+function fbPickImages(e) {
+  const picked = Array.from(e.target.files || []);
+  for (const f of picked) {
+    if (fbDraft.images.length >= FB_IMG_MAX) break;
+    if (!f.type.startsWith("image/")) continue;
+    fbDraft.images.push({ file: f, url: URL.createObjectURL(f) });
+  }
+  e.target.value = "";   // 允许再选同一张：不清空的话 onchange 不触发
+  fbRenderThumbs();
+  fbRefreshCounters();
+  if (picked.length && fbDraft.images.length >= FB_IMG_MAX) {
+    fbSetStatus(`最多 ${FB_IMG_MAX} 张截图`, true);
+  } else {
+    fbSetStatus("");
+  }
+}
+
+function fbClearDraft() {
+  fbDraft.images.forEach((it) => URL.revokeObjectURL(it.url));
+  fbDraft.images = [];
+  $("fbText").value = "";
+  $("fbEmail").value = "";
+  $("fbImageInput").value = "";
+  fbRenderThumbs();
+  fbRefreshCounters();
+}
+
+async function fbSubmit() {
+  const text = $("fbText").value.trim();
+  if (!text) { fbSetStatus("请先写点什么", true); return; }
+  const email = $("fbEmail").value.trim();
+  const btn = $("fbSubmitBtn");
+  btn.disabled = true;
+  fbSetStatus("提交中…");
+  try {
+    const ids = [];
+    for (const it of fbDraft.images) {
+      const up = await API.upload(it.file);
+      ids.push(up.id);
+    }
+    const res = await API.submitUserFeedback(text, email, ids);
+    fbClearDraft();
+    fbSetStatus(`已收到，反馈编号 ${res.id}，谢谢！`);
+  } catch (err) {
+    fbSetStatus(`提交失败：${err && err.message ? err.message : err}`, true);
+    btn.disabled = false;
+    fbRefreshCounters();
+  }
+}
+
+function wireFeedback() {
+  $("fbText").addEventListener("input", fbRefreshCounters);
+  $("fbImageInput").addEventListener("change", fbPickImages);
+  $("fbSubmitBtn").onclick = () => fbSubmit();
+  fbRefreshCounters();
+}
 
 /** 账户页的两处回显。
  *  方案 C 起这里**不再回填任何令牌**——输入框只进不出：它的值只会被 adopt
@@ -3126,6 +3233,8 @@ function bind() {
   $("rowMemory").onclick = () => openSetPage("memory");
   $("rowReminders").onclick = () => openSetPage("reminders");
   $("rowSchedule").onclick = () => openSetPage("schedule");
+  $("rowFeedback").onclick = () => openSetPage("feedback");
+  wireFeedback();
   // 「添加一项」= 追加一条空事项并立刻进编辑态。空文本不进 PUT 也能被服务端拦住，
   // 但那样错误条会盖掉整张清单，不如让这一行先被写满（Esc 就撤掉，等于没加）。
   $("schedAdd").onclick = () => {

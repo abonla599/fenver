@@ -519,6 +519,17 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 
 #personaInput { width: 100%; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; resize: vertical; outline: none; margin-bottom: 10px; }
 
+/* 意见反馈（v0.27）：正文 + 截图缩略图 + 邮箱 + 整宽提交，对位安卓 FeedbackPage。
+   复用 .field/.btn/.set-group，只补这一页独有的计数行、缩略图条与移除按钮。 */
+#paneFeedback .fb-form textarea { width: 100%; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; resize: vertical; outline: none; }
+#paneFeedback .fb-form textarea:focus { border-color: var(--accent); }
+.fb-count { margin: 2px 2px 0; font-size: 12px; color: var(--text-3); }
+.fb-thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.fb-thumb { position: relative; width: 72px; height: 72px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+.fb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fb-thumb-del { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, .62); color: #fff; font-size: 14px; line-height: 1; cursor: pointer; padding: 0; }
+.fb-pick-btn { display: inline-block; width: auto; }
+
 /* 网页内拍照 */
 #cameraModal { z-index: 70; background: rgba(0, 0, 0, .86); }
 .cam-card {
