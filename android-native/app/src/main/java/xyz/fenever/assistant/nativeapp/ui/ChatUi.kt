@@ -81,6 +81,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -296,19 +297,50 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    // 贴底跟随：网页 paint() 的语义 —— 本来贴底才滚，上翻阅读不被打断。
-    // 光 scrollToItem(total-1) 只把最后一条的【顶】对齐视口顶：回答一超过一屏，
-    // 结尾就永远悬在视口外，用户每次都得手动划到最下面（真机反馈）。这里把
-    // 最后一项高出视口的部分一并滚掉，让"贴底"真的是最新一行的底边。
+    // 贴底跟随：流式期间对齐网页 paint()（app.js:1556）——本来贴底才滚，上翻阅读不被打断；
+    // 光 scrollToItem(total-1) 只把最后一条的【顶】对齐视口顶，回答一超过一屏，结尾就永远
+    // 悬在视口外（真机反馈），所以两种情况都要把"最后一项高出视口的部分"一并滚掉。
+    //
+    // 但回答【落定】那一下语义不同：网页落定走 renderMessages 无条件 scrollTop=scrollHeight
+    // （app.js:1323），而安卓 streamText 刚置 null 的这一刻 layoutInfo 里还是流式气泡的旧
+    // 高度，照旧公式算出的 offset 偏小——贴的其实是已经消失的那只气泡的底，用户要看完整
+    // 答案还得自己往下扒（真机反馈）。所以落定这一拍先滚到最后一项顶部，再随帧重贴：
+    // 每帧用最新量到的 lastH 重算 offset，直到连续两帧高度不再变才算贴实。上限 8 帧只是
+    // 防止换行计算反复抖动的兜底，正常一帧就到位，多出来的拍子是幂等的。
     LaunchedEffect(messages.size, streamText) {
-        val info = listState.layoutInfo
-        val total = info.totalItemsCount
+        val first = listState.layoutInfo
+        val total = first.totalItemsCount
         if (total == 0) return@LaunchedEffect
-        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-        if (lastVisible < total - 2) return@LaunchedEffect
-        val viewportH = info.viewportEndOffset - info.viewportStartOffset
-        val lastH = info.visibleItemsInfo.lastOrNull { it.index == total - 1 }?.size ?: 0
-        listState.scrollToItem(total - 1, maxOf(0, lastH - viewportH))
+
+        // 最后一项高出视口的部分，就是要滚掉的像素
+        fun offBottom(i: androidx.compose.foundation.lazy.LazyListLayoutInfo): Int {
+            val vh = i.viewportEndOffset - i.viewportStartOffset
+            val last = i.visibleItemsInfo.lastOrNull { it.index == i.totalItemsCount - 1 }
+            return maxOf(0, (last?.size ?: 0) - vh)
+        }
+
+        if (streamText == null && !busy) {
+            // 落定：无视中途上翻，把答案的最后一行送回眼前（对齐网页 renderMessages）。
+            // 先把最后一项拉进视口让它量出真实高度，再随帧重贴，直到连续两帧高矮不再变。
+            listState.scrollToItem(total - 1, 0)
+            var prevH = -1
+            repeat(8) {
+                withFrameNanos { }
+                val now = listState.layoutInfo
+                val t = now.totalItemsCount
+                if (t == 0) return@LaunchedEffect
+                val lastH = now.visibleItemsInfo
+                    .lastOrNull { it.index == t - 1 }?.size ?: 0
+                if (lastH == 0) return@repeat          // 这一帧还没量到：下一帧再看
+                listState.scrollToItem(t - 1, offBottom(now))
+                if (lastH == prevH) return@LaunchedEffect
+                prevH = lastH
+            }
+        } else {
+            val lastVisible = first.visibleItemsInfo.lastOrNull()?.index ?: -1
+            if (lastVisible < total - 2) return@LaunchedEffect
+            listState.scrollToItem(total - 1, offBottom(first))
+        }
     }
 
     // 复制提示 1.5s 后回到「复制」（网页 setTimeout 同语义）
@@ -789,6 +821,10 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     }
                     Text(topTitle, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        // 网页 .topbar h1 走的是 --text（深底浅字 / 浅底深字），这里必须跟着
+                        // 主题走 onSurface；不写 color 时它落的是默认纯黑——深色主题下黑字压
+                        // 在深蓝黑玻璃底上几乎看不见（真机反馈「标题纯黑色不好辨认」）。
+                        color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f))
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp)
