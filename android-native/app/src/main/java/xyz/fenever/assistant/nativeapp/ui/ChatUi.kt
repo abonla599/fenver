@@ -254,8 +254,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         statusErr = false
     }
 
+    /* 第 16 轮真机回归（v0.28.0 后「模型丢失 + 会话丢失」）：服务端把每账户令牌
+     * 封顶 8 条、超了静默挤最旧——一条 401 只说明**当前这条令牌**作废，过去用
+     * clearAuth() 会把这台机器上所有身份（含各自的 providerId/lastSessionId）
+     * 一起抹掉，把一次可恢复的过期放大成"账户全没"。改为只 forgetCurrent()。 */
     fun logoutIf401(e: Throwable): Boolean {
-        if (e is ApiException && e.status == 401) { Prefs.clearAuth(); onLoggedOut(); return true }
+        if (e is ApiException && e.status == 401) { Prefs.forgetCurrent(); onLoggedOut(); return true }
         return false
     }
 
