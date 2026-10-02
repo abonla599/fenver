@@ -142,8 +142,9 @@ private val WebTypography = Typography(
     labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 11.sp),
 )
 
-/* 外观两态（dark/light）：网页设置行只有「深色」「浅色」两个值，没有跟随系统。
- * 默认深色 = 网页 :root。用 Compose state：切一下整棵树立刻换肤。 */
+/* 外观三态（system/dark/light）：设置页「外观」行换成分段控件后，
+ * "system" 在渲染时按 isSystemInDarkTheme() 落成真深浅，跟随系统切换。
+ * 默认仍是深色 = 网页 :root。用 Compose state：切一下整棵树立刻换肤。 */
 object ThemeMode {
     var value: String by mutableStateOf("dark")
 }
@@ -153,8 +154,13 @@ fun isWebLight(): Boolean = MaterialTheme.colorScheme.background == WebTokens.LB
 
 @Composable
 fun AiTheme(content: @Composable () -> Unit) {
+    val dark = when (ThemeMode.value) {
+        "light" -> false
+        "dark" -> true
+        else -> !isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (ThemeMode.value == "light") LightScheme else DarkScheme,
+        colorScheme = if (dark) DarkScheme else LightScheme,
         shapes = WebShapes,
         typography = WebTypography,
         content = content,

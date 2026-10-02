@@ -37,13 +37,20 @@ object Prefs {
         get() = sp.getString("base_url", null) ?: BuildConfig.DEFAULT_BASE_URL
         set(value) = sp.edit().putString("base_url", value.trim().trimEnd('/')).apply()
 
-    /* 外观两态：dark / light，与网页设置行同值（没有"跟随系统"）。 */
+    /* 外观三态：system / dark / light。网页设置行只有深浅两态；原生多了
+     * "system"（渲染侧 Theme.kt 按 isSystemInDarkTheme 落地）。默认仍是深色。 */
     var themeMode: String
         get() = sp.getString("theme_mode", "dark") ?: "dark"
         set(value) {
             sp.edit().putString("theme_mode", value).apply()
             xyz.fenever.assistant.nativeapp.theme.ThemeMode.value = value
         }
+
+    /* 触感反馈总开关（借鉴 WorkBuddy 的同名设置行）：默认开，关掉后
+     * 设置页所有行点击、分段选择与开关都不再震动。 */
+    var hapticsEnabled: Boolean
+        get() = sp.getBoolean("haptics_enabled", true)
+        set(value) = sp.edit().putBoolean("haptics_enabled", value).apply()
 
     /* 上下文预算（k token），聊天发送前按它截断历史。 */
     var contextTokensK: Int
