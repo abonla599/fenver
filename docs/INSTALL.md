@@ -49,6 +49,36 @@ cd backend
 
 流式回答有个计费防护默认值：关掉页面后最多再跑完当前这一轮就停，不会因为你不在就接着起新轮子花钱；默认 120 秒内重开可以接着看（改法：`data/config.json` 的 `stream_no_reader_grace_seconds`，或 `.env` 里 `STREAM_NO_READER_GRACE_SECONDS` 覆盖，0 表示不留宽限）。
 
+### 3b. 模型单价与积分口径（v0.25 R4b，部署者必读）
+
+本版没有钱包、不扣积分，但**影子积分**从第一次调用就在算：每次按「真实 token × 你配的单价」算出"本应消耗多少"。这是你垫了多少钱的唯一记录，也是 1.0 定价的唯一依据——所以**每个在用的模型都该把 `pricing` 配上**。没配价的模型会被如实标成「未定价」（显示 `?x`），算不出就绝不当成 0（那等于白烧你的钱还报"没花钱"）。
+
+给模型配单价：管理员 `PUT /v1/providers/{id}`、用户 `PUT /v1/me/providers/{id}`，请求体加一格：
+
+```json
+{"pricing": {"mode": "token", "currency": "CNY",
+             "input_per_m": 1.0, "output_per_m": 4.0,
+             "price_checked_on": "2026-10-01", "free_until": null}}
+```
+
+- `input_per_m` / `output_per_m`：**每百万 token** 的现价（去各家官网核对后填，`price_checked_on` 记核价日期）。两档必须一起给，半套价格会被拒绝。
+- `free_until`：显式免费期的截止日期（如 `"2099-12-31"`）。免费期内显示 `0.00x`、对用户分文不扣，但影子照常按真实单价算——"0.00x"和"?x"是两种东西，别混。
+- `mode: "per_call"`（按次/按张计价）：结构已预留，**本版结算未实现**，碰到它会明确拒绝并说明原因，不会偷偷按 token 公式折算。
+- 单价任何改动都会落 `audit.jsonl`（谁、哪格、从多少到多少）；请求里不带 `pricing` 键 = 不改价，显式 `pricing: {}` 才是取消定价。
+
+下面是一张**示例价表**（截至 2026-10 各家公开牌价的形状，仅供照抄格式，下单前务必自己核对当日价格——代码里没有任何内置默认价）：
+
+| 模型（示例） | mode | currency | input_per_m | output_per_m | 备注 |
+|---|---|---|---|---|---|
+| DeepSeek flash | token | CNY | 1.0 | 4.0 | 官方长期牌价形状；若厂商限免，`free_until` 填限免截止日 |
+| DeepSeek pro | token | CNY | 3.0 | 6.0 | 缓存命中便宜，但本口径 `cached_tokens` **不打折**（打折就是把账算成猜的） |
+| 通义千问 plus | token | CNY | 0.8 | 2.0 | `reasoning_tokens` 含在输出里按输出档计，不另加一遍 |
+| 未核价的模型 | —— | —— | —— | —— | 先别配 `pricing`，让它显示 `?x`，比猜一个价诚实 |
+
+基准价（¥→积分的锚，"1 积分 = 基准价跑 1000 个混合 token"）住在 `data/config.json` 的 `credit_benchmark`，默认 输入 ¥1/百万 + 输出 ¥4/百万 = 1.00x、折算比例 4:1，部署者可改；**倍率只是展示**（选模型时的直觉），结算与影子一律真实单价，倍率不是合同价。
+
+每日影子护栏默认**关**（`credit_shadow_daily_limit = 0`）：只算不拦。想让它拦人，`POST /v1/admin/config` 设一个正数（或 `.env` 里 `CREDIT_SHADOW_DAILY_LIMIT`）——某用户当日影子到线后，新的付费轮在轮次边界停在「等待你确认是否继续」，且不再向模型出网。管理端 `GET /v1/admin/usage` 的 `credits` 字段给按天、按 provider 的影子合计与「免费期已垫付 N 积分」。
+
 ### 4. 注册没开，怎么进第一个账号
 
 新装默认**注册关闭**（防公网裸奔）。管理员在 `.env` 场景下用 ACCESS_TOKEN 直接以「本机管理员」身份用 `/admin` 建号；或者临时打开注册：`.env` 里加一行 `REGISTRATION_OPEN=1` 重启，注册完删掉这行再重启。注册入口的开关在 `data/config.json`，管理员也可以登录后用接口改（`POST /v1/admin/config`）。

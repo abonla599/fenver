@@ -591,8 +591,13 @@ def admin_usage(day: str = None, _: Principal = RequireAdmin):
         for field in ("calls", "ok", "failed", "prompt_tokens", "completion_tokens",
                       "total_tokens", "reasoning_tokens", "cached_tokens", "unknown_usage"):
             bucket[field] += row.get(field, 0)
+    # v0.25 T5.20 管理端读面：影子积分按天、按 provider 的合计（管理员可见，
+    # 用户端不出现）。语义是「免费期已垫付 N 积分」——0.00x 免费期照常算出来的
+    # 那个数是垫资额的唯一来源；算不出的（未定价/per_call）如实列成 gap，
+    # 绝不溜进总和。派生即算：当日账行 × 当前单价现算，不改 usage 写口径。
+    from app.core import credits
     return {"day": target or _today(), "rows": rows, "totals": totals,
-            "days": usage.days()}
+            "days": usage.days(), "credits": credits.shadow_breakdown(target)}
 
 
 def _my_provider_name(provider_id: str) -> str:
