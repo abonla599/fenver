@@ -1,10 +1,13 @@
 package xyz.fenever.assistant.nativeapp.ui
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -54,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -124,6 +128,7 @@ internal var reenterRequested = false
 private val SET_PAGES = mapOf(
     "providers" to "模型服务", "accounts" to "账户", "persona" to "角色设定",
     "memory" to "长期记忆", "reminders" to "提醒", "schedule" to "日程",
+    "feedback" to "反馈",
 )
 
 /* v0.24 T4.1（D16 保留项）：「关于」页对外的三句话在这里只写一遍，网页侧
@@ -205,6 +210,8 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                 "schedule" -> SchedulePage(onNote = { t, err -> setStatus(t, err) },
                     onRequireAuth = onRequireAuth,
                     onValChanged = { scheduleVal = it })
+                "feedback" -> FeedbackPage(onNote = { t, err -> setStatus(t, err) },
+                    onClose = { onOpenPage("") })
                 "reminders" -> RemindersPage(onNote = { t, err -> setStatus(t, err) })
                 else -> SettingsList(onOpenPage, onRequireAuth, onOpenUrl, onLoggedOut,
                     providers = providers, memoryCount = memoryCount,
@@ -668,12 +675,13 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
         // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
         SetRow("☾", "外观", trailing = "", valSlot = { ThemeSegment() })
-        // 上面那颗「检查更新」全程不跳外部，这两行却是要把人送到 GitHub 上去的——
-        // 它们问的不是"这台机器上的包新不新"，而是"这个项目本身在哪、能不能拿去看"。
-        // ↗ 后缀（网页 .set-go 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
-        // 「意见反馈」也走 ↗：项目是开源的，反馈的正门就是仓库 issue 页。
-        SetRow("✉", "意见反馈", trailing = "↗", valSlot = { SetValText("GitHub Issues") }) {
-            onOpenUrl(ABOUT_REPO_URL + "/issues")
+        // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
+        // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
+        // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
+        // 「意见反馈」v0.27 起不再跳 GitHub：改成应用内一页（› 前缀），填完直达
+        // 管理员的「反馈」收集页，每条带回独立编号。
+        SetRow("✉", "意见反馈", trailing = "›", valSlot = { SetValText("提交问题与建议") }) {
+            onOpenPage("feedback")
         }
         SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
             onOpenUrl(ABOUT_REPO_URL)
@@ -937,6 +945,197 @@ private fun PersonaPage(onNote: (String) -> Unit, onClose: () -> Unit) {
             text = ""
             onNote("角色设定已清除")
         }
+    }
+}
+
+/* ---------------- 意见反馈页（v0.27：应用内提交 → 管理员「反馈」收集页） ---------------- */
+
+/** 一张已选中的反馈截图：Uri 留着上传时读字节，Bitmap 现在就解码好画缩略图。 */
+private data class FbImg(val uri: Uri, val bmp: Bitmap)
+
+/** 与后端 user_feedback_storage 同一组边界：正文 300、图片 4 张。
+ *  这里挡的是"手滑超长"，真正的硬校验在服务端（界面从来不是边界）。 */
+private const val FB_TEXT_MAX = 300
+private const val FB_IMAGE_MAX = 4
+
+@Composable
+private fun FeedbackPage(onNote: (String, Boolean) -> Unit, onClose: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    val haptic = rememberSetHaptic()
+
+    var text by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var imgs by remember { mutableStateOf(listOf<FbImg>()) }
+    var submitting by remember { mutableStateOf(false) }
+    var doneId by remember { mutableStateOf<String?>(null) }   // 成功回执里的独立编号
+
+    // 一次选多张：系统图片选择器（Photo Picker，activity-compose 1.9 起可用）。
+    // maxItems 建时给满 4；合进来时再按剩余额度截断——已选 N 张就只补到 4。
+    val picker = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickMultipleVisualMedia(FB_IMAGE_MAX)
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val room = FB_IMAGE_MAX - imgs.size
+        val taken = uris.take(room)
+        val decoded = ArrayList<FbImg>(taken.size)
+        for (u in taken) {
+            val b = ctx.contentResolver.openInputStream(u)?.use {
+                BitmapFactory.decodeStream(it)
+            }
+            if (b != null) decoded.add(FbImg(u, b))   // 解不开的（非图/损坏）静默跳过
+        }
+        if (decoded.isEmpty()) onNote("这几张图打不开，换一张试试", true)
+        else imgs = imgs + decoded
+    }
+
+    fun submit() {
+        val body = text.trim()
+        if (body.isEmpty()) { onNote("先说说你遇到的问题或建议", true); return }
+        if (submitting) return
+        submitting = true
+        scope.launch {
+            runCatching {
+                // 先图后信：每张走 /v1/uploads 换成 upload id，再连同正文提交。
+                val ids = ArrayList<String>(imgs.size)
+                for (f in imgs) {
+                    val bytes = ctx.contentResolver.openInputStream(f.uri)?.use { it.readBytes() }
+                        ?: throw Exception("读取图片失败")
+                    var name = "image.jpg"
+                    ctx.contentResolver.query(f.uri,
+                        arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                        ?.use { c -> if (c.moveToFirst()) name = c.getString(0) ?: name }
+                    val mime = ctx.contentResolver.getType(f.uri) ?: "image/jpeg"
+                    ids.add(Api.upload(bytes, name, mime).id)
+                }
+                Api.submitUserFeedback(body, email, ids)
+            }.onSuccess { r ->
+                submitting = false
+                doneId = r.id
+            }.onFailure { e ->
+                submitting = false
+                onNote(when {
+                    e is ApiException && e.status == 401 ->
+                        "登录状态失效：请到「设置 → 账户」重新登录后再提交"
+                    else -> "提交失败：" + (e.message ?: "未知错误")
+                }, true)
+            }
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
+    SetNote("把遇到的问题或对 Fenver 的建议写在这里，提交后会直达管理员的反馈收件箱。")
+
+    // —— 正文（多行 + 右下角 0/300 计数，贴着截图里那张输入框） ——
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .background(MaterialTheme.colorScheme.surfaceVariant)
+        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))) {
+        BasicTextField(text, { v -> text = v.take(FB_TEXT_MAX) },
+            textStyle = TextStyle(fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp)
+                .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 30.dp),
+            decorationBox = { inner ->
+                Box(Modifier.fillMaxWidth()) {
+                    if (text.isEmpty()) Text(
+                        "请描述你遇到的问题和对 Fenver 的建议",
+                        fontSize = 14.sp, color = text3Color(),
+                        modifier = Modifier.padding(end = 8.dp))
+                    inner()
+                    // 计数固定在右下角，随输入实时变
+                    Text("${text.length}/$FB_TEXT_MAX", fontSize = 12.sp,
+                        color = text3Color(),
+                        modifier = Modifier.align(Alignment.BottomEnd)
+                            .padding(horizontal = 4.dp))
+                }
+            })
+    }
+
+    Spacer(Modifier.height(12.dp))
+
+    // —— 图片（0/4）：缩略图网格 + 每张可删 + 末尾一张"+ 添加"占位 ——
+    Row(verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(bottom = 6.dp)) {
+        Text("截图", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("${imgs.size}/$FB_IMAGE_MAX", fontSize = 12.sp, color = text3Color())
+    }
+    Row(Modifier.fillMaxWidth().heightIn(min = 72.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        imgs.forEachIndexed { i, f ->
+            Box(Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))) {
+                Image(f.bmp.asImageBitmap(), contentDescription = null,
+                    modifier = Modifier.matchParentSize())
+                // 右上角 × 删掉这一张（不删服务端附件，只是不带上）
+                Text("×", fontSize = 14.sp, color = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd)
+                        .padding(2.dp).size(18.dp).clip(CircleShape)
+                        .background(Color(0x99000000), CircleShape)
+                        .clickable {
+                            haptic()
+                            imgs = imgs.filterIndexed { j, _ -> j != i }
+                        },
+                    textAlign = TextAlign.Center)
+            }
+        }
+        if (imgs.size < FB_IMAGE_MAX) {
+            Box(Modifier.size(72.dp).clip(RoundedCornerShape(10.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable {
+                    haptic()
+                    picker.launch(
+                        androidx.activity.result.PickVisualMediaRequest(
+                            androidx.activity.result.contract.ActivityResultContracts
+                                .PickVisualMedia.ImageOnly)
+                    )
+                },
+                contentAlignment = Alignment.Center) {
+                Text("＋", fontSize = 24.sp, color = text3Color())
+            }
+        }
+    }
+
+    Spacer(Modifier.height(14.dp))
+
+    // —— 邮箱（选填，方便管理员回复你）——
+    FormRow("邮箱（选填，方便回复你）", email,
+        { v -> email = v.take(120) }, btn = "")
+
+    Spacer(Modifier.height(16.dp))
+
+    // —— 提交（整宽主按钮，对应截图那颗蓝色"提交"）——
+    val scheme = MaterialTheme.colorScheme
+    val light = isWebLight()
+    val bg = if (light) scheme.primary else Color(0xFF062518)
+    val fg = if (light) Color.White else Color(0xFFBFF3D9)
+    val canSubmit = !submitting && text.trim().isNotEmpty()
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .background(if (canSubmit) bg else scheme.surfaceVariant)
+        .border(1.dp, if (canSubmit) scheme.primary else scheme.outline, RoundedCornerShape(12.dp))
+        .clickable(enabled = canSubmit) { submit() }
+        .padding(vertical = 13.dp),
+        contentAlignment = Alignment.Center) {
+        Text(if (submitting) "提交中…" else "提交",
+            fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            color = if (canSubmit) fg else text3Color())
+    }
+
+    // —— 成功回执：把这条反馈的独立编号念给用户，让他知道"发出去了、有据可查" ——
+    doneId?.let { id ->
+        AlertDialog(onDismissRequest = { doneId = null; onClose() },
+            title = { Text("反馈已提交") },
+            text = { Text("你的反馈编号是 $id，管理员已能在收件箱看到它。\n" +
+                "保留这个编号，方便日后追问对应的是哪一条。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    doneId = null
+                    text = ""; email = ""; imgs = emptyList()
+                    onClose()
+                }) { Text("好的") }
+            })
     }
 }
 

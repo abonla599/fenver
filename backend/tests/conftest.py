@@ -44,6 +44,10 @@ os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
 os.environ["USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "usage.json")
 os.environ["SCHEDULE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "schedule.json")
+# 意见反馈（user_feedback.json）同样是导入期算成模块常量的进程级单例：
+# 必须在 import app.main 之前用环境变量指走，截图目录会跟着数据文件走（见
+# user_feedback_storage._image_dir），所以指一条就够。
+os.environ["USER_FEEDBACK_FILE"] = os.path.join(_TEST_DATA_DIR, "user_feedback.json")
 
 # 审计账本也是进程级单例：不指走，测试里的每一次管理端动作都会盖上真实的
 # data/audit.jsonl。隔离判据在 test_test_isolation.py，新增可重定向的存储时那里会红。
