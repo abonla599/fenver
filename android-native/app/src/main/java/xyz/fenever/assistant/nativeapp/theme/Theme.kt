@@ -1,5 +1,9 @@
 package xyz.fenever.assistant.nativeapp.theme
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -15,6 +19,7 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -24,6 +29,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -158,6 +165,19 @@ fun AiTheme(content: @Composable () -> Unit) {
         "light" -> false
         "dark" -> true
         else -> !isSystemInDarkTheme()
+    }
+    // v0.28（用户真机反馈「点输入框时，键盘出现之前会出现白色闪屏」）：键盘以
+    // adjustResize 顶起窗口时，输入卡下方露出来的是**窗口底色**。res/values/
+    // themes.xml 把冷启动首帧钉成深色画布（App 默认外观），但外观是运行时可换的
+    // 三态——浅色/跟随系统落浅色时，底色必须跟着换回白，否则闪屏只是换了个颜色。
+    // 换肤的每一拍在这里重设底色：资源管首帧，这里管之后的一切帧。
+    val bg = if (dark) WebTokens.Bg else WebTokens.LBg
+    val view = LocalView.current
+    DisposableEffect(bg) {
+        var c: Context = view.context
+        while (c is ContextWrapper && c !is Activity) { c = c.baseContext }
+        (c as? Activity)?.window?.setBackgroundDrawable(ColorDrawable(bg.toArgb()))
+        onDispose { }
     }
     MaterialTheme(
         colorScheme = if (dark) DarkScheme else LightScheme,
