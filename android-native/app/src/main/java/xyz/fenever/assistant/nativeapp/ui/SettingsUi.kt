@@ -55,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -71,7 +72,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -96,9 +99,11 @@ import xyz.fenever.assistant.nativeapp.ReminderChannels
 import xyz.fenever.assistant.nativeapp.ReminderScheduler
 import xyz.fenever.assistant.nativeapp.ReminderStore
 import xyz.fenever.assistant.nativeapp.update.Updater
+import xyz.fenever.assistant.nativeapp.theme.ThemeMode
 import xyz.fenever.assistant.nativeapp.theme.aiSoftBrush
 import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
+import java.io.File
 
 /* 设置弹层 = 网页 index.html 的 #settings 一块（.set-sheet → .set-bar → .set-scroll
  * → .set-group/.set-card/.set-row → 二级页 .set-view#setPages）的原生化。
@@ -247,6 +252,62 @@ private fun SetBar(page: String, onOpenPage: (String?) -> Unit) {
 
 /* ---------------- 一行的积木（.set-row / .set-card / .set-group / .set-mini） ---------------- */
 
+/** 触感反馈的取用点（借鉴 WorkBuddy 的「触感反馈」开关）：设置页里所有
+ *  可点的行、分段与开关共用这一条；关掉总闸后各处都静默。
+ *  走 View 平台的 performHapticFeedback 而不是 Compose 的 LocalHapticFeedback——
+ *  后者在本工程锁定的 BOM 2024.06 里 import 不解析（CI 实测），前者是它的地基。 */
+@Composable
+private fun rememberSetHaptic(): () -> Unit {
+    val view = LocalView.current
+    return {
+        if (Prefs.hapticsEnabled) {
+            view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        }
+    }
+}
+
+/** WorkBuddy 那颗绿色开关的原生对位：轨道吃强调色，白点走两端。
+ *  不复用 Material3 Switch——它的默认配色与本页深浅档都不贴，形状也不同。 */
+@Composable
+private fun SetSwitch(on: Boolean, onChange: (Boolean) -> Unit) {
+    val haptic = rememberSetHaptic()
+    val scheme = MaterialTheme.colorScheme
+    Box(Modifier.width(46.dp).height(28.dp).clip(CircleShape)
+        .background(if (on) scheme.primary else scheme.outline)
+        .clickable { haptic(); onChange(!on) }
+        .padding(3.dp),
+        contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart) {
+        Box(Modifier.size(22.dp).background(Color.White, CircleShape))
+    }
+}
+
+/** 「外观」行的三态分段（系统/浅色/深色，借鉴 WorkBuddy 的主题行）。
+ *  选中态读 ThemeMode.value 而不是 Prefs.themeMode：前者是 Compose state，
+ *  切一下这一条才会立刻重画；深档选中底是 primaryContainer（暗薄荷），
+ *  字吃 primary——与全站「选中 = 强调色」的旧规矩同一口径。 */
+@Composable
+private fun ThemeSegment() {
+    val haptic = rememberSetHaptic()
+    val scheme = MaterialTheme.colorScheme
+    val mode = ThemeMode.value
+    Row(Modifier.clip(RoundedCornerShape(10.dp))
+        .border(1.dp, scheme.outline, RoundedCornerShape(10.dp))
+        .padding(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        listOf("system" to "系统", "light" to "浅色", "dark" to "深色").forEach { (v, l) ->
+            val on = mode == v
+            Box(Modifier.clip(RoundedCornerShape(8.dp))
+                .background(if (on) scheme.primaryContainer else Color.Transparent)
+                .clickable { if (!on) { haptic(); Prefs.themeMode = v } }
+                .padding(horizontal = 10.dp, vertical = 5.dp)) {
+                Text(l, fontSize = 12.5.sp,
+                    color = if (on) scheme.primary else text3Color(),
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
+    }
+}
+
 @Composable
 private fun SetCard(content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth()
@@ -279,9 +340,10 @@ private fun SetRow(ico: String, label: String,
                    valSlot: (@Composable () -> Unit)? = null,
                    onClick: () -> Unit = {}) {
     val scheme = MaterialTheme.colorScheme
+    val haptic = rememberSetHaptic()
     val labelColor = if (danger) scheme.error else scheme.onSurface
     Row(Modifier.fillMaxWidth()
-        .then(if (!plain) Modifier.clickable(onClick = onClick) else Modifier)
+        .then(if (!plain) Modifier.clickable { haptic(); onClick() } else Modifier)
         .heightIn(min = 54.dp).padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -396,7 +458,6 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     }
     // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
     // 值槽与两个对话框都从它读——这里不再另起一份 remember 状态做第二真相。
-    val light = isWebLight()
     val admin = Prefs.role == "admin"
     val me = Prefs.currentEntry()
     val name = me?.username ?: ""
@@ -408,6 +469,30 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             ?: providers.firstOrNull { it.id == serverDefaultOf(providers) && it.usable }
     }
     val cap = ((current?.max_context_k ?: 0).let { if (it > 0) it else 64 }).coerceAtLeast(2)
+
+    // —— 「通用」组的三样：通知授权要能从系统页回来后重画（与提醒页同一个 ON_RESUME 路子），
+    //    缓存大小在 IO 线程数一次、清完再数一次。
+    var permTick by remember { mutableIntStateOf(0) }
+    val owner = ctx as? LifecycleOwner
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, ev ->
+            if (ev == Lifecycle.Event.ON_RESUME) permTick++
+        }
+        owner?.lifecycle?.addObserver(obs)
+        onDispose { owner?.lifecycle?.removeObserver(obs) }
+    }
+    permTick
+    val notifGranted = ReminderChannels.notificationsGranted(ctx)
+    var hapticsOn by remember { mutableStateOf(Prefs.hapticsEnabled) }
+    var cacheBytes by remember { mutableStateOf(-1L) }
+    var confirmClearCache by remember { mutableStateOf(false) }
+    val appCtx = ctx.applicationContext
+    fun dirBytes(f: File?): Long = f?.let {
+        runCatching { it.walkTopDown().filter { x -> x.isFile }.sumOf { x -> x.length() } }
+            .getOrDefault(0L)
+    } ?: 0L
+    fun cacheBytesNow(): Long = dirBytes(appCtx.cacheDir) + dirBytes(appCtx.externalCacheDir)
+    LaunchedEffect(Unit) { cacheBytes = withContext(Dispatchers.IO) { cacheBytesNow() } }
 
     // .set-me：头像首字（弱渐变底 + accent 字）+ 名字 + 角色 chip
     Spacer(Modifier.height(14.dp))
@@ -522,6 +607,24 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         }) { onOpenPage("reminders") }
     }
 
+    // —— 通用 ——（借鉴 WorkBuddy 的「触感反馈」「消息通知设置」与 Qoder 的「清理缓存」：
+    //    通知行值槽直读系统授权状态、点下去进系统那一页；缓存行报出大小、清完重量）
+    SetGroup("通用")
+    SetCard {
+        SetRow("✦", "触感反馈", trailing = "", valSlot = {
+            SetSwitch(hapticsOn) { v -> hapticsOn = v; Prefs.hapticsEnabled = v }
+        }) { hapticsOn = !hapticsOn; Prefs.hapticsEnabled = hapticsOn }
+        SetRow("⊙", "消息通知设置", trailing = "›", valSlot = {
+            SetValText(if (notifGranted) "已开启" else "已关闭")
+        }) {
+            if (!openSystemNotificationSettings(appCtx))
+                onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
+        }
+        SetRow("◫", "清理缓存", divider = false, trailing = "›", valSlot = {
+            SetValText(if (cacheBytes < 0) "计算中…" else fmtBytes(cacheBytes))
+        }) { confirmClearCache = true }
+    }
+
     // —— 关于（renderAboutRows）——
     SetGroup("关于")
     SetNote(ABOUT_TAGLINE)
@@ -562,14 +665,16 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             if (Updater.checking) return@SetRow
             Updater.startCheck()
         }
-        SetRow("☾", "外观", trailing = "⇅", valSlot = {
-            SetValText(if (light) "浅色" else "深色")
-        }) {
-            Prefs.themeMode = if (light) "dark" else "light"
-        }
+        // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
+        // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
+        SetRow("☾", "外观", trailing = "", valSlot = { ThemeSegment() })
         // 上面那颗「检查更新」全程不跳外部，这两行却是要把人送到 GitHub 上去的——
         // 它们问的不是"这台机器上的包新不新"，而是"这个项目本身在哪、能不能拿去看"。
         // ↗ 后缀（网页 .set-go 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
+        // 「意见反馈」也走 ↗：项目是开源的，反馈的正门就是仓库 issue 页。
+        SetRow("✉", "意见反馈", trailing = "↗", valSlot = { SetValText("GitHub Issues") }) {
+            onOpenUrl(ABOUT_REPO_URL + "/issues")
+        }
         SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
             onOpenUrl(ABOUT_REPO_URL)
         }
@@ -591,6 +696,29 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                 onLoggedOut()
             }
         }
+    }
+
+    // —— 清理缓存（Qoder「清理缓存」的对位）：只动 cacheDir/externalCacheDir 的内容，
+    //    目录本身留给系统；会话、设置、登录态都不住在这里。IO 线程算字节 + 删。
+    if (confirmClearCache) {
+        AlertDialog(onDismissRequest = { confirmClearCache = false },
+            title = { Text("清理缓存？") },
+            text = { Text("只删除临时文件，不影响对话、设置和登录状态。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearCache = false
+                    scope.launch {
+                        cacheBytes = withContext(Dispatchers.IO) {
+                            runCatching {
+                                listOfNotNull(appCtx.cacheDir, appCtx.externalCacheDir)
+                                    .forEach { d -> d.listFiles()?.forEach { it.deleteRecursively() } }
+                            }
+                            cacheBytesNow()
+                        }
+                    }
+                }) { Text("清理") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } })
     }
 
     // —— 应用内更新（T1.7）：进度对话框 + 「安装未知应用」授权引导 ——
@@ -701,6 +829,26 @@ private fun hostOf(url: String): String = runCatching {
     val def = when (u.scheme) { "https" -> 443; "http" -> 80; else -> -1 }
     if (u.port > 0 && u.port != def) "$h:${u.port}" else h
 }.getOrDefault("")
+
+/** 缓存大小的读法（借鉴 Qoder 的「清理缓存」值槽）：B / KB / 一位小数 MB。 */
+private fun fmtBytes(b: Long): String = when {
+    b >= 1L shl 20 -> "%.1f MB".format(b / 1048576.0)
+    b >= 1L shl 10 -> "%d KB".format(b / 1024)
+    else -> "$b B"
+}
+
+/** 跳到系统「通知设置」这一页（与提醒页「去设置」同一枚 intent）。 */
+private fun openSystemNotificationSettings(ctx: android.content.Context): Boolean = runCatching {
+    if (Build.VERSION.SDK_INT >= 26) {
+        ctx.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } else {
+        ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.parse("package:" + ctx.packageName))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}.isSuccess
 
 /* v0.23 T1.8 起这里不再有"顺手的一份版本比较"（原 isNewerVersion 已删）：
  * 版号判"有没有更新"的真相只有共享的 ReleasePlan.compare 一份——
