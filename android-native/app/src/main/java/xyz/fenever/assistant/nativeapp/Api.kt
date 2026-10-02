@@ -393,9 +393,11 @@ object Api {
 
     /* 打开这一条流：首次不带游标 = 开这一轮（一次付费）；续播带 Last-Event-ID 头重开
        同一条流端点，服务端据此只补缓冲帧、不叫模型不记账。POST 无法用 EventSource，
-       所以续播凭据由这里手动塞进头里（协议上这是 SSE 的合法用法）。 */
+       所以续播凭据由这里手动塞进头里（协议上这是 SSE 的合法用法）。
+       body 每次照发（与网页 api.js 的 open 逐字同语义）：路由是 POST-only，Builder 不挂
+       方法就是 GET——v0.25.0 壳在这里漏过一次 .post()，线上整轮 405。 */
     private fun openStream(payload: String, lastEventId: String?): okhttp3.Response {
-        val rb = request("/v1/chat/stream").apply {
+        val rb = request("/v1/chat/stream").post(payload.toRequestBody(JSON_MT)).apply {
             if (lastEventId != null) header("Last-Event-ID", lastEventId)
         }
         return client.newCall(rb.build()).execute()

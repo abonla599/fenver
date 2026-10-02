@@ -296,14 +296,19 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    // 贴底跟随：网页 paint() 的语义 —— 本来贴底才滚，上翻阅读不被打断
+    // 贴底跟随：网页 paint() 的语义 —— 本来贴底才滚，上翻阅读不被打断。
+    // 光 scrollToItem(total-1) 只把最后一条的【顶】对齐视口顶：回答一超过一屏，
+    // 结尾就永远悬在视口外，用户每次都得手动划到最下面（真机反馈）。这里把
+    // 最后一项高出视口的部分一并滚掉，让"贴底"真的是最新一行的底边。
     LaunchedEffect(messages.size, streamText) {
         val info = listState.layoutInfo
         val total = info.totalItemsCount
-        if (total > 0) {
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            if (lastVisible >= total - 2) listState.scrollToItem(total - 1)
-        }
+        if (total == 0) return@LaunchedEffect
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (lastVisible < total - 2) return@LaunchedEffect
+        val viewportH = info.viewportEndOffset - info.viewportStartOffset
+        val lastH = info.visibleItemsInfo.lastOrNull { it.index == total - 1 }?.height ?: 0
+        listState.scrollToItem(total - 1, maxOf(0, lastH - viewportH))
     }
 
     // 复制提示 1.5s 后回到「复制」（网页 setTimeout 同语义）
