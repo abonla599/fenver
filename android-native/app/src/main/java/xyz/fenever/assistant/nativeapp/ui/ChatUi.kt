@@ -307,7 +307,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
         if (lastVisible < total - 2) return@LaunchedEffect
         val viewportH = info.viewportEndOffset - info.viewportStartOffset
-        val lastH = info.visibleItemsInfo.lastOrNull { it.index == total - 1 }?.height ?: 0
+        val lastH = info.visibleItemsInfo.lastOrNull { it.index == total - 1 }?.size ?: 0
         listState.scrollToItem(total - 1, maxOf(0, lastH - viewportH))
     }
 
