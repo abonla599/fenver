@@ -19,9 +19,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -44,6 +44,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -147,6 +148,12 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     var scheduleVal by remember { mutableStateOf("") }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
     var serverBuild by remember { mutableStateOf("") }
 
+    /* 每页各存一份滚动位置：主列表滑到靠下 → 点进任意子页 → 返回，不再弹回顶部
+       （真机反馈：以前返回后得从头重新滑到靠下才能继续操作）。弹层切页时整体不离开
+       组合，这份 map 随它存活；页名做 key，主列表是 ""，各子页互不串位。 */
+    val scrollByPage = remember { mutableStateMapOf<String, ScrollState>() }
+    val pageScroll = scrollByPage.getOrPut(page) { ScrollState(0) }
+
     fun setStatus(t: String, err: Boolean = false) { note = t; noteErr = err }
     fun reloadProviders() {
         scope.launch {
@@ -178,7 +185,7 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                     MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
         }
-        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+        Column(Modifier.weight(1f, fill = false).verticalScroll(pageScroll)
             .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 22.dp)) {
             when (page) {
                 "providers" -> ProvidersPage(onChanged = { reloadProviders() })
