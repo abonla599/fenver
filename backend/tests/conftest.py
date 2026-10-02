@@ -136,7 +136,7 @@ def _stub_llm_calls(monkeypatch):
     # `for chunk in ...` 当场 TypeError，而不是静默放过一次回归。
     def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
                     tools=None, max_tool_turns=5, user_id=None,
-                    cancel_event=None, on_upstream_start=None):
+                    cancel_event=None, on_upstream_start=None, before_round=None):
         # 形参要跟真函数一致：这个桩以前少两个参数，真签名一加参数，
         # 所有走流式端点的测试就一起 TypeError——而红出来的信息看着像产品坏了。
         for piece in ("（", "测试", "回复）"):
