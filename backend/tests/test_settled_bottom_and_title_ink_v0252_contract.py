@@ -91,16 +91,23 @@ def test_native_settled_reply_resticks_after_layout_is_measured():
     """回答落定必须等新一帧量出真实高度后再贴：withFrameNanos 随帧重贴是唯一正解。
 
     钉三件：落定判据在场（streamText == null && !busy）、随帧等待在场
-    （withFrameNanos）、贴底滚动的目标仍是"最后一项底边对齐视口底"（lastH/vh 公式 +
-    scrollToItem 到 total-1）。把 withFrameNanos 删掉退回"单发一次"，第一条就红。
+    （withFrameNanos）、贴底滚动顶到**滚动边界**（scrollToItem 到最后一项 +
+    MAX_SCROLL_OFFSET 越界夹底）。
+    v0.28 改判：贴底手段从"上一帧量到的高度做减法（lastH - vh）"换成"越界 offset
+    夹到最大滚动位置"——落定那一拍条目还会事后长高（操作行晚一拍才挂出来），
+    按旧高度贴的底会把条目尾巴推进输入卡后面（真机「输入框老是挡着上面的输出」）。
+    高度会撒谎，边界不会。退出判据也换成结果导向：最后一项底边进了视口才收工。
     """
     body = _settle_effect_body(_kt_code())
     assert "streamText == null" in body and "!busy" in body, \
         "落定拍没有单独分支：v0.25.1 的单发公式还会用流式旧高度骗人"
     assert "withFrameNanos" in body, \
         "落定没有随帧重贴：新一帧量到真实高度之前滚的 offset 是旧气泡的，结尾仍悬在视口外"
-    assert "scrollToItem" in body and re.search(r"size.*-.*vh|size.*-", body, re.S), \
-        "贴底不再是【最后一项底边对齐视口底】的公式（v0.25.1 修的就是这个，不许回退）"
+    assert "scrollToItem" in body and "MAX_SCROLL_OFFSET" in body, \
+        "贴底不再是【顶到滚动边界】：v0.28 修的就是条目事后长高把尾巴藏进输入卡，" \
+        "退回拿旧高度做减法就回退成那个 bug"
+    assert re.search(r"last\.offset\s*\+\s*last\.size\s*<=\s*[\w.]*viewportEndOffset", body), \
+        "落定的收工判据不再是【最后一项底边进了视口】——没贴实就停表等于没修"
 
 
 def test_native_streaming_follow_still_gated_on_already_at_bottom():

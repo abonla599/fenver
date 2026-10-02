@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- v0.28（用户真机反馈「点输入框时，键盘出现之前会有一块白色闪屏」）：
+         键盘以 adjustResize 顶起窗口时，输入卡下方露出的那一条正是**窗口底色**。
+         此前直接吃系统主题 Material.Light 的白底，深色界面配一条白板。
+         父主题照旧（App 的界面全由 Compose 画，系统只提供窗口底色），
+         只把底色钉成默认深色主题的画布；浅色/跟随系统外观由 theme/Theme.kt
+         在换肤时实时改回——冷启动首帧归资源管，换肤之后归 Compose 管。 -->
+    <style name="Theme.Fenver" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+        <item name="android:colorBackground">@color/window_bg</item>
+    </style>
+</resources>
