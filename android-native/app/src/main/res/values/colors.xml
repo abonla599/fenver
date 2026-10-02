@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#7030E0</color>
+    <!-- v0.28 白闪屏修复：窗口底色钉成 App 默认深色主题的画布（theme/WebTokens.Bg）。
+         旧值走 Material.Light 的白底——键盘 adjustResize 把窗口顶起时，输入卡下面
+         露出的那一条正是这个底色，深色界面配一条大白板（真机反馈「键盘出现之前
+         会出现白色闪屏」）。浅色外观下由 theme/Theme.kt 在换肤时实时改回白底。 -->
+    <color name="window_bg">#FF0B0E15</color>
 </resources>

@@ -205,6 +205,10 @@ def _fetch_repo(repo: str):
         "asset_name": (asset or {}).get("name") or "",
         "asset_url": (asset or {}).get("browser_download_url") or "",
         "size": int((asset or {}).get("size") or 0),
+        # 正文里那行发布校验值（没有就是空串）。快照层顺手存下它，是为了让
+        # `download_plan` 能把它一起交给磁盘缓存（apk_cache）：只有对得上这串
+        # 摘要的字节才许落盘代管——判据见 apk_cache 的模块注释。
+        "sha256": apk_sha256(body.get("body")),
         # 原样的那条发布 JSON。壳的「检查更新」走 /v1/update/info 透传它——判断逻辑
         # （三态、资产名、URL 白名单）整个活在壳里且被 JVM 台架钉着，服务端只做
         # "一台机器出网 + 缓存"这一段，不另起一份判断的第二真相。
@@ -477,7 +481,10 @@ def download_plan():
     ok, why = _host_ok(url)
     if not ok:
         return None, why
-    return {"url": url, "name": name, "size": size, "version": version}, ""
+    return {"url": url, "name": name, "size": size, "version": version,
+            # 给磁盘缓存的准入凭据（apk_cache 只认对得上这串摘要的字节）；
+            # 旧版发布没有它就是空串——那一版永远不进缓存，照旧走实时代取。
+            "sha256": str(snapshot.get("sha256") or "")}, ""
 
 
 def _open_asset():

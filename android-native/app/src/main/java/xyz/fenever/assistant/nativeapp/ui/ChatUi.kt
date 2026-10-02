@@ -25,6 +25,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -77,10 +80,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,6 +102,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -171,6 +177,11 @@ val CHAT_SUGGESTIONS = listOf(
     "周末在家无聊，推荐点事做",
 )
 
+/* v0.28 贴底的统一手段：超出条目高度的 offset 会被 LazyList 夹到**最大滚动位置**——
+ * 最后一项的底边正好贴住视口底（含 6dp 底衬）。不拿"上一帧量到的高度"做减法，
+ * 是因为条目会在贴过之后再长高（操作行晚一拍才挂出来）：高度会撒谎，边界不会。 */
+private const val MAX_SCROLL_OFFSET = Int.MAX_VALUE / 2
+
 /* 第 7 轮真机反馈改判：第 4 轮为赶跑"点一下就浮出且关不掉的粘贴气泡"，把整屏
  * 文字工具条换成了空壳——代价是键盘开着时长按输入框也什么都出不来，想粘贴没门。
  * 用户钦定：键盘弹着的时候长按要出「粘贴/全选/选择」那套系统工具条。空壳拆掉，
@@ -226,6 +237,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var enginePickerOpen by remember { mutableStateOf(false) }
     var engineDeadStreak by remember { mutableStateOf(0) }
     val listState = rememberLazyListState()
+    // v0.28：composer 那一块此刻的实测高度（像素）。悬浮「跳到底部」箭头
+    // 要悬在它正上方 14dp——箭头是浮层不占布局，位置只能按实测高度算。
+    var composerPx by remember { mutableIntStateOf(0) }
     val inputFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
 
@@ -297,50 +311,54 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    // 贴底跟随：流式期间对齐网页 paint()（app.js:1556）——本来贴底才滚，上翻阅读不被打断；
-    // 光 scrollToItem(total-1) 只把最后一条的【顶】对齐视口顶，回答一超过一屏，结尾就永远
-    // 悬在视口外（真机反馈），所以两种情况都要把"最后一项高出视口的部分"一并滚掉。
+    // 贴底跟随：流式期间对齐网页 paint()（app.js:1556）——本来贴底才滚，上翻阅读不被打断。
     //
-    // 但回答【落定】那一下语义不同：网页落定走 renderMessages 无条件 scrollTop=scrollHeight
-    // （app.js:1323），而安卓 streamText 刚置 null 的这一刻 layoutInfo 里还是流式气泡的旧
-    // 高度，照旧公式算出的 offset 偏小——贴的其实是已经消失的那只气泡的底，用户要看完整
-    // 答案还得自己往下扒（真机反馈）。所以落定这一拍先滚到最后一项顶部，再随帧重贴：
-    // 每帧用最新量到的 lastH 重算 offset，直到连续两帧高度不再变才算贴实。上限 8 帧只是
-    // 防止换行计算反复抖动的兜底，正常一帧就到位，多出来的拍子是幂等的。
+    // v0.28 把"贴底"的算法从"最后一项高出视口的部分"换成**顶到滚动边界**
+    // （scrollToItem(last, MAX_SCROLL_OFFSET)）：旧算法拿上一帧量到的高度算 offset，
+    // 而落定的那一拍消息条目还会**事后长高**——操作行（复制/编辑/重新生成/删除）
+    // 要等 streaming 标记落下才挂出来。高度一变，按旧高度贴的底就把条目尾巴推进了
+    // 输入卡后面（真机反馈「输入框老是挡着上面的输出」，截图里操作行被切掉半截）。
+    // 越界的 offset 会被 LazyList 夹到最大滚动位置——"贴到最底"从此不依赖高度测量，
+    // 量多高都贴得实。落定分支的退出判据也换成结果导向：最后一项底边已经进了视口
+    // 才算贴完，随帧重贴直到那一刻（上限 24 帧防排版反复抖动）。
     LaunchedEffect(messages.size, streamText) {
         val first = listState.layoutInfo
         val total = first.totalItemsCount
         if (total == 0) return@LaunchedEffect
 
-        // 最后一项高出视口的部分，就是要滚掉的像素
-        fun offBottom(i: androidx.compose.foundation.lazy.LazyListLayoutInfo): Int {
-            val vh = i.viewportEndOffset - i.viewportStartOffset
-            val last = i.visibleItemsInfo.lastOrNull { it.index == i.totalItemsCount - 1 }
-            return maxOf(0, (last?.size ?: 0) - vh)
-        }
-
         if (streamText == null && !busy) {
-            // 落定：无视中途上翻，把答案的最后一行送回眼前（对齐网页 renderMessages）。
-            // 先把最后一项拉进视口让它量出真实高度，再随帧重贴，直到连续两帧高矮不再变。
+            // 落定：无视中途上翻，把答案的最后一行送回眼前（对齐网页 renderMessages
+            // 的无条件 scrollTop=scrollHeight）。先拉进视口，再随帧顶到底，
+            // 直到亲眼看到"最后一项的底边在视口里"。
             listState.scrollToItem(total - 1, 0)
-            var prevH = -1
-            repeat(8) {
+            repeat(24) {
                 withFrameNanos { }
                 val now = listState.layoutInfo
                 val t = now.totalItemsCount
                 if (t == 0) return@LaunchedEffect
-                val lastH = now.visibleItemsInfo
-                    .lastOrNull { it.index == t - 1 }?.size ?: 0
-                if (lastH == 0) return@repeat          // 这一帧还没量到：下一帧再看
-                listState.scrollToItem(t - 1, offBottom(now))
-                if (lastH == prevH) return@LaunchedEffect
-                prevH = lastH
+                val last = now.visibleItemsInfo.lastOrNull { it.index == t - 1 }
+                // 1.6.8 的 ListItemInfo 没有 .end：底边就是 offset + size。
+                if (last != null && last.offset + last.size <= now.viewportEndOffset) return@LaunchedEffect
+                listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
             }
         } else {
             val lastVisible = first.visibleItemsInfo.lastOrNull()?.index ?: -1
             if (lastVisible < total - 2) return@LaunchedEffect
-            listState.scrollToItem(total - 1, offBottom(first))
+            listState.scrollToItem(total - 1, MAX_SCROLL_OFFSET)
         }
+    }
+
+    // v0.28：贴底与否——最后一项的底边在不在视口里。悬浮「跳到底部」小箭头据此
+    // 出现/收起；上面的贴底逻辑每帧也靠同一判据收工，两处共用一份真相。
+    var atBottom by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val i = listState.layoutInfo
+            val t = i.totalItemsCount
+            if (t == 0) true
+            else (i.visibleItemsInfo.lastOrNull { it.index == t - 1 }
+                ?.let { it.offset + it.size <= i.viewportEndOffset } ?: false)
+        }.collect { atBottom = it }
     }
 
     // 复制提示 1.5s 后回到「复制」（网页 setTimeout 同语义）
@@ -893,6 +911,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
                 // ---------- .composer：附件行 / 建议 / 输入卡 / 下挂两张玻璃面板 ----------
                 Column(Modifier.fillMaxWidth().imePadding()
+                    .onSizeChanged { composerPx = it.height }
                     .padding(horizontal = 12.dp)
                     .padding(top = 4.dp, bottom = 12.dp)) {
                     if (pending.isNotEmpty())
@@ -1045,6 +1064,31 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             if (NetMinder.show()) {
                 NetMinderCard(Modifier.align(Alignment.TopCenter).statusBarsPadding()
                     .padding(horizontal = 36.dp, vertical = 10.dp))
+            }
+            // v0.28（用户点名照参考图加「小箭头，点击之后直接跳转到最下方」）：
+            // 豆包同款「回到底部」——上翻阅读或流式结尾没在眼前时冒出来，点一下
+            // 把最后一项的底边顶到视口底。录音卡盖场、模型页全屏时不抢位，先让路。
+            AnimatedVisibility(
+                visible = !atBottom && !voice.listening && !modelMenuOpen,
+                enter = fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.7f),
+                exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.7f),
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .padding(bottom = with(LocalDensity.current) { composerPx.toDp() } + 14.dp),
+            ) {
+                Box(Modifier.size(40.dp)
+                    .shadow(8.dp, CircleShape)
+                    .background(glassStrongColor(), CircleShape)
+                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        CircleShape)
+                    .clickable {
+                        scope.launch {
+                            val t = listState.layoutInfo.totalItemsCount
+                            if (t > 0) listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
+                        }
+                    },
+                    contentAlignment = Alignment.Center) {
+                    IconArrowDown(MaterialTheme.colorScheme.onSurface, Modifier.size(20.dp))
+                }
             }
         }
     }

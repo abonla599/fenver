@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse as StarletteFileResponse
 
-from app.core import releases
+from app.core import apk_cache, releases
 from app.core.auth_router import _client_ip
 
 # APK 的 MIME 只写这一次；浏览器认的是它 + Content-Disposition，两样缺一就变成
@@ -238,6 +238,9 @@ SITE_DIR = _site_dir()
 #    作废，不可能把上一版递给这一版的人（HTTP 侧照旧 no-cache，浏览器不许自己留）。
 # 只有真开了代取才扣格子的老口径改成了"真回了字节就扣"：退路（没有快照、拿不到槽）
 # 依旧一格不扣，所以 ①③ 各自的红线都没动。
+# v0.28 起这三样前面还站着一档**磁盘**：验过发布校验值的最新包常驻本地
+# （core/apk_cache.py），命中就既不占槽也不朝 GitHub 跑——②③ 两档从"每次下载都要
+# 赌一把 GitHub"降级成"缓存还没捂热时的过渡"；①照旧，因为它量的是出口带宽。
 APK_WINDOW_SECONDS = 3600
 APK_MAX_PER_SOURCE = 6
 MAX_TRACKED_APK_SOURCES = 4096
@@ -317,7 +320,9 @@ def install_site(app: FastAPI) -> None:
         reason 一律打进日志：EXE 是隐藏窗口起的，不打印就只剩人猜是哪一层坏了。
 
         2026-09-23（审查 #8）起带闸，2026-10-01 补齐第三档：按来源限频 + 有界的
-        单飞行等待 + 60 秒同版接力，见 _APK_DOWNLOADS 上面那段。退路不变：拿不到真
+        单飞行等待 + 60 秒同版接力，见 _APK_DOWNLOADS 上面那段。2026-10-02（v0.28）
+        又在最前面加了磁盘那一档：验过发布校验值的最新包落在本地盘上，命中就不出网
+        （判据与纪律在 core/apk_cache.py）。退路不变：拿不到真
         字节一律 302 发布页或 429，绝不回 200 空文件。这一条同时是 0.23.x 老壳
         「检查更新」的字节出口（`releases.SELF_APK_PATH`），所以那两档闸撞到它时
         的代价被特意压低：一次撞闸只是慢一点或多扣一格，不再是一次必然失败的下载。
@@ -338,6 +343,20 @@ def install_site(app: FastAPI) -> None:
                                      # 缓存这条响应就等于让下一个人下到上一版。
                                      "Cache-Control": "no-cache",
                                      "X-Content-Type-Options": "nosniff"})
+
+        # 磁盘那一档（v0.28）：上一版发布时验过摘要的字节就在本地盘上，直接从磁盘
+        # 出去——不占槽、不朝 GitHub 跑，也就没有"GitHub 慢或正忙"这一种失败。
+        # 格子照扣：它量的是出口字节，不是 GitHub 往返。读文件失败（被手删/磁盘问题）
+        # 不 500，退回下面的接力档：缓存是加速器，不是单点。
+        cached = apk_cache.cached_file(plan["version"], plan.get("sha256") or "")
+        if cached:
+            try:
+                with open(cached, "rb") as fh:
+                    data = fh.read()
+                _APK_DOWNLOADS[ip].append(time.monotonic())
+                return served(plan["name"], data)
+            except OSError as e:
+                print(f"[site] APK 缓存读取失败，退回接力档：{type(e).__name__}", flush=True)
 
         # 接力那一档：60 秒内第二个人（同屋第二台设备、老壳失败后的重试）不再占槽、
         # 不再朝 GitHub 跑，字节直接从这里出去；格子照扣——它量的是出口字节。
@@ -362,6 +381,12 @@ def install_site(app: FastAPI) -> None:
         if data is None:
             print(f"[site] 代取 APK 失败，退回发布页：{why}", flush=True)
             return RedirectResponse(releases.releases_page(), status_code=302)
+        # 这一趟搬到的字节顺手落盘（只代管带发布校验值的那一版，判据见
+        # core/apk_cache.py）：下一个访问者、以及点「立即更新」的那台手机，
+        # 都不必再替 GitHub 的可用性买单。落盘失败不影响本次响应。
+        ok, cache_why = apk_cache.store(plan["version"], data, plan.get("sha256") or "")
+        if not ok:
+            print(f"[site] APK 未落盘代管：{cache_why}", flush=True)
         _relay_put(plan["version"], plan["name"], data)
         return served(plan["name"], data)
 

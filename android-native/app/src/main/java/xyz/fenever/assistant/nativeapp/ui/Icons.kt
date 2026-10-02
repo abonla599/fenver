@@ -94,6 +94,14 @@ fun IconArrowUp(tint: Color, modifier: Modifier = Modifier) =
         poly(tint, sw, k, 6.6f to 11.4f, 12f to 6f, 17.4f to 11.4f)
     }
 
+/** 回到底部：下箭头（杆 + 人字头），v0.28 悬浮「跳到底部」钮用（参考图豆包同款）。 */
+@Composable
+fun IconArrowDown(tint: Color, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, sw ->
+        seg(tint, sw, k, 12f to 4.8f, 12f to 17.8f)
+        poly(tint, sw, k, 6.6f to 12.6f, 12f to 18f, 17.4f to 12.6f)
+    }
+
 /** 停止：实心圆角小方块。 */
 @Composable
 fun IconStop(tint: Color, modifier: Modifier = Modifier) =
