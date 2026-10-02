@@ -38,6 +38,7 @@
 
     <nav class="tabs" id="tabs">
       <button class="tab active" type="button" data-goto="secUsers" data-icon="users" data-label="用户"></button>
+      <button class="tab" type="button" data-goto="secFeedback" data-icon="feedback" data-label="反馈"></button>
       <button class="tab" type="button" data-goto="secUsage" data-icon="usage" data-label="用量"></button>
       <button class="tab" type="button" data-goto="secMemory" data-icon="memory" data-label="记忆"></button>
       <button class="tab" type="button" data-goto="secTasks" data-icon="tasks" data-label="任务"></button>
@@ -66,6 +67,22 @@
           <th>用户名</th><th>身份</th><th>状态</th><th>注册于</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
         </tr></thead>
         <tbody id="userRows"></tbody>
+      </table></div>
+    </section>
+
+    <!-- ---------------- 意见反馈 ---------------- -->
+    <section class="sec hidden" id="secFeedback">
+      <h2>意见反馈</h2>
+      <p class="pane-note">这里是 App「设置 → 意见反馈」提交进来的原话：一条一个独立编号（FB- 开头），删除后编号也不回收、不复用。截图在提交那一刻已复制进反馈目录，用户之后删掉自己的附件不影响这里读图。<b>未读的不许删</b>——先点「已读」，再删，这是这条链路的合同。</p>
+      <div class="row">
+        <span class="dim" id="fbNote"></span>
+        <button id="btnFeedback" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新拉取"></button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>编号</th><th>谁</th><th>时间</th><th>内容</th><th>邮箱</th><th>截图</th><th>状态</th><th class="acts">操作</th>
+        </tr></thead>
+        <tbody id="feedbackRows"></tbody>
       </table></div>
     </section>
 

@@ -444,5 +444,11 @@ const API = (() => {
     memoryStats: () => request("/v1/memory/stats"),
     feedback: (messageId, rating, comment) =>
       request("/v1/feedback", { method: "POST", body: { message_id: messageId, rating, comment } }),
+    /* 意见反馈 → 管理员收集页（v0.27，与安卓 submitUserFeedback 同一条链路）。
+       图片走「先传后附」：每张先 upload() 换成 upload id，再连正文/邮箱一起提交。
+       编号在服务端分配（FB-0000NN），这一版起反馈不再跳去仓库 issue。 */
+    submitUserFeedback: (text, email, images) =>
+      request("/v1/user-feedback", { method: "POST",
+        body: { text, email: email || null, images: images && images.length ? images : null } }),
   };
 })();

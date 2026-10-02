@@ -60,8 +60,8 @@ def test_version_bumped_and_release_notes_brief():
     gradle = _read(BUILD)
     # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
     # 第 18 轮推到 40，v0.24.0 推到 41，v0.24.1 推到 42，v0.25.0 推到 43，v0.25.1 推到 44，v0.25.2 推到 45。下面断的是现在那一格，不是当年那一轮。
-    assert "versionCode 46" in gradle and 'versionName "0.26.0"' in gradle, \
-        "gradle 那一格漂了：这一版应是 46 / 0.26.0，且必须与 docs/releases/v0.26.0.md 同时存在"
+    assert "versionCode 47" in gradle and 'versionName "0.27.0"' in gradle, \
+        "gradle 那一格漂了：这一版应是 47 / 0.27.0，且必须与 docs/releases/v0.27.0.md 同时存在"
     doc = _read(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)

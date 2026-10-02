@@ -1350,6 +1350,119 @@ def submit_feedback(feedback: FeedbackRequest,
         "used_memories": bool(adjusted),
     }
 
+# ---------- 意见反馈（用户写给管理员的话，与上面的 👍/👎 反馈分家） ----------
+# 存储与编号合同在 app/user_feedback_storage.py；这里只做身份、校验与审计。
+import mimetypes
+import re as _re
+from app import user_feedback_storage
+
+_EMAIL_SHAPE_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class UserFeedbackRequest(BaseModel):
+    text: str
+    email: Optional[str] = None
+    images: Optional[List[str]] = Field(None, max_length=user_feedback_storage.IMAGE_MAX)
+
+
+@app.post("/v1/user-feedback")
+def submit_user_feedback(req: UserFeedbackRequest,
+                         principal: Principal = CurrentPrincipal):
+    """提交一条意见反馈，返回它的独立编号（FB-0000NN）。
+
+    图片走「先传后附」：客户端先用 /v1/uploads 传图，这里只引用 upload id。
+    每个 id 都必须过 upload_store.get 的属主闸——引用别人的附件与引用不存在的
+    附件是同一句话（get 本就合并这两种为 None），这个端点不是探测别人 upload_id
+    的信道。校验通过后图片被**复制**进反馈目录，之后用户删自己的附件也删不掉
+    管理员案头的那份凭据。
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="反馈内容不能为空")
+    if len(text) > user_feedback_storage.TEXT_MAX:
+        raise HTTPException(status_code=400,
+                            detail=f"反馈内容不能超过 {user_feedback_storage.TEXT_MAX} 字")
+    email = (req.email or "").strip()
+    if email:
+        if len(email) > 120 or not _EMAIL_SHAPE_RE.match(email):
+            raise HTTPException(status_code=400, detail="邮箱格式不对")
+    sources = []
+    for upload_id in req.images or []:
+        record = upload_store.get(upload_id, owner=principal.user_id)
+        if record is None:
+            raise HTTPException(status_code=400, detail=f"截图不存在或已清理：{upload_id}")
+        if record["kind"] != "image":
+            raise HTTPException(status_code=400, detail="意见反馈只能附图片")
+        ext = os.path.splitext(record["path"])[1].lower() or ".bin"
+        sources.append((record["path"], ext))
+    try:
+        saved = user_feedback_storage.submit(principal.user_id, text, email, sources)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"意见反馈保存失败：{e}")
+    return {"id": saved["id"], "created_at": saved["created_at"]}
+
+
+def _user_feedback_public(record: dict) -> dict:
+    """管理端展示形状：截图只报张数——路径与文件名不出这道门，
+    取图另有带 RequireAdmin 的专用端点。"""
+    return {
+        "id": record["id"],
+        "user_id": record["user_id"],
+        "text": record["text"],
+        "email": record.get("email", ""),
+        "image_count": len(record.get("images", [])),
+        "created_at": record["created_at"],
+        "read": bool(record.get("read")),
+        "read_at": record.get("read_at"),
+    }
+
+
+@app.get("/v1/admin/user-feedback")
+def admin_list_user_feedback(_: Principal = RequireAdmin):
+    """反馈收集列表：新的在前 + 未读计数，管理员页角标读的就是这两个数。"""
+    items = [_user_feedback_public(r) for r in user_feedback_storage.list_all()]
+    items.reverse()
+    return {"items": items, "unread": sum(1 for r in items if not r["read"])}
+
+
+@app.post("/v1/admin/user-feedback/{fb_id}/read")
+def admin_mark_user_feedback_read(fb_id: str, actor: Principal = RequireAdmin):
+    """标记已读。幂等：重复标记返回同一份记录，read_at 记第一次。"""
+    record = user_feedback_storage.mark_read(fb_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="反馈不存在")
+    audit.log(actor, "feedback.read", target=fb_id)
+    return _user_feedback_public(record)
+
+
+@app.delete("/v1/admin/user-feedback/{fb_id}")
+def admin_delete_user_feedback(fb_id: str, actor: Principal = RequireAdmin):
+    """删除一条反馈。**只许删已读**：闸门在服务层而不在界面按钮——
+    用户要的是「管理员已读之后可以选择删除已读」，未读即消失的反馈等于
+    用户的话可以没被看过就被销毁。删除连同截图一起清掉，编号不回收。"""
+    status, record = user_feedback_storage.delete(fb_id)
+    if status == "not_found":
+        raise HTTPException(status_code=404, detail="反馈不存在")
+    if status == "unread":
+        raise HTTPException(status_code=409, detail="未读的反馈不能删除：先标记已读")
+    audit.log(actor, "feedback.delete", target=fb_id,
+              before={"user_id": record["user_id"], "created_at": record["created_at"]})
+    return {"status": "deleted", "id": fb_id}
+
+
+@app.get("/v1/admin/user-feedback/{fb_id}/image/{index}")
+def admin_get_user_feedback_image(fb_id: str, index: int, _: Principal = RequireAdmin):
+    """管理员读反馈截图。读的是反馈目录里那份复制件，不是用户的附件——
+    所以这里不需要、也不存在一条"越属主读别人 uploads"的通道。"""
+    record = user_feedback_storage.get(fb_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="反馈不存在")
+    path = user_feedback_storage.image_path(record, index)
+    if path is None:
+        raise HTTPException(status_code=404, detail="截图不存在或已清理")
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=mime)
+
 # ---------- 智能体 ----------
 # v0.25 R1：这一面从 require_admin 改成了"登录可用 + 严格按属主"。旧注释写的
 # 开放前提是"没有归属可谈"，今天前提已经翻面：Task 必填 user_id、无主旧条目在
