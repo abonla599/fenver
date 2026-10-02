@@ -1,7 +1,10 @@
 package xyz.fenever.assistant.nativeapp
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -70,14 +73,41 @@ class ApiException(val status: Int, message: String) : Exception(message)
                                             val items: List<ScheduleItemDto> = emptyList(),
                                             val count: Int = 0)
 
-/* /v1/chat/stream 的帧只有四种有效事件（start/content/done/error），
-   与服务端 generate() 的产出逐字对齐。 */
+/* /v1/chat/stream 的帧集合（v0.25 R3/R3b 定稿，与网页 api.js:149 那份内核逐条对齐）。
+   旧的 start/content/done/error 三个事件名一个字都不改（两个客户端都按 data.type 分发，
+   改了名字会先打断线上）；新增的是被服务端显式发出的 cancelled/cannot_resume 两帧，
+   以及"看不懂的帧不再静默丢"这一型（ChatEvent.Unknown）。
+
+   终帧纪律：cancelled 与 cannot_resume **都不是终止帧**——它们是 done 之前的一帧，
+   必须等随后那条 type:"done" 收尾。停/续不上的信息全进 done 的新字段
+   （status/stopped_reason/resumable），旧骨架 full_text/message_id/model 不变。 */
 sealed class ChatEvent {
-    data class Start(val messageId: String, val model: String) : ChatEvent()
+    data class Start(val runId: String, val messageId: String, val model: String) : ChatEvent()
     data class Content(val text: String) : ChatEvent()
-    data class Done(val fullText: String, val messageId: String, val model: String) : ChatEvent()
+    // 停止或宽限到点：半句已产出，随后紧跟一条 done 收尾，这里不单独终结。
+    data class Cancelled(val fullText: String, val messageId: String, val message: String) : ChatEvent()
+    // 这条连接追不上服务端缓冲（这一轮续不上了）：同样等随后的 done 收尾，不单独终结。
+    data class CannotResume(val message: String) : ChatEvent()
+    data class Done(val fullText: String, val messageId: String, val model: String,
+                    val status: String, val stoppedReason: String, val resumable: Boolean) : ChatEvent()
     data class Failed(val message: String) : ChatEvent()
+    // 认不出的帧类型：不静默丢——上报一次，同时不打断正常收尾（网页 onUnknown 同语义）。
+    data class Unknown(val type: String) : ChatEvent()
 }
+
+/* 断线不重跑整轮的可续播参数（v0.25 安卓 · T2.4/T2.8），与网页 api.js 逐字/逐值对齐：
+   - STREAM_RESUME_STATUS 是断线重连那一句人话，全场只有一份，界面直接落状态条。
+   - STREAM_RESUME_MAX_ATTEMPTS=5、BACKOFF_BASE_MS=500 是重连的次数上限与退避起始，
+     与网页一致。**上限不是省钱旋钮**：宽限期长短与花销由服务端的轮次边界钱闸决定，
+     和这里试几次无关；上限存在的意义只是"别无限期敲一条已经续不上的门"，到点转取历史。
+   所以安卓这一侧刻意不加"为了少花钱提前放弃重连"的逻辑。 */
+const val STREAM_RESUME_STATUS = "连接断了，正在接着上次的进度取回…"
+const val STREAM_RESUME_MAX_ATTEMPTS = 5
+private const val BACKOFF_BASE_MS = 500L
+
+/* 续不上（410 / cannot_resume / 试到上限）的统一信号：去会话历史取回，绝不重发生成。
+   对应网页 runResilientStream 抛的那个 err.needHistory=true、retryable=false。 */
+class StreamNeedHistoryException(message: String) : Exception(message)
 
 /* 后端接口的原生封装。契约面与 backend/app/web/static/api.js 逐条对齐：
  * - 凭据只走 Authorization: Bearer（authz._header_credential 认可的头）。
@@ -343,46 +373,169 @@ object Api {
             obj(listOf("message_id" to s(messageId), "rating" to JsonPrimitive(rating))))
     }
 
-    /* 流式对话。服务端帧形状固定：`data: {json}\n\n`，JSON 内不含裸换行，
-       所以按行读、空行封帧即可，无需引入 SSE 库。 */
-    fun streamChat(payload: String): Flow<ChatEvent> = flow {
-        val rb = request("/v1/chat/stream").post(payload.toRequestBody(JSON_MT))
-        client.newCall(rb.build()).execute().use { res ->
-            if (!res.isSuccessful) {
-                val text = res.body?.string() ?: ""
-                throw ApiException(res.code, failDetail(text, res.code))
+    /* "停止"终于是一个动作，不再只是关页面/断连的副作用：带 run_id 打服务端取消，
+       翻标志、尽力当场关上游、下一个付费轮不发生（见 core/stream_runs.py + main.py 的 cancel 端点）。
+       归属判定在服务端：不是你的/不存在的 run_id 都是同一句 404，cancel 不是探测信道。
+       与网页 api.js 的 cancelStreamRun 同一条路径。 */
+    suspend fun cancelStreamRun(runId: String) {
+        call("/v1/chat/stream/" + enc(runId) + "/cancel", "POST")
+    }
+
+    /* 续播内核的一次游标累加（v0.25 安卓 · T2.4/T2.8）。这几个状态跨多次重开存活：
+       run_id 给"停止"当目标、lastEventId 给续播当凭据、resumable 一旦被 cannot_resume 置
+       false 就不再尝试续播、terminal 收到 done/error 才止住重连。 */
+    private class StreamResumeState {
+        var runId = ""
+        var lastEventId = ""      // "<run_id>:<seq>"，续播时放进 Last-Event-ID
+        var resumable = true
+        var terminal = false
+    }
+
+    /* 打开这一条流：首次不带游标 = 开这一轮（一次付费）；续播带 Last-Event-ID 头重开
+       同一条流端点，服务端据此只补缓冲帧、不叫模型不记账。POST 无法用 EventSource，
+       所以续播凭据由这里手动塞进头里（协议上这是 SSE 的合法用法）。 */
+    private fun openStream(payload: String, lastEventId: String?): okhttp3.Response {
+        val rb = request("/v1/chat/stream").apply {
+            if (lastEventId != null) header("Last-Event-ID", lastEventId)
+        }
+        return client.newCall(rb.build()).execute()
+    }
+
+    /* 流式对话（可续播内核，对应网页 api.js:149 的 runResilientStream）。
+       服务端帧形状固定：每帧 `id: <run_id>:<seq>\ndata: {json}\n\n`，JSON 内不含裸换行，
+       所以按行读、空行封帧即可，无需引入 SSE 库。
+
+       断线不重发整轮，这是 T2.4 的核心：
+       - 首次 open 不带游标开这一轮；之后每次重开都带 Last-Event-ID 续播，绝不 POST 回
+         /v1/chat 重跑生成（老代码 retryable→Api.chat 那一手就是断线烧钱的病根）。
+       - 服务端回 410、或帧里说 cannot_resume（这一轮续不上了），或试到
+         STREAM_RESUME_MAX_ATTEMPTS 上限，一律抛 StreamNeedHistoryException 让界面去会话
+         历史取回已落库的最终答案——那一轮的钱要么已花、要么被服务端的轮次边界钱闸停在边界，
+         结果都在 sessions 里，重发只会再付一次、再落一条一样的助手消息。
+       - 断线重连那一句话人话走 onStatus；run_id 一旦取到交 onRun（界面存起来给"停止"用）。 */
+    fun streamChat(payload: String,
+                   onStatus: ((String) -> Unit)? = null,
+                   onRun: ((String) -> Unit)? = null): Flow<ChatEvent> = flow {
+        val st = StreamResumeState()
+        var attempt = 0           // 已经续播过几次
+        resumeLoop@ while (!st.terminal) {
+            // open 抛出 = 这一枪根本没到服务端（断网 / DNS / 连不上）。
+            val res = try {
+                openStream(payload, st.lastEventId.ifEmpty { null })
+            } catch (ce: CancellationException) {
+                throw ce           // 上层取消（"停止"的本地兜底）不能被当断线吞掉
+            } catch (e: Exception) {
+                null
             }
-            val src = res.body!!.source()
-            var dataLine: String? = null
-            while (true) {
-                val line = src.readUtf8Line() ?: break
-                if (line.isEmpty()) {
-                    dataLine?.let { parseFrame(it)?.let { ev -> emit(ev) } }
-                    dataLine = null
-                    continue
+            if (res == null) {
+                // 从没握手成功 = 还没开这轮，退避后重开同一条流端点是安全的；
+                // 已经拿到 run_id = 服务端正跑这一轮，只能带游标续播，不能重发生成。
+                if (attempt < STREAM_RESUME_MAX_ATTEMPTS) {
+                    attempt += 1
+                    if (st.runId.isNotEmpty()) onStatus?.invoke(STREAM_RESUME_STATUS)
+                    delay(BACKOFF_BASE_MS shl (attempt - 1))
+                    continue@resumeLoop
                 }
-                if (line.startsWith("data:")) dataLine = line.substring(5).trim()
+                throw StreamNeedHistoryException(
+                    "试了几次都没能接上这一轮：不用重发原文，结果会写进会话历史，刷新会话取回")
             }
-            dataLine?.let { parseFrame(it)?.let { ev -> emit(ev) } }
+
+            try {
+                if (res.code == 410) {
+                    // 410 是明确的"续不上，别重发，去会话里取"；绝不回头重发生成。
+                    throw StreamNeedHistoryException(
+                        "这一轮接不上了：不用重发原文，结果会写进会话历史，刷新会话取回")
+                }
+                if (!res.isSuccessful) {
+                    // 有 run_id、还能续、且没到上限的意外状态，当作断线退避后带游标重试。
+                    if (st.runId.isNotEmpty() && st.resumable &&
+                        attempt < STREAM_RESUME_MAX_ATTEMPTS) {
+                        attempt += 1
+                        onStatus?.invoke(STREAM_RESUME_STATUS)
+                        delay(BACKOFF_BASE_MS shl (attempt - 1))
+                        continue@resumeLoop
+                    }
+                    val text = runCatching { res.body?.string() }.getOrNull() ?: ""
+                    throw ApiException(res.code, failDetail(text, res.code))
+                }
+
+                val src = res.body!!.source()
+                var idValue: String? = null
+                var dataLine: String? = null
+                while (true) {
+                    val line = src.readUtf8Line() ?: break
+                    if (line.isEmpty()) {
+                        emitFrame(this, dataLine, idValue, st, onRun)
+                        idValue = null; dataLine = null
+                        if (st.terminal) break
+                        continue
+                    }
+                    if (line.startsWith("id:")) idValue = line.substring(3).trim()
+                    else if (line.startsWith("data:")) dataLine = line.substring(5).trim()
+                }
+                if (!st.terminal) emitFrame(this, dataLine, idValue, st, onRun)
+
+                // 连接关闭却没有终帧 = 断线。拿不到 run_id、或服务端已说续不上，就没有可
+                // 续播的东西：转取历史，绝不重发生成；否则带游标退避重开续播，到上限同样转取历史。
+                if (!st.terminal) {
+                    if (st.runId.isEmpty() || !st.resumable) {
+                        throw StreamNeedHistoryException(
+                            "这一轮接不上了：不用重发原文，结果会写进会话历史，刷新会话取回")
+                    }
+                    if (attempt >= STREAM_RESUME_MAX_ATTEMPTS) {
+                        throw StreamNeedHistoryException(
+                            "试了几次都没能接上这一轮：不用重发原文，结果会写进会话历史，刷新会话取回")
+                    }
+                    attempt += 1
+                    onStatus?.invoke(STREAM_RESUME_STATUS)
+                    delay(BACKOFF_BASE_MS shl (attempt - 1))
+                }
+            } finally {
+                res.close()
+            }
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun parseFrame(data: String): ChatEvent? = runCatching {
-        val o = json.parseToJsonElement(data).jsonObject
-        when (o["type"]?.jsonPrimitive?.contentOrNull) {
-            "start" -> ChatEvent.Start(
-                o["message_id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                o["model"]?.jsonPrimitive?.contentOrNull.orEmpty())
-            "content" -> ChatEvent.Content(o["text"]?.jsonPrimitive?.contentOrNull.orEmpty())
-            "done" -> ChatEvent.Done(
-                o["full_text"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                o["message_id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                o["model"]?.jsonPrimitive?.contentOrNull.orEmpty())
-            "error" -> ChatEvent.Failed(
-                o["message"]?.jsonPrimitive?.contentOrNull ?: "模型返回错误")
-            else -> null
+    /* 单帧分发：先累加游标与 run_id（停止/续播都认它），再按 data.type 落成 ChatEvent。
+       旧事件名 start/content/done/error 原样保留；cancelled/cannot_resume 是 done 之前的
+       非终帧；认不出的帧不静默丢——落一个 ChatEvent.Unknown 上报，同时不打断正常收尾。 */
+    private suspend fun emitFrame(col: FlowCollector<ChatEvent>, data: String?,
+                                  idValue: String?, st: StreamResumeState,
+                                  onRun: ((String) -> Unit)?) {
+        if (idValue != null) st.lastEventId = idValue
+        if (data == null) return
+        val o = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return
+        o["run_id"]?.jsonPrimitive?.contentOrNull?.let { rid ->
+            if (rid.isNotEmpty() && st.runId.isEmpty()) { st.runId = rid; onRun?.invoke(rid) }
         }
-    }.getOrNull()
+        if (st.runId.isEmpty() && st.lastEventId.isNotEmpty()) {
+            st.runId = st.lastEventId.substringBefore(":")
+            if (st.runId.isNotEmpty()) onRun?.invoke(st.runId)
+        }
+        val str: (String) -> String = { k -> o[k]?.jsonPrimitive?.contentOrNull.orEmpty() }
+        when (val type = o["type"]?.jsonPrimitive?.contentOrNull) {
+            "start" -> col.emit(ChatEvent.Start(st.runId, str("message_id"), str("model")))
+            "content" -> col.emit(ChatEvent.Content(str("text")))
+            "cancelled" -> col.emit(ChatEvent.Cancelled(str("full_text"), str("message_id"),
+                str("message")))
+            "cannot_resume" -> {
+                st.resumable = false
+                col.emit(ChatEvent.CannotResume(str("message")))
+            }
+            "done" -> {
+                st.terminal = true
+                val resumable = o["resumable"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
+                    ?: true
+                col.emit(ChatEvent.Done(str("full_text"), str("message_id"), str("model"),
+                    str("status"), str("stopped_reason"), resumable))
+            }
+            "error" -> {
+                st.terminal = true
+                col.emit(ChatEvent.Failed(str("message").ifEmpty { "模型返回错误" }))
+            }
+            else -> col.emit(ChatEvent.Unknown(type ?: ""))   // 未知帧不静默丢
+        }
+    }
 
     // ---------- 记忆 ----------
     suspend fun addMemory(content: String): JsonElement =
