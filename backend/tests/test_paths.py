@@ -164,9 +164,10 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
                  "长期记忆向量库": "chroma_db", "任务清单": "tasks.json",
                  "用量账本": "usage.json", "日程": "schedule.json",
                  "运行时配置": "config.json", "审计流水": "audit.jsonl"}
-    # 反馈与偏好是导入期算好的模块常量，指不走环境变量，所以不在 FILENAMES 里
-    assert set(FILENAMES) | {"反馈原文", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \
-        f"存储清单与文件名表对不上：{set(FILENAMES) ^ (set(DATA_PATH_ENV_VARS) - {'反馈原文', '偏好摘要'})}"
+    # 反馈、意见反馈与偏好是导入期算好的模块常量，指不走运行时环境变量（conftest 在
+    # import 前把它指到临时目录），所以不在 FILENAMES 里
+    assert set(FILENAMES) | {"反馈原文", "意见反馈", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \
+        f"存储清单与文件名表对不上：{set(FILENAMES) ^ (set(DATA_PATH_ENV_VARS) - {'反馈原文', '意见反馈', '偏好摘要'})}"
 
     redirected = {label: tmp_path / "x" / name for label, name in FILENAMES.items()}
     for label, value in redirected.items():
@@ -179,7 +180,7 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
         assert got[label] == os.path.abspath(str(value)), f"{label} 没跟着 {DATA_PATH_ENV_VARS[label]} 走"
     # 反馈与偏好的常量在 conftest 里被指到临时目录，这里只要求它们出现在表里并且
     # 是绝对路径——它们进的是同一份日志。
-    for label in ("反馈原文", "偏好摘要"):
+    for label in ("反馈原文", "意见反馈", "偏好摘要"):
         assert os.path.isabs(str(got[label])), f"{label} 不是绝对路径"
 
 

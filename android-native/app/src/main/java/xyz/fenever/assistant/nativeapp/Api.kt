@@ -59,6 +59,9 @@ class ApiException(val status: Int, message: String) : Exception(message)
                                     val size: Long = 0)
 @Serializable data class ChatReply(val reply: String = "", val message_id: String = "")
 @Serializable data class ExportTicket(val path: String = "")
+/* 意见反馈提交回执：服务端给回那条反馈的独立编号 + 落库时间（见 core 的
+   user_feedback_storage.submit）。编号是 FB-xxxxxx 形，用户自己留存、管理员按它定位。 */
+@Serializable data class UserFeedbackResult(val id: String = "", val created_at: String = "")
 
 /* 日程（v0.23 R3）：与服务端 app/main.py 的 /v1/schedule 两面同形。
    GET 回 {day, items, days}，PUT 回 {day, items, count}——PUT 的响应里**没有** days，
@@ -372,6 +375,16 @@ object Api {
         call("/v1/feedback", "POST",
             obj(listOf("message_id" to s(messageId), "rating" to JsonPrimitive(rating))))
     }
+
+    /* 意见反馈 → 管理员收集页（v0.27）。图片先经 /v1/uploads 传上去拿到 upload id，
+       再把 id 随 text/email 一起提交；服务端在 submit 时把图复制进反馈目录，
+       与用户后来删不删自己那份附件无关。空白邮箱不发出去（obj 会跳过 null）。 */
+    suspend fun submitUserFeedback(text: String, email: String,
+                                   imageIds: List<String>): UserFeedbackResult =
+        callJson("/v1/user-feedback", "POST", obj(listOf(
+            "text" to s(text),
+            "email" to email.trim().takeIf { it.isNotEmpty() }?.let { s(it) },
+            "images" to arr(imageIds.ifEmpty { null }))))
 
     /* "停止"终于是一个动作，不再只是关页面/断连的副作用：带 run_id 打服务端取消，
        翻标志、尽力当场关上游、下一个付费轮不发生（见 core/stream_runs.py + main.py 的 cancel 端点）。

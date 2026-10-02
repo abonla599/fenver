@@ -30,6 +30,9 @@
     users:   ["M4 20v-1.4A4.6 4.6 0 0 1 8.6 14h2.8A4.6 4.6 0 0 1 16 18.6V20",
               "M9.3 11.3a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z",
               "M17 14.2a4.6 4.6 0 0 1 3 4.4V20"],
+    feedback:["M12 4.5c-4.4 0-8 2.9-8 6.5 0 2 1.1 3.8 2.8 5l-.8 3 3.2-1.6c.9.2 1.8.3 2.8.3",
+              "M12 4.5c4.4 0 8 2.9 8 6.5",
+              "M20 11c0 3.6-3.6 6.5-8 6.5"],
     memory:  ["M12 4c3.9 0 7 1.3 7 2.9S15.9 9.8 12 9.8 5 8.5 5 6.9 8.1 4 12 4Z",
               "M5 6.9v10.2C5 18.7 8.1 20 12 20s7-1.3 7-2.9V6.9",
               "M5 12c0 1.6 3.1 2.9 7 2.9s7-1.3 7-2.9"],
@@ -411,6 +414,83 @@
     return tr;
   }
 
+  /* ---------- 意见反馈 ---------- */
+
+  async function loadFeedback() {
+    const data = await req("/v1/admin/user-feedback");
+    const items = data.items || [];
+    $("fbNote").textContent = items.length
+      ? "共 " + items.length + " 条 · 未读 " + (data.unread || 0)
+      : "";
+    // tab 上的未读角标：管理员页开在那儿就该看得见"有没有新话"，不必点进分区
+    const tabLabel = document.querySelector('.tab[data-goto="secFeedback"] .lbl');
+    if (tabLabel) tabLabel.textContent = data.unread ? "反馈 · 未读" + data.unread : "反馈";
+    const tbody = $("feedbackRows");
+    tbody.textContent = "";
+    if (!items.length) {
+      tbody.appendChild(emptyRow("还没有人提交过反馈：App 的「设置 → 意见反馈」写一条，就会出现在这里。", 8));
+      return;
+    }
+    items.forEach((f) => tbody.appendChild(feedbackRow(f)));
+  }
+
+  function feedbackRow(f) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell("td", f.id, "code"));
+    const who = cell("td", undefined, "name");
+    who.appendChild(cell("span", nameById[f.user_id] || f.user_id));
+    // 与用量同一套纪律：删过号的人和 bootstrap 身份翻不出名字，就把 id 原样摆出来。
+    if (!nameById[f.user_id]) who.appendChild(cell("span", "（不在用户表里）", "dim"));
+    tr.appendChild(who);
+    tr.appendChild(cell("td", fmtTime(f.created_at)));
+    tr.appendChild(cell("td", f.text));
+    tr.appendChild(cell("td", f.email || "—"));
+    const imgs = cell("td");
+    if (!f.image_count) {
+      imgs.appendChild(cell("span", "—", "dim"));
+    }
+    for (let i = 0; i < (f.image_count || 0); i++) {
+      if (i) imgs.appendChild(document.createTextNode(" "));
+      const a = cell("a", "图" + (i + 1));
+      // 同源链接，浏览器自动带上会话 Cookie；图片本身走带 require_admin 的端点
+      a.href = "/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/" + i;
+      a.target = "_blank";
+      a.rel = "noopener";
+      imgs.appendChild(a);
+    }
+    tr.appendChild(imgs);
+    const st = cell("td");
+    st.appendChild(f.read ? cell("span", "已读", "tag") : cell("span", "未读", "tag warn"));
+    tr.appendChild(st);
+
+    const acts = cell("td", undefined, "acts");
+    if (!f.read) {
+      acts.appendChild(btn("check", "标记已读", "btn btn-small btn-ghost",
+        (e) => busy(e.currentTarget, async () => {
+          await req("/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/read",
+            { method: "POST" });
+          flash("已标记已读 " + f.id);
+          await loadFeedback();
+        })));
+    } else {
+      // 未读的行根本不给删除按钮：闸门在后端（409），界面只是不摆一个必然失败的按钮
+      acts.appendChild(btn("trash", "删除", "btn btn-small btn-ghost",
+        (e) => busy(e.currentTarget, async () => {
+          const ok = await ask(
+            "删除反馈 " + f.id + "？",
+            "删的是这一条原话连同它的截图：从反馈文件与截图目录里一起抹掉，删完不可恢复。"
+            + "编号不回收，之后的反馈也不会顶用这个号。",
+            "删除", "trash", true);
+          if (!ok) return;
+          await req("/v1/admin/user-feedback/" + encodeURIComponent(f.id), { method: "DELETE" });
+          flash("已删除 " + f.id);
+          await loadFeedback();
+        })));
+    }
+    tr.appendChild(acts);
+    return tr;
+  }
+
   /* ---------- 用量 ---------- */
 
   // 账本上 paid_by 只有这两个取值（providers.py 里是白名单硬校验）。这一栏要回答的是
@@ -639,8 +719,8 @@
   }
 
   async function refresh() {
-    await loadUsers();          // 用量那一节的「谁」要读它填的名字表，所以不能并到下一行里
-    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadConfig()]);
+    await loadUsers();          // 用量与反馈两节的「谁」要读它填的名字表，所以不能并到下一行里
+    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadConfig(), loadFeedback()]);
   }
 
   $("btnLogin").addEventListener("click", async () => {
@@ -700,6 +780,7 @@
     busy(null, loadUsage);
   });
   $("btnUsage").addEventListener("click", (e) => busy(e.currentTarget, loadUsage));
+  $("btnFeedback").addEventListener("click", (e) => busy(e.currentTarget, loadFeedback));
   $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
   $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
 
