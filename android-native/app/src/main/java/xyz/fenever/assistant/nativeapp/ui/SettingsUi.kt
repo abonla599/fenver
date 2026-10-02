@@ -1267,7 +1267,7 @@ private fun FormRow(placeholder: String, value: String, onValue: (String) -> Uni
 /** 网页 memoryListErrorText 的三句逐字。 */
 private fun memoryListErrorText(e: Throwable): String {
     if (e is ApiException) {
-        if (e.status == 401) return "未登录或令牌已失效：请在「设置 → 账户」重新注册"
+        if (e.status == 401) return "未登录或令牌已失效：请在「设置 → 账户」重新登录"
         if (e.status == 403) return "这个账号没有读取记忆的权限，请找管理员确认"
     }
     return "记忆服务不可用：" + (e.message ?: "")

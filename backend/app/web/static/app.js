@@ -2434,7 +2434,7 @@ async function loadMemories() {
 
 /** "记忆服务不可用"是一句会让人去做错事的话：重启后端治不了没登录。 */
 function memoryListErrorText(e) {
-  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 账户」重新注册";
+  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 账户」重新登录";
   if (e.status === 403) return "这个账号没有读取记忆的权限，请找管理员确认";
   return "记忆服务不可用：" + e.message;
 }
