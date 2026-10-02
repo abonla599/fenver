@@ -149,6 +149,23 @@ def test_native_reconnect_reopens_the_stream_with_last_event_id():
         "续播游标不是 <run_id>:<seq> 这个形状"
 
 
+def test_native_stream_open_still_posts_the_payload_body():
+    """openStream 必须把 payload 以 POST 体发出去——少一步 .post()，OkHttp 就默认 GET。
+
+    现网实伤（2026-10-02，v0.25.0 壳）：续播改造把开流抽成 openStream 时只拼了 URL 和
+    Last-Event-ID 头，忘了挂 body，OkHttp 对无方法的 Builder 默认发 GET /v1/chat/stream；
+    该路由只收 POST，FastAPI 回 405 "Method Not Allowed"，用户每一轮对话当场失败。
+    网页端 open() 是 method:"POST" + body，续播也照发 body（服务端凭 Last-Event-ID 头
+    识别续播，只补缓冲帧、不叫模型）。上一条测试只钉了头名，没钉方法——这条把方法钉上。
+    """
+    api = _kt_code(API_KT)
+    m = re.search(r"fun openStream\([^)]*\)[^{]*\{(.*?)\n    \}", api, re.S)
+    assert m, "找不到 openStream：开流实现搬家了，这条锁要跟着搬，不许直接删"
+    body = m.group(1)
+    assert re.search(r"\.post\(\s*payload\.toRequestBody", body), \
+        "openStream 没把 payload POST 出去——OkHttp 会默认 GET，打 POST-only 路由必 405"
+
+
 def test_native_reconnect_backoff_and_cap_match_the_web_to_the_number():
     """退避 + 次数上限与网页逐值对齐：上限 5、起始 500ms、指数倍增；上限不是省钱旋钮。
 
