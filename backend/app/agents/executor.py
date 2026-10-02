@@ -23,13 +23,17 @@ class Executor:
         # 这里原先写死一个服务商名当默认值：服务商名不该刻进被跟踪的源码。
         self.model = model
 
-    def execute_task(self, task: str, user_id: str = None) -> str:
+    def execute_task(self, task: str, user_id: str = None,
+                     provider_id: str = None) -> str:
+        """执行单个子任务。user_id 与 provider_id 一路带下去：
+        子任务里的每次模型调用都走发起人的池子、记发起人的账（v0.25 R1）。"""
         agent = TaskAgent(
             name="Executor",
             model=self.model,
             tools_schema=get_available_tools_schema(),
             tools=tools_registry,
             user_id=user_id,
+            provider_id=provider_id,
             system_prompt="你是一个执行助手。用可用工具完成任务，返回简洁准确的结果。"
         )
         return agent.run(task)

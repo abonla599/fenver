@@ -12,7 +12,9 @@ class Planner:
         # get_llm_response 把 None 当"没有旧式模型名"交给 resolve 兜底。
         self.model = model
 
-    def plan(self, goal: str) -> list:
+    def plan(self, goal: str, user_id: str = None, provider_id: str = None) -> list:
+        """把目标拆成子任务。user_id/provider_id 往下传给统一出口：
+        计划这一步也是真金白银的调用，必须走发起人的池子并记账（v0.25 R1）。"""
         prompt = f"""你是一个任务规划专家。请将以下复杂目标分解为 3-5 个清晰的子任务步骤，每步一句话。
 
 目标: {goal}
@@ -23,7 +25,7 @@ class Planner:
         response = get_llm_response(self.model, [
             {"role": "system", "content": "你只输出 JSON 数组，无任何其他内容。"},
             {"role": "user", "content": prompt}
-        ])
+        ], provider_id=provider_id, user_id=user_id)
 
         # 解析 JSON
         try:
