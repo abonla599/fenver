@@ -148,7 +148,7 @@ def test_stream_endpoint_sends_the_date_to_the_model(client, monkeypatch):
 
     def spy(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
             tools=None, max_tool_turns=5, user_id=None,
-            cancel_event=None, on_upstream_start=None):
+            cancel_event=None, on_upstream_start=None, before_round=None):
         seen.append([dict(m) for m in messages])
         yield "好"
 

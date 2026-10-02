@@ -25,6 +25,13 @@ from app.core.paths import data_root
 DEFAULTS = {
     "registration_open": False,
     "update_repo": "abonla599/fenver",
+    # v0.25 R3b：流式断线后"没有读者的宽限期"（秒）。单一真相就是这里——
+    # 读取统一走 stream_no_reader_grace_seconds()，别处不许再写这个数。
+    # 为什么是 120 而不是 30（产品定的口径，别再当省钱旋钮调小）：省钱的是
+    # streaming.py 轮次边界上的钱闸——没有活读者就不起飞新一轮，这一条与宽限期
+    # 长短无关；宽限期决定的是"你离开多久之后我们还替你接着跑"。接个电话、锁屏
+    # 看一眼、页面重进，都是几十秒量级，30 秒会把答案停在半路而一分钱没多省。
+    "stream_no_reader_grace_seconds": 120.0,
 }
 
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
@@ -52,6 +59,17 @@ def _env_registration_open():
     return None
 
 
+def _type_ok(value, default) -> bool:
+    """键的形状判定。数字对数字是宽容的：JSON 里 30 与 30.0 是同一个东西的
+    两种写法——按老的 isinstance 口径，手写的整数秒会被判"类型不对"悄悄回
+    默认，正是"我明明改过怎么没生效"那一类配置事故。bool 仍然只收 bool。"""
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, type(default))
+
+
 def restore(path: str = None) -> int:
     """从盘上读回配置（启动时一次；测试用它等价于"重启进程"）。返回读到的条数。"""
     target = os.path.abspath(path or _default_path())
@@ -75,7 +93,7 @@ def restore(path: str = None) -> int:
             return 0
         count = 0
         for key in DEFAULTS:
-            if key in data and isinstance(data[key], type(DEFAULTS[key])):
+            if key in data and _type_ok(data[key], DEFAULTS[key]):
                 _config[key] = data[key]
                 count += 1
             elif key in data:
@@ -108,6 +126,29 @@ def update_repo() -> str:
     return repo or DEFAULTS["update_repo"]
 
 
+def stream_no_reader_grace_seconds() -> float:
+    """流式"没有活读者"的宽限期（秒）——全场唯一读数口径，默认 120（省钱的是轮次边界钱闸，不是这个窗口）。
+
+    优先级与注册开关同一套路：环境变量 STREAM_NO_READER_GRACE_SECONDS 显式设了
+    说话（每次现读，改了不必重启），否则 data/config.json 的
+    stream_no_reader_grace_seconds 说了算。读不懂的值退回默认，和"配置文件坏了
+    先备份再按默认跑"是同一条纪律。0 是合法值：等于"轮次边界上不留窗口"。
+    """
+    raw = os.getenv("STREAM_NO_READER_GRACE_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"⚠️ 环境变量 STREAM_NO_READER_GRACE_SECONDS 不是数（{raw!r}），按下面的口径跑")
+    with _lock:
+        value = _config.get("stream_no_reader_grace_seconds",
+                            DEFAULTS["stream_no_reader_grace_seconds"])
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return float(DEFAULTS["stream_no_reader_grace_seconds"])
+
+
 def apply_update(partial: dict) -> Tuple[dict, list]:
     """合并管理端的改动并落盘。返回 (改后的完整配置, 被拒的键列表)。
 
@@ -120,7 +161,7 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
             if key not in MUTABLE_KEYS:
                 rejected.append(key)
                 continue
-            if not isinstance(value, type(DEFAULTS[key])):
+            if not _type_ok(value, DEFAULTS[key]):
                 rejected.append(key)
                 continue
             _config[key] = value

@@ -570,6 +570,7 @@ import json as json_module
 # 把"什么活得过断线、什么活不过重启"写全了）。这里负责产品接线：谁的一轮、
 # 消息落哪、账记在谁头上。
 from app.core import stream_runs
+from app.core import config_store
 
 # 续播失败的那一句全场只有一份：不存在 / 不是你的 / 缓冲有空洞 / 已过保留期
 # 逐字节相同——与 _task_for_principal 同一个纪律，run_id 不许成为探测信道。
@@ -614,14 +615,43 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
 
     与改造前的 generate() 的三点不同，每一点都是 R3 判据的正面：
     1. 读者断开不再终结这里——生成跑完它的；"停止"走 cancel 端点（显式动作）。
+       R3b 给这条自由加上了钱的边界：第一个付费轮之后，轮次边界要有活读者才
+       起飞下一轮（判据见下面 before_round 的注释，检查点在 streaming.py）。
     2. 助手消息只经 claim_message_save() 落一次：续播、多读者、将来的任何
        重复驱动都写不出第二条（idempotent 落盘）。
     3. usage 只在 stream_chat 的 finally 里记一次：这个函数整个 run 生命周期
        只调用它一次，续播走的分支根本不经过这里（见端点的 resume 分支）。
     取消的半句话也落盘：用户屏幕上已经看到的东西不该在历史里凭空消失——
     这与"用户消息先落盘"是同一条原则。
+
+    终帧纪律（R3b-3）：被停掉的流在 cancelled 之后必须再补一条 type:"done"
+    的缓冲帧收尾。旧 PWA（api.js:160-185）只认 content/done/error，其余静默
+    丢；流若以一个旧客户端看不懂的帧收尾，它按"没 done"判 retryable，会把
+    整轮重发进 /v1/chat 再付一次钱——那正是本版要堵的洞。停的信息放进 done
+    的新字段（status/stopped_reason/resumable），旧解析器不受影响。
     """
     from app.core.streaming import stream_chat, StreamCancelled
+
+    def before_round():
+        """R3b-1 的钱闸·判据侧：检查点在 streaming.py 的轮次边界（付费边界）。
+
+        宽限期单一真相：config_store.stream_no_reader_grace_seconds()（env
+        STREAM_NO_READER_GRACE_SECONDS > data/config.json > 默认 120 秒）。
+        窗口内读者回来（含 Last-Event-ID 续播）一切照常；没回来就借既有的
+        取消路径收场——翻标志、尽力关连接、半句在落盘闩下进会话、账照常
+        结清——绝不 fork 第二套"超时"语义。
+
+        诚实的边界：这里能保证的是"已在飞行中的那一轮流完并结账，新的轮次
+        为零"。它**不**让断线免费——close() 一条正阻塞在 read 上的连接在这套
+        SDK 下不可证明地即时，所以在飞行中的那一轮照常付账。
+        """
+        grace = config_store.stream_no_reader_grace_seconds()
+        if run.wait_for_reader(grace):
+            return True
+        if not run.cancel_event.is_set():      # 到期；若期间已被显式取消，成因不归这里
+            run.stop_cause = "no_reader"
+            run.cancel()
+        return False
 
     status = "failed"
     full_text = ""
@@ -642,7 +672,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                                  tools=pipe.tools_schema if pipe else None,
                                  user_id=principal.user_id,        # 账本要落在人头上
                                  cancel_event=run.cancel_event,    # 停止的主判据
-                                 on_upstream_start=run.attach_upstream):  # 供当场关闭
+                                 on_upstream_start=run.attach_upstream,  # 供当场关闭
+                                 before_round=before_round):       # R3b 轮次边界的钱闸
             full_text += chunk
             run.append({"type": "content", "text": chunk})
 
@@ -661,12 +692,14 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                       file=sys.stderr, flush=True)
 
         run.append({"type": "done", "full_text": full_text,
-                    "message_id": run.message_id, "model": provider["model"]})
+                    "message_id": run.message_id, "model": provider["model"],
+                    "status": "completed", "resumable": False})
         status = "completed"
     except StreamCancelled:
-        # 用户按了停止：已经流出去的半句照样落盘（同一个 message_id，反馈仍可
-        # 关联），然后发 cancelled 终帧。账已由 stream_chat 的 finally 结清——
-        # 那是取消前真消费的部分，此后这里不再叫上游（轮首检查拦下下一轮）。
+        # 用户按了停止（或 R3b 的宽限到期借同一条路收场）：已经流出去的半句
+        # 照样落盘（同一个 message_id，反馈仍可关联），然后发 cancelled 帧、
+        # 再以 done 收尾。账已由 stream_chat 的 finally 结清——那是取消前真
+        # 消费的部分，此后这里不再叫上游（轮首检查与读者闸门两处都拦着）。
         if run.session_id and full_text and run.claim_message_save():
             sessions_store.add_message(run.session_id, principal.user_id,
                                        "assistant", full_text,
@@ -674,6 +707,13 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         run.append({"type": "cancelled", "full_text": full_text,
                     "message_id": run.message_id,
                     "message": "已取消：生成停在块边界，未再发起新的付费调用"})
+        # R3b-3 的收尾 done：旧客户端从 cancelled 身上得不到"结束"，必须给一条
+        # 它今天就认的 done；停的信息只加新字段，不改旧骨架。
+        run.append({"type": "done", "full_text": full_text,
+                    "message_id": run.message_id, "model": provider["model"],
+                    "status": "cancelled",
+                    "stopped_reason": run.stop_cause or "user_cancel",
+                    "resumable": False})
         status = "cancelled"
     except Exception as e:
         reason = _fail_reason(e)
@@ -773,7 +813,7 @@ def cancel_stream_run(run_id: str, principal: Principal = CurrentPrincipal):
                 "message": f"运行已处于终态: {run.status}，无需取消"}
     return {"status": "cancelled", "run_id": run_id,
             "message": "已请求取消：停在下一个块边界，不再发起新的付费调用；"
-                       "流的最后一个事件是 cancelled"}
+                       "流以 done 终帧收尾（status=cancelled，cancelled 事件在其之前）"}
 
 # ---------- 会话管理 ----------
 # 归属只由 principal 推导：路由不接受任何来自 body/query/path 的 user_id 或
