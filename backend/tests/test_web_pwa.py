@@ -3641,3 +3641,323 @@ def test_a_me_response_without_a_user_id_does_not_create_a_broken_entry():
     out = _run_identity_js({"me": {"username": "缺 id", "role": "admin"}})
     assert out["entries"] == 0 and out["afterWho"] == "", out
     assert out["threw"] is None, f"缺 user_id 直接把启动炸了：{out}"
+
+
+# ---------- v0.25 网页泳道：断线不重发整轮（T2.4 / T2.5 / T2.8） ----------
+#
+# 后端在 task/v025-r3b-no-reader-billing 把协议定稿了：每帧带 `id: <run_id>:<seq>`，
+# 续播走 `Last-Event-ID`，续不上回 410，"停止"有 POST /v1/chat/stream/{run_id}/cancel，
+# 被停的流以旧解析器认得的 done 收尾。这一节钉的是**网页这一侧必须跟上这套协议**，
+# 而不是停在老行为——老 api.js 只认 content/done/error，收到看不懂的帧静默丢，流尾
+# 没 done 就抛 err.retryable=true，app.js 随即把整段 POST 回 /v1/chat 重跑这一轮：
+# 用户一断线/关页面就重复计费、重复入库。判据分两层：能读源码定形的用文本锁，
+# "断线到底走了哪条路、退避是不是真在退、410 是不是转去取历史"这种只有跑起来才
+# 说得清的，交给 node 真跑 api.js 里那份 runResilientStream（沿用本文件 _run_boot_js
+# 那套"按行为断言而非按文本断言"的先例）。
+
+# 人话状态：断线重连这一句全场只有一份，测试拿它当锚点。
+STREAM_RESUME_PHRASE = "连接断了，正在接着上次的进度取回…"
+
+
+def _f_start(seq=1, run_id="R", message_id="m-1", model="mm"):
+    return {"id": f"{run_id}:{seq}",
+            "data": {"type": "start", "run_id": run_id, "seq": seq,
+                     "message_id": message_id, "model": model}}
+
+
+def _f_content(text, seq, run_id="R"):
+    return {"id": f"{run_id}:{seq}",
+            "data": {"type": "content", "run_id": run_id, "seq": seq, "text": text}}
+
+
+def _f_done(seq, run_id="R", status="completed", stopped_reason=None, **extra):
+    data = {"type": "done", "run_id": run_id, "seq": seq, "status": status,
+            "resumable": False, "message_id": "m-1", "model": "mm", "full_text": ""}
+    if stopped_reason is not None:
+        data["stopped_reason"] = stopped_reason
+    data.update(extra)
+    return {"id": f"{run_id}:{seq}", "data": data}
+
+
+_STREAM_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const realFns = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+const PREAMBLE = `
+const enc = new TextEncoder();
+const NL = String.fromCharCode(10);   // 别在这里写反斜杠换行：它会塌成真换行把生成的代码截断
+function blockToText(b) {
+  let s = "";
+  if (b.id) s += "id: " + b.id + NL;
+  if (b.data !== undefined && b.data !== null) s += "data: " + JSON.stringify(b.data) + NL;
+  return s + NL;
+}
+const openCalls = [];
+let oi = 0;
+function open(lastEventId) {
+  openCalls.push(lastEventId || "");
+  const spec = SC.opens[Math.min(oi, SC.opens.length - 1)];
+  oi += 1;
+  const status = spec.status === undefined ? 200 : spec.status;
+  const resp = { ok: status >= 200 && status < 300, status: status };
+  if (resp.ok) {
+    const blocks = (spec.blocks || []).map(blockToText);
+    let i = 0;
+    resp.body = { getReader() {
+      return { read() {
+        if (i < blocks.length) {
+          const v = enc.encode(blocks[i]); i += 1;   // 必须推进游标，否则 read 永远回第一帧
+          return Promise.resolve({ value: v, done: false });
+        }
+        return Promise.resolve({ value: undefined, done: true });
+      } };
+    } };
+  } else {
+    resp.body = null;
+  }
+  return Promise.resolve(resp);
+}
+const sleepCalls = [];
+const chunks = [];
+const statuses = [];
+const unknownTypes = [];
+const runIds = [];
+function sleep(ms) { sleepCalls.push(ms); return Promise.resolve(); }
+async function drive() {
+  let result = null, threw = null;
+  try {
+    result = await runResilientStream({
+      open: open, sleep: sleep, maxAttempts: SC.maxAttempts,
+      resumeStatus: SC.resumeStatus,
+      onChunk: (t) => { chunks.push(t); },
+      onStatus: (m) => { statuses.push(m); },
+      onRun: (r) => { runIds.push(r); },
+      onUnknown: (e) => { unknownTypes.push(e && e.type); },
+    });
+  } catch (e) {
+    threw = { kind: e.kind === undefined ? null : e.kind,
+              retryable: e.retryable === undefined ? null : e.retryable,
+              needHistory: e.needHistory === undefined ? null : e.needHistory,
+              status: e.status === undefined ? null : e.status,
+              message: String((e && e.message) || e) };
+  }
+  const done = (result && result.done) ? result.done : null;
+  return { openCalls: openCalls, sleepCalls: sleepCalls, chunks: chunks.join(""),
+           statuses: statuses, runIds: runIds, unknownTypes: unknownTypes,
+           resultUnknown: (result && result.unknown) ? result.unknown.map((u) => u.type) : null,
+           finished: !!done,
+           doneType: done ? done.type : null,
+           doneStatus: done && done.status !== undefined ? done.status : null,
+           doneResumable: done && done.resumable !== undefined ? done.resumable : null,
+           threw: threw };
+}
+`;
+
+const sandbox = { console, setTimeout, Promise, JSON, Math, Object, Array, String,
+  Number, Error, Boolean, Symbol, TextDecoder, TextEncoder };
+vm.createContext(sandbox);
+const script = "const SC = " + JSON.stringify(SC) + ";\n" + PREAMBLE + "\n" + realFns + "\ndrive()";
+const done = vm.runInContext(script, sandbox);
+done.then((r) => process.stdout.write(JSON.stringify(r)),
+          (e) => { console.error(e); process.exit(2); });
+"""
+
+
+def _run_stream_js(scenario: dict) -> dict:
+    """在 node 里真跑仓库那份 runResilientStream（api.js），喂给它脚本化的 SSE 帧。
+
+    open/sleep/回调全是假的，被执行的**控制流**是仓库那一份，逐字取自 _js("api.js")。
+    为什么必须真跑：这一轮要钉的正是"断线之后到底走了续播还是重发、退避有没有真在退、
+    410 是不是转去取历史"——这些读源码读不出对错，只有拿运行时说话。
+    """
+    import json, shutil, subprocess, tempfile
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    api = _js("api.js")
+    src = _fn_text(api, "runResilientStream")
+    scenario.setdefault("resumeStatus", STREAM_RESUME_PHRASE)
+    d = Path(tempfile.mkdtemp(prefix="stream-js-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(_STREAM_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_the_stream_client_never_resends_a_whole_turn():
+    """非正常结束绝不重跑这一轮：app.js 不许再打 API.chat，api.js 不许再抛 retryable=true。
+
+    反向锁，方向要钉死：老代码的两个出血点是 (1) api.js 流尾没 done 就
+    `err.retryable = true`，(2) app.js runStream 的 else 分支 `await API.chat(...)`
+    整段重发。这两处字面量今天还在，所以这条现在是红的；实现把它们拆掉之后才该绿。
+    留着其中任何一个，用户关页面就是一次重复计费 + 一条重复入库的助手消息。
+    """
+    app_src = _js()
+    api_src = _js("api.js")
+    assert "API.chat(" not in app_src, "app.js 还在整段重发 /v1/chat：这正是断线烧钱的那一手"
+    assert "retryable = true" not in api_src and "retryable=true" not in api_src, \
+        "api.js 还在给非正常结束的流打 retryable=true：上层据此重发整轮"
+
+
+def test_the_stream_parser_handles_the_new_terminal_frames_without_losing_the_old_ones():
+    """解析器要认新帧（cancelled / cannot_resume），又不许把老的 content/done 换名。
+
+    后端契约（test_v025_stream_cancel_contract 钉过）说 start/content/done 三个旧事件名
+    不能动——两个客户端都按 data.type 分发。这一条同时钉新帧被显式接住：cancelled 不能
+    被当未知静默丢（它是 done 之前的一帧），cannot_resume 要落下"不可续播"的信号。
+    """
+    api_src = _js("api.js")
+    assert '"content"' in api_src and '"done"' in api_src, "老的 content/done 分发被顺手改掉了"
+    assert '"cancelled"' in api_src, "cancelled 帧没被解析器接住：会被当未知丢掉"
+    assert '"cannot_resume"' in api_src, "cannot_resume 帧没被接住：断线之后不知道不能再续"
+    assert '"error"' in api_src, "error 帧的分发不能丢（模型真故障与断线是两回事）"
+    # 未知类型不得静默丢：要么有个明确的兜底分支把它记下来/上报
+    assert "onUnknown" in api_src or "unknown" in api_src, \
+        "解析器没有处理未知帧的出口：任何新帧都会像老代码那样被静默丢弃"
+
+
+def test_the_stop_button_asks_the_server_to_cancel_this_run():
+    """停止是显式动作：先打 POST /v1/chat/stream/{run_id}/cancel，本地 abort 只是兜底。
+
+    run_id 必须从流里拿到并记住（onRun 落到 state.currentRunId），否则 cancel 这一枪
+    找不到目标。次序钉死：cancel 在 abort 之前——只在客户端 abort 连接等于没停生产，
+    还顺带把"关页面"伪装成"点了停止"。
+    """
+    app_src = _js()
+    api_src = _js("api.js")
+    stop_body = _function_body(app_src, "stop")
+    assert "API.cancelStreamRun" in stop_body, "停止没打服务端取消：只是本地 abort"
+    assert "currentRunId" in stop_body, "停止没拿住这一轮的 run_id"
+    assert "abort()" in stop_body, "取消打不出去时的本地兜底没了"
+    assert stop_body.index("API.cancelStreamRun") < stop_body.index("abort()"), \
+        "abort 排在了服务端取消前面：主路径/兜底路径反了"
+    assert re.search(r'"/v1/chat/stream/"\s*\+', api_src) and '"/cancel"' in api_src, \
+        "api.js 没有打向 /v1/chat/stream/{run_id}/cancel 的封装"
+
+
+def test_reconnect_carries_the_last_event_id_back_to_the_stream_endpoint():
+    """续播是带凭据重开同一条流，不是重发原文：Last-Event-ID 由 run_id:seq 拼出。
+
+    续播请求仍然 POST /v1/chat/stream（带 Last-Event-ID 头），服务端据此只补缓冲帧、
+    不叫模型不记账。这条锁钉三件事：头名对、头的值来自已收到的最后一个 id、重开打的是
+    流端点而不是 /v1/chat。
+    """
+    api_src = _js("api.js")
+    sc = _function_body(api_src, "streamChat")
+    assert "Last-Event-ID" in sc, "续播没带 Last-Event-ID 头"
+    assert "/v1/chat/stream" in sc, "续播重开的不是流端点"
+    assert "/v1/chat\"" not in sc, "streamChat 里还留着把这一轮 POST 回 /v1/chat 的重发路径"
+    assert "runResilientStream" in sc, "streamChat 没走可续播的弹性内核"
+
+
+def test_the_reconnect_status_is_plain_words():
+    """重连时那一句话是人话，不是错误码、不是上游原文。"""
+    api_src = _js("api.js")
+    assert STREAM_RESUME_PHRASE in api_src, \
+        "断线重连没有那句人话状态：用户只会看到界面卡住"
+    assert "取回" in api_src, "取历史那一路没有给人一句「去会话里取回」的实话"
+
+
+def test_a_clean_stream_ends_on_done_and_is_not_resumed():
+    """对照组：正常一条 done 收尾的流不该触发任何重连——所有续播逻辑都只在断线时醒。"""
+    out = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("你好", 2), _f_done(3)]},
+    ]})
+    assert out["threw"] is None, out["threw"]
+    assert out["finished"] is True and out["doneType"] == "done", out
+    assert out["chunks"] == "你好", out
+    assert out["openCalls"] == [""], f"正常结束不该重开连接：{out['openCalls']}"
+    assert out["statuses"] == [], f"没断线却写了重连状态：{out['statuses']}"
+
+
+def test_a_stream_that_drops_midflight_resumes_with_the_last_event_id():
+    """断线的正路：带 Last-Event-ID 续播补上剩下的帧，凑齐整段，一次都不重发原文。"""
+    out = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("甲", 2)]},                       # 断在这里：没有 done
+        {"blocks": [_f_content("乙", 3), _f_done(4, full_text="甲乙")]},       # 续播补齐
+    ]})
+    assert out["threw"] is None, out["threw"]
+    assert out["finished"] is True, out
+    assert out["chunks"] == "甲乙", f"续播没把断掉那半截接上：{out['chunks']!r}"
+    # 第一次开不带游标，第二次开必须带上已收到的最后一帧 id（R:2）
+    assert out["openCalls"] == ["", "R:2"], f"续播没带 Last-Event-ID：{out['openCalls']}"
+    assert out["runIds"] == ["R"], out
+    assert out["statuses"] == [STREAM_RESUME_PHRASE], f"重连没给人那句人话：{out['statuses']}"
+
+
+def test_an_unresumable_stream_goes_to_history_instead_of_resending():
+    """续播撞上 410：转「去会话里取回」，标成不可重试且不重发；那句话里不许裸奔错误码。"""
+    out = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("甲", 2)]},
+        {"status": 410},
+    ]})
+    assert out["finished"] is False, out
+    threw = out["threw"]
+    assert threw is not None and threw["needHistory"] is True, f"410 没转成取历史：{threw}"
+    assert threw["retryable"] is False, f"还是被打成可重发：{threw}"
+    assert threw["status"] == 410, threw
+    assert out["openCalls"] == ["", "R:2"], f"410 之后还在重开：{out['openCalls']}"
+    assert "410" not in threw["message"], f"给用户的话里裸奔了错误码：{threw['message']!r}"
+    assert "取回" in threw["message"], f"那句话没告诉人去会话里取：{threw['message']!r}"
+
+
+def test_unknown_stream_frames_are_reported_not_silently_dropped():
+    """看不懂的帧不许像老代码那样被吞掉：既收进 unknown 上报，也不影响正常 done 收尾。"""
+    weird = {"id": "R:3", "data": {"type": "frobnicate", "run_id": "R", "seq": 3}}
+    out = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("甲", 2), weird, _f_done(4)]},
+    ]})
+    assert out["threw"] is None, f"未知帧被当成了致命错误（老代码的反面也要防）：{out['threw']}"
+    assert out["finished"] is True and out["doneType"] == "done", out
+    assert "frobnicate" in out["unknownTypes"], f"未知帧被静默丢弃了：{out['unknownTypes']}"
+    assert out["openCalls"] == [""], f"未知帧不该触发重连：{out['openCalls']}"
+
+
+def test_cancelled_and_error_frames_end_the_stream_without_rebilling():
+    """两种终局都不许回头重发：cancelled→done 是正常收尾；error 是模型真故障（不可重试）。"""
+    cancelled = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("甲", 2),
+                    {"id": "R:3", "data": {"type": "cancelled", "run_id": "R", "seq": 3,
+                                           "full_text": "甲", "message": "已取消"}},
+                    _f_done(4, status="cancelled", stopped_reason="user_cancel", full_text="甲")]},
+    ]})
+    assert cancelled["threw"] is None, cancelled["threw"]
+    assert cancelled["finished"] is True, cancelled
+    assert cancelled["doneStatus"] == "cancelled", f"cancelled 后的 done 状态丢了：{cancelled}"
+    assert cancelled["chunks"] == "甲", cancelled
+    assert cancelled["openCalls"] == [""], f"被取消的流不该重开：{cancelled['openCalls']}"
+
+    errored = _run_stream_js({"maxAttempts": 4, "opens": [
+        {"blocks": [_f_start(1), _f_content("甲", 2),
+                    {"id": "R:3", "data": {"type": "error", "run_id": "R", "seq": 3,
+                                           "message": "模型调用失败：上游超时"}}]},
+    ]})
+    assert errored["threw"] is not None, errored
+    assert errored["threw"]["kind"] == "error", errored["threw"]
+    assert errored["threw"]["retryable"] is False, "模型真故障被标成可重发：会再付一次钱"
+    assert errored["openCalls"] == [""], f"error 之后不该重连：{errored['openCalls']}"
+
+
+def test_reconnect_backs_off_and_hands_the_answer_to_history_after_a_few_tries():
+    """退避 + 次数上限：延迟逐次变大，够不着终帧就转取历史，绝不回去重发原文。
+
+    宽限期不是省钱旋钮（产品口径），所以这里不许出现"为了少花钱提前放弃重连"——
+    放弃的理由只能是"试到了上限"，而结局是取历史，不是重发生成。
+    """
+    out = _run_stream_js({"maxAttempts": 3, "opens": [
+        {"blocks": [_f_start(1)]},        # 每次都在没有 done 处断开（同一份反复喂）
+    ]})
+    assert out["finished"] is False, out
+    threw = out["threw"]
+    assert threw is not None and threw["needHistory"] is True, f"到上限没转取历史：{threw}"
+    assert threw["retryable"] is False, f"到上限还被打成可重发整轮：{threw}"
+    # 1 次首开 + 3 次续播
+    assert len(out["openCalls"]) == 4, f"重连次数不是上限那个数：{out['openCalls']}"
+    assert len(out["sleepCalls"]) == 3, f"退避次数对不上：{out['sleepCalls']}"
+    assert out["sleepCalls"] == sorted(out["sleepCalls"]) and \
+        all(b > a for a, b in zip(out["sleepCalls"], out["sleepCalls"][1:])), \
+        f"退避没在逐次变大：{out['sleepCalls']}"

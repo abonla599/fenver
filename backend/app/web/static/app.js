@@ -203,6 +203,7 @@ const state = {
   editingScope: null,     // "admin"=改共享条目（管理员面）| "mine"=我的模型 | null=表单没开
   myDefault: null,        // /v1/me/providers 报的"我的默认"，服务端持久化那份
   me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
+  currentRunId: null,     // 这一轮流式对话的 run_id：停止要打服务端取消、断线续播也认它
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -1567,36 +1568,48 @@ async function runStream(holder) {
   try {
     const done = await API.streamChat(
       { model: providerId, provider: providerId, messages: sent, attachments,
-        sessionId: pref.sessionId, signal: state.controller.signal },
+        sessionId: pref.sessionId, signal: state.controller.signal,
+        // 记住这一轮的 run_id：停止要打服务端取消、断线续播也认它（来自 start 帧/帧元数据）。
+        onRun: (runId) => { state.currentRunId = runId; },
+        // 断线重连的人话状态直接落状态条；错误码不许裸奔到这一行。
+        onStatus: (m) => setStatus(m),
+        // 看不懂的帧不静默丢：内核已经记了一笔，这里不打断正常收尾。
+        onUnknown: () => {} },
       (chunk) => {
         holder.content += chunk;
         if (body && !pending) pending = raf(paint);
       });
     if (done && done.message_id) holder.message_id = done.message_id;
     if (done && done.model) holder.model = done.model;
+    // 被停的流以旧解析器认得的 done 收尾：status=cancelled 说明是"停止"或宽限到点。
+    if (done && done.status === "cancelled") {
+      aborted = true;
+      holder.content = (holder.content || done.full_text || "") + "\n\n_（已停止生成）_";
+      setStatus("已停止生成");
+    } else if (done && done.status === "cannot_resume") {
+      // 这条连接追不上服务端缓冲：去会话里取回已落库的结果，不重发生成。
+      await pullFromHistory(holder);
+    }
   } catch (e) {
     if (e.name === "AbortError") {
       aborted = true;
       holder.content = (holder.content || "") + "\n\n_（已停止生成）_";
       setStatus("已停止生成");
-    } else if (e.retryable === false) {
+    } else if (e.kind === "error" || e.retryable === false) {
+      // 模型真故障：原因已给出，绝不重发整轮去二次付费。
       failed = true;
       holder.transient = true;
       holder.content = holder.content ? holder.content + "\n\n⚠️ " + e.message : "⚠️ " + e.message;
       if (!needsAuth(e)) setStatus(e.message, true);
+    } else if (e.needHistory) {
+      // 断线续不上 / 试到上限：从会话历史取回这一轮已经落库的结果，不重发生成。
+      await pullFromHistory(holder);
     } else {
-      try {
-        const data = await API.chat({ model: providerId, provider: providerId,
-          messages: sent, attachments, session_id: pref.sessionId });
-        holder.content = data.reply;
-        holder.message_id = data.message_id;
-        holder.model = data.model;
-      } catch (e2) {
-        failed = true;
-        holder.transient = true;
-        if (needsAuth(e2)) holder.content = "⚠️ " + e2.message;
-        else { holder.content = "⚠️ " + e2.message; setStatus(e2.message, true); }
-      }
+      // 其余是这一轮请求本身没被服务端接受（如限流）：说句实话，同样不重发整段。
+      failed = true;
+      holder.transient = true;
+      holder.content = "⚠️ " + e.message;
+      if (!needsAuth(e)) setStatus(e.message, true);
     }
   } finally {
     // 未决的那帧要取消：流结束后 renderMessages 会整棵重建消息区，
@@ -1606,6 +1619,7 @@ async function runStream(holder) {
     if (body) body.removeAttribute("data-live");
     state.streaming = false;
     state.controller = null;
+    state.currentRunId = null;
     $("stopBtn").classList.add("hidden");
     $("sendBtn").classList.remove("hidden");
   }
@@ -1622,8 +1636,50 @@ async function persistCurrent() {
   await replaceMessages(state.messages);
 }
 
-function stop() {
+/* 停止是一个"动作"，不再只是关页面的副作用：先让服务端真取消这一轮。
+ * 主路径 = POST /v1/chat/stream/{run_id}/cancel（翻标志、尽力当场关上游、下一个付费轮
+ * 不发生，见 core/stream_runs.py + main.py）；本地 abort 只是兜底——只在客户端断连等于
+ * 没停生产，还把这个动作伪装成了"关页面"。取消成功后不 abort：那条连接会自己收到
+ * cancelled→done 终帧并正常收尾。run_id 是 runStream 里从流元数据抓来落在 state 上的。 */
+async function stop() {
+  const runId = state.currentRunId;
+  if (runId) {
+    try {
+      await API.cancelStreamRun(runId);
+      return;   // 服务端已收到取消，让流自己的终帧收尾，不硬断本地连接
+    } catch (e) {
+      // 取消这一枪没打出去（网络断了 / run 已终态 404）：落到下面的本地兜底。
+    }
+  }
   if (state.controller) { try { state.controller.abort(); } catch (_) {} }
+}
+
+/* 断线续不上、或服务端判这一轮不可续播时，去会话历史里取回已经落库的助手回复。
+ * 关键是"不重发生成"：那一轮的钱要么已经花、要么被服务端的轮次边界钱闸停在了边界，
+ * 结果都在 sessions.json 里；重发只会再付一次、再落一条一样的助手消息。
+ * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。 */
+async function pullFromHistory(holder) {
+  setStatus("这一轮接不上了，正在去会话里取回结果…");
+  try {
+    const sess = await API.getSession(pref.sessionId);
+    const list = (sess && sess.messages) || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (m.role === "assistant") {
+        holder.content = m.content || "";
+        if (m.message_id) holder.message_id = m.message_id;
+        if (m.model) holder.model = m.model;
+        setStatus("");
+        return;
+      }
+    }
+    // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
+    holder.transient = true;
+    setStatus("没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条", true);
+  } catch (e) {
+    holder.transient = true;
+    if (!needsAuth(e)) setStatus(e.message, true);
+  }
 }
 
 async function sendFeedback(index, rating, btn) {
