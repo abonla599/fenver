@@ -83,7 +83,8 @@ fun SessionDrawer(tick: Int, currentId: String,
         try { sessions = Api.listSessions() }
         catch (e: Exception) {
             if (e is xyz.fenever.assistant.nativeapp.ApiException && e.status == 401) {
-                xyz.fenever.assistant.nativeapp.Prefs.clearAuth(); onLoggedOut()
+                // 与 ChatUi.logoutIf401 同律：只忘当前身份，不清全机清单
+                xyz.fenever.assistant.nativeapp.Prefs.forgetCurrent(); onLoggedOut()
             } else error = e.message
         }
         loading = false
