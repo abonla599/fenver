@@ -18,16 +18,19 @@ class TaskAgent:
     - 循环调用 LLM + 工具，直到得到最终答案
     """
     def __init__(self, name: str, model: str, tools_schema: list, tools: dict,
-                 system_prompt: str = "", user_id: str = None):
+                 system_prompt: str = "", user_id: str = None, provider_id: str = None):
         # user_id 一路从凭据里带下来：工具执行必须知道"是谁在调"，否则 needs_user
         # 那类工具（查某个人自己的数据）只能一律拒绝。缺身份是 fail-closed，
         # 不是"当成没身份的人"。
+        # provider_id 是发起人那口池子的门牌：调用统一出口时带上它，
+        # 别人的默认、站级的默认都不许顶替这个人选过的模型（v0.25 R1）。
         self.name = name
         self.model = model
         self.tools_schema = tools_schema
         self.tools = tools
         self.system_prompt = system_prompt
         self.user_id = user_id
+        self.provider_id = provider_id
         self.max_turns = 8
         # 与 ReActAgent 同一个口径：这两行 print 打的是工具入参与结果原文，
         # 默认关掉；调试时把它翻成 True 即可，不必再往源码里塞临时输出。
@@ -67,7 +70,9 @@ class TaskAgent:
         ]
 
         for turn in range(self.max_turns):
-            response = get_llm_response(self.model, messages)
+            response = get_llm_response(self.model, messages,
+                                        provider_id=self.provider_id,
+                                        user_id=self.user_id)
             
             # 检查是否有工具调用
             if "<tool_call>" in response:

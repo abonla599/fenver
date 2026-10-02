@@ -82,11 +82,15 @@ except ImportError as e:
     print(f"⚠️ 编排器不可用，/v1/agent/orchestrate 等端点将返回 503: {e}")
 
 try:
-    from app.agents.task_store import task_store, get_task, TaskStatus
+    from app.agents.task_store import task_store, get_task, tasks_of, TaskStatus
 except ImportError:
     task_store = {}
     get_task = None
     TaskStatus = None
+
+    def tasks_of(user_id):                # 模块未就绪时按人过滤空表——绝不返回全量
+        return [t for t in task_store.values()
+                if getattr(t, "user_id", None) == user_id]
 
 # ... (其余代码保持不变) ...
 
@@ -540,7 +544,8 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
         else:
             reply = get_llm_response(
                 model=provider["model"], messages=messages,
-                temperature=0.7, provider_id=provider["id"])
+                temperature=0.7, provider_id=provider["id"],
+                user_id=principal.user_id)   # 账要落在叫它的人头上
     except HTTPException:
         raise
     except Exception as e:
@@ -1113,57 +1118,93 @@ def submit_feedback(feedback: FeedbackRequest,
     }
 
 # ---------- 智能体 ----------
-# 这一面挂的是 require_admin，不是 current_principal，理由是"没有归属可谈"：
-# 编排与任务表（app/agents/task_store）是一个进程级全局 dict，条目上没有 owner，
-# 所以这里若只声明"我是某个注册用户"，契约会是绿的，而任何注册用户都能列出、取消、
-# 删除别人的任务；agent 本身还拿着本机自己的上游配置跑付费调用，跑在谁的账上
-# 无人知道。要做成普通用户可用，先给 task 加 owner（与会话同一套归属规则），
-# 那是另一端工程；在此之前管理员是唯一不撒谎的守卫。
-# 仓库里没有任何客户端调这两组端点（PWA/Flutter/Android 都不用），所以不是破坏性变更。
+# v0.25 R1：这一面从 require_admin 改成了"登录可用 + 严格按属主"。旧注释写的
+# 开放前提是"没有归属可谈"，今天前提已经翻面：Task 必填 user_id、无主旧条目在
+# 恢复时认给部署者主账号（app/agents/task_store）。守卫换掉而归属没跟上 = 把
+# 全表开放给全体注册用户，所以判据不在这里，在契约测试：
+# tests/test_route_auth_contract.py（静态：缺鉴权/缺归属各自点名）与
+# tests/test_v025_task_ownership_contract.py（行为：跨用户、枚举、记账、限流）。
+def _resolve_agent_provider(principal: Principal, requested: str = None) -> dict:
+    """把"这个人用哪条模型服务"定在叫模型之前：发起人自己的池子与默认
+    （providers.default_for），全局默认不许顶替用户选过的东西。
+    没配 provider 的人是 400 加一句给他看的话，不是 500——这是他的配置状态，
+    不是服务故障。出口照全站规矩过 scrub_secrets。
+    """
+    try:
+        return provider_store.resolve(requested, legacy_model=requested,
+                                      user_id=principal.user_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=scrub_secrets(str(e)))
+
+
 @app.post("/v1/agent/run")
-def run_agent(request: AgentRequest, principal: Principal = RequireAdmin):
+def run_agent(request: AgentRequest, http: Request,
+              principal: Principal = CurrentPrincipal):
+    # 与聊天同一本限流账（先判断、才叫模型）：这一族从"管理员专享"变成
+    # "登录可用"的那一刻起，它就不再是可以没有闸门的遗留端点。
+    throttle_paid_upstream(http, principal)
+    provider = _resolve_agent_provider(principal, request.model)
     try:
         from app.agents.react_agent import ReActAgent
         agent = ReActAgent(
-            model=request.model,
+            model=provider["model"],
             max_turns=request.max_turns
         )
         # user_id 必须往下传：needs_user 类工具（查日程/查记忆）靠执行器用服务端
-        # 身份覆盖模型参数，原先这一格是空的——管理员跑 agent 时那些工具会静悄悄
-        # 落在 default_user 的账上，读到的可能不是自己的数据。
+        # 身份覆盖模型参数；provider_id 带上解析结果——统一出口按人记账。
         result = agent.run(
             task=request.task,
             max_duration=request.max_duration,
             user_id=principal.user_id,
+            provider_id=provider["id"],
         )
         return {"result": result}
     except ImportError:
         return {"result": "智能体模块尚未就绪，请稍后再试"}
 
 @app.post("/v1/agent/orchestrate")
-def orchestrate_task(request: OrchestrateRequest, principal: Principal = RequireAdmin):
+def orchestrate_task(request: OrchestrateRequest, http: Request,
+                     principal: Principal = CurrentPrincipal):
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
-    # 身份必须往下传：以前这一格写的是 `_: Principal`（收下就丢），于是任务
-    # 建出来不知道属于谁，而"先记着、读的时候再说"正是这个项目付过账的形状。
+    throttle_paid_upstream(http, principal)
+    # 身份与解析出的模型服务都必须往下传：以前这一格写的是 `_: Principal`
+    # （收下就丢），于是任务建出来不知道属于谁，而"先记着、读的时候再说"
+    # 正是这个项目付过账的形状。
+    provider = _resolve_agent_provider(principal)
     return orchestrator.run(
         goal=request.goal,
         task_id=request.task_id,
         user_id=principal.user_id,
+        provider_id=provider["id"],
     )
 
 # ---------- 任务状态 ----------
-# 与上面两组同一个守卫：读侧必须和写侧一样严，否则"谁的任务"这件事就只
-# 在取消/删除那两条上被守住，列出全部目标一句话就能拿到。
+# 读侧与写侧同一道门：属主判定收在 _task_for_principal 一个函数里，四个端点
+# 谁也别想绕过——与会话/附件"非属主即 404"同形，id 存在与否在这道门外不可知。
+def _task_for_principal(task_id: str, user_id: str, is_admin: bool):
+    """"这个任务是不是你的"的唯一答案。非属主与不存在：同一个 404、同一句话。
+
+    admin 见全量是这一族从 v0.24 继承的既有能力（当年人人都要 admin），
+    开放给普通用户之后不缩——但列表与详情都要把 user_id 带在响应里，
+    管理页才答得出"这是谁的任务"。
+    """
+    task = task_store.get(task_id) if task_store else None
+    if task is None or (not is_admin and task.user_id != user_id):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
+
+
 @app.get("/v1/tasks/{task_id}")
-async def get_task_status(task_id: str, _: Principal = RequireAdmin):
+async def get_task_status(task_id: str, principal: Principal = CurrentPrincipal):
     if get_task is None:
         raise HTTPException(status_code=503, detail="任务存储模块尚未就绪")
-    task = get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    task = _task_for_principal(task_id, principal.user_id,
+                               principal.role == "admin")
     response = {
         "task_id": task.task_id,
+        "user_id": task.user_id,
+        "legacy": bool(getattr(task, "legacy", False)),
         "goal": task.goal,
         "status": task.status,
         "current_subtask": task.current_subtask,
@@ -1184,10 +1225,14 @@ async def get_task_status(task_id: str, _: Principal = RequireAdmin):
     return response
 
 @app.get("/v1/tasks")
-async def list_all_tasks(_: Principal = RequireAdmin):
+async def list_all_tasks(principal: Principal = CurrentPrincipal):
     if task_store is None:
         return {"total": 0, "tasks": []}
-    tasks = list(task_store.values())
+    is_admin = principal.role == "admin"
+    # 非属主过滤走 task_store 自己的 tasks_of（那里是数据层唯一的"属于谁"口径），
+    # 不在端点里再抄一份列表推导——抄的那份迟早和 getter 漂移。
+    tasks = (list(task_store.values()) if is_admin
+             else tasks_of(principal.user_id))
     return {
         "total": len(tasks),
         "tasks": [
@@ -1196,6 +1241,7 @@ async def list_all_tasks(_: Principal = RequireAdmin):
                 "goal": t.goal[:50] + "..." if len(t.goal) > 50 else t.goal,
                 "status": t.status,
                 "user_id": t.user_id,
+                "legacy": bool(getattr(t, "legacy", False)),
                 "progress": f"{t.current_subtask}/{len(t.subtasks)}",
                 "created_at": t.created_at
             }
@@ -1204,10 +1250,9 @@ async def list_all_tasks(_: Principal = RequireAdmin):
     }
 
 @app.post("/v1/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, _: Principal = RequireAdmin):
-    if task_id not in task_store:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    task = task_store[task_id]
+async def cancel_task(task_id: str, principal: Principal = CurrentPrincipal):
+    task = _task_for_principal(task_id, principal.user_id,
+                               principal.role == "admin")
     if TaskStatus and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
         return {
             "status": "warning",
@@ -1222,11 +1267,10 @@ async def cancel_task(task_id: str, _: Principal = RequireAdmin):
     }
 
 @app.delete("/v1/tasks/{task_id}")
-async def delete_task(task_id: str, _: Principal = RequireAdmin):
-    if task_id in task_store:
-        del task_store[task_id]
-        return {"status": "deleted", "task_id": task_id}
-    raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+async def delete_task(task_id: str, principal: Principal = CurrentPrincipal):
+    _task_for_principal(task_id, principal.user_id, principal.role == "admin")
+    del task_store[task_id]
+    return {"status": "deleted", "task_id": task_id}
 
 # ---------- 官网 ----------
 # 放最后只是因为这一节属于"对外长什么样",和上面那堆接口分开摆。
