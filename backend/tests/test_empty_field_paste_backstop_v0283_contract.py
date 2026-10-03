@@ -134,9 +134,9 @@ def test_pill_shell_and_mounts_untouched():
 def test_version_bumped_and_release_notes_brief():
     gradle = _read(BUILD)
     # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
-    # v0.28.0 推到 48，v0.28.1 推到 49，v0.28.2 推到 50，v0.28.3 推到 51，v0.29.0 推到 52，v0.29.1 推到 53。下面断的是现在那一格。
-    assert "versionCode 53" in gradle and 'versionName "0.29.1"' in gradle, \
-        "gradle 那一格漂了：这一版应是 53 / 0.29.1，且必须与 docs/releases/v0.29.1.md 同时存在"
+    # v0.28.0 推到 48，v0.28.1 推到 49，v0.28.2 推到 50，v0.28.3 推到 51，v0.29.0 推到 52，v0.29.1 推到 53，v0.29.2 推到 54。下面断的是现在那一格。
+    assert "versionCode 54" in gradle and 'versionName "0.29.2"' in gradle, \
+        "gradle 那一格漂了：这一版应是 54 / 0.29.2，且必须与 docs/releases/v0.29.2.md 同时存在"
     doc = _read(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)

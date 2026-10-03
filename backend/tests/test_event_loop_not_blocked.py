@@ -17,6 +17,7 @@ import pytest
 
 from app.core import streaming
 from app.main import app
+from tests import conftest
 
 # 这些端点要么朝进程外发一次网络请求（模型/嵌入），要么做真实文件 I/O
 # （会话与配置整份落盘、附件写删、PDF 全文抽取、chroma 逐条更新）。它们必须是同步 def，
@@ -156,6 +157,10 @@ def test_health_is_answerable_while_a_stream_is_stalled(monkeypatch):
         return StalledChunks()
 
     monkeypatch.setattr(streaming, "stream_chat", stalled_stream)
+    # 端点自 v0.29.2 起抽干 stream_chat_events：这里仍然只借"逐块产出 str"的那只手，
+    # 阻塞点在源上、跟谁驱动它无关，包一层 content 帧不改变这条锁要测的东西。
+    monkeypatch.setattr(streaming, "stream_chat_events",
+                        conftest.text_as_events(stalled_stream))
 
     async def scenario():
         transport = httpx.ASGITransport(app=app)

@@ -130,3 +130,27 @@ def test_fresh_provider_store_is_not_seeded_from_the_local_env(tmp_path):
     assert store.all() == [], (
         "测试进程里的 ProviderStore 被本机 .env 播种成了真模型："
         f"{[p.get('id') for p in store.all()]}。conftest 需要把 DEEPSEEK_API_KEY 置空。")
+
+
+def test_uvicorn_loggers_still_propagate_after_the_whole_suite():
+    """uvicorn 那两个 logger 的 propagate 必须还是 True：断在 False 上，caplog 收零条。
+
+    2026-10-03 的形状：新加一条起真 uvicorn 的端到端用例之后，落在它后面的
+    test_log_sanitizer 里那条"访问行必须打码"变红，红出来的话是
+    `assert '●已脱敏●' in ''` ——看着像脱敏器坏了，实际是 caplog 一条都没收到。
+    根因：uvicorn 一起来就把 uvicorn / uvicorn.access 的 propagate 置 False（写死在
+    它默认日志配置里，`log_config=None` 也挡不住），而 pytest 的 caplog 挂在 root 上。
+    套件是字母序，这条用例的名字排在 test_log_sanitizer 前面，所以它**每次**都会把
+    后面那条弄红——不是偶发，是刚加进来的那一晚本机全量才第一次露出来。
+
+    起服务方的义务是进出各存一份、还原一份（见该文件的 live_server 夹具）。这条判据
+    不看谁做的：任何新用例借用全局日志状态不还，都会在这里先红，而不是把不相干的
+    用例拖下水。
+    """
+    import logging
+
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        assert logging.getLogger(name).propagate, (
+            f"{name}.propagate 被某条用例改成 False 了：caplog 从此收不到它的任何记录，"
+            "红会红在离真凶很远的用例上。起 uvicorn 的用例必须自己还原（先例见 "
+            "test_live_trace_relay_v0292.py 的 live_server 夹具）。")
