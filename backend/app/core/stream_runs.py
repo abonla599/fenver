@@ -42,6 +42,8 @@ import time
 import uuid
 from typing import Dict, Generator, List, Optional
 
+from app.core import stream_events
+
 # 缓冲与保留的上限。取值逻辑：一次几千 token 的回答约几万次 content 帧吗？不——
 # chunk 通常几个到几十个字符，2000 帧 + 200k 字符足够装下一条长回答；超过的人
 # 是机器输出的极端样本，他们的正确出路是刷新会话，而不是让服务端无限攒内存。
@@ -308,3 +310,52 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
                 return
     finally:
         run.detach_reader()
+
+
+# ---------- 跨属主补帧的隐私边界（v0.29.1） ----------
+
+PRIVATE_TRACE_FRAME_TYPES = frozenset({
+    stream_events.FRAME_THINKING, stream_events.FRAME_TOOL_CALL,
+    stream_events.FRAME_TOOL_RESULT, stream_events.FRAME_SEARCH,
+})
+
+
+def scrub_private_trace(frames: Generator[str, None, None]) -> Generator[str, None, None]:
+    """把"只属于发起者"的过程留痕从补帧里摘掉，其余逐字节原样透出。
+
+    为什么要有这一层：续播那条路允许 admin 跨属主接上别人的 run（main.py 的
+    resume 分支，注释写的"与任务面同权同形"）。v0.25 时代那条缓冲里只有正文，
+    跨属主接上去看到的是回答；v0.29 把思考文本、工具入参与执行结果、搜索命中
+    也写进了**同一个**缓冲，于是同一条通道开始送模型对用户输入的复述和用户的
+    私有参数。这不是既有权限：管理端从来不读任何人的会话内容（/admin 界面不调
+    任何 /v1/sessions，逐条路由见 tests/test_cross_owner_replay_scrubs_trace_v0291.py），
+    不该由"给同一轮多加了四种帧"顺手扩大。
+
+    只在出口做减法：那三类帧整条不吐（连 `id:` 行一起，序号因此留空档——两个
+    客户端都按 data 行的 type 分发、按 id 记游标，空档不影响下次续播），done 里
+    的 trace 字段删掉，骨架字段一个不动，所以旧客户端照旧拿到完整正文与终帧。
+    """
+    try:
+        for chunk in frames:
+            head, sep, rest = chunk.partition("data: ")
+            if not sep:
+                yield chunk                             # 连 data 行都没有：不猜它的形状
+                continue
+            payload_text, end, tail = rest.partition("\n\n")
+            try:
+                payload = json.loads(payload_text)
+            except ValueError:
+                yield chunk                             # 看不懂的帧照原样送，别在这里制造第二次断裂
+                continue
+            ftype = payload.get("type")
+            if ftype in PRIVATE_TRACE_FRAME_TYPES:
+                continue
+            if ftype == stream_events.FRAME_DONE and "trace" in payload:
+                payload.pop("trace")
+                yield head + sep + json.dumps(payload) + end + tail
+                continue
+            yield chunk
+    finally:
+        # 外层被 close（读者断开）时必须把内层一起关掉：sse_frames 的 detach_reader
+        # 挂在它的 finally 上，R3b 的"没有活读者"计时就系在这一关，晚一步是白等宽限。
+        frames.close()

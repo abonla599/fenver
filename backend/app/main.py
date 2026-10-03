@@ -834,8 +834,14 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
         # 存在与否，得到的信息量为零。admin 可跨属主续播，与任务面同权同形。
         if not mine or not stream_runs.resumable(run, cursor):
             return JSONResponse(status_code=410, content=CANNOT_RESUME)
-        return StreamingResponse(stream_runs.sse_frames(run, cursor),
-                                 media_type="text/event-stream")
+        frames = stream_runs.sse_frames(run, cursor)
+        if run.user_id != principal.user_id:
+            # 同权同形的是"能不能接上"，不是"能看见什么"：跨属主补帧时把过程
+            # 留痕（思考文本、工具入参与结果、搜索命中、done.trace）整段摘掉。
+            # v0.25 那条通道里只有正文，v0.29 往同一个缓冲多加了四种帧，权限
+            # 面不该跟着变大——理由与判据见 stream_runs.scrub_private_trace。
+            frames = stream_runs.scrub_private_trace(frames)
+        return StreamingResponse(frames, media_type="text/event-stream")
 
     # 节流同样必须在这里判，理由和下面那条归属一样：流一开，状态码就锁死在 200，
     # 那时再挡只能断流，而 429 与 Retry-After 根本送不出去。
