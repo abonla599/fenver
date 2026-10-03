@@ -12,6 +12,7 @@ import threading
 import uuid
 from datetime import datetime
 
+from app.core import stream_events as se
 from app.core.atomic_write import write_json_atomic
 from app.core.owner_backfill import backfill_owner
 from app.core.paths import data_root
@@ -75,7 +76,7 @@ class SessionStore:
         write_json_atomic(self.path, self._sessions)
 
     @staticmethod
-    def _entry(role, content, message_id=None, memory_ids=None):
+    def _entry(role, content, message_id=None, memory_ids=None, trace=None):
         """规范化单条消息；形状不对就返回 None，由调用方决定丢弃还是拒绝。"""
         if not isinstance(role, str) or not isinstance(content, str):
             return None
@@ -85,6 +86,14 @@ class SessionStore:
         # 必须保留，否则客户端一次整体回写就会让该条回答失去反馈效力
         if memory_ids:
             entry["memory_ids"] = [str(m) for m in memory_ids]
+        # 过程留痕（v0.29）：只认「非空、且每一项是带 kind 的 dict」这份形状。存之前
+        # 一律过 compact_trace 再裁一道——这条路径也吃客户端 PUT 回来的整份回写，
+        # 不重裁就等于把"客户端能往磁盘塞多大一份 trace"交给对面。老会话没有这个
+        # 字段，原样加载、原样回显，一个字节都不动（向后兼容是硬要求）。
+        if isinstance(trace, list) and trace:
+            steps = [t for t in trace if isinstance(t, dict) and t.get("kind")]
+            if steps:
+                entry["trace"] = se.compact_trace(steps)
         return entry
 
     @classmethod
@@ -95,7 +104,8 @@ class SessionStore:
             if not isinstance(item, dict):
                 continue
             entry = cls._entry(item.get("role"), item.get("content"),
-                               item.get("message_id"), item.get("memory_ids"))
+                               item.get("message_id"), item.get("memory_ids"),
+                               item.get("trace"))
             if entry is not None:
                 cleaned.append(entry)
         return cleaned
@@ -156,8 +166,9 @@ class SessionStore:
             return json.loads(json.dumps(data))
 
     def add_message(self, session_id: str, owner: str, role: str, content: str,
-                    message_id: str = None, memory_ids: list = None) -> bool:
-        entry = self._entry(role, content, message_id, memory_ids)
+                    message_id: str = None, memory_ids: list = None,
+                    trace: list = None) -> bool:
+        entry = self._entry(role, content, message_id, memory_ids, trace)
         if entry is None:
             return False
         with self._lock:

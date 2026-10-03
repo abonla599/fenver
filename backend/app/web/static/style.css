@@ -263,6 +263,57 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .typing .msg-body::after { content: "▋"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* ---------- 过程留痕（v0.29.0）：思考 / 工具调用 / 搜索网页 ----------
+ * 这块面板坐在助手气泡里、正文上方，所以每一档都从现网 :root 令牌取，不新增色值：
+ * 底色比气泡浅一档（--surface）、正文一律 --text-2/--text-3、失败才用 --danger、
+ * 链接与耗时用 --accent。宽度锁死在 100%：单行的标题/摘要按 ellipsis 裁，多行的
+ * 思考与摘要换行并限行数，谁都不许把气泡撑出横向滚动条——手机上气泡溢出比看不见过程更糟。
+ * 默认收起：.msg-trace 在模板里就带 hidden，有 trace 才由 app.js 摘掉。 */
+.msg-trace { width: 100%; max-width: 100%; border: 1px solid var(--line);
+             border-radius: 12px; background: var(--surface); }
+.trace-head { display: flex; align-items: center; gap: 7px; width: 100%;
+              border: 0; background: transparent; cursor: pointer; text-align: left;
+              padding: 7px 11px; font-size: 12px; color: var(--text-2); }
+.trace-head:hover { color: var(--text); background: var(--bg-hover); }
+.trace-caret { flex: none; color: var(--text-3); font-size: 11px; line-height: 1; }
+.trace-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「正在进行」那一点呼吸挂在箭头上，而不是给整块面板加动画：帧洪泛期间少一层合成。
+   摘除在 app.js runStream 的 finally 里，与 .typing / data-live 同一拍；减弱动效的退路
+   写在下面「首屏凭据层」那一份集中清单里（全表只留那一处 prefers-reduced-motion 块）。 */
+.msg-trace.trace-live .trace-caret { color: var(--accent); animation: blink 1s steps(2) infinite; }
+.trace-steps { border-top: 1px solid var(--line); padding: 3px 11px 9px; }
+.trace-step { padding: 6px 0; border-top: 1px dashed var(--line);
+              font-size: 12px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere; }
+.trace-step:first-child { border-top: 0; }
+/* 思考文本与答案要一眼分得开：斜体、矮一档墨色、最多 6 行——一轮深想动辄几千字，
+   全摊开会把手答挤到屏幕外，那笔交易不划算（要看全文在会话历史里读）。 */
+.trace-thinking { font-style: italic; white-space: pre-wrap;
+                  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.trace-tool-line { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.trace-tool-status { flex: none; font-weight: 600; color: var(--text-3); }
+.trace-tool-status.ok { color: var(--accent); }
+.trace-tool-status.bad { color: var(--danger); }
+.trace-tool-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.trace-tool-time { flex: none; margin-left: auto; font-size: 11px; color: var(--text-3);
+                   font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+.trace-tool-summary { margin-top: 3px;
+                      display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.trace-tool-truncated { margin-top: 3px; font-size: 11px; color: var(--text-3); }
+.trace-search-query { margin-bottom: 3px; font-size: 11px; color: var(--text-3); }
+.trace-results { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.trace-result { min-width: 0; }
+.trace-result-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.trace-result-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                      color: var(--accent); }
+a.trace-result-title:hover { text-decoration: underline; }
+/* 服务端把非 http(s) 的网址抹成了空串，那一行没有链接可给：按纯文本画，不猜 */
+.trace-result-plain { color: var(--text); }
+.trace-result-host { flex: none; max-width: 38%; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; font-size: 11px; color: var(--text-3); }
+.trace-result-snippet { margin-top: 1px;
+                        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.trace-omitted { text-align: center; font-size: 11px; color: var(--text-3); }
+
 .empty-state { max-width: 640px; margin: 9vh auto 0; text-align: center; color: var(--text-2); }
 .empty-state h2 { font-size: 20px; color: var(--text); margin: 0 0 6px; font-weight: 600; }
 .empty-state img { width: 54px; height: 54px; border-radius: 16px; margin-bottom: 14px;
@@ -638,10 +689,13 @@ button:focus-visible, a:focus-visible, select:focus-visible,
          clip-path: ellipse(150% 130% at 50% 100%); }
 }
 /* 晕动症要的是"别动"，不是"动快点"，所以这里关的是动画与过渡本身而不是时长。
-   本轮加的 hover 浮起 / 按压缩放 / 弹层弹出全都在这份清单里。 */
+   本轮加的 hover 浮起 / 按压缩放 / 弹层弹出全都在这份清单里。
+   v0.29.0 的过程面板也照这一份清单收：聊天页那块"进行中"的呼吸（.msg-trace.trace-live）
+   列在下面那一条 animation:none 里——全表只留这一处 prefers-reduced-motion 集中清单，
+   散落着写会把退路漏在新规则上（test_web_pwa 两条减弱动效的锁读的都是第一块）。 */
 @media (prefers-reduced-motion: reduce) {
   .auth.intro-brand .auth-brand, .auth.intro-sheet .auth-sheet, .attach-menu,
-  .update-sheet.show { animation: none; }
+  .update-sheet.show, .msg-trace.trace-live .trace-caret { animation: none; }
   .btn, .btn-primary, .btn-send, .btn-ghost, .suggestions button, .sb-item, .nav-item,
   .who-row, .set-row, .set-mini, .attach-tile, .icon-btn, .icon-btn.plus-btn, .code-copy,
   .msg-tools, .chip, .input-card, .auth-eye { transition: none; }

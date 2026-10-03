@@ -135,9 +135,12 @@ const API = (() => {
    * 服务端说续不上（410）或试到次数上限，就交一句"去会话里取回"的实话
    * （err.needHistory=true、retryable=false），绝不回头重发生成。
    *
-   * 刻意把 open/sleep/onChunk/onStatus/onRun/onUnknown/maxAttempts/resumeStatus 全从 deps
-   * 进来，只为了让测试能用 node 真跑这份控制流（见 test_web_pwa 的 _run_stream_js）：
+   * 刻意把 open/sleep/onChunk/onEvent/onStatus/onRun/onUnknown/maxAttempts/resumeStatus
+   * 全从 deps 进来，只为了让测试能用 node 真跑这份控制流（见 test_web_pwa 的 _run_stream_js）：
    * "断线到底走了续播还是重发、退避有没有真在退、410 是不是转取历史"读源码读不出对错。
+   *
+   * v0.29.0 加 onEvent：过程帧（thinking/tool_call/tool_result/search）连同 start/done
+   * 这些非内容帧都从这一条缝交出去，**onChunk 仍只吃 content 文本**——老调用点一个字没变。
    */
   const STREAM_RESUME_STATUS = "连接断了，正在接着上次的进度取回…";
   // 重连次数上限。这不是"省钱旋钮"：宽限期长短与花销由服务端的轮次边界钱闸决定，和这里
@@ -149,6 +152,7 @@ const API = (() => {
   async function runResilientStream(deps) {
     const open = deps.open;
     const onChunk = deps.onChunk;
+    const onEvent = deps.onEvent;
     const onStatus = deps.onStatus;
     const onRun = deps.onRun;
     const onUnknown = deps.onUnknown;
@@ -236,6 +240,13 @@ const API = (() => {
             if (onRun) onRun(runId);
           }
           const type = evt && evt.type;
+          // 非内容帧一律先交 onEvent 这一条缝（v0.29.0 的过程帧：thinking/tool_call/
+          // tool_result/search，以及 start/done）。两种情况都不能把流弄断：没传回调等于
+          // 没有这件事；回调自己炸了（界面在画一个已经摘掉的节点）也只是这一帧没画上，
+          // 正文与终帧照走下面的分发。
+          if (type !== "content" && onEvent) {
+            try { onEvent(evt); } catch (_) { /* 渲染失败不杀流 */ }
+          }
           if (type === "content") {
             if (onChunk) onChunk(evt.text || "");
           } else if (type === "done") {
@@ -252,6 +263,11 @@ const API = (() => {
             throw err;
           } else if (type === "start") {
             // 带 message_id/model/run_id；run_id 已在上面捕获。
+          } else if (type === "thinking" || type === "tool_call"
+                     || type === "tool_result" || type === "search") {
+            // v0.29.0 的过程帧：上面那条 onEvent 缝已经把整帧交出去了，这里只是别让它们
+            // 掉进下面的 else——unknown 那一笔的语义是「契约之外冒出来的东西」，把已知帧
+            // 记进去等于给上报加噪声（帧名唯一出处仍是 core/stream_events.py 的 CLIENT_FRAMES）。
           } else {
             // 认不出的帧：不静默丢——记下来上报，同时不打断正常收尾。
             unknown.push(evt);
@@ -289,8 +305,12 @@ const API = (() => {
    * 内核里）。open 把"重开同一条流"封成一个函数：首次带原文 body 开轮，续播带 Last-Event-ID
    * 头重开——服务端据此只补缓冲帧，不叫模型、不重记账。onStatus/onRun/onUnknown 由界面传入，
    * 分别用于人话状态、记住 run_id（给"停止"打 cancel）、上报看不懂的帧。
+   *
+   * 第三个形参 onEvent 是 v0.29.0 加的那条缝：只吃非内容帧，onChunk 照旧只管 content
+   * 文本，所以 `streamChat(opts, onChunk)` 这一句老写法一个字节都还是对的。写成可选、
+   * 且 opts.onEvent 也算同一条缝（与 onStatus/onRun 那一组同风格），界面两种挂法都行。
    */
-  async function streamChat(opts, onChunk) {
+  async function streamChat(opts, onChunk, onEvent) {
     const open = async (lastEventId) => {
       const headers = { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") };
       if (lastEventId) headers["Last-Event-ID"] = lastEventId;   // 续播凭据：<run_id>:<seq>
@@ -312,7 +332,8 @@ const API = (() => {
       return res;
     };
     const out = await runResilientStream({
-      open, onChunk, onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
+      open, onChunk, onEvent: onEvent || (opts && opts.onEvent),
+      onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
       sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
       resumeStatus: STREAM_RESUME_STATUS,
     });

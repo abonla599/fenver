@@ -442,6 +442,7 @@ def _self_origin(request: Request) -> str:
     return f"{proto}://{host}" if proto == "https" and host else ""
 
 # ---------- 聊天接口 ----------
+from app.core import stream_events
 from app.core import credits
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)
@@ -567,11 +568,13 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
 
     try:
         used_memory_ids = []
+        trace = []
         if USE_PIPELINE:
             result = ChatPipeline(user_id=principal.user_id).process(
                 provider["model"], messages, provider_id=provider["id"])
             reply = result.get("reply", "")
             used_memory_ids = result.get("used_memory_ids") or []
+            trace = result.get("trace") or []
         else:
             reply = get_llm_response(
                 model=provider["model"], messages=messages,
@@ -586,12 +589,18 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
         raise HTTPException(status_code=502, detail=f"模型调用失败：{reason}")
 
     message_id = str(uuid.uuid4())
+    # 落盘前先压一次：客户端把整份过程原样回写时不该绕过预算。
+    # compact_trace 产出的就是纯 JSON 安全字典，不必再 json 兜一圈。
+    compacted = stream_events.compact_trace(trace) if trace else []
     if request.session_id:
         sessions_store.add_message(request.session_id, principal.user_id, "user", user_text)
         sessions_store.add_message(request.session_id, principal.user_id, "assistant", reply,
-                                   message_id, used_memory_ids)
-    return {"reply": reply, "message_id": message_id,
-            "provider": provider["id"], "model": provider["model"]}
+                                   message_id, used_memory_ids, trace=compacted)
+    out = {"reply": reply, "message_id": message_id,
+           "provider": provider["id"], "model": provider["model"]}
+    # 只加新键，不动既有键：老客户端读 reply 照旧，新客户端据 trace 还原过程面板。
+    out["trace"] = compacted
+    return out
 
 # ---------- 流式聊天接口 ----------
 from fastapi.responses import StreamingResponse
@@ -661,7 +670,9 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     整轮重发进 /v1/chat 再付一次钱——那正是本版要堵的洞。停的信息放进 done
     的新字段（status/stopped_reason/resumable），旧解析器不受影响。
     """
-    from app.core.streaming import stream_chat, StreamCancelled
+    from app.core.streaming import (stream_chat, StreamCancelled, begin_trace,
+                                    drain_frames, collect_steps, end_trace)
+    from app.core import stream_events as se
 
     def before_round():
         """R3b-1 的钱闸·判据侧：检查点在 streaming.py 的轮次边界（付费边界）。
@@ -697,9 +708,20 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
 
     status = "failed"
     full_text = ""
+    trace: list = []
+
+    def _emit_pending():
+        """把引擎塞进本线程 sink 的非内容帧补发进 run 缓冲，保持产出顺序。
+
+        thinking/tool_call/tool_result/search 这些被 stream_chat 的文本过滤器吃掉了，
+        只能靠 drain_frames 交回来——它们与 content 帧的相对次序即引擎的产出次序。
+        """
+        for frame in drain_frames():
+            run.append(frame)
+
+    begin_trace()
     try:
-        run.append({"type": "start", "message_id": run.message_id,
-                    "model": provider["model"]})
+        run.append(se.start_frame(run.message_id, provider["model"]))
 
         # 用户消息先落盘：模型调用失败时也不该让用户刚发的话凭空消失
         if run.session_id:
@@ -716,14 +738,22 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                                  cancel_event=run.cancel_event,    # 停止的主判据
                                  on_upstream_start=run.attach_upstream,  # 供当场关闭
                                  before_round=before_round):       # R3b 轮次边界的钱闸
+            # 先补发这段正文之前引擎产出的过程帧（思考/工具/搜索），再发正文本身，
+            # 于是"它在想 → 它去调工具 → 它说结论"在上屏顺序上就是发生顺序。
+            _emit_pending()
             full_text += chunk
-            run.append({"type": "content", "text": chunk})
+            run.append(se.content_frame(chunk))
+        # 末轮的 tool_call/tool_result/search 在最后一块正文之后才产出，收尾必须再抽一次。
+        _emit_pending()
+
+        # 全程过程步收拢成可落盘的 trace（封顶步数/字数在 compact_trace 里）
+        trace = se.compact_trace(collect_steps())
 
         # 保存助手回复到会话（如果提供了 session_id）——闩内只有一次
         if run.session_id and run.claim_message_save():
             sessions_store.add_message(
                 run.session_id, principal.user_id, "assistant",
-                full_text, run.message_id, used_memory_ids)
+                full_text, run.message_id, used_memory_ids, trace=trace)
 
         # 按信号写长期记忆，判据与非流式路径同一处（pipeline.save_interaction）
         if pipe is not None:
@@ -733,8 +763,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                 print(f"流式记忆保存失败（不影响已返回的回复）: {_fail_reason(e)}",
                       file=sys.stderr, flush=True)
 
-        run.append({"type": "done", "full_text": full_text,
-                    "message_id": run.message_id, "model": provider["model"],
+        run.append({**se.done_frame(full_text, run.message_id, provider["model"],
+                                    trace or None),
                     "status": "completed", "resumable": False})
         status = "completed"
     except StreamCancelled:
@@ -742,10 +772,13 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         # 照样落盘（同一个 message_id，反馈仍可关联），然后发 cancelled 帧、
         # 再以 done 收尾。账已由 stream_chat 的 finally 结清——那是取消前真
         # 消费的部分，此后这里不再叫上游（轮首检查与读者闸门两处都拦着）。
+        # 取消点之前已经产出的过程帧与留痕照发照存：屏幕上看到过的不该在历史里消失。
+        _emit_pending()
+        trace = se.compact_trace(collect_steps())
         if run.session_id and full_text and run.claim_message_save():
             sessions_store.add_message(run.session_id, principal.user_id,
                                        "assistant", full_text,
-                                       run.message_id, used_memory_ids)
+                                       run.message_id, used_memory_ids, trace=trace)
         # 到线的成因决定那句话：影子护栏停在「等待你确认是否继续」上（卡片 §3-2），
         # 断线仍停在原来那句上——同一个出口、两条实话，不许合并成一句含糊的"已取消"。
         stop_message = (credits.SHADOW_STOP_MESSAGE
@@ -756,8 +789,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                     "message": stop_message})
         # R3b-3 的收尾 done：旧客户端从 cancelled 身上得不到"结束"，必须给一条
         # 它今天就认的 done；停的信息只加新字段，不改旧骨架。
-        run.append({"type": "done", "full_text": full_text,
-                    "message_id": run.message_id, "model": provider["model"],
+        run.append({**se.done_frame(full_text, run.message_id, provider["model"],
+                                    trace or None),
                     "status": "cancelled",
                     "stopped_reason": run.stop_cause or "user_cancel",
                     "resumable": False})
@@ -765,11 +798,12 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     except Exception as e:
         reason = _fail_reason(e)
         print(f"流式模型调用失败: {reason}", file=sys.stderr, flush=True)
-        run.append({"type": "error", "message": f"模型调用失败：{reason}"})
+        run.append(se.error_frame(f"模型调用失败：{reason}"))
         status = "failed"
     finally:
         # 无论走到哪条出口，run 必须有终态：没有它，读者会挂在 cond.wait 上，
         # 那正是旧结构里"连接还开着但再也没动静"的形状。
+        end_trace()
         run.finish(status)
 
 

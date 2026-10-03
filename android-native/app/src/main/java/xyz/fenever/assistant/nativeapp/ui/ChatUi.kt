@@ -124,6 +124,7 @@ import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -139,6 +140,12 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ChatEvent
@@ -168,13 +175,104 @@ import xyz.fenever.assistant.nativeapp.theme.userBubbleBrush
  * 原生没有 blob URL，图片按 id 现取字节解码，取不到退化成 📄 标签（同一降级语义）。 */
 data class AttItem(val id: String, val name: String, val kind: String, val size: Long)
 
+/* ---------------- 过程留痕（v0.29.0） ----------------
+ * 步的形状与服务端 core/stream_events.py 的 step_* 同构（kind 分 thinking/tool/
+ * search/omitted），网页 accumulateTrace 的 UI 原生化：流上四类过程帧并进一份列表，
+ * 历史回放（StoredMessage.trace / done.trace）翻译成同一模型，面板只渲染一份。
+ * 安全纪律与网页逐条对齐：所有字段一律纯文本渲染，绝不从不安全文本里造可点区间；
+ * 链接只在客户端复查 http(s) 前缀之后才挂点击（服务端那道过滤不算信任前提）。 */
+data class TraceHit(val title: String, val url: String, val snippet: String)
+
+data class TraceItem(
+    val kind: String,                 // thinking / tool / search / omitted（认不出的原样留 kind）
+    val text: String = "",            // thinking 正文；认不出的步的回退文案
+    val id: String = "",              // tool_call ↔ tool_result 的配对键
+    val name: String = "",
+    val label: String = "",
+    val pending: Boolean = false,     // tool_call 已发、tool_result 还没等到
+    val ok: Boolean = false,
+    val summary: String = "",
+    val elapsedMs: Int = 0,
+    val truncated: Boolean = false,
+    val query: String = "",
+    val results: List<TraceHit> = emptyList(),
+    val omitted: Int = 0,
+)
+
+/* 落盘步 → UI 步：全量读法（缺键给空值），认不出的 kind 不猜形状、只把能给的字留下。 */
+private fun jtStr(o: JsonObject, k: String): String =
+    (o[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
+private fun jtBool(o: JsonObject, k: String): Boolean =
+    (o[k] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() ?: false
+private fun jtInt(o: JsonObject, k: String): Int =
+    (o[k] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0
+
+internal fun traceFromStored(steps: List<JsonObject>?): List<TraceItem> =
+    (steps ?: emptyList()).mapNotNull { o ->
+        val kind = jtStr(o, "kind")
+        if (kind.isEmpty()) return@mapNotNull null
+        when (kind) {
+            "thinking" -> TraceItem(kind, text = jtStr(o, "text"))
+            "omitted" -> TraceItem(kind, omitted = jtInt(o, "count"))
+            "tool" -> TraceItem(kind, id = jtStr(o, "id"), name = jtStr(o, "name"),
+                label = jtStr(o, "label"), pending = jtBool(o, "pending"),
+                ok = jtBool(o, "ok"), summary = jtStr(o, "summary"),
+                elapsedMs = jtInt(o, "elapsed_ms"), truncated = jtBool(o, "truncated"))
+            "search" -> TraceItem(kind, id = jtStr(o, "id"), query = jtStr(o, "query"),
+                results = (o["results"] as? JsonArray)?.mapNotNull { r ->
+                    val rj = r as? JsonObject ?: return@mapNotNull null
+                    TraceHit(jtStr(rj, "title"), jtStr(rj, "url"), jtStr(rj, "snippet"))
+                } ?: emptyList())
+            else -> TraceItem(kind, text = jtStr(o, "text")
+                .ifEmpty { jtStr(o, "summary") }.ifEmpty { jtStr(o, "label") })
+        }
+    }
+
+/* UI 步 → 落盘步：PUT 全量替换会把不带 trace 的消息在服务端抹平，这里必须把
+ * 四型步原样写回（未知 kind 退化成 kind+text 回环，不再丢整步）。 */
+internal fun traceToJson(steps: List<TraceItem>): List<JsonObject> = steps.map { t ->
+    buildJsonObject {
+        put("kind", t.kind)
+        when (t.kind) {
+            "thinking" -> put("text", t.text)
+            "omitted" -> put("count", t.omitted)
+            "tool" -> {
+                put("id", t.id); put("name", t.name); put("label", t.label)
+                put("ok", t.ok); put("summary", t.summary)
+                put("elapsed_ms", t.elapsedMs); put("truncated", t.truncated)
+            }
+            "search" -> {
+                put("id", t.id); put("query", t.query)
+                put("results", JsonArray(t.results.map { r ->
+                    buildJsonObject {
+                        put("title", r.title); put("url", r.url); put("snippet", r.snippet)
+                    }
+                }))
+            }
+            else -> put("text", t.text)
+        }
+    }
+}
+
+/** 流已经不会再有 tool_result 了：把还挂着"进行中"的步收落成一句话，别让它永远悬着。 */
+private fun closePendingTrace(steps: List<TraceItem>): List<TraceItem> = steps.map {
+    if (it.kind == "tool" && it.pending)
+        it.copy(pending = false, ok = false,
+            summary = it.summary.ifEmpty { "没等到这一步的结果" })
+    else it
+}
+
 /* 一条已落地的消息。transient = 网页 runStream 失败那条 ⚠️ 气泡：看得见，
- * 但 replaceMessages/outbound 都把它滤掉，不发给服务端、不混进上下文。 */
+ * 但 replaceMessages/outbound 都把它滤掉，不发给服务端、不混进上下文。
+ * trace/traceExpanded（v0.29.0）：这条回答的过程步与面板开合。开合记在消息上
+ * 而不是组件里——LazyColumn 把条目滚出视口就销毁组合，记在组件上会丢用户点开的选择。 */
 data class UiMsg(val role: String, val content: String,
                  val messageId: String? = null, val model: String? = null,
                  val feedback: Int? = null,
                  val attachments: List<AttItem> = emptyList(),
-                 val transient: Boolean = false)
+                 val transient: Boolean = false,
+                 val trace: List<TraceItem> = emptyList(),
+                 val traceExpanded: Boolean = false)
 
 /* 网页 .suggestions 的四枚 chips（app.js SUGGESTIONS 逐字）。点击只填输入框、不发送。
  * 2026-09-28 真机反馈：原来四条偏"技术演示"，换成日常真会问的事。 */
@@ -217,6 +315,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var statusErr by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var streamText by remember { mutableStateOf<String?>(null) }
+    // v0.29.0 过程面板：流式期间累积的过程步 + 面板开合。流式期间默认展开、落定自动
+    // 折叠（网页 plan §7 同一判据）；用户点过头（touched）就把他的选择带进落定态，
+    // 任何自动逻辑不再替他改主意。
+    var streamTrace by remember { mutableStateOf(listOf<TraceItem>()) }
+    var streamTraceOpen by remember { mutableStateOf(true) }
+    var streamTraceTouched by remember { mutableStateOf(false) }
     var attachOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
     var drawerTick by remember { mutableStateOf(0) }
@@ -309,7 +413,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 messages = d.messages.map { m ->
                     UiMsg(m.role, m.content, m.message_id, m.model,
                         attachments = (m.attachments ?: emptyList())
-                            .map { AttItem(it.id, it.name, it.kind, it.size) })
+                            .map { AttItem(it.id, it.name, it.kind, it.size) },
+                        // 落盘回放：重开一条会话也看得见过程（服务端那份 trace 就是为这一句留的）
+                        trace = traceFromStored(m.trace))
                 }
             }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
         }
@@ -333,6 +439,10 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 越界的 offset 会被 LazyList 夹到最大滚动位置——"贴到最底"从此不依赖高度测量，
     // 量多高都贴得实。落定分支的退出判据也换成结果导向：最后一项底边已经进了视口
     // 才算贴完，随帧重贴直到那一刻（上限 24 帧防排版反复抖动）。
+    // v0.29.0 过程面板与贴底的共存：key 一个字节都不动（test_settled_bottom_and_title_ink
+    // 逐字钉着这条 LaunchedEffect，贴底/夹边界是 v0.28 真机磨出来的判据，不在这儿加戏）。
+    // 面板长高搭的是 content 帧重跑的顺风车；落定那一拍的无条件顶到底会把整块过程
+    // 连同答案尾行一起送回眼前；生成中分支自带「只有近底才跟」闸门，上翻阅读不被打断。
     LaunchedEffect(messages.size, streamText) {
         val first = listState.layoutInfo
         val total = first.totalItemsCount
@@ -415,8 +525,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     suspend fun persist(list: List<UiMsg>): Boolean {
         if (sessionId.isEmpty()) return true
         return try {
+            // trace 必须随行回写：整份历史是 PUT 全量替换，这一句不带 trace，
+            // 每一次保存都会把服务端落好的过程留痕抹平（v0.29.0 落盘回放）。
             Api.replaceMessages(sessionId, list.filter { !it.transient }
-                .map { StoredMessage(it.role, it.content, it.messageId, it.model) })
+                .map { StoredMessage(it.role, it.content, it.messageId, it.model,
+                    trace = traceToJson(it.trace)) })
             NetMinder.noteSuccess()
             true
         } catch (e: Exception) {
@@ -472,7 +585,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             val lastAssistant = d.messages.lastOrNull { it.role == "assistant" }
             if (lastAssistant != null) {
                 messages = messages + UiMsg("assistant", lastAssistant.content,
-                    lastAssistant.message_id, lastAssistant.model)
+                    lastAssistant.message_id, lastAssistant.model,
+                    // 断线取回的不止正文：这一轮的过程在服务端已经落盘，取回来照样摊得开
+                    trace = traceFromStored(lastAssistant.trace))
                 setStatus("")
             } else {
                 // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
@@ -503,8 +618,21 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             busy = true; stopRequested = false
             currentRunId = null
             streamText = ""
+            streamTrace = emptyList(); streamTraceOpen = true; streamTraceTouched = false
             setStatus("生成中…")
             val acc = StringBuilder()
+            // 过程步的本地累积（网页 holder.trace 的原生对位）：只 append 不重排，
+            // 每帧发布一份快照给组合读（思考帧服务端已按 120 字/0.4 秒攒片，频率可控）。
+            val traceAcc = ArrayList<TraceItem>()
+            fun publishTrace() { streamTrace = traceAcc.toList() }
+            var doneTrace = emptyList<JsonObject>()   // done 带回的权威步序（服务端裁过）
+            // 落定形状：done.trace 是含 omitted 的权威版，优先用它——屏幕上的过程与
+            // 重开会话后看到的才是同一份；没有（老服务端/半途断）就用本地累积收掉未决步。
+            fun settledTrace(): List<TraceItem> =
+                if (doneTrace.isNotEmpty()) closePendingTrace(traceFromStored(doneTrace))
+                else closePendingTrace(traceAcc.toList())
+            // 面板开合：用户点过就带走他的选择；没点过，落定即自动折叠。
+            fun settledExpanded(): Boolean = streamTraceTouched && streamTraceOpen
             var doneId: String? = null
             var doneModel: String? = null
             var doneStatus = ""
@@ -526,6 +654,52 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     when (ev) {
                         is ChatEvent.Start -> if (ev.runId.isNotEmpty()) currentRunId = ev.runId
                         is ChatEvent.Content -> { acc.append(ev.text); streamText = acc.toString() }
+                        // v0.29.0 过程帧：与网页 accumulateTrace 同规则 —— 连续 thinking
+                        // 并进最后一步（30 个分片不许变 30 行）、tool_result 按 id 认领它的
+                        // tool_call（id 对不上就退化成配最近的 pending）、search 一步一行。
+                        is ChatEvent.Thinking -> {
+                            val text = ev.text
+                            if (text.isNotEmpty()) {
+                                val last = traceAcc.lastIndex
+                                if (last >= 0 && traceAcc[last].kind == "thinking")
+                                    traceAcc[last] = traceAcc[last].copy(
+                                        text = traceAcc[last].text + text)
+                                else traceAcc.add(TraceItem("thinking", text = text))
+                                publishTrace()
+                            }
+                        }
+                        is ChatEvent.ToolCall -> {
+                            // 参数（arguments/arguments_text）这一版不占行：网页面板也没画，
+                            // 折叠着读的是 label；帧照收不误，界面上多一格是一期的事。
+                            traceAcc.add(TraceItem("tool", id = ev.id, name = ev.name,
+                                label = ev.label.ifEmpty { ev.name }, pending = true))
+                            publishTrace()
+                        }
+                        is ChatEvent.ToolResult -> {
+                            val at = traceAcc.indexOfLast {
+                                it.kind == "tool" && it.pending &&
+                                    (ev.id.isEmpty() || it.id == ev.id)
+                            }
+                            if (at < 0) {
+                                traceAcc.add(TraceItem("tool", id = ev.id, name = ev.name,
+                                    label = ev.name.ifEmpty { "工具调用" },
+                                    ok = ev.ok, summary = ev.summary,
+                                    elapsedMs = ev.elapsedMs, truncated = ev.truncated))
+                            } else {
+                                traceAcc[at] = traceAcc[at].copy(pending = false,
+                                    name = ev.name.ifEmpty { traceAcc[at].name },
+                                    ok = ev.ok, summary = ev.summary,
+                                    elapsedMs = ev.elapsedMs, truncated = ev.truncated)
+                            }
+                            publishTrace()
+                        }
+                        is ChatEvent.Search -> {
+                            traceAcc.add(TraceItem("search", id = ev.id, query = ev.query,
+                                results = ev.results.map {
+                                    TraceHit(it.title, it.url, it.snippet)
+                                }))
+                            publishTrace()
+                        }
                         // cancelled / cannot_resume 都不是终止帧：半句与"续不上"的信号都在流里，
                         // 等随后那条 done 收尾，这里不单独终结（与网页内核同一语义，别自创）。
                         is ChatEvent.Cancelled -> Unit
@@ -534,6 +708,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             doneId = ev.messageId; doneModel = ev.model
                             doneStatus = ev.status
                             if (ev.fullText.isNotEmpty()) doneFullText = ev.fullText
+                            if (ev.trace.isNotEmpty()) doneTrace = ev.trace
                         }
                         is ChatEvent.Failed -> { failed = true; failMsg = ev.message }
                         // 认不出的帧：不静默丢——内核已落 ChatEvent.Unknown，这里不打断正常收尾。
@@ -545,28 +720,32 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     // error 帧：模型真故障，原因已给出，绝不重发整轮去二次付费。
                     messages = messages + UiMsg("assistant",
                         (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + failMsg,
-                        transient = true)
+                        transient = true, trace = settledTrace(),
+                        traceExpanded = settledExpanded())
                     setStatus(failMsg, true)
                 } else when (doneStatus) {
                     "cancelled" -> {
                         stopped = true
                         val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
                         messages = messages + UiMsg("assistant",
-                            text + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null })
+                            text + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
+                            trace = settledTrace(), traceExpanded = settledExpanded())
                         setStatus("已停止生成")
                     }
                     "cannot_resume" -> needHistory = true
                     else -> {
                         val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
                         messages = messages + UiMsg("assistant", text, doneId,
-                            doneModel?.ifBlank { null })
+                            doneModel?.ifBlank { null },
+                            trace = settledTrace(), traceExpanded = settledExpanded())
                     }
                 }
             } catch (e: CancellationException) {
                 // 本地取消的兜底一支：只有服务端 cancel 打不出去时才会走到这里。
                 stopped = true
                 messages = messages + UiMsg("assistant",
-                    acc.toString() + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null })
+                    acc.toString() + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
+                    trace = settledTrace(), traceExpanded = settledExpanded())
                 setStatus("已停止生成")
             } catch (e: StreamNeedHistoryException) {
                 // 410 / 续不上 / 试到上限：去会话里取回，不重发生成（这一枪到了服务端，不算断网）。
@@ -577,10 +756,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 val msg = e.message ?: "请求失败"
                 messages = messages + UiMsg("assistant",
                     (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + msg,
-                    transient = true)
+                    transient = true, trace = settledTrace(),
+                    traceExpanded = settledExpanded())
                 if (!logoutIf401(e)) setStatus(msg, true)
             } finally {
                 streamText = null; busy = false; streamJob = null
+                // 过程已经随 UiMsg 落地，流上的临时累积就地清空（面板不会双倍挂两份）
+                streamTrace = emptyList()
             }
             if (needHistory) pullFromHistory()
             // persistCurrent + loadSessions：标题可能因首条消息被服务端改掉（顶栏要跟着新）
@@ -921,9 +1103,26 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                 }
                             },
                             onFeedback = { sendFeedback(index, it) },
+                            onToggleTrace = {
+                                // 人点过就尊重人的选择（落定时的"自动折叠"只没被碰过的面板）
+                                messages = messages.mapIndexed { i, x ->
+                                    if (i == index)
+                                        x.copy(traceExpanded = !x.traceExpanded) else x
+                                }
+                            },
+                            onOpenUrl = onOpenUrl,
                         )
                     }
-                    streamText?.let { s -> item { StreamingBubble(s) } }
+                    streamText?.let { s ->
+                        item {
+                            StreamingBubble(s, streamTrace, streamTraceOpen,
+                                onToggleTrace = {
+                                    streamTraceTouched = true
+                                    streamTraceOpen = !streamTraceOpen
+                                },
+                                onOpenUrl = onOpenUrl)
+                        }
+                    }
                 }
 
                 // ---------- .composer：附件行 / 建议 / 输入卡 / 下挂两张玻璃面板 ----------
@@ -1715,7 +1914,8 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
                        onStartEdit: () -> Unit, onCancelEdit: () -> Unit,
                        onSaveEdit: (String) -> Unit,
                        onCopy: (Boolean) -> Unit, onDelete: () -> Unit,
-                       onRegen: () -> Unit, onFeedback: (Int) -> Unit) {
+                       onRegen: () -> Unit, onFeedback: (Int) -> Unit,
+                       onToggleTrace: () -> Unit, onOpenUrl: (String) -> Unit) {
     val mine = m.role == "user"
     val scheme = MaterialTheme.colorScheme
     val clipboard = LocalClipboardManager.current
@@ -1771,6 +1971,10 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
             Column(bubbleMod.padding(
                 horizontal = if (mine) 15.dp else 16.dp,
                 vertical = if (mine) 10.dp else 12.dp)) {
+                // 过程面板排在正文上方（网页 .msg-trace 同位）：历史落定态默认折叠，
+                // 点标题行展开。只有助手消息带得到 trace。
+                if (!mine && m.trace.isNotEmpty())
+                    TracePanel(m.trace, m.traceExpanded, onToggleTrace, onOpenUrl)
                 if (mine) Text(m.content, fontSize = 15.sp, lineHeight = 24.sp,
                     color = if (isWebLight()) WebTokens.LText else WebTokens.Text)
                 else RichText(m.content, scheme.onSurface)
@@ -1831,9 +2035,11 @@ private fun ToolBtn(label: String, on: Boolean = false, enabled: Boolean = true,
     }
 }
 
-/* 流式中的那条助手气泡：网页 = .msg.assistant.typing，body 里实时长字 + ▋ 呼吸光标。 */
+/* 流式中的那条助手气泡：网页 = .msg.assistant.typing，body 里实时长字 + ▋ 呼吸光标。
+ * v0.29.0：正文上方先挂过程面板（流式期间默认展开，判据在 ChatScreen 的 streamTrace*）。 */
 @Composable
-private fun StreamingBubble(text: String) {
+private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded: Boolean,
+                            onToggleTrace: () -> Unit, onOpenUrl: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 6.dp, topEnd = 20.dp,
         bottomEnd = 20.dp, bottomStart = 20.dp)
@@ -1846,9 +2052,115 @@ private fun StreamingBubble(text: String) {
             .background(scheme.surfaceVariant, shape)
             .border(BorderStroke(1.dp, scheme.outline), shape)
             .padding(horizontal = 16.dp, vertical = 12.dp)) {
+            if (trace.isNotEmpty())
+                TracePanel(trace, traceExpanded, onToggleTrace, onOpenUrl)
             if (text.isEmpty()) BlinkCursor()
             else { RichText(text, scheme.onSurface); BlinkCursor() }
         }
+    }
+}
+
+/* ---------------- 过程面板（v0.29.0 · 网页 .msg-trace 的原生对位） ----------------
+ * 全部手搓 Column/Row/Text/clickable —— 本工程没有 markdown 库，也不为这一个面板
+ * 加依赖。配色只吃文件里现成的档位（scheme + text3Color），不自造色板。 */
+
+/** 客户端侧的最后一道闸：只放行 http(s)，其余（含空串）一律按纯文本处理。
+ *  搜索标题/摘要/网址是别人写的网页内容——服务端过滤过一轮，这里仍不互信（纵深防御）。 */
+private fun safeTraceUrl(url: String): String {
+    val u = url.trim()
+    val lower = u.lowercase()
+    return if (lower.startsWith("http://") || lower.startsWith("https://")) u else ""
+}
+
+/** 折叠着也能读的那一行标题：思考过程 · 3 步 · 已搜索 5 个网页（与网页同文案同判据）。 */
+@Composable
+private fun TracePanel(items: List<TraceItem>, expanded: Boolean,
+                       onToggle: () -> Unit, onOpenUrl: (String) -> Unit) {
+    val pages = items.filter { it.kind == "search" }.sumOf { it.results.size }
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("思考过程 · ${items.size} 步" +
+                    if (pages > 0) " · 已搜索 $pages 个网页" else "",
+                fontSize = 12.sp, color = text3Color(),
+                modifier = Modifier.weight(1f))
+            Text(if (expanded) "▾" else "▸", fontSize = 12.sp, color = text3Color())
+        }
+        if (expanded) items.forEach { TraceStepRow(it, onOpenUrl) }
+    }
+}
+
+@Composable
+private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    when (t.kind) {
+        // 思考文本与答案要一眼分得开：矮一档墨色 + 斜体（网页 .trace-thinking 同语义）
+        "thinking" -> Text(t.text, fontSize = 13.sp, lineHeight = 20.sp,
+            fontStyle = FontStyle.Italic, color = scheme.onSurfaceVariant)
+        "omitted" -> Text("…中间 ${t.omitted} 步已省略…",
+            fontSize = 12.sp, color = text3Color(),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp))
+        "tool" -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // ✓/✗ 是字形不是 emoji；还没等到结果的那一步（停在块边界、断线）画一个点
+                Text(if (t.pending) "…" else if (t.ok) "✓" else "✗",
+                    fontSize = 13.sp,
+                    color = when {
+                        t.pending -> text3Color()
+                        t.ok -> scheme.primary
+                        else -> scheme.error
+                    })
+                Text(t.label.ifEmpty { t.name.ifEmpty { "工具调用" } },
+                    fontSize = 13.sp, color = scheme.onSurface,
+                    modifier = Modifier.weight(1f))
+                if (!t.pending && t.elapsedMs > 0)
+                    Text("${t.elapsedMs} ms", fontSize = 11.sp, color = text3Color())
+            }
+            if (!t.pending && t.summary.isNotEmpty())
+                Text(t.summary, fontSize = 12.sp, lineHeight = 18.sp,
+                    color = scheme.onSurfaceVariant)
+            if (t.truncated)
+                Text("输出过长，给模型的那一份已截断", fontSize = 11.sp, color = text3Color())
+        }
+        "search" -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("搜索：${t.query}", fontSize = 12.sp, color = text3Color())
+            t.results.forEach { TraceResultRow(it, onOpenUrl) }
+        }
+        // 认不出的步（服务端以后加的新 kind）：能给字就给字，猜形状是错的方向
+        else -> if (t.text.isNotEmpty())
+            Text(t.text, fontSize = 12.sp, color = text3Color())
+    }
+}
+
+/* 一条命中网页：标题 + 站点名一行、摘要下一行。标题只有过了 safeTraceUrl 那道闸
+ * 才挂点击（走 ChatScreen 既有的 onOpenUrl 出口），否则整行都是死的纯文本。 */
+@Composable
+private fun TraceResultRow(r: TraceHit, onOpenUrl: (String) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val url = safeTraceUrl(r.url)
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(r.title.ifEmpty { url.ifEmpty { "（无标题）" } },
+                fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                color = if (url.isNotEmpty()) scheme.primary else scheme.onSurfaceVariant,
+                modifier = if (url.isNotEmpty())
+                    Modifier.weight(1f).clickable { onOpenUrl(url) }
+                else Modifier.weight(1f))
+            // 站点名从已过闸的 url 里解析；解析不出就空着，绝不拿原 url 充数
+            val host = if (url.isNotEmpty())
+                runCatching { java.net.URI(url).host }.getOrNull().orEmpty() else ""
+            if (host.isNotEmpty())
+                Text(host, fontSize = 11.sp, color = text3Color(), maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 110.dp))
+        }
+        if (r.snippet.isNotEmpty())
+            Text(r.snippet, fontSize = 12.sp, lineHeight = 17.sp,
+                maxLines = 3, overflow = TextOverflow.Ellipsis, color = text3Color())
     }
 }
 
