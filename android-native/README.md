@@ -13,7 +13,9 @@ Kotlin + Jetpack Compose 编写的 Android 客户端，与既有资产的关系�
 - 登录 / 注册 / 找回密码（三题与后端 `RECOVERY_QUESTIONS` 同源）
 - 会话列表：新建、删除（长按）
 - 聊天：`/v1/chat/stream` 流式渲染、停止、失败回退非流式、图片附件上传、
-  模型下拉（`/v1/models`，默认取服务端 `default`）、答复反馈（`/v1/feedback`）
+  模型下拉（`/v1/models`，默认取服务端 `default`）、答复反馈（`/v1/feedback`）、
+  过程面板（v0.29：思考/工具调用/搜索命中实时可见，流式展开、落定折叠，
+  重开会话按服务端落盘的 `trace` 回放）
 - 我的记忆：列表 / 搜索 / 添加 / 删除
 - 网页版·设置与管理（唯一的 WebView 页）：加载 `/app/`，用原生持有的 Bearer
   令牌调 `/v1/auth/adopt` 换取 httpOnly 会话 Cookie 后重载——模型服务配置、
@@ -24,7 +26,11 @@ Kotlin + Jetpack Compose 编写的 Android 客户端，与既有资产的关系�
 - 只用 `Authorization: Bearer`（头凭据），不依赖 Cookie、无需 CSRF 头；
   令牌存本机私有 SharedPreferences。
 - 服务地址默认 `BuildConfig.DEFAULT_BASE_URL`（与壳同源主机名），登录页可改。
-- 与后端契约逐字对齐：SSE 帧 `data: {json}\n\n`、事件 start/content/done/error。
+- 与后端契约逐字对齐：SSE 帧 `data: {json}\n\n`（唯一真源
+  `backend/app/core/stream_events.py`），v0.29 起共八类：
+  `start` / `thinking` / `tool_call` / `tool_result` / `search` / `content` /
+  `done`（含可选 `trace` 步序）/ `error`；认不出的帧静默兼容、不崩（老包保命条款）。
+  整份历史回写 `PUT /v1/sessions/{id}/messages` 必须带 `trace`，否则每次保存都抹平过程留痕。
 
 ## 构建
 

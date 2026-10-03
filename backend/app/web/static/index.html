@@ -478,6 +478,16 @@
   <template id="msgTpl">
     <article class="msg">
       <div class="msg-role"></div>
+      <!-- 过程留痕（v0.29.0）：正文上方的可折叠面板——模型在想什么、调了哪个工具、
+           搜到哪些网页。默认 hidden：没有 trace 的消息（历史里的老消息、用户自己那条）
+           一格都不占。展开/收起由 app.js 的 setTraceOpen 管，步内容由 paintTrace 用
+           createElement + textContent 填：这里放着空壳，字符串一个都不从服务端进 HTML。 -->
+      <div class="msg-trace hidden">
+        <button class="trace-head" type="button" aria-expanded="false">
+          <span class="trace-caret">▸</span><span class="trace-summary"></span>
+        </button>
+        <div class="trace-steps hidden"></div>
+      </div>
       <div class="msg-body"></div>
       <div class="msg-atts"></div>
       <div class="msg-tools">

@@ -148,17 +148,23 @@ _EXTERNAL_CONTENT_NOTE = ("以下为搜索引擎返回的外部网页标题与�
     # 导入期定死就退化成名单。
     available=lambda: availability.search_reachable()
 )
-def web_search_tool(query: str) -> str:
+def web_search_tool(query: str) -> ToolResponse:
     """一次真实搜索。永远回一句人话：不回异常，也不回假结果。
 
     空结果那句是特意写成"不要据此断定不存在"的：模型拿到一句"没找到"就顺手回答
     "这事不存在"，是这类工具最贵的错法——搜不到与不存在是两回事。
     有结果但全是噪声是另一半错法：它会照着不相干的标题编，而那次它是有底气的。
+
+    返回 ToolResponse 而不是裸字符串，是为了把结构化命中（artifacts）单独带一路：
+    给模型看的那段正文（data）逐字节照旧，而 artifacts 里的 {title,url,snippet}
+    走另一条通道进"过程面板"（search 帧），让用户能核对它到底搜了哪些网页。
+    artifacts 绝不掺进 data——掺了就等于改了模型输入。
     """
     rows = search_source.search(query)
     if not rows:
-        return ("这次搜索没有返回结果。可能是源站暂时不给，也可能是关键词的问题；"
-                "不要据此断定这件事不存在，可以换个说法再搜一次，或者如实说查不到。")
+        return ToolResponse(True, data=(
+            "这次搜索没有返回结果。可能是源站暂时不给，也可能是关键词的问题；"
+            "不要据此断定这件事不存在，可以换个说法再搜一次，或者如实说查不到。"))
     # 真人搜成功一次 = 源此刻好用，这是比定时探测更强的证据，也让探测别再敲源站
     availability.note_search_ok()
     # 标注头写在正文之前：结果里的标题与摘要来自别人写的网页，网页作者完全可能
@@ -171,7 +177,10 @@ def web_search_tool(query: str) -> str:
         body += ("\n〔提示〕以上结果里没有一条包含你这句查询的关键词，"
                  "它们可能与你的问题无关：不要据此编造答案，"
                  "换个关键词（更少、更具体的词）再搜一次。")
-    return body
+    # artifacts 原样带上结构化行：URL/摘要的安全裁剪与条数封顶在 stream_events 里做，
+    # 这里只负责"把源头给的东西如实交出去"，不改任何一个字节。
+    return ToolResponse(True, data=body,
+                        artifacts={"kind": "web_search", "query": query, "results": rows})
 
 
 # 虚词与标点。它们不进"实词"：页面上到处都是「的/是/了」，认它们等于任何两条中文
