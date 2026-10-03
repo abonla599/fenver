@@ -195,3 +195,30 @@ def test_mutation_reordering_a_step_turns_the_order_lock_red():
     i_stop = _line_of(r"Stop-Process -Id \$p\.ProcessId -Force", PS1)
     lines[i_dis], lines[i_stop] = lines[i_stop], lines[i_dis]
     assert not ordered("\n".join(lines)), "把停用看门狗挪到停进程之后，顺序锁必须红"
+
+
+def test_startup_window_is_polled_with_a_knob_not_a_hardcoded_sleep():
+    """v0.29.1 换包当晚实测到的脚本自身缺陷：冻结版起进程要过 chromadb 导入与
+    服务商探测，**进程活着但 /health 还没应答**是常态（20:44:42 起、20 秒后才通）。
+    当时写死的 `Start-Sleep -Seconds 12` 于是把一个**好包**判死，打印了整套回滚
+    配方，而生产只是慢了十几秒——误报的回滚指令比没有指令更危险，因为它让人去动
+    一个本来正常的东西。锁的形状：等待必须是轮询 + 可调上限，两处上限同一个旋钮。"""
+
+    def polled(text: str) -> bool:
+        return bool(re.search(r"\[int\] \$StartTimeoutSeconds = (\d+)", text)
+                    and re.search(r"\$bootDeadline = \(Get-Date\)\.AddSeconds\(\$StartTimeoutSeconds\)", text)
+                    and re.search(r"while \(\(Get-Date\) -lt \$bootDeadline\)", text)
+                    and re.search(r"\$deadline = \(Get-Date\)\.AddSeconds\(\$StartTimeoutSeconds\)", text))
+
+    assert polled(PS1), "起进程与 /health 两处等待都必须轮询、都吃 -StartTimeoutSeconds"
+    default = int(re.search(r"\[int\] \$StartTimeoutSeconds = (\d+)", PS1).group(1))
+    assert default >= 60, f"默认上限 {default}s 撑不住一次冷启动（实测约 20s，留一倍余量）"
+    assert not re.search(r"Start-Sleep -Seconds (1[0-9]|[2-9][0-9])\r?\n\$running = Get-LiveProcess", PS1), \
+        "写死的固定秒数不许回到起进程检查前面"
+    # STARTED 必须在轮询循环之后、/health 判定之前：顺序反了就是"还没起来就验收"
+    assert _line_of(r"\$bootDeadline = ", PS1) < _line_of(r"^Write-Output \('STARTED pid='", PS1) \
+        < _line_of(r"\$h\.build -ne \$ExpectedVersion", PS1)
+
+    mutated = PS1.replace("while ((Get-Date) -lt $bootDeadline) {",
+                          "if ((Get-Date) -lt $bootDeadline) {", 1)
+    assert not polled(mutated), "把轮询改成一次性判断，这条锁必须红"

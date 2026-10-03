@@ -50,6 +50,10 @@ param(
     # backend listen port, same number the watchdog and start-ai-stack use
     [int] $Port = 8000,
 
+    # how long to wait for the frozen backend to appear AND to answer /health;
+    # a cold start with chromadb plus the provider probe is not a two-second job
+    [int] $StartTimeoutSeconds = 90,
+
     # run every precheck and print the plan; touches no process and no file
     [switch] $DryRun
 )
@@ -279,17 +283,30 @@ Write-Output 'SWAPPED'
 # start-ai-stack.bat: run_backend resolves data\ against the working directory,
 # and launching it from elsewhere strands fresh runtime data inside the package
 # (the same 2026-09-16 data-loss shape, one swap later).
+# A frozen onedir backend needs more than a few seconds before it owns the
+# port: chromadb imports, then the provider probe. Measured on 2026-10-03 the
+# process was alive but /health still silent at +12s, so a fixed short wait
+# fails a GOOD package and prints a rollback recipe for no reason. Poll
+# instead, and keep the window configurable for slower machines.
 try {
     Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
 } catch {
     Stop-AfterFailure 'start' $_.Exception.Message
 }
-Start-Sleep -Seconds 12
-$running = Get-LiveProcess
-if ($running.Count -lt 1) {
-    Stop-AfterFailure 'started-check' ('no process at ' + $LiveExe + ' twelve seconds after start')
+$livePid = 0
+$bootDeadline = (Get-Date).AddSeconds($StartTimeoutSeconds)
+while ((Get-Date) -lt $bootDeadline) {
+    Start-Sleep -Seconds 2
+    $running = Get-LiveProcess
+    if ($running.Count -ge 1) {
+        $livePid = (@($running)[0]).ProcessId
+        break
+    }
 }
-Write-Output ('STARTED pid=' + (@($running)[0]).ProcessId)
+if ($livePid -eq 0) {
+    Stop-AfterFailure 'started-check' ('no process at ' + $LiveExe + ' within ' + $StartTimeoutSeconds + ' seconds after start')
+}
+Write-Output ('STARTED pid=' + $livePid)
 
 # ------------------------------------- step 7: acceptance - the NEW code answers
 # Not "is the port up": the 2026-09-19 first failed swap kept /health answering
@@ -297,7 +314,7 @@ Write-Output ('STARTED pid=' + (@($running)[0]).ProcessId)
 # the served build stamp equals the target tag, and the served app.js carries
 # this release's marker string.
 $h = $null
-$deadline = (Get-Date).AddSeconds(30)
+$deadline = (Get-Date).AddSeconds($StartTimeoutSeconds)
 while ((Get-Date) -lt $deadline) {
     try {
         $h = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/health' -f $Port) -TimeoutSec 5
