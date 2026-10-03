@@ -100,6 +100,47 @@ function Get-LiveProcess {
             ($_.ExecutablePath.TrimEnd('\') -ieq $LiveExe.TrimEnd('\')) })
 }
 
+function Invoke-PackageMove {
+    # Move a WHOLE package directory: one rename, never a child-by-child copy.
+    #
+    # Why not Move-Item (measured 2026-10-03 22:42, first v0.29.2 swap attempt):
+    # the backend had been stopped and the port was free, yet the rename still
+    # failed on a handle the OS had not finished tearing down. Move-Item does not
+    # simply raise in that case - the FileSystem provider creates the destination
+    # and starts moving children, then dies partway. That run left an empty
+    # dist\run_backend_old-20261003-224259 sitting next to an intact source, so
+    # "which directory is the rollback package?" briefly had two answers.
+    # [System.IO.Directory]::Move is a single rename: it moves everything or
+    # nothing, and it refuses to move ONTO an existing directory - which is also
+    # why the printed rollback recipe below uses it: Move-Item given a destination
+    # that exists does not raise, it nests the backup INSIDE the live package
+    # (hit for real on 2026-10-03 while hand-following this script's own recipe).
+    # The short retry loop exists because a lingering handle is a two-second
+    # condition, not a decision to abort a production swap.
+    param([string] $From, [string] $To, [int] $TrySeconds = 20)
+    $giveUpAt = (Get-Date).AddSeconds($TrySeconds)
+    while ($true) {
+        try {
+            [System.IO.Directory]::Move($From, $To)
+            return
+        } catch {
+            if ((Get-Date) -ge $giveUpAt) { throw }
+            Start-Sleep -Milliseconds 1000
+        }
+    }
+}
+
+function Get-HealthOnce {
+    # One non-blocking /health probe. Anything that can go wrong (no listener
+    # yet, half-up service, TLS/proxy noise) comes back as $null: the caller
+    # decides what silence means, this function never throws.
+    try {
+        return Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/health' -f $Port) -TimeoutSec 5
+    } catch {
+        return $null
+    }
+}
+
 function Show-Rollback {
     # printed, never auto-run: after the live dir has been moved aside, a wrong
     # automatic un-rename under a file lock converts one half-swap into two.
@@ -109,9 +150,11 @@ function Show-Rollback {
     Write-Output 'ROLLBACK-HOWTO 2) stop the NEW backend by full exe path:'
     Write-Output ('    ' + $stopCmd)
     Write-Output 'ROLLBACK-HOWTO 3) move the half-live package aside (keep it as evidence, never delete it):'
-    Write-Output ("    Move-Item -LiteralPath '$Live' -Destination '$Live-failed-$stamp'")
-    Write-Output 'ROLLBACK-HOWTO 4) move the backup package back into place:'
-    Write-Output ("    Move-Item -LiteralPath '$Backup' -Destination '$Live'")
+    Write-Output ("    [System.IO.Directory]::Move('$Live', '$Live-failed-$stamp')")
+    Write-Output 'ROLLBACK-HOWTO 4) move the backup package back into place (this REFUSES if the live dir still'
+    Write-Output '    exists - that refusal is the point: a plain Move-Item would bury the backup one level'
+    Write-Output '    deeper inside the half-live package instead of failing):'
+    Write-Output ("    [System.IO.Directory]::Move('$Backup', '$Live')")
     Write-Output 'ROLLBACK-HOWTO 5) start the old package and wait until /health answers with the OLD build:'
     Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden")
     Write-Output 'ROLLBACK-HOWTO 6) only now re-enable the watchdog task (find it by its action, as this script did)'
@@ -179,6 +222,17 @@ foreach ($poison in @('.env', 'data', 'chroma_db')) {
         # runtime data baked into the package dies with the next swap.
         Add-Fail ('PRECHECK fail stage-contaminant=' + $poison)
     }
+}
+
+# The swap is a RENAME, and a rename cannot cross volumes: staging must sit on
+# the same drive as the live package. Discovering that at step 5 would leave
+# production stopped, the old package safely backed up, and no way in - so it is
+# checked before anything is stopped (same rule the all-or-nothing mover below
+# depends on; PyInstaller's default --distpath dist_new is under the repo root).
+$stageRoot = [System.IO.Path]::GetPathRoot($StageDir)
+$liveRoot = [System.IO.Path]::GetPathRoot($Live)
+if ($stageRoot -ne $liveRoot) {
+    Add-Fail ('PRECHECK fail stage-volume stage=' + $stageRoot + ' live=' + $liveRoot)
 }
 
 if ($script:failures.Count -gt 0) {
@@ -254,14 +308,17 @@ if ($stillListening.Count -gt 0) {
 Start-Sleep -Seconds 1
 
 # ------------------------------------- step 4/5: rename the old aside, then swap
-# Move-Item throughout, never Rename-Item: Rename-Item's -NewName takes only a
-# LEAF name; given a full target path it does not raise, it does nothing, and
-# the script cheerfully prints success (documented 2026-09-20 morning incident
-# - two packages still in their original places, operator told the swap worked).
+# Never Rename-Item: its -NewName takes only a LEAF name; given a full target
+# path it does not raise, it does nothing, and the script cheerfully prints
+# success (documented 2026-09-20 morning incident - two packages still in their
+# original places, operator told the swap worked). And never a cmdlet that
+# copies child by child when the rename fails: see Invoke-PackageMove for what
+# that shape cost on 2026-10-03 (an empty backup directory next to an intact
+# source, both claiming to be the rollback package).
 # The old package is renamed, NEVER deleted: rollback depends on it staying on
 # disk, which is exactly why the backup gets a timestamped name (no overwrite).
 try {
-    Move-Item -LiteralPath $Live -Destination $Backup
+    Invoke-PackageMove -From $Live -To $Backup
 } catch {
     Stop-AfterFailure 'backup-rename' $_.Exception.Message
 }
@@ -269,7 +326,7 @@ $script:backupDone = $true   # from here on, failures print the recipe, no auto-
 Write-Output ('BACKUP ' + $Backup)
 
 try {
-    Move-Item -LiteralPath $StageDir -Destination $Live
+    Invoke-PackageMove -From $StageDir -To $Live
 } catch {
     Stop-AfterFailure 'stage-move' $_.Exception.Message
 }
@@ -304,7 +361,29 @@ while ((Get-Date) -lt $bootDeadline) {
     }
 }
 if ($livePid -eq 0) {
-    Stop-AfterFailure 'started-check' ('no process at ' + $LiveExe + ' within ' + $StartTimeoutSeconds + ' seconds after start')
+    # 2026-10-03 22:44 (v0.29.2 swap): this loop ran its full window without ever
+    # matching a process, and the script printed the complete rollback recipe - for
+    # a package that had been up since +7s and was serving the target build the
+    # whole time (/health answered build=v0.29.2 within seconds of the abort).
+    # "The process list disagrees with me" is a statement about the process list,
+    # not about production. So the verdict gets a second witness before it fires:
+    # ask the service itself. If /health already answers with THE BUILD WE ARE
+    # TRYING TO SHIP, there is nothing to roll back, and printing a recipe only
+    # invites an operator to tear down a healthy backend (this is the same failure
+    # shape as the old hardcoded 12-second sleep, one signal riper).
+    $asked = Get-HealthOnce
+    if ($asked -and $asked.build -eq $ExpectedVersion) {
+        # -1 = up per /health, invisible to the process list. Deliberately not 0:
+        # 0 is the value that means "declare failure and print the recipe".
+        $livePid = -1
+    } else {
+        # One statement per line on purpose: PowerShell 5.1 ends a statement at a
+        # newline even inside parens unless the line ends on an open operator, and
+        # a wrapped message here would take the whole script down with it.
+        $why = 'no process at ' + $LiveExe + ' within ' + $StartTimeoutSeconds
+        $why = $why + ' seconds after start, and /health stayed silent on build=' + $ExpectedVersion
+        Stop-AfterFailure 'started-check' $why
+    }
 }
 Write-Output ('STARTED pid=' + $livePid)
 
@@ -316,10 +395,8 @@ Write-Output ('STARTED pid=' + $livePid)
 $h = $null
 $deadline = (Get-Date).AddSeconds($StartTimeoutSeconds)
 while ((Get-Date) -lt $deadline) {
-    try {
-        $h = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/health' -f $Port) -TimeoutSec 5
-        if ($h -and $h.build) { break }
-    } catch { }
+    $h = Get-HealthOnce
+    if ($h -and $h.build) { break }
     Start-Sleep -Milliseconds 800
 }
 if (-not $h -or -not $h.build) {
