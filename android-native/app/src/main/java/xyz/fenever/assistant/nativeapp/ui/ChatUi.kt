@@ -84,6 +84,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -94,6 +95,9 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -102,6 +106,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -131,6 +136,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ChatEvent
@@ -1285,12 +1291,28 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
     val nativeToolbar = remember(view, toolbarBg, toolbarFg) {
         PopupTextToolbar(view, toolbarBg, toolbarFg)
     }
+    // v0.28.3（真机「空框长按没粘贴」兜底，见 pasteBackstop 注释）：键盘起+空框+
+    // 语音闸门不在位时，长按归文本框自家链条；链条哑了（工具条没弹起）才补位。
+    val latestInput by rememberUpdatedState(input)
+    var fieldRect by remember { mutableStateOf<Rect?>(null) }
     // 第 12 轮（豆包三态输入区，用户逐图钦定）：收起=单胶囊 [声纹][发消息或按住
     // 说话…][＋]；单点展开（键盘起/有字/生成中）=上行「输入消息…」文本区 +
     // 下行 [声纹][模型钮][＋][发送/停止]。
     val expanded = keyboardUp || input.text.isNotEmpty() || busy
     // 语音闸门在位就不挂文本框（第 10 轮零键盘闪机制原样保留）：没框就没焦点可抢。
     val gateOn = voiceMode || voiceArmed || voiceLive
+    val pasteGuardMod = Modifier.pasteBackstop(
+        toolbar = nativeToolbar,
+        eligible = { !gateOn && keyboardUp && !voiceMode && latestInput.text.isEmpty() },
+        anchorRect = { fieldRect },
+        onPasteText = { text ->
+            val cur = latestInput
+            val start = cur.selection.min
+            val end = cur.selection.max
+            onInput(TextFieldValue(cur.text.replaceRange(start, end, text),
+                selection = TextRange(start + text.length)))
+        },
+    )
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
         color = scheme.surface, border = BorderStroke(1.dp, scheme.outline),
         shadowElevation = 6.dp) {
@@ -1308,7 +1330,8 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                         else IconVoiceWave(scheme.onSurfaceVariant, Modifier.size(19.dp))
                     }
                 }
-                Box(Modifier.weight(1f).heightIn(min = 42.dp).then(voiceMod),
+                Box(Modifier.weight(1f).heightIn(min = 42.dp).then(voiceMod)
+                    .then(pasteGuardMod),
                     contentAlignment = if (gateOn) Alignment.Center else Alignment.TopStart) {
                     if (gateOn) {
                         if (voiceMode) Row(horizontalArrangement = Arrangement.Center,
@@ -1331,7 +1354,9 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                             cursorBrush = SolidColor(scheme.primary),
                             modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 200.dp)
                                 .padding(horizontal = 6.dp, vertical = 7.dp)
-                                .focusRequester(focusRequester),
+                                .focusRequester(focusRequester)
+                                // v0.28.3：兜底粘贴弹胶囊要贴着框——把根坐标量下来备着
+                                .onGloballyPositioned { fieldRect = it.boundsInRoot() },
                             // 网页：Enter 发送、Shift+Enter 换行。手机键盘对位：Send 键=发送，
                             // 键盘上的回车/换行键照常插入换行（Gboard 上 Shift 语义由键面自己给）。
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -1514,6 +1539,79 @@ private class PopupTextToolbar(
 
     override val status: TextToolbarStatus
         get() = if (popup != null) TextToolbarStatus.Shown else TextToolbarStatus.Hidden
+}
+
+/* v0.28.3（真机反馈「在这个界面长按怎么没有粘贴了」+截图：键盘起、空框）：
+ * Compose 1.6.8 的长按链条里，「粘贴」一项被 clipboardManager.hasText() 把关——
+ * 它只认 text/plain 这一种 MIME。国产 ROM 上不少 App 复制出来的剪贴板带的是
+ * 自定义/非标准 MIME（内容其实是文字），hasText() 说不算，于是 showMenu 收到
+ * 四个全 null 的回调，胶囊静默不弹，用户眼里就是"长按没反应、粘贴没了"。
+ * 另一条可疑路径是整条长按链在个别 ROM 上压根没触发（同样无声无息）。
+ *
+ * 兜底观察器与 voiceHold 同款姿势：挂在输入位锚点 Box 上、PointerEventPass.Final
+ * 收事件、一口不吃——文本框自己的正常链照常跑；只有"长按抬手后工具条仍未弹起"
+ * （status != Shown，子节点 Main 段先于父节点 Final 段处理同一记 up，判定时机
+ * 天然靠后）才补位：直接读平台剪贴板（coerceToText 能把非标准 MIME 里的文字
+ * 硬取出来），复用同一只 PopupTextToolbar 弹「粘贴」，插入走 onInput 光标位。
+ * 只管空框长按这一被点名的场景：框里有字时长按选词出剪切/复制/粘贴，那条链
+ * 的判定不经过 hasText 门（复制项由选区决定），没有同样的哑点。 */
+@Composable
+private fun Modifier.pasteBackstop(
+    toolbar: PopupTextToolbar,
+    eligible: () -> Boolean,
+    anchorRect: () -> Rect?,
+    onPasteText: (String) -> Unit,
+): Modifier {
+    val ctx = LocalContext.current
+    val eligibleRef = rememberUpdatedState(eligible)
+    val rectRef = rememberUpdatedState(anchorRect)
+    val pasteRef = rememberUpdatedState(onPasteText)
+    return pointerInput(toolbar) {
+        val slop = viewConfiguration.touchSlop
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (!eligibleRef.value()) return@awaitEachGesture
+            // 第一阶段：长按时限内抬手 = 普通点按/放光标，全程不掺和
+            val earlyUp = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                var up: PointerInputChange? = null
+                while (up == null) {
+                    val e = awaitPointerEvent(PointerEventPass.Final)
+                    val c = e.changes.firstOrNull { it.id == down.id } ?: break
+                    if ((c.position - down.position).getLength() > slop) break
+                    if (!c.pressed) up = c
+                }
+                up
+            }
+            if (earlyUp != null) return@awaitEachGesture
+            // 第二阶段：等这一指头真正离开（超时/滑出/取消都拿不到干净的 up）
+            run {
+                var r: PointerInputChange? = null
+                while (r == null) {
+                    val e = awaitPointerEvent(PointerEventPass.Final)
+                    val c = e.changes.firstOrNull { it.id == down.id } ?: break
+                    if ((c.position - down.position).getLength() > slop) break
+                    if (!c.pressed) r = c
+                }
+                r
+            } ?: return@awaitEachGesture
+            if (toolbar.status == TextToolbarStatus.Shown) return@awaitEachGesture
+            val text = readClipText(ctx) ?: return@awaitEachGesture
+            val rect = rectRef.value() ?: return@awaitEachGesture
+            toolbar.showMenu(rect, null, { pasteRef.value()(text) }, null, null)
+        }
+    }
+}
+
+/* 平台剪贴板直读：Compose 的 hasText() 只认 text/plain，这里退一步——
+ * coerceToText 能把带自定义 MIME 的文本项还原成字符串；图片/文件项
+ * coerceToText 吐回来的是 content URI，那不算"可粘贴的文字"，拒掉。 */
+private fun readClipText(ctx: android.content.Context): String? {
+    val cm = ctx.getSystemService(android.content.ClipboardManager::class.java) ?: return null
+    val clip = cm.primaryClip ?: return null
+    if (clip.itemCount == 0) return null
+    val t = clip.getItemAt(0).coerceToText(ctx)?.toString()?.trim() ?: return null
+    if (t.isEmpty() || t.startsWith("content://") || t.startsWith("file://")) return null
+    return t
 }
 
 /* 模型切换钮（ⒶAuto）：第 13 轮起收起态也挂——用户点名「不然我进去了怎么找到」，
