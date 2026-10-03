@@ -649,15 +649,50 @@ def test_轮首只有一个闸_影子与读者是同一钩子的两个判据而�
     streaming 的检查点仍恰好一处（before_round() 调用），main.py 的钩子只有
     一个 before_round 定义、它内部同时持有影子与读者两个判据。有人再往轮首
     另起一个独立闸，先红在这里，再去评审里解释为什么『两处都在回答这一轮
-    该不该花钱出网』的问题被拆成了两半。"""
+    该不该花钱出网』的问题被拆成了两半。
+
+    v0.29.0 起轮次循环从 stream_chat 搬进了 stream_chat_events（stream_chat 退化成
+    只透正文的 str 薄过滤器），原来"读 stream_chat 那一个函数的源码"这个切面就
+    失效了——不是判据错了，是尺子量错了地方。这里把数法改硬而不是改松：整个
+    streaming 模块里 before_round() 的调用点恰好一处，并且那一条必须挂在真的会
+    create() 出网的那个函数里，同时 stream_chat 必须把钩子原样转给那个函数。
+    于是"闸门搬家"照样绿，"另起一座闸"和"闸挂在没人走的函数上"都会红。
+    """
+    import ast
     import inspect
     import app.core.streaming as streaming
     # conftest 的 autouse 桩挂在模块属性上（streaming.stream_chat = fake_stream），
     # 直接 inspect 会扫到桩。与 real_stream 同一招：reload 换回真函数再读源码——
     # 本用例只读源码、不发调用，reload 不影响任何行为判据。
     importlib.reload(streaming)
-    src = inspect.getsource(streaming.stream_chat)
+    src = inspect.getsource(streaming)
     assert src.count("before_round()") == 1, src
+
+    def _plain_calls(node, fname):
+        return sum(1 for n in ast.walk(node)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                   and n.func.id == fname)
+
+    def _upstream_creates(node):
+        return sum(1 for n in ast.walk(node)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "create")
+
+    top_funcs = [n for n in ast.parse(src).body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    holders = [n.name for n in top_funcs if _plain_calls(n, "before_round")]
+    assert len(holders) == 1, f"轮首检查点只许有一处，现在出现在 {holders}"
+    holder = next(n for n in top_funcs if n.name == holders[0])
+    assert _upstream_creates(holder) >= 1, (
+        f"唯一的检查点挂在 {holders[0]} 上，可它自己从不 create()：说明真正的轮次"
+        "循环在别处另起了一处，正是这条判据要拦的『两座闸』")
+    filter_src = next((ast.get_source_segment(src, f) for f in top_funcs
+                       if f.name == "stream_chat"), "")
+    assert filter_src, "stream_chat 不在了：老签名那条兼容路径没人管，判据得跟着重写"
+    assert holders[0] in filter_src and "before_round=before_round" in filter_src, (
+        "stream_chat 没把 before_round 转给真正出网的那个函数：走 str 签名的调用方"
+        "（非流式回退与一批既有用例）会绕过轮首这座闸")
+
     import app.main as m
     hook_src = inspect.getsource(m._produce_stream)
     assert hook_src.count("def before_round") == 1

@@ -43,7 +43,12 @@ class ApiException(val status: Int, message: String) : Exception(message)
 @Serializable data class StoredMessage(val role: String, val content: String,
                                        val message_id: String? = null,
                                        val model: String? = null,
-                                       val attachments: List<AttachmentDto>? = null)
+                                       val attachments: List<AttachmentDto>? = null,
+                                       // v0.29.0 过程留痕：步的形状异构（按 kind 分四种），
+                                       // 原样收进 JsonObject 最省也最不丢字段；界面层再翻译成
+                                       // UI 模型。json 开了 ignoreUnknownKeys（见 Api.json），
+                                       // 服务端将来给步加键，老包也只是看不懂而不是解崩。
+                                       val trace: List<JsonObject>? = null)
 @Serializable data class SessionDetail(val session_id: String = "", val title: String = "新对话",
                                        val created_at: String = "", val model: String = "",
                                        val messages: List<StoredMessage> = emptyList())
@@ -76,23 +81,49 @@ class ApiException(val status: Int, message: String) : Exception(message)
                                             val items: List<ScheduleItemDto> = emptyList(),
                                             val count: Int = 0)
 
-/* /v1/chat/stream 的帧集合（v0.25 R3/R3b 定稿，与网页 api.js:149 那份内核逐条对齐）。
-   旧的 start/content/done/error 三个事件名一个字都不改（两个客户端都按 data.type 分发，
-   改了名字会先打断线上）；新增的是被服务端显式发出的 cancelled/cannot_resume 两帧，
+/* /v1/chat/stream 的帧集合（v0.29.0 定稿，唯一真源是 backend/app/core/stream_events.py，
+   与网页 api.js 那份内核逐条对齐）。完整八类帧，按出现序：
+     start(message_id,model) → thinking(text)* → tool_call(id,name,label,arguments|arguments_text)
+     → tool_result(id,name,ok,summary,elapsed_ms,truncated) → search(id,query,results[])
+     → content(text)* → done(full_text,message_id,model[,trace]) / error(message)。
+   旧的 start/content/done/error 字段一个都不动（两个客户端都按 data.type 分发，
+   改了名字会先打断线上）；thinking/tool_call/tool_result/search 是 v0.29.0 新增；
+   cancelled/cannot_resume 是被服务端显式发出的停止/续播帧（v0.25 R3b），
    以及"看不懂的帧不再静默丢"这一型（ChatEvent.Unknown）。
+
+   trace 步（done.trace 与会话历史里存的是同一套形状）按 kind 区分：
+   thinking{text} / tool{id,name,label,ok,summary,elapsed_ms,truncated} /
+   search{id,query,results[{title,url,snippet}]} / omitted{count}。
 
    终帧纪律：cancelled 与 cannot_resume **都不是终止帧**——它们是 done 之前的一帧，
    必须等随后那条 type:"done" 收尾。停/续不上的信息全进 done 的新字段
    （status/stopped_reason/resumable），旧骨架 full_text/message_id/model 不变。 */
+/* 一条搜索命中（v0.29.0）：title/url/snippet 全是第三方可控文本，界面只当字面量渲染；
+   url 服务端已把非 http(s) 抹成空串，客户端仍要自校验之后才允许挂点击。 */
+data class SearchHit(val title: String, val url: String, val snippet: String)
+
 sealed class ChatEvent {
     data class Start(val runId: String, val messageId: String, val model: String) : ChatEvent()
     data class Content(val text: String) : ChatEvent()
+    // v0.29.0 过程帧：思考文本（服务端已按 120 字/0.4 秒攒片）、工具一头一尾、搜索命中。
+    data class Thinking(val text: String) : ChatEvent()
+    // 参数合法 JSON 时进 arguments（逐键字符串），否则退化成 arguments_text 整段。
+    data class ToolCall(val id: String, val name: String, val label: String,
+                        val arguments: Map<String, String>,
+                        val argumentsText: String?) : ChatEvent()
+    data class ToolResult(val id: String, val name: String, val ok: Boolean,
+                          val summary: String, val elapsedMs: Int,
+                          val truncated: Boolean) : ChatEvent()
+    data class Search(val id: String, val query: String,
+                      val results: List<SearchHit>) : ChatEvent()
     // 停止或宽限到点：半句已产出，随后紧跟一条 done 收尾，这里不单独终结。
     data class Cancelled(val fullText: String, val messageId: String, val message: String) : ChatEvent()
     // 这条连接追不上服务端缓冲（这一轮续不上了）：同样等随后的 done 收尾，不单独终结。
     data class CannotResume(val message: String) : ChatEvent()
+    // trace：服务端裁过的权威步序（含 omitted），老服务端不发这字段就是空表。
     data class Done(val fullText: String, val messageId: String, val model: String,
-                    val status: String, val stoppedReason: String, val resumable: Boolean) : ChatEvent()
+                    val status: String, val stoppedReason: String, val resumable: Boolean,
+                    val trace: List<JsonObject> = emptyList()) : ChatEvent()
     data class Failed(val message: String) : ChatEvent()
     // 认不出的帧类型：不静默丢——上报一次，同时不打断正常收尾（网页 onUnknown 同语义）。
     data class Unknown(val type: String) : ChatEvent()
@@ -243,6 +274,10 @@ object Api {
                 put("content", JsonPrimitive(m.content))
                 m.message_id?.let { put("message_id", JsonPrimitive(it)) }
                 m.model?.let { put("model", JsonPrimitive(it)) }
+                // 整份历史回写是 PUT 全量替换：这一句不带 trace，服务端落好的过程留痕
+                // 就在每一次保存之后被抹平（v0.29.0 落盘回放的命门）。空数组不发——
+                // 发出去等于用「没有过程」覆盖掉服务端那一份紧凑 trace。
+                m.trace?.let { if (it.isNotEmpty()) put("trace", JsonArray(it)) }
             }
         })
         call("/v1/sessions/" + enc(id) + "/messages", "PUT",
@@ -544,8 +579,11 @@ object Api {
     }.flowOn(Dispatchers.IO)
 
     /* 单帧分发：先累加游标与 run_id（停止/续播都认它），再按 data.type 落成 ChatEvent。
-       旧事件名 start/content/done/error 原样保留；cancelled/cannot_resume 是 done 之前的
-       非终帧；认不出的帧不静默丢——落一个 ChatEvent.Unknown 上报，同时不打断正常收尾。 */
+       旧事件名 start/content/done/error 原样保留；v0.29.0 新增 thinking/tool_call/
+       tool_result/search 四臂（字段口径以 core/stream_events.py 为唯一真源）；
+       cancelled/cannot_resume 是 done 之前的非终帧；认不出的帧不静默丢——落一个
+       ChatEvent.Unknown 上报，同时不打断正常收尾。新臂全部用「取不到就给空值」的
+       全量读法（as? + contentOrNull），任何一帧字段畸变都不会抛。 */
     private suspend fun emitFrame(col: FlowCollector<ChatEvent>, data: String?,
                                   idValue: String?, st: StreamResumeState,
                                   onRun: ((String) -> Unit)?) {
@@ -560,9 +598,37 @@ object Api {
             if (st.runId.isNotEmpty()) onRun?.invoke(st.runId)
         }
         val str: (String) -> String = { k -> o[k]?.jsonPrimitive?.contentOrNull.orEmpty() }
+        // 新增臂专用的全量读法：值不是字符串原语就当没有，绝不 jsonPrimitive 抛异常。
+        val sOf: (JsonObject, String) -> String =
+            { o2, k -> (o2[k] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+        val bOf: (JsonObject, String) -> Boolean =
+            { o2, k -> (o2[k] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull() ?: false }
+        val iOf: (JsonObject, String) -> Int =
+            { o2, k -> (o2[k] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0 }
         when (val type = o["type"]?.jsonPrimitive?.contentOrNull) {
             "start" -> col.emit(ChatEvent.Start(st.runId, str("message_id"), str("model")))
             "content" -> col.emit(ChatEvent.Content(str("text")))
+            "thinking" -> col.emit(ChatEvent.Thinking(sOf(o, "text")))
+            "tool_call" -> {
+                // arguments 给的是对象就逐键取字符串（非原语退化成 toString）；
+                // 模型参数不是合法 JSON 时服务端发的是 arguments_text。两头都照收，不抛。
+                val args = (o["arguments"] as? JsonObject)?.entries
+                    ?.associate { (k, v) ->
+                        k to ((v as? JsonPrimitive)?.contentOrNull ?: v.toString()) }
+                    ?: emptyMap()
+                col.emit(ChatEvent.ToolCall(sOf(o, "id"), sOf(o, "name"), sOf(o, "label"),
+                    args, (o["arguments_text"] as? JsonPrimitive)?.contentOrNull))
+            }
+            "tool_result" -> col.emit(ChatEvent.ToolResult(
+                sOf(o, "id"), sOf(o, "name"), bOf(o, "ok"),
+                sOf(o, "summary"), iOf(o, "elapsed_ms"), bOf(o, "truncated")))
+            "search" -> {
+                val hits = (o["results"] as? JsonArray)?.mapNotNull { el ->
+                    val r = el as? JsonObject ?: return@mapNotNull null
+                    SearchHit(sOf(r, "title"), sOf(r, "url"), sOf(r, "snippet"))
+                } ?: emptyList()
+                col.emit(ChatEvent.Search(sOf(o, "id"), sOf(o, "query"), hits))
+            }
             "cancelled" -> col.emit(ChatEvent.Cancelled(str("full_text"), str("message_id"),
                 str("message")))
             "cannot_resume" -> {
@@ -573,8 +639,11 @@ object Api {
                 st.terminal = true
                 val resumable = o["resumable"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
                     ?: true
+                // trace：服务端裁过的权威步序（落盘回放同一份形状），原样收进 JsonObject。
+                val steps = (o["trace"] as? JsonArray)
+                    ?.mapNotNull { it as? JsonObject } ?: emptyList()
                 col.emit(ChatEvent.Done(str("full_text"), str("message_id"), str("model"),
-                    str("status"), str("stopped_reason"), resumable))
+                    str("status"), str("stopped_reason"), resumable, steps))
             }
             "error" -> {
                 st.terminal = true
