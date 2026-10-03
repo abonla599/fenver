@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from tests import conftest
 
 client = TestClient(app)
 
@@ -64,6 +65,9 @@ def test_stream_with_session(monkeypatch):
             yield piece
 
     monkeypatch.setattr(streaming, "stream_chat", fake_stream)
+    # 端点抽干的是 stream_chat_events（v0.29.2）：两条切面一起钉，只钉一条等于没钉。
+    monkeypatch.setattr(streaming, "stream_chat_events",
+                        conftest.text_as_events(fake_stream))
 
     # 流式发送消息
     payload = {
@@ -124,6 +128,7 @@ def test_a_failed_model_call_says_which_exception_and_why(client, monkeypatch, c
         yield "永远不会到这里"
 
     monkeypatch.setattr(streaming, "stream_chat", boom)
+    monkeypatch.setattr(streaming, "stream_chat_events", conftest.text_as_events(boom))
 
     res = client.post("/v1/chat/stream", json={
         "model": "deepseek-chat",

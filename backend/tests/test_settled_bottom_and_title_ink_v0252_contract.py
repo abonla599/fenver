@@ -69,9 +69,13 @@ def _kt_code() -> str:
 
 
 def _settle_effect_body(code: str) -> str:
-    """取 LaunchedEffect(messages.size, streamText) 的函数体（大括号配对截断）。"""
-    m = re.search(r"LaunchedEffect\(messages\.size,\s*streamText\)\s*\{", code)
-    assert m, "找不到贴底跟随的 LaunchedEffect(messages.size, streamText)：这一整块被删了？"
+    """取贴底跟随那条 LaunchedEffect 的函数体（大括号配对截断）。
+
+    key 列表允许变（v0.29.2 加了过程面板的变化量），钉的是"messages.size 与
+    streamText 仍在、且这是唯一那条贴底效果"。
+    """
+    m = re.search(r"LaunchedEffect\(\s*messages\.size,[^)]*streamText[^)]*\)\s*\{", code)
+    assert m, "找不到贴底跟随的 LaunchedEffect(messages.size, streamText, …)：这一整块被删了？"
     i = m.end() - 1
     depth = 0
     while i < len(code):

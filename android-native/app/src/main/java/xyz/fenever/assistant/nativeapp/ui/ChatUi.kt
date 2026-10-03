@@ -122,6 +122,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.TextToolbar
 import androidx.compose.ui.platform.TextToolbarStatus
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -439,11 +440,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 越界的 offset 会被 LazyList 夹到最大滚动位置——"贴到最底"从此不依赖高度测量，
     // 量多高都贴得实。落定分支的退出判据也换成结果导向：最后一项底边已经进了视口
     // 才算贴完，随帧重贴直到那一刻（上限 24 帧防排版反复抖动）。
-    // v0.29.0 过程面板与贴底的共存：key 一个字节都不动（test_settled_bottom_and_title_ink
-    // 逐字钉着这条 LaunchedEffect，贴底/夹边界是 v0.28 真机磨出来的判据，不在这儿加戏）。
-    // 面板长高搭的是 content 帧重跑的顺风车；落定那一拍的无条件顶到底会把整块过程
-    // 连同答案尾行一起送回眼前；生成中分支自带「只有近底才跟」闸门，上翻阅读不被打断。
-    LaunchedEffect(messages.size, streamText) {
+    // v0.29.0 过程面板与贴底的共存：面板长高搭的是 content 帧重跑的顺风车；落定那一拍
+    // 的无条件顶到底会把整块过程连同答案尾行一起送回眼前；生成中分支自带「只有近底才
+    // 跟」闸门，上翻阅读不被打断。
+    // v0.29.2 改判：顺风车没了。服务端把思考帧改成即产即发之后，"只想不说"的那几十秒
+    // 里 streamText 一直是空串——面板在长高、列表却一动不动，最新那几行思考始终在视口
+    // 外，用户看到的仍然是"憋半天没动静"。所以跟着面板的**变化量**重跑这条效果：
+    // 步数与思考总字数。为什么不拿 streamTrace 列表本身当 key——连续思考是就地并进最后
+    // 一步的（30 个分片不许变 30 行），列表身份不变，那样 key 永不触发，等于没修。
+    // 贴底/夹边界的判据一个字没动（test_settled_bottom_and_title_ink 钉的就是那部分），
+    // 生成中分支的近底闸门继续挡住"每个 token 把上翻阅读的人拽回底部"。
+    val streamTraceChars = streamTrace.sumOf { it.text.length }
+    LaunchedEffect(messages.size, streamText, streamTrace.size, streamTraceChars) {
         val first = listState.layoutInfo
         val total = first.totalItemsCount
         if (total == 0) return@LaunchedEffect
@@ -2209,7 +2217,47 @@ private fun AttPreview(a: AttItem) {
 }
 
 /* 轻量 Markdown：``` 围栏内是代码卡（--code-bg 深底、line 描边、圆角 14、等宽 13/1.6，
- * 横向可滚），其余按段落文本。完整 MD 排版留给网页版；原生保证可读、形状对得上。 */
+ * 横向可滚），围栏之外再认 **加粗**。完整 MD 排版留给网页版；原生保证可读、形状对得上。
+ *
+ * 加粗这一层是 2026-10-03 用户点名补的：满屏的 `**` 号。原因不是正则写错，也不是
+ * emoji / 全角括号不匹配——是**从来就没有实现过**：整个 RichText 只切 ``` 围栏，
+ * 其余一律当纯文本吐给 Text()。所以模型按 Markdown 写的每一条加粗，在原生端都
+ * 带着星号原样上屏，而网页版（marked + DOMPurify）一直是正常的。
+ *
+ * 只认成对的 `**`：单个 `*` 留给算术（"2 * 3 * 4"不许变斜体，那是另一种坏）。
+ * 流式期间遇到只开了头还没闭合的 `**`，按原样显示——宁可晚一帧变粗，也不许把
+ * 已经到手的字吞掉。 */
+internal fun boldSegments(src: String): List<Pair<String, Boolean>> {
+    val out = ArrayList<Pair<String, Boolean>>()
+    var rest = src
+    while (true) {
+        val open = rest.indexOf("**")
+        if (open < 0) { if (rest.isNotEmpty()) out.add(rest to false); break }
+        if (open > 0) out.add(rest.substring(0, open) to false)
+        rest = rest.substring(open + 2)
+        val close = rest.indexOf("**")
+        if (close < 0) { out.add("**" + rest to false); break }
+        out.add(rest.substring(0, close) to true)
+        rest = rest.substring(close + 2)
+    }
+    return out
+}
+
+private fun boldAnnotated(src: String, color: Color): AnnotatedString {
+    val b = AnnotatedString.Builder()
+    b.pushStyle(SpanStyle(color = color))
+    for ((seg, isBold) in boldSegments(src)) {
+        if (isBold) {
+            b.pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
+            b.append(seg)
+            b.pop()
+        } else {
+            b.append(seg)
+        }
+    }
+    return b.toAnnotatedString()
+}
+
 @Composable
 internal fun RichText(text: String, color: Color) {
     val parts = ArrayList<Pair<String, Boolean>>()
@@ -2243,8 +2291,8 @@ internal fun RichText(text: String, color: Color) {
                         .border(1.dp, WebTokens.Line, preShape)
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                         .horizontalScroll(rememberScrollState()))
-            } else if (seg.isNotBlank()) Text(seg, fontSize = 15.sp, lineHeight = 25.sp,
-                color = color)
+            } else if (seg.isNotBlank()) Text(boldAnnotated(seg, color),
+                fontSize = 15.sp, lineHeight = 25.sp)
         }
     }
 }
