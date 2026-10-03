@@ -116,6 +116,33 @@ class _FakeClient:
     chat = _FakeChat()
 
 
+def text_as_events(text_fn):
+    """把一个"逐块产出 str"的 stream_chat 桩包成同签名的 stream_chat_events 桩。
+
+    v0.29.2 起聊天端点抽干的是 stream_chat_events，不是 stream_chat：过程帧必须在产生
+    的那一刻进 run 缓冲，不能再等正文把它带出来（判据与来龙去脉见
+    tests/test_live_trace_relay_v0292.py）。既有的端点用例一律以 stream_chat 为切面，
+    不必重写：把同一个 spy 交给这里，两条切面就钉在一起，改一条漏一条会当场红。
+
+    桩自己直接产出帧 dict 时也照收（原样透传），这样"要发 error 帧"那类用例可以复用
+    同一个包装器。
+    """
+    from app.core import stream_events as se
+
+    def events(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
+               tools=None, max_tool_turns=5, user_id=None,
+               cancel_event=None, on_upstream_start=None, before_round=None):
+        for piece in text_fn(model, messages, provider_id=provider_id,
+                             temperature=temperature, max_tokens=max_tokens,
+                             tools=tools, max_tool_turns=max_tool_turns,
+                             user_id=user_id, cancel_event=cancel_event,
+                             on_upstream_start=on_upstream_start,
+                             before_round=before_round):
+            yield piece if isinstance(piece, dict) else se.content_frame(piece)
+
+    return events
+
+
 @pytest.fixture(autouse=True)
 def _stub_llm_calls(monkeypatch):
     """把所有真实模型调用打桩：测试不应消耗额度，也不应因上游故障变红。"""
@@ -147,6 +174,9 @@ def _stub_llm_calls(monkeypatch):
             yield piece
 
     monkeypatch.setattr(streaming, "stream_chat", fake_stream)
+    # 端点自 v0.29.2 起抽干 stream_chat_events：两条切面必须一起钉住，否则这个 autouse
+    # 桩只挡住一半，剩下的用例会去碰真上游（然后以 TypeError 或网络超时收场）。
+    monkeypatch.setattr(streaming, "stream_chat_events", text_as_events(fake_stream))
 
     # 第五本限流账是进程内的单调时钟状态：不清的话，整套跑下来前面的测试把
     # (127.0.0.1, default_user) 那 20 次额度用光，后面每一个 /v1/chat 都吃 429。

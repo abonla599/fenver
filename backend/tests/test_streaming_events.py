@@ -374,8 +374,9 @@ def test_compact_trace_caps_steps_and_never_empties():
 def test_sse_endpoint_emits_process_frames_and_persists_trace(real_engine):
     """真用户走的是 /v1/chat/stream，不是引擎函数。这一条钉端点接线：
 
-    - thinking/tool_call/tool_result 这些被 stream_chat 文本过滤器吃掉的帧，必须靠
-      ambient sink（begin_trace/drain_frames）补发进 run 缓冲、原样上屏；
+    - thinking/tool_call/tool_result 这些被 stream_chat 文本过滤器吃掉的帧，自 v0.29.2
+      起由端点直接逐帧消费 stream_chat_events，在产生的那一刻 append 进 run 缓冲、
+      原样上屏（不许攒到正文之后再补发，那条锁在 test_live_trace_relay_v0292.py）；
     - 助手消息落盘时带 trace（回看时才有来历），done 帧也带 trace；
     - 旧的 content/done 骨架不受影响（老客户端只认 content/done）。
     """

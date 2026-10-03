@@ -14,7 +14,9 @@ SimpleNamespace 假块全都照样绿，线上一接真模型就永远没有思�
 回退必红自查（①②④ 实测过：把 mock 上游的 reasoning_content 三片删掉，这三条一起红，
 ③不受影响——它验的是另一道闸）：
 - 上游不再给 reasoning_content、或 SDK/读侧把它吞了 → ①②④ 红；
-- 把端点里 drain_frames 的补发时机改到正文之后 → ②红（thinking 排到 content 之后）；
+- 把端点里补发的顺序改坏（thinking 排进 content 之后）→ ②红。注意**迟到**不在这里
+  判：过程帧攒到正文之后一起补发，读完整条流之后形状一模一样，②看不出来——那条锁
+  在 test_live_trace_relay_v0292.py，它冻住上游、只认读者中途读到的东西。
 - 把 search_frame 的 _safe_url 改成原样放行 → ③红（javascript: 上了线）；
 - 把 add_message 的 trace 参数删掉 → ④红（磁盘上那份没了）。
 """
