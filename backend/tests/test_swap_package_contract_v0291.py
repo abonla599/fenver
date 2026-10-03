@@ -98,13 +98,19 @@ def test_no_rename_item_and_no_get_process():
       （2026-09-20 上午事故：脚本打印"换好了"，两份包都在原位）；换目录必须 Move-Item。
     - Get-Process：它的属性是 .Id，.ProcessId 是 Win32_Process 的——写错不报错，
       只会静默地什么都没停。本脚本停进程全走 Win32_Process（Get-LiveProcess），
-      所以连 Get-Process 这个 cmdlet 都不许出现，从根上没有拿错属性的可能。"""
-    assert "Rename-Item" not in CODE, "换目录只许 Move-Item；Rename-Item 收整路径时静默不动"
+      所以连 Get-Process 这个 cmdlet 都不许出现，从根上没有拿错属性的可能。
+
+    v0.29.2 换包当晚改判：换目录从"必须 Move-Item"收紧成"必须走整体改名器"。判据还是同一条
+    ——**不许打印一句成功而文件没动**——只是当年的解法（Move-Item）自己漏了另一种
+    静默形状：改名失败时它会先建目标目录再逐子项搬，2026-10-03 22:42 那次就在盘上
+    留下一个空的 dist\run_backend_old-20261003-224259 与完好源目录并排。判据与理由
+    见 test_swap_package_all_or_nothing_move.py。"""
+    assert "Rename-Item" not in CODE, "换目录只许整体改名；Rename-Item 收整路径时静默不动"
     assert "Get-Process" not in CODE, "不许 Get-Process：.Id/.ProcessId 属性之争只留给 Win32_Process 一处"
-    assert re.search(r"Move-Item -LiteralPath \$Live -Destination \$Backup", CODE), \
-        "旧包必须先 Move-Item 让位（这就是那条不许删的备份步）"
-    assert re.search(r"Move-Item -LiteralPath \$StageDir -Destination \$Live", CODE), \
-        "新包必须 Move-Item 换入到位"
+    assert re.search(r"Invoke-PackageMove -From \$Live -To \$Backup", CODE), \
+        "旧包必须先整体改名让位（这就是那条不许删的备份步）"
+    assert re.search(r"Invoke-PackageMove -From \$StageDir -To \$Live", CODE), \
+        "新包必须整体改名换入到位"
 
 
 def test_watchdog_task_found_by_action_not_by_name():
