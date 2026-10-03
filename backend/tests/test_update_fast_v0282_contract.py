@@ -146,9 +146,9 @@ def test_metadata_gets_travel_on_the_fast_lane_with_one_retry():
     assert re.search(r"metaClient = OkHttpClient\.Builder\(\)[\s\S]{0,240}?"
                      r"readTimeout\(15, TimeUnit\.SECONDS\)", api), \
         "快线读超时不是 15 秒档"
-    assert 'if (req.method() == "GET") return@withContext getMeta(req)' in api, \
+    assert 'if (req.method == "GET") return@withContext getMeta(req)' in api, \
         "GET 不再走快线"
-    assert "metaClient.newCall(req)" in api and "for (_ in 0 until 2)" in api, \
+    assert "metaClient.newCall(req)" in api and "for (attempt in 0 until 2)" in api, \
         "快线的一次重试没了"
     assert "catch (e: java.io.IOException)" in api, "重试没按'只重网络层失败'收口"
     # 大超时那条线还得给流式与字节用：两处都在才算各走各的
