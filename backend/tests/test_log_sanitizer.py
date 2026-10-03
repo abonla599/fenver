@@ -226,3 +226,69 @@ def test_routed_logs_are_masked_end_to_end(run_backend_mod, tmp_path, monkeypatc
     body = log.read_text(encoding="utf-8")
     assert "brandnew-model-77" not in body
     assert "switched upstream to" in body
+
+
+# ------------------------------------------------- filter 不许破坏 formatter 的拆包 --
+
+def test_redact_filter_keeps_args_shape_for_the_access_formatter():
+    """uvicorn 的 AccessFormatter 拆的是 `record.args`（五元组），不是 msg。
+
+    老写法把 msg 先展平再 `record.args = ()`，于是每条访问日志都在 formatter
+    里抛 `ValueError: not enough values to unpack (expected 5, got 0)`。现网
+    实测过代价：data/backend.log 里每个请求后面跟一段 `--- Logging error ---`
+    加整条调用栈，换包前那一代日志里 828 次、再前一代 2,462 次，而 1MB 轮转
+    把真该留下的访问记录连同噪声一起滚掉了。请求本身照旧 200，所以这条
+    不会让任何功能测试变红——正是本仓一直在拆的"坏了但没人知道"那类形状。
+
+    判据两半边：args 的形状留着（formatter 才拆得动），敏感值仍然被打码
+    （它就长在值里，不在 `%s` 模板里）。
+    """
+    from uvicorn.logging import AccessFormatter
+
+    register("secretmodel-x1")
+    record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, None, None,
+        '%s - "%s %s HTTP/%s" %s',
+        ("127.0.0.1:52000", "GET", "/v1/chat?model=secretmodel-x1", "1.1", 200), None)
+    assert logsanitizer._RedactFilter().filter(record) is True
+    assert isinstance(record.args, tuple) and len(record.args) == 5, record.args
+    line = AccessFormatter().format(record)                 # 改回清空 args 的写法：这行必炸
+    assert "secretmodel-x1" not in line, line
+    assert MASK in line, line
+    assert "GET" in line and "/v1/chat" in line and "200" in line, line
+
+
+def test_access_line_reaches_the_log_without_any_logging_error(capfd, monkeypatch):
+    """整条链跑一遍：行要落在，stderr 里不许再冒出 logging 的吞异常噪声。
+
+    只断言"没抛"不够——logging 把 formatter 的异常自己吞了往 stderr 吐，
+    handler 这条路照样"写成功"。所以两头都要看：落盘的那份要有真的访问行，
+    stderr 那份不能有 `--- Logging error ---`。
+    """
+    import io
+    from uvicorn.logging import AccessFormatter
+
+    register("secretmodel-x1")
+    logsanitizer.install_std_filters()
+    logger = logging.getLogger("uvicorn.access")
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(AccessFormatter())
+    saved = (list(logger.handlers), logger.propagate, logger.level)
+    logger.handlers, logger.propagate = [handler], False
+    logger.setLevel(logging.INFO)        # NOTSET 会退回 root 的 WARNING，行根本进不来
+
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    try:
+        logger.info('%s - "%s %s HTTP/%s" %s', "127.0.0.1:52001", "GET",
+                    "/v1/chat?model=secretmodel-x1", "1.1", 200)
+    finally:
+        logger.handlers, logger.propagate, logger.level = saved
+
+    written = buf.getvalue()
+    err = capfd.readouterr().err
+    assert written.strip(), "访问行根本没落盘"
+    assert "secretmodel-x1" not in written, written
+    assert "/v1/chat" in written and "200" in written, written
+    assert "--- Logging error ---" not in err, err
+    assert "not enough values to unpack" not in err, err
