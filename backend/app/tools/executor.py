@@ -1,6 +1,7 @@
 import threading
 import time
 from collections import defaultdict
+from typing import NamedTuple, Optional
 
 from app.tools.registry import tools_registry
 from app.tools.response import ToolResponse
@@ -80,31 +81,73 @@ def clip_for_model(text: str, budget: int = TOOL_OUTPUT_BUDGET) -> str:
     return text[:head] + _omission(total - room, total, budget) + (text[total - tail:] if tail else "")
 
 
+class ToolOutcome(NamedTuple):
+    """一次工具调用的完整结果：给模型的文本 + 给人看的结构化元数据。
+
+    为什么两个都要：给模型的 `text` 是预算裁剪后那段带 ✓/✗ 前缀的话（与非流式那条
+    pipeline 拿到的逐字节一致），而 ok/artifacts/truncated/elapsed_ms 只服务于"过程
+    面板"——用户要看到的是"这次算成了没、花了多久、输出有没有被截、搜到哪些网页"，
+    这些信息不该、也没被塞进模型的上下文。
+    """
+    text: str
+    ok: bool
+    artifacts: Optional[dict]
+    truncated: bool
+    elapsed_ms: int
+
+
 def execute_tool(tool_name: str, arguments: dict, user_id: str = None) -> str:
     """执行一条工具，返回**已在上下文预算内**的结果文本。
+
+    这是全站对外稳定的文本契约：两条聊天路径与 ReAct 那条都靠它，签名与返回类型
+    （str）一律不动。真正干活的是 execute_tool_detailed——这里只是把它结果里的
+    `.text` 投影出来，于是"唯一实现"只有一份，两侧不可能各长出一套截断/频控逻辑。
 
     `user_id` 由调用方从**凭据**里算出来传进来（两条聊天路径都是这么做的），它不进
     模型可见的参数表：标了 needs_user 的工具，执行器用服务端那份覆盖掉模型可能传上
     来的同名参数。方向反过来（让模型说了算）就是"读谁的日程"由模型编。
     """
-    raw = _dispatch(tool_name, arguments, user_id)
+    return execute_tool_detailed(tool_name, arguments, user_id=user_id).text
+
+
+def execute_tool_detailed(tool_name: str, arguments: dict,
+                          user_id: str = None) -> ToolOutcome:
+    """执行一条工具，返回文本 + 结构化元数据。唯一实现，两条路共用。
+
+    流式那条要拿 artifacts/truncated 发帧，非流式与 ReAct 只要 `.text`——它们各自
+    从这一个函数取自己要的那几项，绝不允许出现"另一份执行器"。计时贴着真正执行的
+    `_dispatch` 与出口裁剪，量到的是这一次调用的人为感知耗时（不含上游排队）。
+    """
+    start = time.monotonic()
+    response = _dispatch(tool_name, arguments, user_id)
+    raw = response.to_string()
     clipped = clip_for_model(raw)
-    if len(clipped) != len(raw):
+    truncated = len(clipped) != len(raw)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    if truncated:
         print(f"[Tools] {tool_name} 输出 {len(raw)} 字，超出 {TOOL_OUTPUT_BUDGET} 字预算，"
               f"已截断后再发给模型")
-    return clipped
+    return ToolOutcome(text=clipped, ok=bool(response.success),
+                       artifacts=getattr(response, "artifacts", None),
+                       truncated=truncated, elapsed_ms=elapsed_ms)
 
 
-def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> str:
+def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> ToolResponse:
+    """把一次调用收敛成一个 ToolResponse（含 success/artifacts），不再吐裸字符串。
+
+    所有分支都回 ToolResponse：未知工具、参数非对象、缺身份、schema 外参数、频控
+    闸门、正常执行、执行炸了——每个出口都带正确的 success 位与（搜索这类工具的）
+    artifacts，好让上层既能原样拿到给模型的文本，又能拿到结构化元数据去发过程帧。
+    """
     if tool_name not in tools_registry:
-        return ToolResponse(False, error=f"未知工具: {tool_name}", hint="使用 help 工具查看可用工具列表").to_string()
+        return ToolResponse(False, error=f"未知工具: {tool_name}", hint="使用 help 工具查看可用工具列表")
     info = tools_registry[tool_name]
     func = info["function"]
     # 模型偶尔会给出数组/字符串当参数。原写法 dict(arguments) 在这一支会直接炸
     # 出 TypeError（还在 try 之外）；这里按同样的口径给出结构化的"参数错误"。
     if not isinstance(arguments, dict):
         return ToolResponse(False, error="参数错误: arguments 必须是对象",
-                            hint="请检查工具参数是否正确").to_string()
+                            hint="请检查工具参数是否正确")
     # 只放行 schema 里声明过的参数。函数签名上的形参（比如 execute_code 的
     # max_retries）模型一律不许给——否则传个 max_retries=100 就能串行拉起
     # 上百个容器。schema 是模型能碰的唯一契约。
@@ -116,19 +159,19 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> str:
     if info.get("needs_user"):
         if not (user_id or "").strip():
             return ToolResponse(False, error="缺少身份：这条工具只查得到某个具体人的数据",
-                                hint="请从已登录的会话里调用").to_string()
+                                hint="请从已登录的会话里调用")
         kwargs["user_id"] = user_id
     # 频控放在真正执行之前、参数清洗之后：被闸门挡下的调用不该已经拉起过容器。
     if blocked := _freq_gate(tool_name, user_id):
         return ToolResponse(False, error=blocked,
-                            hint="等待后用一次调用完成剩余步骤").to_string()
+                            hint="等待后用一次调用完成剩余步骤")
     try:
         result = func(**kwargs)
-        # 如果函数本身返回 ToolResponse，则保持，否则包装
+        # 如果函数本身返回 ToolResponse，则保持（连同它的 artifacts），否则包装
         if isinstance(result, ToolResponse):
-            return result.to_string()
-        return ToolResponse(True, data=result).to_string()
+            return result
+        return ToolResponse(True, data=result)
     except TypeError as e:
-        return ToolResponse(False, error=f"参数错误: {e}", hint="请检查工具参数是否正确").to_string()
+        return ToolResponse(False, error=f"参数错误: {e}", hint="请检查工具参数是否正确")
     except Exception as e:
-        return ToolResponse(False, error=str(e), hint="重试或使用其他方法").to_string()
+        return ToolResponse(False, error=str(e), hint="重试或使用其他方法")

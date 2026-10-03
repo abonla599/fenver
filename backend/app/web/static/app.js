@@ -1281,6 +1281,9 @@ async function switchSession(id) {
   const full = await API.getSession(id);
   state.messages = (full.messages || []).map((m) => ({
     role: m.role, content: m.content, message_id: m.message_id, attachments: m.attachments,
+    // trace 只进界面不进模型：outbound() 那份历史由 truncateWithin 重新包成
+    // {role,content}，而 replaceMessages 回写整份历史时必须带上它（v0.29.0 落盘回放）
+    trace: m.trace,
   }));
   await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   renderMessages();
@@ -1362,6 +1365,266 @@ function renderSuggestions(show) {
   });
 }
 
+/* ---------------- 过程留痕（v0.29.0） ----------------
+ * 流上的 thinking / tool_call / tool_result / search 四类帧在内存里累积成 holder.trace
+ * （步的形状与服务端落盘的 done.trace 同一套 kind 字段），画在气泡正文上方那块可折叠
+ * 面板里，历史回放走同一个渲染函数。四条纪律，都是这条特性最容易做错的地方：
+ * ① 安全：服务端与模型给的每一个字符串只当文本进 DOM（createElement + textContent）。
+ *    搜索结果的标题/摘要/网址是别人写的网页内容，拼进 innerHTML 就是 XSS；href 只认
+ *    http(s)，服务端已经过滤过一轮，客户端再判一次（纵深防御，`javascript:` 走不到那行）。
+ * ② 频率：帧来得比帧率快得多，所以累积不碰 DOM，重画统一走 runStream 那条 rAF 闸门；
+ *    而且每一拍只补新出现的步、只重画被帧改脏的那一步——30 条 thinking 分片不该变成
+ *    30 行，也不该有 30 次整块重建。
+ * ③ 默认：流式期间展开、`done` 落定后自动折叠（plan §7）。人手动点过之后
+ *    panel.dataset.manual 落一枚标记，之后任何自动逻辑都不再碰它的开合。
+ * ④ 收尾：`.typing`/`data-live` 那套既有清理顺带把 trace 的"进行中"呼吸态摘掉——
+ *    一条已经答完的消息不该还在闪。
+ */
+const TRACE_KIND_CLASS = { thinking: "trace-thinking", tool: "trace-tool",
+                           search: "trace-search", omitted: "trace-omitted" };
+
+/** 这个网址能不能当链接用：只放行 http(s)，其余（含空串）一律按纯文本画。 */
+function traceSafeUrl(url) {
+  const s = String(url == null ? "" : url).trim();
+  return /^https?:\/\/\S+$/i.test(s) ? s : "";
+}
+
+/** 折叠着也能读的那一行标题：思考过程 · 3 步 · 已搜索 5 个网页 */
+function traceSummaryText(trace) {
+  const steps = Array.isArray(trace) ? trace : [];
+  let pages = 0;
+  steps.forEach((s) => {
+    if (s && s.kind === "search") pages += (s.results || []).length;
+  });
+  const head = "思考过程 · " + steps.length + " 步";
+  return pages ? head + " · 已搜索 " + pages + " 个网页" : head;
+}
+
+/** 一步一行。每一个值都走 textContent：这里没有任何一处字符串拼接进 HTML。 */
+function traceStepNode(step) {
+  const s = step && typeof step === "object" ? step : {};
+  const row = document.createElement("div");
+  row.className = "trace-step " + (TRACE_KIND_CLASS[s.kind] || "trace-other");
+
+  if (s.kind === "thinking") {
+    // 思考文本与答案要一眼分得开：矮一档墨色 + 斜体，样式在 style.css 的 .trace-thinking
+    row.textContent = String(s.text || "");
+    return row;
+  }
+  if (s.kind === "omitted") {
+    row.textContent = "…中间 " + (Number(s.count) || 0) + " 步已省略…";
+    return row;
+  }
+  if (s.kind === "tool") {
+    const line = document.createElement("div");
+    line.className = "trace-tool-line";
+    const pending = !!s.pending;
+    const mark = document.createElement("span");
+    mark.className = "trace-tool-status " + (pending ? "pending" : (s.ok ? "ok" : "bad"));
+    // ✓/✗ 是字形不是 emoji；还没等到结果的那一步（停在块边界、断线）画一个点
+    mark.textContent = pending ? "…" : (s.ok ? "✓" : "✗");
+    const label = document.createElement("span");
+    label.className = "trace-tool-label";
+    label.textContent = String(s.label || s.name || "工具调用");
+    line.append(mark, label);
+    const ms = Number(s.elapsed_ms) || 0;
+    if (!pending && ms > 0) {
+      const time = document.createElement("span");
+      time.className = "trace-tool-time";
+      time.textContent = ms + " ms";
+      line.appendChild(time);
+    }
+    row.appendChild(line);
+    if (!pending && s.summary) {
+      const sum = document.createElement("div");
+      sum.className = "trace-tool-summary";
+      sum.textContent = String(s.summary);
+      row.appendChild(sum);
+    }
+    if (s.truncated) {
+      const note = document.createElement("div");
+      note.className = "trace-tool-truncated";
+      note.textContent = "输出过长，给模型的那一份已截断";
+      row.appendChild(note);
+    }
+    return row;
+  }
+  if (s.kind === "search") {
+    const q = document.createElement("div");
+    q.className = "trace-search-query";
+    q.textContent = "搜索：" + String(s.query || "");
+    row.appendChild(q);
+    const list = document.createElement("div");
+    list.className = "trace-results";
+    (Array.isArray(s.results) ? s.results : []).forEach((r) => {
+      list.appendChild(traceResultNode(r));
+    });
+    row.appendChild(list);
+    return row;
+  }
+  // 认不出的步（服务端以后加新 kind，或被截断只剩半条）：能给字就给字，猜形状是错的方向
+  row.textContent = String(s.text || s.summary || s.label || "");
+  return row;
+}
+
+/** 一条命中网页：标题是链接（仅在 http(s) 时），摘要在下一行。 */
+function traceResultNode(r) {
+  const item = document.createElement("div");
+  item.className = "trace-result";
+  const row = document.createElement("div");
+  row.className = "trace-result-line";
+  const url = traceSafeUrl(r && r.url);
+  const title = document.createElement(url ? "a" : "span");
+  title.className = "trace-result-title";
+  // 服务端把非 http 的网址抹成了空串：那种行没有链接可给，标题按纯文本画
+  title.textContent = String((r && r.title) || url || "（无标题）");
+  if (url) {
+    title.href = url;
+    title.target = "_blank";
+    title.rel = "noopener noreferrer";
+  } else {
+    title.classList.add("trace-result-plain");
+  }
+  row.appendChild(title);
+  const host = document.createElement("span");
+  host.className = "trace-result-host";
+  let hostName = "";
+  if (url) {
+    try { hostName = new URL(url).host; } catch (_) { hostName = ""; }
+  }
+  host.textContent = hostName;
+  row.appendChild(host);
+  item.appendChild(row);
+  if (r && r.snippet) {
+    const sn = document.createElement("div");
+    sn.className = "trace-result-snippet";
+    sn.textContent = String(r.snippet);
+    item.appendChild(sn);
+  }
+  return item;
+}
+
+/** 面板的开合：`hidden` 类是本仓库既有的习惯（没有用 <details>，老 WebView 不好统一样式）。 */
+function setTraceOpen(panel, open) {
+  if (!panel) return;
+  const on = !!open;
+  panel.classList.toggle("open", on);
+  const steps = panel.querySelector(".trace-steps");
+  if (steps) steps.classList.toggle("hidden", !on);
+  const caret = panel.querySelector(".trace-caret");
+  if (caret) caret.textContent = on ? "▾" : "▸";
+  const head = panel.querySelector(".trace-head");
+  if (head) head.setAttribute("aria-expanded", on ? "true" : "false");
+}
+
+/** 把 trace 画进这一条消息的面板。
+ *  full 为真整块重画（落定那一拍与历史回放），否则增量：只补新步、只重画脏步。
+ *  live（= holder._traceLive）决定呼吸态与默认开合。 */
+function paintTrace(node, holder, opts) {
+  const o = opts || {};
+  const panel = node && node.querySelector ? node.querySelector(".msg-trace") : null;
+  if (!panel) return;
+  const list = panel.querySelector(".trace-steps");
+  if (!list) return;
+  const trace = Array.isArray(holder.trace) ? holder.trace : [];
+  const live = !!holder._traceLive;
+  const nodes = panel._traceNodes || (panel._traceNodes = []);
+  const dirty = holder._traceDirty;
+
+  if (o.full) { nodes.length = 0; list.textContent = ""; }
+  // 步数只会涨（done 那一拍换成服务端紧凑版时走 full 重画）；涨了之外的一致性由 full 兜
+  while (nodes.length > trace.length) { nodes.pop().remove(); }
+  for (let i = 0; i < trace.length; i += 1) {
+    const redo = i >= nodes.length || o.full || (dirty && dirty.has(i));
+    if (!redo) continue;
+    const el = traceStepNode(trace[i]);
+    if (i < nodes.length) list.replaceChild(el, nodes[i]);
+    else list.appendChild(el);
+    nodes[i] = el;
+  }
+  if (dirty) dirty.clear();
+
+  const summary = panel.querySelector(".trace-summary");
+  if (summary) summary.textContent = traceSummaryText(trace);
+  panel.classList.toggle("hidden", !trace.length);
+  panel.classList.toggle("trace-live", live && !!trace.length);
+  if (!panel.dataset.manual) setTraceOpen(panel, o.open === undefined ? live : o.open);
+}
+
+/** 把一帧过程帧并进 holder.trace：返回是否改动过 trace。认不出的帧一律不炸。 */
+function accumulateTrace(holder, evt) {
+  if (!holder || !evt || typeof evt.type !== "string") return false;
+  const trace = holder.trace || (holder.trace = []);
+  const mark = (i) => {
+    (holder._traceDirty || (holder._traceDirty = new Set())).add(i);
+  };
+  if (evt.type === "thinking") {
+    const text = String(evt.text || "");
+    if (!text) return false;
+    const last = trace[trace.length - 1];
+    if (last && last.kind === "thinking") {
+      // 同一轮思考是一段一段 flush 过来的（服务端 120 字/0.4 秒一帧）：并进最后一步，
+      // 不然一次深回答能把面板刷成几十行"我在想"。
+      last.text = String(last.text || "") + text;
+      mark(trace.length - 1);
+    } else {
+      trace.push({ kind: "thinking", text });
+      mark(trace.length - 1);
+    }
+    return true;
+  }
+  if (evt.type === "tool_call") {
+    trace.push({ kind: "tool", id: String(evt.id || ""), name: String(evt.name || ""),
+                 label: String(evt.label || evt.name || "工具调用"), pending: true });
+    mark(trace.length - 1);
+    return true;
+  }
+  if (evt.type === "tool_result") {
+    const id = String(evt.id || "");
+    let at = -1;
+    for (let i = trace.length - 1; i >= 0; i -= 1) {
+      const s = trace[i];
+      if (s.kind !== "tool" || !s.pending) continue;
+      if (s.id === id || !id) { at = i; break; }
+    }
+    if (at < 0) {
+      trace.push({ kind: "tool", id, name: String(evt.name || "") });
+      at = trace.length - 1;
+    }
+    // 换整条而不是逐字段改：面板重画这一步，落盘的步形状与服务端 step_tool 保持一致
+    trace[at] = {
+      kind: "tool", id,
+      name: String(evt.name || trace[at].name || ""),
+      label: trace[at].label || String(evt.name || "工具调用"),
+      ok: !!evt.ok, summary: String(evt.summary || ""),
+      elapsed_ms: Number(evt.elapsed_ms) || 0, truncated: !!evt.truncated,
+    };
+    mark(at);
+    return true;
+  }
+  if (evt.type === "search") {
+    trace.push({ kind: "search", id: String(evt.id || ""), query: String(evt.query || ""),
+                 results: Array.isArray(evt.results) ? evt.results : [] });
+    mark(trace.length - 1);
+    return true;
+  }
+  return false;   // start/content/done/error/cancelled 与看不懂的帧都不进面板
+}
+
+/** 流已经不会再有 tool_result 了：把还挂着"进行中"的那几步落成一句话，别让它永远闪。 */
+function closePendingTrace(holder) {
+  const trace = Array.isArray(holder.trace) ? holder.trace : [];
+  let changed = false;
+  trace.forEach((s, i) => {
+    if (!s || s.kind !== "tool" || !s.pending) return;
+    s.pending = false; s.ok = false;
+    s.summary = s.summary || "没等到这一步的结果";
+    (holder._traceDirty || (holder._traceDirty = new Set())).add(i);
+    changed = true;
+  });
+  return changed;
+}
+
 function messageNode(m, index) {
   const node = $("msgTpl").content.firstElementChild.cloneNode(true);
   node.classList.add(m.role === "user" ? "user" : "assistant");
@@ -1369,6 +1632,16 @@ function messageNode(m, index) {
   const role = node.querySelector(".msg-role");
   role.textContent = m.role === "user" ? "我" : "助手";
   if (m.role !== "user" && m.model) role.textContent += " · " + m.model;
+
+  // 落盘回放：重开一条会话也要看得见过程（服务端那份 trace 就是为这一句留的）。
+  // 这一步必须在 body 之前画完，面板排在正文上方由模板顺序决定，不靠 JS 挪节点。
+  paintTrace(node, m, { full: true });
+  node.querySelector(".trace-head").onclick = () => {
+    // 人点过就不再替他改主意（流式期间展开、落定折叠那套默认到此为止）
+    const panel = node.querySelector(".msg-trace");
+    if (panel) panel.dataset.manual = "1";
+    setTraceOpen(panel, !(panel && panel.classList.contains("open")));
+  };
 
   const body = node.querySelector(".msg-body");
   if (m.role === "user") body.textContent = m.content;
@@ -1471,7 +1744,7 @@ async function regenerate(index) {
 }
 
 async function streamInto() {
-  const holder = { role: "assistant", content: "" };
+  const holder = { role: "assistant", content: "", trace: [] };
   state.messages.push(holder);
   renderMessages();
   await runStream(holder);
@@ -1481,11 +1754,15 @@ async function replaceMessages(list) {
   if (!pref.sessionId) return;
   const payload = list
     .filter((m) => !m.transient)
-    .map(({ role, content, message_id, memory_ids, model }) => {
+    .map(({ role, content, message_id, memory_ids, model, trace }) => {
       const out = { role, content };
       if (message_id) out.message_id = message_id;
       if (memory_ids) out.memory_ids = memory_ids;
       if (model) out.model = model;
+      // 整份历史回写是 PUT 全量替换：这一句不带 trace，服务端落好的过程留痕就在
+      // 每一次保存之后被抹平（v0.29.0 落盘回放的那半条命在这里）。空数组不发——
+      // 发出去等于用「没有过程」覆盖掉服务端那一份紧凑 trace。
+      if (Array.isArray(trace) && trace.length) out.trace = trace;
       return out;
     });
   try {
@@ -1540,6 +1817,9 @@ async function runStream(holder) {
   // data-live 的容器——半截代码块此刻高亮是无效功，流结束后的全量渲染才补。
   // 摘除在 finally 里，renderMessages 整棵重建之前。
   if (body) body.setAttribute("data-live", "1");
+  // 过程面板进入"正在进行"态：默认展开、标题带一点呼吸；摘除在下面的 finally 里，
+  // 与 .typing / data-live 同一拍，所以一条已经答完的消息不会还在闪。
+  holder._traceLive = true;
 
   /* chunk 到达的频率远高于帧率：每个 chunk 都全量重渲 + 强制滚底，长回复是
      O(n²)，而且用户在生成期间一旦上翻，下一帧就被拽回底部。改成把「渲染 +
@@ -1555,6 +1835,9 @@ async function runStream(holder) {
     // 贴底要先于渲染判断：渲染会撑高滚动区，渲染后再算就永远"不贴底"了。
     const stick = host.scrollHeight - host.scrollTop - host.clientHeight < 120;
     MD.render(body, holder.content, true);
+    // 过程帧与正文块共用这一条 rAF 闸门：帧洪泛（reasoning 一个一个 token 地来）最多
+    // 也就是每帧重画一次，而且只补新步、只重画脏掉的那一步。
+    paintTrace(node, holder);
     if (stick) host.scrollTop = host.scrollHeight;
   };
 
@@ -1574,13 +1857,22 @@ async function runStream(holder) {
         // 断线重连的人话状态直接落状态条；错误码不许裸奔到这一行。
         onStatus: (m) => setStatus(m),
         // 看不懂的帧不静默丢：内核已经记了一笔，这里不打断正常收尾。
-        onUnknown: () => {} },
+        onUnknown: () => {},
+        // 过程帧（thinking/tool_call/tool_result/search）从这条缝进来：并进 holder.trace
+        // 之后挂上同一拍 rAF 重画。onChunk 不变，仍然只吃正文文本。
+        onEvent: (evt) => {
+          if (accumulateTrace(holder, evt) && node && !pending) pending = raf(paint);
+        },
+      },
       (chunk) => {
         holder.content += chunk;
         if (body && !pending) pending = raf(paint);
       });
     if (done && done.message_id) holder.message_id = done.message_id;
     if (done && done.model) holder.model = done.model;
+    // done 带回来的那一份 trace 是服务端裁过的权威步序（含 omitted），也是马上要落盘的
+    // 形状——拿它覆盖本地累积的那份，屏幕上的过程与重开会话后看到的过程才是同一份。
+    if (done && Array.isArray(done.trace) && done.trace.length) holder.trace = done.trace;
     // 被停的流以旧解析器认得的 done 收尾：status=cancelled 说明是"停止"或宽限到点。
     if (done && done.status === "cancelled") {
       aborted = true;
@@ -1617,6 +1909,12 @@ async function runStream(holder) {
     if (pending) cancelRaf(pending);
     if (node) node.classList.remove("typing");
     if (body) body.removeAttribute("data-live");
+    // 过程面板跟着落定：摘掉"进行中"的呼吸态、把没等到结果的步收落成一句话、
+    // 默认折叠（人手动点过开合就不动它）。整块重画一次，因为 done.trace 已经换掉了
+    // 本地累积的那份，步序与落盘的形状在这里对齐。
+    holder._traceLive = false;
+    closePendingTrace(holder);
+    paintTrace(node, holder, { full: true, open: false });
     state.streaming = false;
     state.controller = null;
     state.currentRunId = null;
@@ -1667,6 +1965,8 @@ async function pullFromHistory(holder) {
       const m = list[i];
       if (m.role === "assistant") {
         holder.content = m.content || "";
+        // 断线取回的不止正文：这一轮的过程在服务端已经落盘，取回来照样摊得开
+        if (Array.isArray(m.trace) && m.trace.length) holder.trace = m.trace;
         if (m.message_id) holder.message_id = m.message_id;
         if (m.model) holder.model = m.model;
         setStatus("");
@@ -3411,6 +3711,7 @@ async function restore() {
     const full = await API.getSession(pref.sessionId);
     state.messages = (full.messages || []).map((m) => ({
       role: m.role, content: m.content, message_id: m.message_id, attachments: m.attachments,
+      trace: m.trace,   // 重开网页版也看得见上一轮的过程（见 openSession 同一处注释）
     }));
     await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   } catch (e) {

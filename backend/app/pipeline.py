@@ -15,8 +15,29 @@ from app.memory.memory_router import memory_manager
 from app.memory import signals
 from app.preference_analyzer import read_preference
 from app.tools.registry import get_available_tools_schema
-from app.tools.executor import execute_tool
+from app.tools.executor import execute_tool, execute_tool_detailed
+from app.core import stream_events as se
 from app.tools.builtin_tools import *
+
+
+def _tool_label(name: str, args) -> str:
+    """工具过程步的一句短中文标题（收起态文案）。
+
+    与 core/streaming.py 里那份是同一个口径：搜什么/算什么各给一句人话，其余退回
+    "调用 <name>"。这里刻意不复用 streaming 的私有函数（跨模块引私有 helper 会在
+    那模块被 reload 时留一份旧引用），逻辑小而纯、两处不会各自漂移。真正的封顶
+    （TOOL_LABEL_MAX）在 stream_events 的构造里做。
+    """
+    if isinstance(args, dict):
+        if name == "web_search":
+            q = str(args.get("query", "")).strip()
+            if q:
+                return f"搜索「{q}」"
+        if name == "calculator":
+            expr = str(args.get("expression", "")).strip()
+            if expr:
+                return f"计算 {expr}"
+    return f"调用 {name}"
 
 
 def _today_line() -> str:
@@ -95,16 +116,19 @@ class ChatPipeline:
         # 2. 注入记忆与用户偏好上下文
         enriched_messages, used_memory_ids = self.inject_context(messages, user_input)
 
-        # 3. 调用模型（带工具循环）
+        # 3. 调用模型（带工具循环）：顺手收一份过程留痕（哪些工具跑了、搜到哪些网页），
+        #    非流式这条路没有逐块思考可展，但工具与搜索这两类步一样值得让人回看。
+        trace: List[Dict[str, Any]] = []
         final_reply = self._call_model_with_tool_loop(model, enriched_messages,
-                                                      provider_id=provider_id)
+                                                      provider_id=provider_id,
+                                                      trace_out=trace)
 
         # 4. 按信号自动保存记忆（多数轮次什么都不存，那是设计意图）
         self.save_interaction(user_input)
 
         msg_id = str(uuid.uuid4())
         return {"reply": final_reply, "message_id": msg_id,
-                "used_memory_ids": used_memory_ids}
+                "used_memory_ids": used_memory_ids, "trace": trace}
 
     def inject_context(self, messages: List[Dict], query: str):
         """注入今天日期、记忆与该用户自己的偏好摘要（非流式与流式共用）。
@@ -160,14 +184,22 @@ class ChatPipeline:
             messages.insert(0, {"role": "system", "content": text})
 
     def _call_model_with_tool_loop(self, model: str, messages: List[Dict], max_turns=5,
-                                   provider_id: str = None) -> str:
+                                   provider_id: str = None,
+                                   trace_out: List[Dict[str, Any]] = None) -> str:
         """支持工具调用的对话循环，类似 ReAct 的简化版。
 
         配置缺失或调用失败一律抛异常：把故障当回复文本返回，会让错误写进会话
         历史，并被上层当作模型输出继续加工。
+
+        trace_out 给了就把每一步收进去（工具/搜索的过程步）；给了就走
+        execute_tool_detailed（一次执行同时拿回文本与 ok/truncated/elapsed/artifacts），
+        没给就退回 execute_tool 这条公开的文本契约——两条都把服务端算出的 user_id 递到
+        工具底层，且各自只跑一次，绝不双跑。默认 None 保证既有直连调用方（含账本用例）
+        行为逐字不变。
         """
         provider = store.resolve(provider_id, legacy_model=model)
         client = build_client(provider)
+        rich = trace_out is not None
         billed = {k: 0 for k in ("prompt_tokens", "completion_tokens",
                                  "total_tokens", "reasoning_tokens", "cached_tokens")}
         rounds = 0
@@ -216,16 +248,29 @@ class ChatPipeline:
                             })
                             continue
                         print(f"[Pipeline] 调用工具: {name}({args})")
-                        try:
+                        label = _tool_label(name, args)
+                        if rich:
+                            outcome = execute_tool_detailed(name, args, user_id=self.user_id)
+                            result = outcome.text
+                        else:
                             result = execute_tool(name, args, user_id=self.user_id)
-                        except Exception as e:
-                            result = f"工具执行错误: {e}"
+                            outcome = None
                         # 将工具结果作为 tool 消息添加
                         msgs.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": str(result)
                         })
+                        if rich:
+                            trace_out.append(se.step_tool(tool_call.id, name, label,
+                                                          outcome.ok, str(result),
+                                                          elapsed_ms=outcome.elapsed_ms,
+                                                          truncated=outcome.truncated))
+                            art = outcome.artifacts
+                            if isinstance(art, dict) and art.get("kind") == "web_search":
+                                trace_out.append(se.step_search(tool_call.id,
+                                                                art.get("query", ""),
+                                                                art.get("results")))
                 else:
                     # 无工具调用，返回文本
                     return msg.content or "（模型未返回内容）"
