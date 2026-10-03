@@ -66,6 +66,14 @@ TIMEOUT_SECONDS = 5.0
 CACHE_SECONDS = 600
 MAX_BYTES = 256 * 1024
 
+# v0.28.2「检查更新要转半天」的服务端那一半：缓存过点的头一个人替全网去 GitHub 跑一趟，
+# 实测那趟 2.1 秒起步、GitHub 慢时顶到 TIMEOUT_SECONDS×两个候选仓≈10 秒——正好逼近壳里
+# Updater 的 12 秒读超时。现在快照超过半个缓存期就**先交手里的货、后台补新货**（单飞），
+# 进程起来另有 warmer 先拉一次。收紧的只有"什么时候去拉"；「过期旧快照不许冒充最新」
+# （AC-4）由 _payload_at 那条判据原样守着，一条都没放松。
+# 限流账：匿名 GitHub 按 IP 60 次/小时，warmer 满打满算 12 次/小时，是承诺的零头。
+REFRESH_AHEAD_SECONDS = CACHE_SECONDS // 2
+
 # ---------- 官网那颗「安卓版」按钮要代取的字节 ----------
 # 白名单是两条，不是一条，而且这条是量出来的不是记住的：`browser_download_url` 在
 # github.com 上，它 302 去的是 **release-assets.githubusercontent.com**（2026-09-22 真跑
@@ -129,6 +137,11 @@ _fetched_at = None
 # 若缓存期只认尝试时间，一份超过 TTL 的旧快照会在 GitHub 恢复前被一直当成最新供出去
 # ——那正是 AC-4「伪装最新」的样子。
 _payload_at = None
+# 后台补货的单飞闩：同一时刻最多一条腿在替全网跑 GitHub，
+# 补货中的请求一律先拿手里的快照回去——这就是 AC-1 的全部机关。
+_refreshing = False
+# warmer 只许被 lifespan 起一条（幂等闩；测试进程不走 lifespan，天然不起线程）。
+_warmer_started = False
 
 
 def _numeric(segments):
@@ -232,6 +245,52 @@ def _fetch():
         if not first_reason:
             first_reason = f"{why}（{repo}）" if len(repos) > 1 else why
     return None, first_reason
+
+
+def _refresh_now():
+    """后台补一次快照：与 _snapshot 同步分支同一组记账，只是不站在提问者的线程上。
+    _fetch 本身不抛（模块纪律），这里的 try/finally 守的是闩一定要落下。"""
+    global _payload, _fetched_at, _payload_at, _refreshing
+    try:
+        payload, _why = _fetch()
+        with _lock:
+            _fetched_at = time.monotonic()
+            if payload is not None:
+                _payload = payload
+                _payload_at = time.monotonic()
+    finally:
+        with _lock:
+            _refreshing = False
+
+
+def _spawn_refresh():
+    """把补货这件事交出去——单独成函数，是为了契约用例能钉住"踢了但没同步出网"。"""
+    threading.Thread(target=_refresh_now, daemon=True,
+                     name="release-refresh").start()
+
+
+def start_cache_warmer() -> None:
+    """进程一起来就先把快照攒上，之后每半个缓存期照看一眼。由 main.py 的 lifespan 调用。
+
+    为什么值得为"没人问也去拉"付账：「今天还没人开过 App」的清晨，第一个点开设置页
+    点「检查更新」的人不该替所有人去撞那条 5 秒出站。冷启动那一次由本线程 synchronous
+    地拉（用户还没进来），此后每轮都只会命中 _snapshot 的后台补货分支。
+    """
+    global _warmer_started
+    with _lock:
+        if _warmer_started:
+            return
+        _warmer_started = True
+    threading.Thread(target=_warm_loop, daemon=True, name="release-warm").start()
+
+
+def _warm_loop():
+    while True:
+        try:
+            _snapshot()      # 冷：这一趟同步拉一次把缓存攒热；热且过半：只踢后台一脚
+        except Exception:    # warmer 不许把进程带倒，下一轮再说
+            pass
+        time.sleep(REFRESH_AHEAD_SECONDS)
 
 
 # 发版工作流写在 Release 正文末尾的那一行：`APK-SHA256: <64 位小写十六进制>`。
@@ -380,12 +439,23 @@ def _snapshot() -> tuple:
     重试节流看 `_fetched_at`（最近一次尝试），但**是否还新鲜**看 `_payload_at`
     （最近一次成功）：两者分开，旧货出不了「检查更新」这道门，见
     `latest_release_manifest` 的注释。
+
+    v0.28.2 起多一档"过半补货"：手里有货、尝试时间过半个缓存期但还没过期——
+    立刻把手里的货交出去（AC-1：提问的人不等网络），后台单飞补一次新货。
+    过半个期但**没成功过**的旧货照样走 stale_attempt 的同步分支，新鲜度判据不动。
     """
-    global _payload, _fetched_at, _payload_at
+    global _payload, _fetched_at, _payload_at, _refreshing
     now = time.monotonic()
+    kick = False
     with _lock:
         stale_attempt = (_fetched_at is None or (now - _fetched_at) >= CACHE_SECONDS
                          or _payload_at is None or (now - _payload_at) >= CACHE_SECONDS)
+        if (not stale_attempt and not _refreshing and _payload is not None
+                and (now - _fetched_at) >= REFRESH_AHEAD_SECONDS):
+            _refreshing = True
+            kick = True
+    if kick:
+        _spawn_refresh()
     reason = ""
     if stale_attempt:
         payload, why = _fetch()
@@ -432,12 +502,13 @@ def reset_for_tests() -> None:
     刚起来 = `_fetched_at` 是 None，不是 0.0：后者在 monotonic 还很小（真·刚开机、
     或 CI 的虚拟机）时会被判成"缓存还新"，那正是这条缓存要防的反面。
     """
-    global _payload, _fetched_at, _payload_at, _repo_of_payload
+    global _payload, _fetched_at, _payload_at, _repo_of_payload, _refreshing
     with _lock:
         _payload = None
         _fetched_at = None
         _payload_at = None
         _repo_of_payload = None
+        _refreshing = False
 
 
 def _host_ok(url: str):
