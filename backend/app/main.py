@@ -118,6 +118,10 @@ async def lifespan(app: FastAPI):
     # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
     from app.tools.availability import start_probe
     start_probe()
+    # v0.28.2：发布页快照的暖缓存线程。冷启动先拉一次、之后每半个缓存期照看一眼，
+    # 让「检查更新」永远走在已经握在手里的快照上——判据与限流账见 releases 模块。
+    from app.core import releases as _releases
+    _releases.start_cache_warmer()
     start_background_scheduler()
     yield
     # 关闭时执行（如果需要清理资源）

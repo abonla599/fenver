@@ -126,6 +126,16 @@ object Api {
         .writeTimeout(2, TimeUnit.MINUTES)
         .build()
 
+    /* v0.28.2 冷启动「等半天才出模型」的那条线：上面 5 分钟读超时是为流式设的，
+     * 但元数据 GET（模型清单/会话列表/身份/健康戳）都是几 KB 的 JSON——弱网或链路
+     * 被网关劫持时它们照样挂满五分钟，把"打开软件后一直不能用"钉死在这里。
+     * GET 单列一条快线：连接 10 秒、读 15 秒封顶；POST/PUT/DELETE、上传与票据字节
+     * 照旧走大超时那条——付费的生成长答不许被 15 秒掐断。 */
+    private val metaClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
+
     private fun request(path: String, tokenOverride: String? = null): Request.Builder =
         Request.Builder().url(Prefs.baseUrl.trimEnd('/') + path)
             .apply {
@@ -150,12 +160,34 @@ object Api {
                 // （建会话、设默认、测连通），这里补一个零字节体保持同一语义。
                 else -> rb.method(method, body?.toRequestBody(JSON_MT) ?: "".toRequestBody(null))
             }
-            client.newCall(rb.build()).execute().use { res ->
+            val req = rb.build()
+            // GET 一律走快线（见 metaClient 的来由）；其余方法留在大超时线路上。
+            if (req.method() == "GET") return@withContext getMeta(req)
+            client.newCall(req).execute().use { res ->
                 val text = res.body?.string() ?: ""
                 if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
                 text
             }
         }
+
+    /* 元数据 GET 的一次快问快答：网络层失败（超时/断流/DNS）补一次重试——
+     * GET 幂等，重试不重复扣费也不落第二条数据；HTTP 4xx/5xx 的 ApiException
+     * 不是 IOException，原样上抛绝不重打（401 的语义在调用方，重打只会再戳一次）。 */
+    private fun getMeta(req: Request): String {
+        var last: java.io.IOException? = null
+        for (_ in 0 until 2) {
+            try {
+                metaClient.newCall(req).execute().use { res ->
+                    val text = res.body?.string() ?: ""
+                    if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
+                    return text
+                }
+            } catch (e: java.io.IOException) {
+                last = e
+            }
+        }
+        throw last!!
+    }
 
     private suspend inline fun <reified T> callJson(path: String, method: String = "GET",
                                                     body: String? = null): T =

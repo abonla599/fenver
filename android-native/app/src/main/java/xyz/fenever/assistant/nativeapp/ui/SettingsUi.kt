@@ -165,15 +165,21 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     val pageScroll = scrollByPage.getOrPut(page) { ScrollState(0) }
 
     fun setStatus(t: String, err: Boolean = false) { note = t; noteErr = err }
+    /* 首拉有没有回来过：设置页一进来 providers 是空的，那不等于"服务端没有模型"。
+     * v0.28.2 真机反馈 2 的第二半——把"还没读到"说成「服务端还没有可用的模型」，
+     * 人会去添加重复的模型服务；读取中就说读取中。 */
+    var modelsLoaded by remember { mutableStateOf(false) }
     fun reloadProviders() {
         scope.launch {
             runCatching { val r = Api.models(); providers = r.models; serverDefault = r.default }
+            modelsLoaded = true
             onModelsChanged()
         }
     }
 
     LaunchedEffect(Unit) {
         runCatching { val r = Api.models(); providers = r.models; serverDefault = r.default }
+        modelsLoaded = true
         runCatching {
             val el = Api.listMemory(50)
             val arr = (el as? JsonObject)?.get("memories") as? JsonArray
@@ -217,6 +223,7 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                     providers = providers, memoryCount = memoryCount,
                     scheduleVal = scheduleVal,
                     serverBuild = serverBuild, identityTick = identityTick,
+                    modelsLoading = !modelsLoaded,
                     onTick = { identityTick++ }, onNote = { t, err -> setStatus(t, err) },
                     onModelsChanged = { reloadProviders() }, canExport = canExport)
             }
@@ -422,6 +429,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          providers: List<ModelInfo>, memoryCount: String,
                          scheduleVal: String,
                          serverBuild: String, identityTick: Int,
+                         modelsLoading: Boolean,
                          onTick: () -> Unit,
                          onNote: (String, Boolean) -> Unit,
                          onModelsChanged: () -> Unit, canExport: Boolean) {
@@ -469,8 +477,13 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     val me = Prefs.currentEntry()
     val name = me?.username ?: ""
     val usable = providers.filter { it.usable }
-    val chatNote = if (usable.isNotEmpty()) "${usable.size} 个模型可用"
-    else "服务端还没有可用的模型"
+    // v0.28.2：清单还没回来就说"在读了"——「服务端还没有可用的模型」会把一次慢加载
+    // 说成一件不存在的事实，人会照着这句话去添加重复的模型服务。
+    val chatNote = when {
+        usable.isNotEmpty() -> "${usable.size} 个模型可用"
+        modelsLoading -> "正在读取模型清单…"
+        else -> "服务端还没有可用的模型"
+    }
     val current = remember(providers, identityTick) {
         providers.firstOrNull { it.id == Prefs.defaultProviderId && it.usable }
             ?: providers.firstOrNull { it.id == serverDefaultOf(providers) && it.usable }
@@ -538,7 +551,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     // —— 模型 ——（当前模型 + 模型服务同吃一张卡片，网页 .set-card 就两张行）
     SetGroup("模型")
     SetCard {
-        ModelPickRow(providers, current, identityTick) { id, p ->
+        ModelPickRow(providers, current, identityTick, modelsLoading) { id, p ->
             // 网页 renderModelSelect 的 select：选不可用的 → 一句红字 + 弹回原值
             if (!p.usable) {
                 onNote(if (admin) "该模型未配置密钥，请先在「设置 → 模型服务」补全"
@@ -749,11 +762,12 @@ private fun serverDefaultOf(providers: List<ModelInfo>): String? =
    不可用的条目灰着、括号里带 reason，点它不生效（网页 disabled 选项选不中）。 */
 @Composable
 private fun ModelPickRow(providers: List<ModelInfo>, current: ModelInfo?,
-                         tick: Int, onPick: (String, ModelInfo) -> Unit) {
+                         tick: Int, loading: Boolean,
+                         onPick: (String, ModelInfo) -> Unit) {
     var open by remember { mutableStateOf(false) }
     tick
     SetRow("◆", "当前模型", trailing = "⌄", valSlot = {
-        SetValText(current?.name ?: "未配置模型")
+        SetValText(current?.name ?: if (loading) "读取中…" else "未配置模型")
     }) { open = true }
     if (open) {
         AlertDialog(onDismissRequest = { open = false },
@@ -761,7 +775,8 @@ private fun ModelPickRow(providers: List<ModelInfo>, current: ModelInfo?,
             title = { Text("当前模型", fontSize = 17.sp) },
             text = {
                 Column {
-                    if (providers.isEmpty()) Text("未配置模型", fontSize = 14.sp,
+                    if (providers.isEmpty()) Text(if (loading) "正在读取模型清单…" else "未配置模型",
+                        fontSize = 14.sp,
                         color = text3Color())
                     providers.forEach { p ->
                         val label = if (p.usable) {
