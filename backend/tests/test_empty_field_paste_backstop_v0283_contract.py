@@ -12,7 +12,7 @@
 仍未弹起才补位——直接读平台剪贴板（coerceToText 收非标准 MIME 的文字），
 复用同一只 PopupTextToolbar 弹「粘贴」。
 
-钉五件事：
+钉六件事：
 ① 观察器挂在输入位锚点 Box 上，只在「空框 + 键盘起 + 语音闸门不在位」时上班；
 ② 补位判据是自家工具条没弹起（status 非 Shown），且全程 Final 段、一口不吃；
 ③ 闭包全部 rememberUpdatedState 现取（第 8 轮冻快照那个病根不许复发）；
@@ -50,6 +50,20 @@ def test_backstop_exists_and_mounted_on_anchor_box():
     assert "anchorRect = { fieldRect }" in CHAT and \
         ".onGloballyPositioned { fieldRect = it.boundsInRoot() }" in CHAT, \
         "补位弹的胶囊要贴着输入框：框的根坐标量下来递给 showMenu"
+
+
+def test_gesture_and_layout_imports_present():
+    # CI 编译判例：awaitEachGesture/awaitFirstDown 是 foundation.gestures 的顶层函数，
+    # boundsInRoot 是 androidx.compose.ui.layout 的扩展函数——都不是 PointerInputScope
+    # / LayoutCoordinates 的成员，漏 import 当场 Unresolved reference。
+    for imp in ("import androidx.compose.foundation.gestures.awaitEachGesture",
+                "import androidx.compose.foundation.gestures.awaitFirstDown",
+                "import androidx.compose.ui.layout.boundsInRoot",
+                "import androidx.compose.ui.input.pointer.PointerEventPass",
+                "import androidx.compose.ui.input.pointer.pointerInput",
+                "import androidx.compose.ui.layout.onGloballyPositioned",
+                "import kotlinx.coroutines.withTimeoutOrNull"):
+        assert imp + "\n" in CHAT, f"缺 {imp}：Kotlin 编译不过"
 
 
 def test_backstop_only_fires_when_native_chain_stayed_silent():
@@ -96,7 +110,7 @@ def test_pill_shell_and_mounts_untouched():
         "第 18 轮的选区末端落点公式不回退"
     assert re.search(r"setTextSize\(TypedValue\.COMPLEX_UNIT_SP, 13f\)", body), "13sp 小胶囊不回退"
     assert CHAT.count("LocalTextToolbar provides") == 2, "两处挂载数不变：只加观察器，没加第三个壳"
-    assert re.search(r"toolbar\.showMenu\(rect, null, \{ pasteRef\.value\(\)\(text\) \}, null, null\)", CHAT), \
+    assert re.search(r"toolbar\.showMenu\(rect, null, \{ pasteRef\.value\.invoke\(text\) \}, null, null\)", CHAT), \
         "补位复用同一只壳、只递粘贴一项（第三参正是 onPasteRequested）"
 
 
