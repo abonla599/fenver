@@ -139,7 +139,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ChatEvent
@@ -1571,32 +1570,23 @@ private fun Modifier.pasteBackstop(
     val pasteRef = rememberUpdatedState(onPasteText)
     return pointerInput(toolbar) {
         val slop = viewConfiguration.touchSlop
+        val holdMs = viewConfiguration.longPressTimeoutMillis
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
             if (!eligibleRef.value()) return@awaitEachGesture
-            // 第一阶段：长按时限内抬手 = 普通点按/放光标，全程不掺和
-            val earlyUp = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                var up: PointerInputChange? = null
-                while (up == null) {
-                    val e = awaitPointerEvent(PointerEventPass.Final)
-                    val c = e.changes.firstOrNull { it.id == down.id } ?: break
-                    if ((c.position - down.position).getDistance() > slop) break
-                    if (!c.pressed) up = c
-                }
-                up
+            // 一趟循环等这一指头真正离开：滑出/丢指/取消都拿不到干净的抬手，直接让位。
+            // 这段不许包进 run {} 或任何换接收者的挂起 lambda——AwaitPointerEventScope
+            // 带 @RestrictSuspension，换了接收者就调不动 awaitPointerEvent（CI 判例）。
+            var lift: PointerInputChange? = null
+            while (lift == null) {
+                val e = awaitPointerEvent(PointerEventPass.Final)
+                val c = e.changes.firstOrNull { it.id == down.id } ?: break
+                if ((c.position - down.position).getDistance() > slop) break
+                if (!c.pressed) lift = c
             }
-            if (earlyUp != null) return@awaitEachGesture
-            // 第二阶段：等这一指头真正离开（超时/滑出/取消都拿不到干净的 up）
-            run {
-                var r: PointerInputChange? = null
-                while (r == null) {
-                    val e = awaitPointerEvent(PointerEventPass.Final)
-                    val c = e.changes.firstOrNull { it.id == down.id } ?: break
-                    if ((c.position - down.position).getDistance() > slop) break
-                    if (!c.pressed) r = c
-                }
-                r
-            } ?: return@awaitEachGesture
+            val up = lift ?: return@awaitEachGesture
+            // 按下不足长按时限 = 普通点按/放光标：这一下归文本框自己，全程不掺和
+            if (up.uptimeMillis - down.uptimeMillis < holdMs) return@awaitEachGesture
             if (toolbar.status == TextToolbarStatus.Shown) return@awaitEachGesture
             val text = readClipText(ctx) ?: return@awaitEachGesture
             val rect = rectRef.value() ?: return@awaitEachGesture

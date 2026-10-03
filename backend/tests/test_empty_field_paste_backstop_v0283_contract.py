@@ -33,6 +33,12 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _code_only(text: str) -> str:
+    """剥掉注释再判「某个写法绝对不许出现」——注释里写病例会被文本判据误伤。"""
+    no_line = re.sub(r"//[^\n]*", "", text)
+    return re.sub(r"/\*[\s\S]*?\*/", "", no_line)
+
+
 CHAT = _read(UI / "ui" / "ChatUi.kt")
 BACKSTOP = re.search(r"@Composable\nprivate fun Modifier\.pasteBackstop\([\s\S]*?\n\}", CHAT)
 CLIP = re.search(r"private fun readClipText\([\s\S]*?\n\}", CHAT)
@@ -62,22 +68,33 @@ def test_gesture_and_layout_imports_present():
                 "import androidx.compose.ui.input.pointer.PointerEventPass",
                 "import androidx.compose.ui.input.pointer.pointerInput",
                 "import androidx.compose.ui.layout.onGloballyPositioned",
-                "import kotlinx.coroutines.withTimeoutOrNull"):
+                "import androidx.compose.ui.geometry.Rect"):
         assert imp + "\n" in CHAT, f"缺 {imp}：Kotlin 编译不过"
 
 
 def test_backstop_only_fires_when_native_chain_stayed_silent():
     body = BACKSTOP.group(0)
+    code = _code_only(body)
     assert re.search(r"if \(toolbar\.status == TextToolbarStatus\.Shown\) return@awaitEachGesture", body), \
         "只在自家工具条没弹起时补位——文本框的链跑通了就一声不吭"
-    assert body.count("PointerEventPass.Final") >= 2 and "PointerEventPass.Main" not in body, \
+    assert code.count("PointerEventPass.Final") >= 1 and "PointerEventPass.Main" not in code, \
         "与 voiceHold 同款姿势：Final 段收事件，子节点 Main 段先处理完才轮到判定"
-    assert ".consume(" not in body and "consumeChange" not in body, \
+    assert ".consume(" not in code and "consumeChange" not in code, \
         "一口不吃：兜底观察器不许抢文本框的事件"
     assert "awaitFirstDown(requireUnconsumed = false)" in body, \
         "连 down 都不要求未消费——抢不过文本框时照常收得到"
-    assert "withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis)" in body, \
-        "长按时限内抬手算普通点按，不放光标也要让路"
+    # CI 编译判例：AwaitPointerEventScope 带 @RestrictSuspension，等抬手这一趟循环
+    # 必须留在挂起作用本级——包进换接收者的 lambda 就调不动 awaitPointerEvent
+    assert "run {" not in code and "withTimeoutOrNull" not in code, \
+        "不许再把等待抬手的循环包进换接收者的 lambda：Restricted suspending functions 编译错"
+    assert re.search(r"if \(up\.uptimeMillis - down\.uptimeMillis < holdMs\) return@awaitEachGesture", body), \
+        "按下不足长按时限 = 普通点放光标，用事件时间差判，不另开定时器"
+    assert "val holdMs = viewConfiguration.longPressTimeoutMillis" in body, \
+        "长按门槛跟着系统 ViewConfiguration 走（1.6.8 起这属性在 ui 的 ViewConfiguration 上）"
+    assert ".getDistance()" in body and ".getLength()" not in code, \
+        "1.6.8 的 Offset 只有 getDistance（getLength 是更早的名字，写它编译不过）"
+    assert "pasteRef.value.invoke(text)" in body, \
+        "value 是属性：写成 value()(text) 会被读成零参调用再拿 Unit 去调"
 
 
 def test_backstop_closures_read_latest_state():
