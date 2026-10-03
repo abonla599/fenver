@@ -91,10 +91,39 @@ class RedactingStream:
 
 
 class _RedactFilter(logging.Filter):
+    """逐条打码，但**保持 record 的可格式化形状**。
+
+    不能图省事写成 `record.msg = redact(record.getMessage()); record.args = ()`：
+    uvicorn 的 AccessFormatter 不看 msg，它把 `record.args` 当成五元组拆开
+    （client_addr/method/full_path/http_version/status_code，见
+    uvicorn/logging.py 的 AccessFormatter.formatMessage）。args 一旦被清空，
+    每条访问日志都在 formatter 里抛
+    `ValueError: not enough values to unpack (expected 5, got 0)`，logging 把这
+    一段 `--- Logging error ---` 连同整条调用栈吐到 stderr——也就是
+    data/backend.log。现网实测：换包前后每一代日志里各有 828 / 2,462 次，
+    真正的访问记录被噪声挤掉，而 1MB 轮转又把噪声本身也滚没了：出事故时
+    唯一该留下的东西（谁在什么时候打了哪个接口）恰恰不在。请求本身不受影响
+    （状态码照旧 200），所以这条不会让任何功能测试变红——正是本仓反复拆的那类形状。
+
+    改法：msg 模板与 args 里的每个值各打各的码，元组长度原样留着。敏感串本来就
+    在值里（模型 id、上游 host），不在 `%s` 模板里，所以脱敏性质一点没丢。
+    """
+
+    @staticmethod
+    def _redact_value(v):
+        return redact(v) if isinstance(v, str) else v
+
     def filter(self, record):
         try:
-            record.msg = redact(record.getMessage())
-            record.args = ()
+            args = record.args
+            if isinstance(args, tuple):
+                record.args = tuple(self._redact_value(a) for a in args)
+            elif isinstance(args, dict):
+                record.args = {k: self._redact_value(v) for k, v in args.items()}
+            elif args is not None:
+                record.args = self._redact_value(args)
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg)
         except Exception:
             pass                        # 打码失败绝不吞掉日志本身
         return True
