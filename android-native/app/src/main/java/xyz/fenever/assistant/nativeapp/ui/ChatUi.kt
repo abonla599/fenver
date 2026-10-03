@@ -616,7 +616,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         if (t.isEmpty() && pending.isEmpty()) return
         streamJob = null
         scope.launch {
-            if (providers.isEmpty()) loadModelsNow()
+            if (providers.isEmpty()) {
+                // 冷启动清单还没回来的那几秒按了发送：先说一声在补拉，别让键像坏了
+                //（v0.28.2 真机反馈 2；快线超时见 Api.metaClient，不会再挂 5 分钟）
+                setStatus("正在读取模型清单…")
+                loadModelsNow()
+            }
             if (currentProvider() == null) {
                 setStatus(if (Prefs.role == "admin")
                     "当前没有可用模型，请在「设置 → 模型服务」中配置"
