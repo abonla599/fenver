@@ -162,7 +162,7 @@ object Api {
             }
             val req = rb.build()
             // GET 一律走快线（见 metaClient 的来由）；其余方法留在大超时线路上。
-            if (req.method() == "GET") return@withContext getMeta(req)
+            if (req.method == "GET") return@withContext getMeta(req)
             client.newCall(req).execute().use { res ->
                 val text = res.body?.string() ?: ""
                 if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
@@ -175,7 +175,7 @@ object Api {
      * 不是 IOException，原样上抛绝不重打（401 的语义在调用方，重打只会再戳一次）。 */
     private fun getMeta(req: Request): String {
         var last: java.io.IOException? = null
-        for (_ in 0 until 2) {
+        for (attempt in 0 until 2) {
             try {
                 metaClient.newCall(req).execute().use { res ->
                     val text = res.body?.string() ?: ""
