@@ -15,7 +15,18 @@ from app.core import usage
 
 # 在 conftest 那个 autouse 桩生效之前把真函数抓在手里：它会把 app.core.streaming.stream_chat
 # 整个换成 fake_stream，测试再从模块属性上取就拿不到真代码。
+# v0.29.2 起 conftest 把 stream_chat_events 也一并钉住了（聊天端点改抽帧那条路，端点
+# 用例的切面必须跟着搬），所以这里真身也要抓两把：只搬 stream_chat 的话，真身内部
+# 按名字找到的仍然是桩——账本一行都不会记，红出来像"记账坏了"。
 from app.core.streaming import stream_chat as real_stream_chat
+from app.core.streaming import stream_chat_events as real_stream_chat_events
+
+
+@pytest.fixture(autouse=True)
+def _real_events_seam(monkeypatch):
+    """把真 stream_chat_events 盖回模块属性：这条用例要的是真上游连接，不是端点切面桩。"""
+    import app.core.streaming as streaming
+    monkeypatch.setattr(streaming, "stream_chat_events", real_stream_chat_events)
 
 
 @pytest.fixture(autouse=True)

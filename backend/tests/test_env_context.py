@@ -19,6 +19,7 @@ import pytest
 from app import pipeline as pipeline_mod
 from app.core import schedule
 from app.pipeline import ChatPipeline
+from tests import conftest
 
 PERSONA = "你是考研规划助手，只用中文回答。"
 DATE_LINE_OK = "环境锚点没进那一条 system"
@@ -114,6 +115,9 @@ def test_stream_endpoint_sends_the_env_anchor_to_the_model(client, monkeypatch):
         yield "好"
 
     monkeypatch.setattr(streaming, "stream_chat", spy)
+    # 端点抽干的是 stream_chat_events（v0.29.2）：两条切面一起钉，只钉一条等于没钉。
+    monkeypatch.setattr(streaming, "stream_chat_events",
+                        conftest.text_as_events(spy))
 
     r = client.post("/v1/chat/stream", json={
         "model": "deepseek-chat",

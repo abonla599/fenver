@@ -49,11 +49,15 @@ def _close_quietly(stream) -> None:
 #   2. 而端点这一头要把 thinking/tool_call/search 帧逐块 append 进 run 缓冲、
 #      还要在最后把步收拢成 trace 落盘——这些非内容帧被 stream_chat 这个文本过滤器
 #      吃掉了，得有另一条路交出去。
-# 解法：端点（与生产线程同线程）在抽干 stream_chat 前 begin_trace()，引擎把非内容帧
-# 与步就地塞进这根线程的 sink；端点每收到一段正文就 drain_frames() 把攒下的帧补发，
-# 流抽干后再 collect_steps() 拿全程留痕。stream_chat 仍是 stream_chat_events 的薄过滤器，
-# 签名不变、桩不受影响；直连 stream_chat_events 的调用方（含本模块新测试）可改用显式
-# trace_out。生产线程是每轮一条独立线程，线程局部天然按 run 隔离，不串味。
+# 解法：端点（与生产线程同线程）在抽干之前 begin_trace()，引擎把非内容帧与步就地塞进
+# 这根线程的 sink，流抽干后 collect_steps() 拿全程留痕。帧的上屏方式在 v0.29.2 换过一次：
+# 以前端点吃 stream_chat 的文本、每吐一段正文才 drain_frames() 补发攒下的帧，于是模型
+# "只想不说"的那几十秒里一个字节都不上屏——现在端点直接逐帧消费 stream_chat_events，
+# 帧在产生的那一刻就进 run 缓冲；drain_frames() 仍留给确实只能吃文本的调用方，
+# sink 里的帧改成"顺手攒着"，不再有人依赖它决定何时上屏。
+# stream_chat 仍是 stream_chat_events 的薄过滤器，签名不变、桩不受影响；直连
+# stream_chat_events 的调用方（含本模块新测试）可改用显式 trace_out。生产线程是每轮
+# 一条独立线程，线程局部天然按 run 隔离，不串味。
 _trace_local = threading.local()
 
 
@@ -139,8 +143,9 @@ def stream_chat(
     切面的端点用例照旧成立。真正干活的是 stream_chat_events——这里只是它的一个投影。
 
     非内容帧（thinking/tool_call/tool_result/search）与过程步不在这里透传：需要它们的
-    调用方要么用 begin_trace()/drain_frames()/collect_steps() 这对环境接口（端点走的
-    就是这条），要么直接抽干 stream_chat_events 并传 trace_out。
+    调用方要么用 begin_trace()/collect_steps() 这对环境接口，要么直接抽干
+    stream_chat_events 并传 trace_out。自 v0.29.2 起聊天端点走的是后一条：过程帧必须
+    在产生的那一刻上屏，不能等正文把它攒出来。
     """
     for ev in stream_chat_events(
         model, messages, provider_id=provider_id, temperature=temperature,
@@ -202,8 +207,9 @@ def stream_chat_events(
     ok = True
 
     def _push_frame(frame: Dict[str, Any]) -> None:
-        # 非内容帧交进 ambient sink：stream_chat 这层文本过滤器吃不掉它们，
-        # 端点靠 drain_frames() 逐块补发。content 帧不进 sink（端点自己发 content）。
+        # 非内容帧另存一份进 ambient sink，只为让 stream_chat（文本过滤器）那条路还拿得到
+        # 过程帧；端点不再从这里取帧决定上屏时机——它直接逐帧消费 stream_chat_events。
+        # content 帧不进 sink（发文本的那条路自己就有正文）。
         if sink is not None and frame.get("type") != se.FRAME_CONTENT:
             sink.frames.append(frame)
 
@@ -313,7 +319,12 @@ def stream_chat_events(
                     rp = getattr(delta, "reasoning_content", None)
                     if rp and rich and think_emitted < se.THINKING_TOTAL_MAX:
                         think_buf += rp
-                        if len(think_buf) >= se.THINKING_FLUSH_CHARS:
+                        # 两条触发都必须落在这段"只有思考、还没有正文"的代码里。
+                        # 以前时间触发只写在下面的正文分支，于是模型只想不说的
+                        # 那几十秒里一帧都不发：用户看到的正是"等半天，思考过程和
+                        # 答案一起蹦出来"，而且在这段时间里没有判断依据去按停止。
+                        if (len(think_buf) >= se.THINKING_FLUSH_CHARS
+                                or (time.monotonic() - think_last_flush) >= se.THINKING_FLUSH_SECONDS):
                             yield from flush_thinking()
                     piece = getattr(delta, "content", None)
                     if piece:

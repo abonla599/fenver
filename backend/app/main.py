@@ -670,8 +670,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     整轮重发进 /v1/chat 再付一次钱——那正是本版要堵的洞。停的信息放进 done
     的新字段（status/stopped_reason/resumable），旧解析器不受影响。
     """
-    from app.core.streaming import (stream_chat, StreamCancelled, begin_trace,
-                                    drain_frames, collect_steps, end_trace)
+    from app.core.streaming import (stream_chat_events, StreamCancelled, begin_trace,
+                                    collect_steps, end_trace)
     from app.core import stream_events as se
 
     def before_round():
@@ -710,15 +710,6 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     full_text = ""
     trace: list = []
 
-    def _emit_pending():
-        """把引擎塞进本线程 sink 的非内容帧补发进 run 缓冲，保持产出顺序。
-
-        thinking/tool_call/tool_result/search 这些被 stream_chat 的文本过滤器吃掉了，
-        只能靠 drain_frames 交回来——它们与 content 帧的相对次序即引擎的产出次序。
-        """
-        for frame in drain_frames():
-            run.append(frame)
-
     begin_trace()
     try:
         run.append(se.start_frame(run.message_id, provider["model"]))
@@ -731,20 +722,23 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         # tools 走的是同一个 pipeline 实例：非流式那条一直把工具传给模型，
         # 流式这条以前一个都没传，于是界面上工具等于不存在（模型如实说它
         # 不会用计算器）。清单装配见 ChatPipeline.__init__。
-        for chunk in stream_chat(provider["model"], messages,
-                                 provider_id=provider["id"],
-                                 tools=pipe.tools_schema if pipe else None,
-                                 user_id=principal.user_id,        # 账本要落在人头上
-                                 cancel_event=run.cancel_event,    # 停止的主判据
-                                 on_upstream_start=run.attach_upstream,  # 供当场关闭
-                                 before_round=before_round):       # R3b 轮次边界的钱闸
-            # 先补发这段正文之前引擎产出的过程帧（思考/工具/搜索），再发正文本身，
-            # 于是"它在想 → 它去调工具 → 它说结论"在上屏顺序上就是发生顺序。
-            _emit_pending()
-            full_text += chunk
-            run.append(se.content_frame(chunk))
-        # 末轮的 tool_call/tool_result/search 在最后一块正文之后才产出，收尾必须再抽一次。
-        _emit_pending()
+        #
+        # 引擎这里必须直接吃 stream_chat_events 的**帧**，不能吃 stream_chat 的文本：
+        # 上一版走文本，过程帧被过滤器吃掉、只留在本线程 sink 里，端点每吐出
+        # 一段正文才 drain 一次补发。后果就是用户实测到的那件事——模型只想不说
+        # 的那几十秒里一个字节都不上屏，"等半天，思考过程和答案一起蹦出来"，
+        # 而在这段时间里他没有任何判断依据去按停止。改成逐帧即产即发之后，
+        # 思考/工具/搜索在发生的那一刻就进 run 缓冲。
+        for frame in stream_chat_events(provider["model"], messages,
+                                        provider_id=provider["id"],
+                                        tools=pipe.tools_schema if pipe else None,
+                                        user_id=principal.user_id,        # 账本要落在人头上
+                                        cancel_event=run.cancel_event,    # 停止的主判据
+                                        on_upstream_start=run.attach_upstream,  # 供当场关闭
+                                        before_round=before_round):       # R3b 轮次边界的钱闸
+            if frame.get("type") == se.FRAME_CONTENT:
+                full_text += frame.get("text") or ""
+            run.append(frame)
 
         # 全程过程步收拢成可落盘的 trace（封顶步数/字数在 compact_trace 里）
         trace = se.compact_trace(collect_steps())
@@ -773,7 +767,6 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         # 再以 done 收尾。账已由 stream_chat 的 finally 结清——那是取消前真
         # 消费的部分，此后这里不再叫上游（轮首检查与读者闸门两处都拦着）。
         # 取消点之前已经产出的过程帧与留痕照发照存：屏幕上看到过的不该在历史里消失。
-        _emit_pending()
         trace = se.compact_trace(collect_steps())
         if run.session_id and full_text and run.claim_message_save():
             sessions_store.add_message(run.session_id, principal.user_id,
