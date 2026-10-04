@@ -54,6 +54,7 @@ def test_all_stores_share_one_root(monkeypatch):
     """
     from app.core.auth import _default_users_path
     from app.core.providers import _default_path as providers_path
+    from app.core.search_keys import path as search_keys_path
     from app.core.uploads import _default_dir as uploads_dir
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
     from app.session.session_store import _default_path as sessions_path
@@ -65,6 +66,7 @@ def test_all_stores_share_one_root(monkeypatch):
         ("SESSION_DB_PATH", sessions_path),
         ("CHROMA_DB_PATH", chroma_dir),
         ("USERS_DB_PATH", _default_users_path),
+        ("SEARCH_KEYS_DB_PATH", search_keys_path),
     ]
     for var, _ in stores:
         monkeypatch.delenv(var, raising=False)
@@ -163,7 +165,8 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
                  "模型服务配置": "providers.json", "附件": "uploads",
                  "长期记忆向量库": "chroma_db", "任务清单": "tasks.json",
                  "用量账本": "usage.json", "日程": "schedule.json",
-                 "运行时配置": "config.json", "审计流水": "audit.jsonl"}
+                 "运行时配置": "config.json", "审计流水": "audit.jsonl",
+                 "搜索源密钥": "search_keys.json"}
     # 反馈、意见反馈与偏好是导入期算好的模块常量，指不走运行时环境变量（conftest 在
     # import 前把它指到临时目录），所以不在 FILENAMES 里
     assert set(FILENAMES) | {"反馈原文", "意见反馈", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \

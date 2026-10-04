@@ -324,7 +324,8 @@ class ChatPipeline:
                             if isinstance(art, dict) and art.get("kind") == "web_search":
                                 trace_out.append(se.step_search(tool_call.id,
                                                                 art.get("query", ""),
-                                                                art.get("results")))
+                                                                art.get("results"),
+                                                                art.get("source")))
                 else:
                     # 无工具调用，返回文本
                     return msg.content or "（模型未返回内容）"
