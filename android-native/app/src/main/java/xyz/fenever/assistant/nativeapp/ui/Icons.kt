@@ -12,6 +12,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 /* 自绘线性图标族（第 5 轮真机反馈：emoji 按钮「看着太简陋」）。
  * 统一语言：24 格网、1.7 描边、圆头圆角，全部 Canvas 直绘——零新依赖，
@@ -157,3 +160,60 @@ fun IconMenu(tint: Color, modifier: Modifier = Modifier) =
         seg(tint, sw, k, 4.5f to 12f, 19.5f to 12f)
         seg(tint, sw, k, 4.5f to 17.2f, 19.5f to 17.2f)
     }
+
+/* ---------------- v0.30 过程面板专用 ----------------
+ * 这一族的来由：面板原来打的是字形（▋ ▾ ✓ ✗ …），字体没覆盖就变成实心方块——
+ * 用户真机截图里那条"只剩一个绿方块的气泡"就是 ▋。状态一律改成画，
+ * 不再赌设备上有没有这个字形。 */
+
+/** 过程面板标题左侧那枚"看见过程"的眼：杏仁框 + 瞳孔。 */
+@Composable
+fun IconTraceEye(tint: Color, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, sw ->
+        drawArc(tint, 200f, 140f, false, Offset(4.2f * k, 4.2f * k), Size(15.6f * k, 15.6f * k),
+            style = Stroke(width = sw, cap = StrokeCap.Round))
+        drawArc(tint, 20f, 140f, false, Offset(4.2f * k, 4.2f * k), Size(15.6f * k, 15.6f * k),
+            style = Stroke(width = sw, cap = StrokeCap.Round))
+        drawCircle(tint, 2.1f * k, Offset(12f * k, 12f * k))
+    }
+
+/** 这一步做完了：圆圈 + 对勾。 */
+@Composable
+fun IconStepDone(tint: Color, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, sw ->
+        drawCircle(tint, 8.6f * k, Offset(12f * k, 12f * k), style = Stroke(width = sw))
+        poly(tint, sw, k, 7.9f to 12.3f, 10.7f to 15.1f, 16.2f to 9.3f)
+    }
+
+/** 这一步失败了：圆圈 + 叉。 */
+@Composable
+fun IconStepFailed(tint: Color, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, sw ->
+        drawCircle(tint, 8.6f * k, Offset(12f * k, 12f * k), style = Stroke(width = sw))
+        seg(tint, sw, k, 9.4f to 9.4f, 14.6f to 14.6f)
+        seg(tint, sw, k, 14.6f to 9.4f, 9.4f to 14.6f)
+    }
+
+/** 进行中：八个小点转圈，rotation 由调用方的无限动画喂进来。 */
+@Composable
+fun IconStepBusy(tint: Color, rotation: Float, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, _ ->
+        for (i in 0 until 8) {
+            val ang = Math.toRadians((i * 45f + rotation).toDouble())
+            val fade = 1f - i / 9f
+            drawCircle(tint.copy(alpha = fade), 1.35f * k,
+                Offset(12f * k + (7.4f * k * cos(ang)).toFloat(),
+                    12f * k + (7.4f * k * sin(ang)).toFloat()))
+        }
+    }
+
+/** 三点呼吸（参考用户给的「正在思考 •••」）：phase 0→1 跑一圈，亮的那颗往前走。 */
+@Composable
+fun IconThinkingDots(tint: Color, phase: Float, modifier: Modifier = Modifier) =
+    LineIcon(modifier = modifier) { k, _ ->
+        listOf(6.5f, 12f, 17.5f).forEachIndexed { i, x ->
+            val wave = 1f - abs(((phase + i / 3f) % 1f) * 2f - 1f)
+            drawCircle(tint.copy(alpha = 0.3f + 0.7f * wave), 1.55f * k, Offset(x * k, 12f * k))
+        }
+    }
+

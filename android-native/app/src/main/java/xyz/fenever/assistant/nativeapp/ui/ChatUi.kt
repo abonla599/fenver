@@ -93,6 +93,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -116,6 +117,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.platform.LocalView
@@ -125,7 +127,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -806,6 +807,27 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         stopRequested = true; streamJob?.cancel()
     }
 
+    /* IME 压制件（原本挂在语音闸门那段，v0.30 上移到这里）：
+     * sendNow 发完消息要立刻收键盘，而局部函数不能前向引用——这套件必须在 sendNow 之前定义。
+     * 第 9 轮：这 ROM 上键盘的 show 动画会吞掉同窗口里紧随的一次 hide() 调用——
+     * 第 8 轮单发 stashIme 真机实测压不住（胶囊和键盘照样同屏）。改成连发补刀：
+     * 先发落在动画里也无妨，后面 4 发（180/360/540/720ms）落在动画结束之后必收。
+     * 必须 remember：键盘升降正会触发重组，裸 new Handler 会让 DisposableEffect
+     * 的 key 每轮都变、把排队中的补刀全清掉——自己拆自己的台。 */
+    val root = LocalView.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val imeStash = remember { Handler(Looper.getMainLooper()) }
+    DisposableEffect(imeStash) { onDispose { imeStash.removeCallbacksAndMessages(null) } }
+    fun stashIme() {
+        focusManager.clearFocus()
+        runCatching { root.windowInsetsController?.hide(WindowInsetsCompat.Type.ime()) }
+        for (i in 1..4) {
+            imeStash.postDelayed({
+                runCatching { root.windowInsetsController?.hide(WindowInsetsCompat.Type.ime()) }
+            }, i * 180L)
+        }
+    }
+
     /* app.js send()：空输入且没有附件 → 什么都不做；清单还没回来先补拉一次；
      * 没有可用模型 → 指路文案（管理员/普通用户两句不一样）并打开「模型服务」。 */
     fun sendNow(text: String) {
@@ -833,6 +855,10 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             pending = emptyList()
             messages = messages + UiMsg("user", t, attachments = atts)
             input = TextFieldValue("")
+            // v0.30 用户诉求：发完问题键盘自动收起，省掉一次手动收键盘，直接看输出。
+            // 用现成的 stashIme（clearFocus + 连发压 IME），不另起一套——单发 hide()
+            // 在这 ROM 上会被 show 动画吞掉（第 8/9 轮真机判例）。
+            stashIme()
             streamInto()
         }
     }
@@ -905,8 +931,6 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 整个顶扁、内衬恒为 0，门控在真机上形同虚设（第 4 轮反馈的根因）。
     // 双保险：内衬有值吃内衬，另外实测窗口可见区缩水。
     val density = LocalDensity.current
-    val root = LocalView.current
-    val keyboardController = LocalSoftwareKeyboardController.current
     val frameKeyboardUp = rememberKeyboardVisible()
     // 第 15 轮改判（用户真机：「点键盘下箭头收了键盘，输入框还停在打字态」）：
     // 第 14 轮拿焦点当键盘代理，收键盘不收焦点——信号永远卡在"有键盘"，胶囊回不去。
@@ -914,22 +938,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 键盘起=窗被顶扁（本 App manifest 声明 adjustResize，第 9 轮真机已证），
     // 键盘收=窗弹回，无论用什么方式收都能测到。ime 内衬那路保留兜别的机型。
     val keyboardUp = WindowInsets.ime.getBottom(density) > 0 || frameKeyboardUp
-    // 第 9 轮：这 ROM 上键盘的 show 动画会吞掉同窗口里紧随的一次 hide() 调用——
-    // 第 8 轮单发 stashIme 真机实测压不住（胶囊和键盘照样同屏）。改成连发补刀：
-    // 先发落在动画里也无妨，后面 4 发（180/360/540/720ms）落在动画结束之后必收。
-    // 必须 remember：键盘升降正会触发重组，裸 new Handler 会让 DisposableEffect
-    // 的 key 每轮都变、把排队中的补刀全清掉——自己拆自己的台。
-    val imeStash = remember { Handler(Looper.getMainLooper()) }
-    DisposableEffect(imeStash) { onDispose { imeStash.removeCallbacksAndMessages(null) } }
-    fun stashIme() {
-        focusManager.clearFocus()
-        runCatching { root.windowInsetsController?.hide(WindowInsetsCompat.Type.ime()) }
-        for (i in 1..4) {
-            imeStash.postDelayed({
-                runCatching { root.windowInsetsController?.hide(WindowInsetsCompat.Type.ime()) }
-            }, i * 180L)
-        }
-    }
+    // root / keyboardController / imeStash / stashIme 已上移到 sendNow 之前：
+    // v0.30 起「发送即收键盘」要在 sendNow 里调 stashIme，而局部函数不能前向引用。
     // 第 10 轮（用户点名「不希望出现键盘闪一下」，学豆包/DeepSeek）：语音闸门在位的
     // 窗口里根本不挂文本框——没框就没焦点可抢，键盘无从闪现。短按松手由 voiceHold 的
     // onTap 记一笔 fieldPending：挂回文本框、程序化聚焦并请出键盘（点按=打字，长按=说话）。
@@ -1982,7 +1992,7 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
                 // 过程面板排在正文上方（网页 .msg-trace 同位）：历史落定态默认折叠，
                 // 点标题行展开。只有助手消息带得到 trace。
                 if (!mine && m.trace.isNotEmpty())
-                    TracePanel(m.trace, m.traceExpanded, onToggleTrace, onOpenUrl)
+                    TracePanel(m.trace, m.traceExpanded, null, onToggleTrace, onOpenUrl)
                 if (mine) Text(m.content, fontSize = 15.sp, lineHeight = 24.sp,
                     color = if (isWebLight()) WebTokens.LText else WebTokens.Text)
                 else RichText(m.content, scheme.onSurface)
@@ -2043,8 +2053,11 @@ private fun ToolBtn(label: String, on: Boolean = false, enabled: Boolean = true,
     }
 }
 
-/* 流式中的那条助手气泡：网页 = .msg.assistant.typing，body 里实时长字 + ▋ 呼吸光标。
- * v0.29.0：正文上方先挂过程面板（流式期间默认展开，判据在 ChatScreen 的 streamTrace*）。 */
+/* 流式中的那条助手气泡：网页 = .msg.assistant.typing，body 里实时长字 + 呼吸光标。
+ * v0.29.0：正文上方先挂过程面板（流式期间默认展开，判据在 ChatScreen 的 streamTrace*）。
+ * v0.30：面板在"还在想、一个字都没发"的那几十秒也要出现——原来 trace 为空就整块不挂，
+ * 用户看到的只有一个光标（真机截图：气泡里就一个方块）。现在正文还没开口就先给
+ * 一行「正在思考 •••」，等第一步落了地再换成带秒数的实时状态条。 */
 @Composable
 private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded: Boolean,
                             onToggleTrace: () -> Unit, onOpenUrl: (String) -> Unit) {
@@ -2061,16 +2074,40 @@ private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded:
             .border(BorderStroke(1.dp, scheme.outline), shape)
             .padding(horizontal = 16.dp, vertical = 12.dp)) {
             if (trace.isNotEmpty())
-                TracePanel(trace, traceExpanded, onToggleTrace, onOpenUrl)
+                TracePanel(trace, traceExpanded,
+                    if (text.isEmpty()) "正在思考" else "正在生成", onToggleTrace, onOpenUrl)
+            else if (text.isEmpty()) TraceThinkingNow()
             if (text.isEmpty()) BlinkCursor()
             else { RichText(text, scheme.onSurface); BlinkCursor() }
         }
     }
 }
 
-/* ---------------- 过程面板（v0.29.0 · 网页 .msg-trace 的原生对位） ----------------
- * 全部手搓 Column/Row/Text/clickable —— 本工程没有 markdown 库，也不为这一个面板
- * 加依赖。配色只吃文件里现成的档位（scheme + text3Color），不自造色板。 */
+/* 一个字都还没有的那几秒：只有呼吸三点 + 「正在思考」。
+ * 与面板里的实时状态条同款动画，但这里不报秒数——还没开始跑任何一步。 */
+@Composable
+private fun TraceThinkingNow() {
+    Row(verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        IconThinkingDots(text3Color(), thinkingPhase(), Modifier.size(22.dp))
+        Text("正在思考", fontSize = 12.sp, color = text3Color())
+    }
+}
+
+/* 三点呼吸的相位：0→1 无限跑。单独抽出来，面板与"还没开始"那行共用一套节奏。 */
+@Composable
+private fun thinkingPhase(): Float {
+    val tr = rememberInfiniteTransition(label = "thinkdots")
+    val p by tr.animateFloat(0f, 1f,
+        infiniteRepeatable(tween(1200), RepeatMode.Restart), label = "phase")
+    return p
+}
+
+/* ---------------- 过程面板（v0.29.0 · 网页 .msg-trace 的原生对位；v0.30 改版） ----------------
+ * 全部手搓 Column/Row/Text/clickable + Icons.kt 里的 Canvas 直绘图标 —— 本工程没有
+ * markdown 库，也不为这一个面板加依赖。配色只吃文件里现成的档位（scheme + text3Color）。
+ * 改版要点（对着用户给的两张参考图）：标题行说"查看 N 个步骤"、当前那一步单独一条
+ * 实时状态条带秒数、步前标记一律画（字形缺了就变豆腐块）。 */
 
 /** 客户端侧的最后一道闸：只放行 http(s)，其余（含空串）一律按纯文本处理。
  *  搜索标题/摘要/网址是别人写的网页内容——服务端过滤过一轮，这里仍不互信（纵深防御）。 */
@@ -2080,52 +2117,116 @@ private fun safeTraceUrl(url: String): String {
     return if (lower.startsWith("http://") || lower.startsWith("https://")) u else ""
 }
 
-/** 折叠着也能读的那一行标题：思考过程 · 3 步 · 已搜索 5 个网页（与网页同文案同判据）。 */
+/** 毫秒 → 一位小数的秒：面板里所有时长同一个口径（参考图就是 "18.7s"）。 */
+private fun fmtTraceSecs(ms: Int): String = "%.1fs".format(ms / 1000.0)
+
+/** 折叠着也能读的那一行标题 + 正在跑的那一步的实时状态条。
+ *
+ * liveLabel=null（历史落定态）只剩标题行 + 展开后的步列表；
+ * liveLabel 非空（流式中，调用方给"正在思考/正在生成"）时底部那条状态条一直在——
+ * 收起着也看得见"它现在在干什么、干了多久"，这正是用户提的
+ * "复杂任务我看不出想到哪一步"的答案。 */
 @Composable
-private fun TracePanel(items: List<TraceItem>, expanded: Boolean,
+private fun TracePanel(items: List<TraceItem>, expanded: Boolean, liveLabel: String?,
                        onToggle: () -> Unit, onOpenUrl: (String) -> Unit) {
     val pages = items.filter { it.kind == "search" }.sumOf { it.results.size }
+    val steps = items.count { it.kind != "omitted" }
+    // 当前在跑的那一步：工具发出去了还没等到结果 → 报这一步的名字；否则报调用方给的态。
+    val running = items.lastOrNull { it.kind == "tool" && it.pending }
+    val status = if (running != null)
+        running.label.ifEmpty { running.name.ifEmpty { "处理中" } }
+    else liveLabel.orEmpty()
+    // 计时起点挂在"是哪一步"上：换步归零，同一步反复重组不重置。
+    // 服务端只有 tool_result 带 elapsed_ms，进行中的这一步没人报进度，只能客户端数。
+    val clockKey = running?.id?.ifEmpty { running.label } ?: "live"
+    val startedAt = remember(clockKey) { android.os.SystemClock.elapsedRealtime() }
+    val chevron by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
     Column(Modifier.fillMaxWidth().padding(bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("思考过程 · ${items.size} 步" +
-                    if (pages > 0) " · 已搜索 $pages 个网页" else "",
+            IconTraceEye(text3Color(), Modifier.size(14.dp))
+            Text((if (expanded) "收起 " else "查看 ") + "$steps 个步骤" +
+                    if (pages > 0) " · $pages 个网页" else "",
                 fontSize = 12.sp, color = text3Color(),
                 modifier = Modifier.weight(1f))
-            Text(if (expanded) "▾" else "▸", fontSize = 12.sp, color = text3Color())
+            IconChevronDown(text3Color(), Modifier.size(14.dp).rotate(chevron))
         }
         if (expanded) items.forEach { TraceStepRow(it, onOpenUrl) }
+        if (liveLabel != null) TraceLiveBar(status, startedAt)
+    }
+}
+
+/* 当前这一步的实时状态条（参考图："阅读中…  18.7s"）。
+ * 秒数每 100ms 走一格：只重组这一条 Row，不去碰整张列表的贴底跟随。 */
+@Composable
+private fun TraceLiveBar(label: String, startedAt: Long) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(8.dp)
+    val spin by rememberInfiniteTransition(label = "livebar")
+        .animateFloat(0f, 360f,
+            infiniteRepeatable(tween(900), RepeatMode.Restart), label = "spin")
+    var now by remember(startedAt) {
+        mutableStateOf(android.os.SystemClock.elapsedRealtime())
+    }
+    LaunchedEffect(startedAt) {
+        while (true) {
+            now = android.os.SystemClock.elapsedRealtime()
+            delay(100)
+        }
+    }
+    Row(Modifier.fillMaxWidth()
+        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
+        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
+        .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        IconStepBusy(scheme.primary, spin, Modifier.size(14.dp))
+        Text(label, fontSize = 12.sp, color = scheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f))
+        Text(fmtTraceSecs((now - startedAt).toInt()), fontSize = 11.sp,
+            color = text3Color())
     }
 }
 
 @Composable
 private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val spin by rememberInfiniteTransition(label = "stepicon")
+        .animateFloat(0f, 360f,
+            infiniteRepeatable(tween(900), RepeatMode.Restart), label = "spin")
     when (t.kind) {
-        // 思考文本与答案要一眼分得开：矮一档墨色 + 斜体（网页 .trace-thinking 同语义）
+        // 思考文本与答案一眼分开：矮一档墨色 + 左边一道竖线（参考图的排版）。
+        // 原来靠斜体区分，斜体在中文里没有字形、只会合成拉伸，读着更累。
         "thinking" -> Text(t.text, fontSize = 13.sp, lineHeight = 20.sp,
-            fontStyle = FontStyle.Italic, color = scheme.onSurfaceVariant)
+            color = scheme.onSurfaceVariant,
+            modifier = Modifier
+                .drawBehind {
+                    drawLine(scheme.outline, Offset(0f, 0f), Offset(0f, size.height),
+                        strokeWidth = 2.dp.toPx())
+                }
+                .padding(start = 10.dp)
+                .fillMaxWidth())
         "omitted" -> Text("…中间 ${t.omitted} 步已省略…",
             fontSize = 12.sp, color = text3Color(),
             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp))
         "tool" -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // ✓/✗ 是字形不是 emoji；还没等到结果的那一步（停在块边界、断线）画一个点
-                Text(if (t.pending) "…" else if (t.ok) "✓" else "✗",
-                    fontSize = 13.sp,
-                    color = when {
-                        t.pending -> text3Color()
-                        t.ok -> scheme.primary
-                        else -> scheme.error
-                    })
+                // 状态标记改成画出来的：✓/✗/▋ 这些字形在部分设备上没有，
+                // 缺字就成实心方块（v0.30 用户截图里那条"只有方块的气泡"）。
+                when {
+                    t.pending -> IconStepBusy(text3Color(), spin, Modifier.size(14.dp))
+                    t.ok -> IconStepDone(scheme.primary, Modifier.size(14.dp))
+                    else -> IconStepFailed(scheme.error, Modifier.size(14.dp))
+                }
                 Text(t.label.ifEmpty { t.name.ifEmpty { "工具调用" } },
                     fontSize = 13.sp, color = scheme.onSurface,
                     modifier = Modifier.weight(1f))
                 if (!t.pending && t.elapsedMs > 0)
-                    Text("${t.elapsedMs} ms", fontSize = 11.sp, color = text3Color())
+                    Text(fmtTraceSecs(t.elapsedMs), fontSize = 11.sp, color = text3Color())
             }
             if (!t.pending && t.summary.isNotEmpty())
                 Text(t.summary, fontSize = 12.sp, lineHeight = 18.sp,
@@ -2134,7 +2235,11 @@ private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
                 Text("输出过长，给模型的那一份已截断", fontSize = 11.sp, color = text3Color())
         }
         "search" -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text("搜索：${t.query}", fontSize = 12.sp, color = text3Color())
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                IconTraceEye(scheme.primary, Modifier.size(14.dp))
+                Text("搜索：${t.query}", fontSize = 12.sp, color = text3Color())
+            }
             t.results.forEach { TraceResultRow(it, onOpenUrl) }
         }
         // 认不出的步（服务端以后加的新 kind）：能给字就给字，猜形状是错的方向
@@ -2172,13 +2277,17 @@ private fun TraceResultRow(r: TraceHit, onOpenUrl: (String) -> Unit) {
     }
 }
 
-/* .typing .msg-body::after { content:"▋"; animation: blink 1s steps(2) } —— 两帧硬切。 */
+/* .typing .msg-body::after { content:"▋"; animation: blink 1s steps(2) } —— 两帧硬切。
+ * v0.30 改成画出来的竖条：网页上 ▋ 有字体兜着，原生这边这台设备根本没这个字形，
+ * 真机截图中那条空气泡里就剩一块实心绿方块（缺字渲染）。不再赌字体覆盖。 */
 @Composable
 private fun BlinkCursor() {
     val tr = rememberInfiniteTransition(label = "cursor")
     val a by tr.animateFloat(1f, 0f,
         infiniteRepeatable(tween(500), RepeatMode.Reverse), label = "blink")
-    Text("▋", fontSize = 15.sp, color = MaterialTheme.colorScheme.primary.copy(alpha = a))
+    Box(Modifier.width(3.dp).height(16.dp)
+        .background(MaterialTheme.colorScheme.primary.copy(alpha = a),
+            RoundedCornerShape(1.5.dp)))
 }
 
 /* ---------------- 附件缩略图：按 id 现取字节（网页 fileBlobUrl 的原生对位） ----------------
