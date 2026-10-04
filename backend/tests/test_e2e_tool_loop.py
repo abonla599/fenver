@@ -246,8 +246,9 @@ def test_react_multi_tool_turn_message_ids_are_unique(client):
 
     原先写死 f"call_{turn}"，同一轮第二个调用的 tool 消息与第一个共 id——这份
     消息历史再发回任何 OpenAI 兼容上游都是非法形状，等于第二轮起整条链必炸。
+    v0.31：文本协议已删除，统一走原生 tool_calls。
     """
-    MODE.protocol = "text"
+    MODE.protocol = "native"
     MODE.tools = [("calculator", {"expression": "2+3*4"}),
                   ("calculator", {"expression": "10-1"})]
     r = client.post("/v1/agent/run", json={"task": "分别算 2+3*4 和 10-1",
