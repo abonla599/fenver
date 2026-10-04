@@ -1712,6 +1712,83 @@ function closePendingTrace(holder) {
   return changed;
 }
 
+/* ---------- v0.31 审批确认卡片 ----------
+ * 服务端在流中发 approval_request 帧 → 客户端画一张确认卡片（标题 + 正文 + 允许/拒绝）。
+ * 文案与原生 ApprovalCard 逐字一致（契约测试钉死）：
+ *   标题：「执行代码确认」
+ *   正文：plan_summary（服务端已生成，形如「执行一段 python 代码：…」）
+ *   按钮：「允许」/「拒绝」
+ * 三条出路：
+ *   ① 允许 → POST /v1/approval/confirm {decision:"allow"} → 卡片置灰
+ *   ② 拒绝 → POST /v1/approval/confirm {decision:"reject"} → 卡片置灰，本轮该工具熔断
+ *   ③ 超时/断线 → 票据 60s 后作废，卡片自动置灰（不重复弹）
+ * 票据一次性消费：POST 返回 404 = 票据已失效（超时/已消费/跨属主），卡片置灰。 */
+
+// 双端契约文案常量（与 backend/app/core/approval.py 的 APPROVAL_TITLE 等逐字对齐）
+const APPROVAL_TITLE = "执行代码确认";
+const APPROVAL_ALLOW_TEXT = "允许";
+const APPROVAL_REJECT_TEXT = "拒绝";
+
+/** 把审批卡片画进这条消息。holder._approval 有数据才显示，否则隐藏。 */
+function paintApproval(node, holder) {
+  const card = node && node.querySelector ? node.querySelector(".msg-approval") : null;
+  if (!card) return;
+  const ap = holder._approval;
+  if (!ap) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  const head = card.querySelector(".approval-head");
+  if (head) head.textContent = APPROVAL_TITLE;
+  const summary = card.querySelector(".approval-summary");
+  if (summary) summary.textContent = String(ap.plan_summary || "");
+  const allowBtn = card.querySelector(".approval-allow");
+  const rejectBtn = card.querySelector(".approval-reject");
+  if (allowBtn) allowBtn.textContent = APPROVAL_ALLOW_TEXT;
+  if (rejectBtn) rejectBtn.textContent = APPROVAL_REJECT_TEXT;
+  // 已决态（已允许/已拒绝/已超时）→ 按钮灰掉
+  card.classList.toggle("resolved", !!ap.resolved);
+  // 按钮事件只绑一次（_approvalBound 标记）
+  if (!card._approvalBound && !ap.resolved) {
+    card._approvalBound = true;
+    if (allowBtn) allowBtn.onclick = () => confirmApproval(holder, node, "allow");
+    if (rejectBtn) rejectBtn.onclick = () => confirmApproval(holder, node, "reject");
+  }
+}
+
+/** 用户点了允许或拒绝：POST 到服务端消费票据。 */
+async function confirmApproval(holder, node, decision) {
+  const ap = holder._approval;
+  if (!ap || ap.resolved) return;
+  try {
+    await API.confirmApproval(ap.ticket_id, decision);
+  } catch (e) {
+    // 404 = 票据已失效（超时/已消费）；其他错误也不该杀流
+    if (e.status !== 404) NetMinder.note(e);
+  }
+  ap.resolved = true;
+  ap.decision = decision;
+  paintApproval(node, holder);
+}
+
+/** 审批票据超时处理：60s 后自动置灰卡片（不重复弹）。 */
+function startApprovalExpiry(holder, node) {
+  const ap = holder._approval;
+  if (!ap || ap.resolved) return;
+  const remaining = (ap.expires_at * 1000) - Date.now();
+  if (remaining <= 0) {
+    ap.resolved = true;
+    paintApproval(node, holder);
+    return;
+  }
+  // 存 timer id 在 holder 上，renderMessages 重建时清掉
+  if (holder._approvalTimer) clearTimeout(holder._approvalTimer);
+  holder._approvalTimer = setTimeout(() => {
+    if (!ap.resolved) {
+      ap.resolved = true;
+      paintApproval(node, holder);
+    }
+  }, remaining);
+}
+
 function messageNode(m, index) {
   const node = $("msgTpl").content.firstElementChild.cloneNode(true);
   node.classList.add(m.role === "user" ? "user" : "assistant");
@@ -1733,6 +1810,10 @@ function messageNode(m, index) {
   const body = node.querySelector(".msg-body");
   if (m.role === "user") body.textContent = m.content;
   else MD.render(body, m.content);
+
+  // v0.31 审批卡片：落盘回放时如果 holder 上挂着未决的审批，也要画出来。
+  paintApproval(node, m);
+  if (m._approval && !m._approval.resolved) startApprovalExpiry(m, node);
 
   const atts = node.querySelector(".msg-atts");
   (m.attachments || []).forEach((a) => {
@@ -1974,6 +2055,19 @@ async function runStream(holder) {
         // 过程帧（thinking/tool_call/tool_result/search）从这条缝进来：并进 holder.trace
         // 之后挂上同一拍 rAF 重画。onChunk 不变，仍然只吃正文文本。
         onEvent: (evt) => {
+          // v0.31 审批帧：不进 trace 面板，单独画确认卡片。同一拍 rAF 重画。
+          if (evt.type === "approval_request") {
+            holder._approval = {
+              ticket_id: String(evt.ticket_id || ""),
+              tool_name: String(evt.tool_name || ""),
+              plan_summary: String(evt.plan_summary || ""),
+              expires_at: Number(evt.expires_at) || 0,
+              resolved: false,
+            };
+            paintApproval(node, holder);
+            startApprovalExpiry(holder, node);
+            return;
+          }
           if (accumulateTrace(holder, evt) && node && !pending) pending = raf(paint);
         },
       },
@@ -2021,6 +2115,8 @@ async function runStream(holder) {
     // 迟到的 paint 会打到已经摘掉的旧节点上。
     if (pending) cancelRaf(pending);
     traceTickStop();
+    // v0.31 审批超时定时器：流结束后不再需要，重建消息时 startApprovalExpiry 会重挂。
+    if (holder._approvalTimer) { clearTimeout(holder._approvalTimer); holder._approvalTimer = 0; }
     if (node) node.classList.remove("typing");
     if (body) body.removeAttribute("data-live");
     // 过程面板跟着落定：摘掉"进行中"的呼吸态、把没等到结果的步收落成一句话、

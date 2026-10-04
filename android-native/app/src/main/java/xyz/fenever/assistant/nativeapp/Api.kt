@@ -116,6 +116,11 @@ sealed class ChatEvent {
                           val truncated: Boolean) : ChatEvent()
     data class Search(val id: String, val query: String,
                       val results: List<SearchHit>) : ChatEvent()
+    // v0.31 审批层：服务端发来的确认请求。客户端据此显示确认卡片，用户允许/拒绝后
+    // POST /v1/approval/confirm。票据一次性消费，超时作废。
+    data class ApprovalRequest(val ticketId: String, val toolName: String,
+                               val planSummary: String,
+                               val expiresAt: Double) : ChatEvent()
     // 停止或宽限到点：半句已产出，随后紧跟一条 done 收尾，这里不单独终结。
     data class Cancelled(val fullText: String, val messageId: String, val message: String) : ChatEvent()
     // 这条连接追不上服务端缓冲（这一轮续不上了）：同样等随后的 done 收尾，不单独终结。
@@ -461,6 +466,20 @@ object Api {
         call("/v1/chat/stream/" + enc(runId) + "/cancel", "POST")
     }
 
+    /* v0.31 审批层：一次性票据确认。与网页 api.js 的 confirmApproval / getApprovalStatus
+     * 同一条路径。decision 只接受 "allow" / "reject"；票据超时或已消费时服务端返回 404。 */
+    suspend fun confirmApproval(ticketId: String, decision: String): String {
+        val body = buildJsonObject {
+            put("ticket_id", ticketId)
+            put("decision", decision)
+        }.toString()
+        return call("/v1/approval/confirm", "POST", body)
+    }
+
+    suspend fun getApprovalStatus(ticketId: String): String {
+        return call("/v1/approval/" + enc(ticketId))
+    }
+
     /* 续播内核的一次游标累加（v0.25 安卓 · T2.4/T2.8）。这几个状态跨多次重开存活：
        run_id 给"停止"当目标、lastEventId 给续播当凭据、resumable 一旦被 cannot_resume 置
        false 就不再尝试续播、terminal 收到 done/error 才止住重连。 */
@@ -648,6 +667,11 @@ object Api {
             "error" -> {
                 st.terminal = true
                 col.emit(ChatEvent.Failed(str("message").ifEmpty { "模型返回错误" }))
+            }
+            "approval_request" -> {
+                val expiresAt = (o["expires_at"] as? JsonPrimitive)?.doubleOrNull ?: 0.0
+                col.emit(ChatEvent.ApprovalRequest(sOf(o, "ticket_id"), sOf(o, "tool_name"),
+                    sOf(o, "plan_summary"), expiresAt))
             }
             else -> col.emit(ChatEvent.Unknown(type ?: ""))   // 未知帧不静默丢
         }

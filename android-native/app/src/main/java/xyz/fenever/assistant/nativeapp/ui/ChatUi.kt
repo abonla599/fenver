@@ -201,6 +201,17 @@ data class TraceItem(
     val omitted: Int = 0,
 )
 
+/* v0.31 审批卡片状态。与 PWA holder._approval 同一份形状。
+ * 文案与 backend/app/core/approval.py 的 APPROVAL_TITLE 等逐字对齐（契约测试钉死）。 */
+data class ApprovalState(
+    val ticketId: String,
+    val toolName: String,
+    val planSummary: String,
+    val expiresAt: Double,
+    val resolved: Boolean = false,
+    val decision: String = "",  // "allow" / "reject" / "" (pending)
+)
+
 /* 落盘步 → UI 步：全量读法（缺键给空值），认不出的 kind 不猜形状、只把能给的字留下。 */
 private fun jtStr(o: JsonObject, k: String): String =
     (o[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -323,6 +334,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var streamTrace by remember { mutableStateOf(listOf<TraceItem>()) }
     var streamTraceOpen by remember { mutableStateOf(true) }
     var streamTraceTouched by remember { mutableStateOf(false) }
+    // v0.31 审批卡片：流式中收到的 approval_request 帧。用户允许/拒绝/超时后置 resolved。
+    var streamApproval by remember { mutableStateOf<ApprovalState?>(null) }
     var attachOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
     var drawerTick by remember { mutableStateOf(0) }
@@ -628,6 +641,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             currentRunId = null
             streamText = ""
             streamTrace = emptyList(); streamTraceOpen = true; streamTraceTouched = false
+            streamApproval = null
             setStatus("生成中…")
             val acc = StringBuilder()
             // 过程步的本地累积（网页 holder.trace 的原生对位）：只 append 不重排，
@@ -708,6 +722,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                     TraceHit(it.title, it.url, it.snippet)
                                 }))
                             publishTrace()
+                        }
+                        // v0.31 审批帧：不进 trace 面板，单独显示确认卡片。
+                        is ChatEvent.ApprovalRequest -> {
+                            streamApproval = ApprovalState(
+                                ticketId = ev.ticketId, toolName = ev.toolName,
+                                planSummary = ev.planSummary, expiresAt = ev.expiresAt)
                         }
                         // cancelled / cannot_resume 都不是终止帧：半句与"续不上"的信号都在流里，
                         // 等随后那条 done 收尾，这里不单独终结（与网页内核同一语义，别自创）。
@@ -1138,7 +1158,23 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                     streamTraceTouched = true
                                     streamTraceOpen = !streamTraceOpen
                                 },
-                                onOpenUrl = onOpenUrl)
+                                onOpenUrl = onOpenUrl,
+                                approval = streamApproval,
+                                onApprovalDecision = { decision ->
+                                    val cur = streamApproval ?: return@StreamingBubble
+                                    if (cur.resolved) return@StreamingBubble
+                                    if (decision == "__timeout__") {
+                                        // 超时作废：不 POST，只置灰卡片
+                                        streamApproval = cur.copy(resolved = true, decision = "timeout")
+                                        return@StreamingBubble
+                                    }
+                                    scope.launch {
+                                        try {
+                                            Api.confirmApproval(cur.ticketId, decision)
+                                        } catch (_: Exception) { /* 404=票据失效，不杀界面 */ }
+                                        streamApproval = cur.copy(resolved = true, decision = decision)
+                                    }
+                                })
                         }
                     }
                 }
@@ -2060,7 +2096,9 @@ private fun ToolBtn(label: String, on: Boolean = false, enabled: Boolean = true,
  * 一行「正在思考 •••」，等第一步落了地再换成带秒数的实时状态条。 */
 @Composable
 private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded: Boolean,
-                            onToggleTrace: () -> Unit, onOpenUrl: (String) -> Unit) {
+                            onToggleTrace: () -> Unit, onOpenUrl: (String) -> Unit,
+                            approval: ApprovalState? = null,
+                            onApprovalDecision: ((String) -> Unit)? = null) {
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 6.dp, topEnd = 20.dp,
         bottomEnd = 20.dp, bottomStart = 20.dp)
@@ -2077,6 +2115,9 @@ private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded:
                 TracePanel(trace, traceExpanded,
                     if (text.isEmpty()) "正在思考" else "正在生成", onToggleTrace, onOpenUrl)
             else if (text.isEmpty()) TraceThinkingNow()
+            // v0.31 审批卡片：与 PWA .msg-approval 同一套视觉语言与文案。
+            if (approval != null)
+                ApprovalCard(approval, onApprovalDecision)
             if (text.isEmpty()) BlinkCursor()
             else { RichText(text, scheme.onSurface); BlinkCursor() }
         }
@@ -2188,6 +2229,62 @@ private fun TraceLiveBar(label: String, startedAt: Long) {
             modifier = Modifier.weight(1f))
         Text(fmtTraceSecs((now - startedAt).toInt()), fontSize = 11.sp,
             color = text3Color())
+    }
+}
+
+/* ---------- v0.31 审批确认卡片 ----------
+ * 与 PWA .msg-approval 同一套视觉语言（沿用状态条画法：圆角、边框、淡底）与文案。
+ * 文案由契约测试钉死，漂一个字就红：
+ *   标题：「执行代码确认」
+ *   正文：plan_summary（服务端已生成）
+ *   按钮：「允许」/「拒绝」
+ * 三条出路：允许 → POST confirm → 卡片置灰；拒绝 → 同 → 本轮熔断；
+ * 超时 → 票据 60s 后作废，卡片自动置灰（不重复弹）。 */
+
+// 双端契约文案常量（与 backend/app/core/approval.py 逐字对齐）
+private const val APPROVAL_TITLE = "执行代码确认"
+private const val APPROVAL_ALLOW_TEXT = "允许"
+private const val APPROVAL_REJECT_TEXT = "拒绝"
+
+@Composable
+private fun ApprovalCard(state: ApprovalState,
+                         onDecision: ((String) -> Unit)?) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(8.dp)
+    val resolved = state.resolved
+    // 超时自动置灰：票据 expires_at 到点后卡片不再可操作（不重复弹）。
+    LaunchedEffect(state.ticketId, state.expiresAt) {
+        if (resolved) return@LaunchedEffect
+        val remainingMs = ((state.expiresAt * 1000) - System.currentTimeMillis()).toLong()
+        if (remainingMs > 0) {
+            kotlinx.coroutines.delay(remainingMs)
+        }
+        // 到期后如果还没决定，标记为已解决（超时作废）
+        if (!state.resolved) {
+            onDecision?.invoke("__timeout__")
+        }
+    }
+    Column(Modifier.fillMaxWidth()
+        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
+        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
+        .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(APPROVAL_TITLE, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            color = scheme.onSurface)
+        Text(state.planSummary, fontSize = 12.sp, color = scheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically) {
+            val btnAlpha = if (resolved) 0.5f else 1f
+            Text(APPROVAL_REJECT_TEXT, fontSize = 13.sp, color = scheme.onSurfaceVariant.copy(alpha = btnAlpha),
+                modifier = Modifier.clickable(enabled = !resolved) { onDecision?.invoke("reject") }
+                    .padding(horizontal = 12.dp, vertical = 5.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(APPROVAL_ALLOW_TEXT, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                color = scheme.primary.copy(alpha = btnAlpha),
+                modifier = Modifier.clickable(enabled = !resolved) { onDecision?.invoke("allow") }
+                    .padding(horizontal = 12.dp, vertical = 5.dp))
+        }
     }
 }
 
