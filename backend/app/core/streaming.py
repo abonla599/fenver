@@ -17,6 +17,8 @@ from typing import Generator, List, Dict, Any, Optional
 from app.core.providers import store, build_client
 from app.core import usage   # 账本：两条聊天路径共用一个口径，别各记一套
 from app.core import stream_events as se
+from app.core.guardrails import RoundGuard
+from app.core import approval
 from app.tools.executor import execute_tool, execute_tool_detailed, ToolOutcome
 
 
@@ -205,6 +207,7 @@ def stream_chat_events(
                                              "total_tokens", "reasoning_tokens", "cached_tokens")}
     rounds = 0
     ok = True
+    guard = RoundGuard()
 
     def _push_frame(frame: Dict[str, Any]) -> None:
         # 非内容帧另存一份进 ambient sink，只为让 stream_chat（文本过滤器）那条路还拿得到
@@ -308,6 +311,7 @@ def stream_chat_events(
                         billed["reasoning_tokens"] += (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
                         pdetails = getattr(u, "prompt_tokens_details", None)
                         billed["cached_tokens"] += (getattr(pdetails, "cached_tokens", 0) or 0) if pdetails else 0
+                        guard.record_tokens(getattr(u, "total_tokens", 0) or 0)
                     if not getattr(chunk, "choices", None):
                         continue
                     delta = getattr(chunk.choices[0], "delta", None)
@@ -403,6 +407,61 @@ def stream_chat_events(
                     parsed_args = raw_args
                 label = _tool_label(name, parsed_args)
 
+                # v0.31 护栏：执行前检查（重复检测 + 成本上限 + 失败退避）
+                guard_blocked = guard.check(name, parsed_args if isinstance(parsed_args, dict) else {})
+                if guard_blocked:
+                    msgs.append({"role": "tool", "tool_call_id": call_id,
+                                 "content": guard_blocked})
+                    if rich:
+                        rframe = se.tool_result_frame(call_id, name, False, guard_blocked,
+                                                      elapsed_ms=0, truncated=False)
+                        _push_frame(rframe)
+                        yield rframe
+                        _record_step(se.step_tool(call_id, name, label, False, guard_blocked,
+                                                  elapsed_ms=0, truncated=False))
+                    continue
+
+                # v0.31 审批层：需要审批的工具先检查是否已确认
+                if approval.needs_approval(name):
+                    if approval.is_round_fused(user_id, name):
+                        blocked_msg = (f"{name} 已被用户拒绝，本轮不再重试。"
+                                       "请基于已有信息回答用户。")
+                        msgs.append({"role": "tool", "tool_call_id": call_id,
+                                     "content": blocked_msg})
+                        if rich:
+                            rframe = se.tool_result_frame(call_id, name, False, blocked_msg,
+                                                          elapsed_ms=0, truncated=False)
+                            _push_frame(rframe)
+                            yield rframe
+                            _record_step(se.step_tool(call_id, name, label, False, blocked_msg,
+                                                      elapsed_ms=0, truncated=False))
+                        continue
+                    # 创建审批请求
+                    approval_req = approval.create_approval_request(name, parsed_args if isinstance(parsed_args, dict) else {}, user_id)
+                    pending_msg = (f"〔审批待确认〕{name} 需要用户确认后才能执行。"
+                                   f"票据 ID: {approval_req['ticket_id']}。"
+                                   "请告知用户点击确认卡片。")
+                    msgs.append({"role": "tool", "tool_call_id": call_id,
+                                 "content": pending_msg})
+                    if rich:
+                        # 发一条审批请求帧（客户端据此显示确认卡片）
+                        approval_frame = {
+                            "type": "approval_request",
+                            "ticket_id": approval_req["ticket_id"],
+                            "tool_name": name,
+                            "plan_summary": approval_req["plan_summary"],
+                            "expires_at": approval_req["expires_at"],
+                        }
+                        _push_frame(approval_frame)
+                        yield approval_frame
+                        rframe = se.tool_result_frame(call_id, name, False, pending_msg,
+                                                      elapsed_ms=0, truncated=False)
+                        _push_frame(rframe)
+                        yield rframe
+                        _record_step(se.step_tool(call_id, name, label, False, pending_msg,
+                                                  elapsed_ms=0, truncated=False))
+                    continue
+
                 # 工具开始执行**之前**先把 tool_call 帧发出去：用户要看到"它现在要去
                 # 算什么"，等算完再发就失去意义了。
                 if rich:
@@ -416,6 +475,12 @@ def stream_chat_events(
                 else:
                     result = _run_tool(name, raw_args, user_id=user_id)
                     outcome = None
+                # 护栏：记录结果（成功/失败 → 退避计数）
+                guard.record_outcome(name, ok=bool(outcome.ok if outcome else True))
+                # R2 工具输出预算闸：单轮累计超限时截断并告知
+                already_trunc = bool(outcome.truncated if outcome else False)
+                result, budget_trunc = guard.clip_output(str(result), already_trunc)
+                is_truncated = already_trunc or budget_trunc
                 msgs.append({"role": "tool", "tool_call_id": call_id,
                              "content": result})
 
@@ -423,12 +488,12 @@ def stream_chat_events(
                     summary = result
                     rframe = se.tool_result_frame(call_id, name, outcome.ok, summary,
                                                   elapsed_ms=outcome.elapsed_ms,
-                                                  truncated=outcome.truncated)
+                                                  truncated=is_truncated)
                     _push_frame(rframe)
                     yield rframe
                     _record_step(se.step_tool(call_id, name, label, outcome.ok, summary,
                                               elapsed_ms=outcome.elapsed_ms,
-                                              truncated=outcome.truncated))
+                                              truncated=is_truncated))
                     art = outcome.artifacts
                     if isinstance(art, dict) and art.get("kind") == "web_search":
                         sframe = se.search_frame(call_id, art.get("query", ""),
