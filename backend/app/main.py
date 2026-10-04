@@ -899,6 +899,55 @@ def cancel_stream_run(run_id: str, principal: Principal = CurrentPrincipal):
             "message": "已请求取消：停在下一个块边界，不再发起新的付费调用；"
                        "流以 done 终帧收尾（status=cancelled，cancelled 事件在其之前）"}
 
+# ---------- v0.31 审批层 ----------
+# 确认请求/票据字段/双端文案的契约定稿（安卓与网页端等这份）：
+# - 确认请求：{ticket_id, tool_name, plan_summary, created_at, expires_at, user_id}
+# - 确认动作：POST /v1/approval/confirm {ticket_id, decision: "allow"|"reject"}
+# - 双端文案：标题「执行代码确认」、正文「模型想要执行一段 {language} 代码」、按钮「允许」/「拒绝」
+from pydantic import BaseModel
+
+class ApprovalConfirmRequest(BaseModel):
+    ticket_id: str
+    decision: str  # "allow" | "reject"
+
+@app.post("/v1/approval/confirm")
+def confirm_approval(request: ApprovalConfirmRequest,
+                     principal: Principal = CurrentPrincipal):
+    """用户确认或拒绝一条审批请求。
+
+    票据一次性消费，超时作废，绝不默认放行。
+    跨属主隐私：非票据属主返回 404（不泄露票据存在）。
+    """
+    from app.core import approval
+    ticket = approval.consume_ticket(request.ticket_id, request.decision,
+                                     principal.user_id)
+    if ticket is None:
+        # 票据不存在、已消费、超时、或跨属主——统一 404
+        raise HTTPException(status_code=404, detail="审批票据不存在或已失效")
+    return {
+        "status": "confirmed" if request.decision == "allow" else "rejected",
+        "ticket_id": request.ticket_id,
+        "tool_name": ticket.tool_name,
+        "message": ("已允许执行" if request.decision == "allow"
+                    else "已拒绝，本轮该工具不再重试"),
+    }
+
+@app.get("/v1/approval/{ticket_id}")
+def get_approval_status(ticket_id: str,
+                        principal: Principal = CurrentPrincipal):
+    """查询审批票据状态（不消费）。客户端轮询用。"""
+    from app.core import approval
+    ticket = approval.get_ticket(ticket_id)
+    if ticket is None or ticket.user_id != principal.user_id:
+        raise HTTPException(status_code=404, detail="审批票据不存在或已失效")
+    return {
+        "ticket_id": ticket.ticket_id,
+        "tool_name": ticket.tool_name,
+        "plan_summary": ticket.plan_summary,
+        "status": "pending" if not ticket.consumed else ticket.decision,
+        "expires_at": ticket.expires_at,
+    }
+
 # ---------- 会话管理 ----------
 # 归属只由 principal 推导：路由不接受任何来自 body/query/path 的 user_id 或
 # owner，否则"我是谁"就成了客户端说了算。

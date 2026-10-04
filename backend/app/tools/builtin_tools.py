@@ -287,7 +287,9 @@ def help_tool() -> str:
     },
     # 读 sandbox 这一个实例的 client，不再 new 一个 SandboxManager：后者每次都会
     # 重连 docker 守护进程，并把「沙箱停用」那行警告重复打印一遍。
-    available=lambda: sandbox.client is not None
+    available=lambda: sandbox.client is not None,
+    # v0.31 审批层：代码执行有副作用（烧容器、可能跑恶意代码），必须等用户确认。
+    requires_approval=True,
 )
 def execute_code(code: str, language: str = "python", max_retries=2) -> str:
     result = {}
