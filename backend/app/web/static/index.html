@@ -501,6 +501,18 @@
         <div class="trace-now hidden" aria-hidden="true"><span class="trace-now-dots"></span>正在思考</div>
       </div>
       <div class="msg-body"></div>
+      <!-- v0.31 审批确认卡片：模型要执行需要审批的工具（当前仅 execute_code）时，
+           服务端发 approval_request 帧，app.js 据此填这一格并摘掉 hidden。
+           视觉沿用 v0.30 状态条画法——一行标题 + 允许/拒绝两键，不引入新组件族。
+           文案与原生 ChatUi.kt 的 ApprovalCard 逐字一致，由契约测试钉死。 -->
+      <div class="msg-approval hidden" aria-live="polite">
+        <div class="approval-head"></div>
+        <div class="approval-summary"></div>
+        <div class="approval-actions">
+          <button class="approval-allow" type="button">允许</button>
+          <button class="approval-reject" type="button">拒绝</button>
+        </div>
+      </div>
       <div class="msg-atts"></div>
       <div class="msg-tools">
         <button data-act="copy">复制</button>
