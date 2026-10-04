@@ -17,6 +17,8 @@ from app.preference_analyzer import read_preference
 from app.tools.registry import get_available_tools_schema
 from app.tools.executor import execute_tool, execute_tool_detailed
 from app.core import stream_events as se
+from app.core.guardrails import RoundGuard
+from app.core import approval
 from app.tools.builtin_tools import *
 
 
@@ -204,6 +206,7 @@ class ChatPipeline:
                                  "total_tokens", "reasoning_tokens", "cached_tokens")}
         rounds = 0
         ok = True
+        guard = RoundGuard()
         try:
 
             # 复制消息列表，避免修改原始数据
@@ -228,6 +231,7 @@ class ChatPipeline:
                     billed["reasoning_tokens"] += (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
                     pdetails = getattr(u, "prompt_tokens_details", None)
                     billed["cached_tokens"] += (getattr(pdetails, "cached_tokens", 0) or 0) if pdetails else 0
+                    guard.record_tokens(getattr(u, "total_tokens", 0) or 0)
                 msg = response.choices[0].message
 
                 if msg.tool_calls:
@@ -247,6 +251,50 @@ class ChatPipeline:
                                 "content": f"工具参数解析失败（不是合法 JSON）: {e}",
                             })
                             continue
+                        # v0.31 护栏：执行前检查（重复检测 + 成本上限 + 失败退避）
+                        blocked = guard.check(name, args)
+                        if blocked:
+                            msgs.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": blocked,
+                            })
+                            if rich:
+                                trace_out.append(se.step_tool(
+                                    tool_call.id, name, _tool_label(name, args),
+                                    False, blocked, elapsed_ms=0, truncated=False))
+                            continue
+                        # v0.31 审批层：需要审批的工具先检查是否已确认
+                        if approval.needs_approval(name):
+                            if approval.is_round_fused(self.user_id, name):
+                                blocked_msg = (f"{name} 已被用户拒绝，本轮不再重试。"
+                                               "请基于已有信息回答用户。")
+                                msgs.append({
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": blocked_msg,
+                                })
+                                if rich:
+                                    trace_out.append(se.step_tool(
+                                        tool_call.id, name, _tool_label(name, args),
+                                        False, blocked_msg, elapsed_ms=0, truncated=False))
+                                continue
+                            # 创建审批请求（票据在服务端，客户端通过帧拿到 ticket_id）
+                            approval_req = approval.create_approval_request(
+                                name, args, self.user_id)
+                            pending_msg = (f"〔审批待确认〕{name} 需要用户确认后才能执行。"
+                                           f"票据 ID: {approval_req['ticket_id']}。"
+                                           "请告知用户点击确认卡片。")
+                            msgs.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": pending_msg,
+                            })
+                            if rich:
+                                trace_out.append(se.step_tool(
+                                    tool_call.id, name, _tool_label(name, args),
+                                    False, pending_msg, elapsed_ms=0, truncated=False))
+                            continue
                         print(f"[Pipeline] 调用工具: {name}({args})")
                         label = _tool_label(name, args)
                         if rich:
@@ -255,17 +303,23 @@ class ChatPipeline:
                         else:
                             result = execute_tool(name, args, user_id=self.user_id)
                             outcome = None
+                        # 护栏：记录结果（成功/失败 → 退避计数）
+                        guard.record_outcome(name, ok=bool(outcome.ok if outcome else True))
+                        # R2 工具输出预算闸：单轮累计超限时截断并告知
+                        already_trunc = bool(outcome.truncated if outcome else False)
+                        result, budget_trunc = guard.clip_output(str(result), already_trunc)
+                        is_truncated = already_trunc or budget_trunc
                         # 将工具结果作为 tool 消息添加
                         msgs.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": str(result)
+                            "content": result
                         })
                         if rich:
                             trace_out.append(se.step_tool(tool_call.id, name, label,
-                                                          outcome.ok, str(result),
+                                                          outcome.ok, result,
                                                           elapsed_ms=outcome.elapsed_ms,
-                                                          truncated=outcome.truncated))
+                                                          truncated=is_truncated))
                             art = outcome.artifacts
                             if isinstance(art, dict) and art.get("kind") == "web_search":
                                 trace_out.append(se.step_search(tool_call.id,
