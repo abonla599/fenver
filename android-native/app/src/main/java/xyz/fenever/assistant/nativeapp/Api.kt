@@ -17,9 +17,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.putPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import xyz.fenever.assistant.core.ExportName
 import okhttp3.MultipartBody
@@ -470,8 +472,8 @@ object Api {
      * 同一条路径。decision 只接受 "allow" / "reject"；票据超时或已消费时服务端返回 404。 */
     suspend fun confirmApproval(ticketId: String, decision: String): String {
         val body = buildJsonObject {
-            put("ticket_id", ticketId)
-            put("decision", decision)
+            putPrimitive("ticket_id", ticketId)
+            putPrimitive("decision", decision)
         }.toString()
         return call("/v1/approval/confirm", "POST", body)
     }
