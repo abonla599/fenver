@@ -375,6 +375,28 @@ a.trace-result-title:hover { text-decoration: underline; }
 .trace-now-dots::after { left: 14px; animation-delay: .4s; }
 @keyframes trace-dot { 0%, 65%, 100% { opacity: .3; } 22% { opacity: 1; } }
 
+/* v0.31 审批确认卡片：沿用状态条画法（圆角、边框、淡底），一行标题 + 正文 + 两键。
+   与原生 ApprovalCard 同一套视觉语言，文案由契约测试钉死。
+   默认 hidden；app.js 收到 approval_request 帧后摘掉并填入内容。 */
+.msg-approval { display: flex; flex-direction: column; gap: 6px;
+                margin: 4px 0; padding: 10px 12px;
+                border: 1px solid var(--line); border-radius: 8px;
+                background: var(--bg-hover); font-size: 13px; }
+.msg-approval.hidden { display: none; }
+.approval-head { font-weight: 600; color: var(--text); font-size: 13px; }
+.approval-summary { color: var(--text-2); font-size: 12px;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px; }
+.approval-allow, .approval-reject {
+  padding: 5px 16px; border-radius: 6px; font-size: 13px; font-weight: 500;
+  cursor: pointer; border: 1px solid var(--line); transition: background .15s, opacity .15s; }
+.approval-allow { background: var(--accent); color: #fff; border-color: var(--accent); }
+.approval-allow:hover { opacity: .9; }
+.approval-reject { background: transparent; color: var(--text-2); }
+.approval-reject:hover { background: var(--bg-hover); }
+/* 已决态：按钮灰掉，卡片保留但不再可操作（超时/已响应后由 app.js 加 .resolved） */
+.msg-approval.resolved .approval-actions { pointer-events: none; opacity: .5; }
+
 .empty-state { max-width: 640px; margin: 9vh auto 0; text-align: center; color: var(--text-2); }
 .empty-state h2 { font-size: 20px; color: var(--text); margin: 0 0 6px; font-weight: 600; }
 .empty-state img { width: 54px; height: 54px; border-radius: 16px; margin-bottom: 14px;
