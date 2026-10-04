@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 桌面图标的底层：与 tools/render-app-icon.ps1 画的方底同一套渐变。
+     angle=315 在 Android 里是"左上→右下"，和脚本里 GDI+ 的 45 度同方向。
+     上层 @mipmap/ic_launcher_foreground 只画气泡，透明底，安全区内。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="#0E7C86"
+        android:endColor="#7030E0" />
+</shape>

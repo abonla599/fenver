@@ -73,6 +73,12 @@ docs-internal/
 # 密钥形态扫描器。它自己必须是**被扫的对象**（写坏了形状规则会当场红），所以它得进
 # 版本库、进 CI 那次 checkout。纯标准库、只读文件，不碰网络也不写盘。
 !/tools/secret_scan.py
+# 桌面图标的生成脚本：五桶 x 三张（launcher/round/foreground）加网页那份 1024，
+# 全靠它一条命令重画。它不进仓库就等于图标成了"本机独有的一次性产物"——
+# test_native_trace_polish_and_icon_v0300_contract.py 在 CI 的干净 checkout 里
+# 找不到脚本会当场红，而下一次想换配色的人只能对着 PNG 手抠。脚本只画几何、
+# 不含任何密钥，输出路径全在 android-native/ 与 backend/app/web/static/ 里。
+!/tools/render-app-icon.ps1
 server.log
 tunnel.log
 PATH_backup_*.txt
