@@ -478,15 +478,27 @@
   <template id="msgTpl">
     <article class="msg">
       <div class="msg-role"></div>
-      <!-- 过程留痕（v0.29.0）：正文上方的可折叠面板——模型在想什么、调了哪个工具、
-           搜到哪些网页。默认 hidden：没有 trace 的消息（历史里的老消息、用户自己那条）
-           一格都不占。展开/收起由 app.js 的 setTraceOpen 管，步内容由 paintTrace 用
-           createElement + textContent 填：这里放着空壳，字符串一个都不从服务端进 HTML。 -->
+      <!-- 过程留痕（v0.29.0；v0.30 与原生面板对齐改版）：正文上方的可折叠面板——模型在
+           想什么、调了哪个工具、搜到哪些网页。默认 hidden：没有 trace 的消息（历史里的
+           老消息、用户自己那条）一格都不占。展开/收起由 app.js 的 setTraceOpen 管，步内容
+           由 paintTrace 用 createElement + textContent 填：这里放着空壳，字符串一个都不从
+           服务端进 HTML。
+           三个壳都是 v0.30 新加的，全部由 CSS 画、不写一个字形：
+           · .trace-eye / .trace-caret —— 标题行那枚"看见过程"的眼 + 展开箭头（原生是
+             IconTraceEye / IconChevronDown + rotate，这里 .open 一类切换 transform）；
+           · .trace-status —— 收起着也看得见的实时状态条：转圈 + 当前这一步 + 本地秒表。
+             服务端只有 tool_result 帧带 elapsed_ms，"正在跑的这一步"没人报进度，只能现数；
+           · .trace-now —— 一个字都还没吐的那几秒的「正在思考 ···」（原生 TraceThinkingNow）。
+             原来 trace 为空整块面板不挂，手机上看到的就是条空气泡。 -->
       <div class="msg-trace hidden">
         <button class="trace-head" type="button" aria-expanded="false">
-          <span class="trace-caret">▸</span><span class="trace-summary"></span>
+          <span class="trace-eye" aria-hidden="true"></span><span class="trace-summary"></span><span class="trace-caret" aria-hidden="true"></span>
         </button>
         <div class="trace-steps hidden"></div>
+        <div class="trace-status hidden" aria-hidden="true">
+          <span class="trace-status-spin"></span><span class="trace-status-label"></span><span class="trace-status-time"></span>
+        </div>
+        <div class="trace-now hidden" aria-hidden="true"><span class="trace-now-dots"></span>正在思考</div>
       </div>
       <div class="msg-body"></div>
       <div class="msg-atts"></div>
