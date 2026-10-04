@@ -264,10 +264,11 @@ const API = (() => {
           } else if (type === "start") {
             // 带 message_id/model/run_id；run_id 已在上面捕获。
           } else if (type === "thinking" || type === "tool_call"
-                     || type === "tool_result" || type === "search") {
-            // v0.29.0 的过程帧：上面那条 onEvent 缝已经把整帧交出去了，这里只是别让它们
-            // 掉进下面的 else——unknown 那一笔的语义是「契约之外冒出来的东西」，把已知帧
-            // 记进去等于给上报加噪声（帧名唯一出处仍是 core/stream_events.py 的 CLIENT_FRAMES）。
+                     || type === "tool_result" || type === "search"
+                     || type === "approval_request") {
+            // v0.29.0 的过程帧与 v0.31 审批帧：上面那条 onEvent 缝已经把整帧交出去了，
+            // 这里只是别让它们掉进下面的 else——unknown 那一笔的语义是「契约之外冒出
+            // 的东西」，把已知帧记进去等于给上报加噪声。
           } else {
             // 认不出的帧：不静默丢——记下来上报，同时不打断正常收尾。
             unknown.push(evt);
@@ -471,5 +472,13 @@ const API = (() => {
     submitUserFeedback: (text, email, images) =>
       request("/v1/user-feedback", { method: "POST",
         body: { text, email: email || null, images: images && images.length ? images : null } }),
+
+    /* v0.31 审批层：一次性票据确认。decision 只接受 "allow" / "reject"。
+     * 票据超时或已消费时服务端返回 404，UI 据此判定卡片失效（不重复弹）。 */
+    confirmApproval: (ticketId, decision) =>
+      request("/v1/approval/confirm", { method: "POST",
+        body: { ticket_id: ticketId, decision: decision } }),
+    getApprovalStatus: (ticketId) =>
+      request("/v1/approval/" + encodeURIComponent(ticketId)),
   };
 })();
