@@ -1389,15 +1389,27 @@ function traceSafeUrl(url) {
   return /^https?:\/\/\S+$/i.test(s) ? s : "";
 }
 
-/** 折叠着也能读的那一行标题：思考过程 · 3 步 · 已搜索 5 个网页 */
-function traceSummaryText(trace) {
+/** 毫秒 → 一位小数的秒：面板里所有时长同一个口径（与原生 fmtTraceSecs 逐字同格式）。
+ *  固定一位小数不留退路：原生那边是 "%.1fs"，这里 toFixed(1) 与之逐字对齐，
+ *  "18.7s" 与 "18.70s"/"18s" 两种写法各说一遍就是双端长岔的开始。 */
+function fmtTraceSecs(ms) {
+  const n = Number(ms) || 0;
+  return (n / 1000).toFixed(1) + "s";
+}
+
+/** 折叠着也能读的那一行标题：查看 3 个步骤 · 5 个网页 / 收起 3 个步骤（v0.30 与原生同文案）。
+ *  展开态换动词是原生那版定的口径（"查看/收起"），两边各写一套就是体验分裂。
+ *  步数不数 omitted 那一条：它是"这里被裁过"的记账，不是一步，算进去等于虚报进度。 */
+function traceSummaryText(trace, open) {
   const steps = Array.isArray(trace) ? trace : [];
   let pages = 0;
+  let counted = 0;
   steps.forEach((s) => {
     if (s && s.kind === "search") pages += (s.results || []).length;
+    if (!s || s.kind !== "omitted") counted += 1;
   });
-  const head = "思考过程 · " + steps.length + " 步";
-  return pages ? head + " · 已搜索 " + pages + " 个网页" : head;
+  const head = (open ? "收起 " : "查看 ") + counted + " 个步骤";
+  return pages ? head + " · " + pages + " 个网页" : head;
 }
 
 /** 一步一行。每一个值都走 textContent：这里没有任何一处字符串拼接进 HTML。 */
@@ -1407,7 +1419,8 @@ function traceStepNode(step) {
   row.className = "trace-step " + (TRACE_KIND_CLASS[s.kind] || "trace-other");
 
   if (s.kind === "thinking") {
-    // 思考文本与答案要一眼分得开：矮一档墨色 + 斜体，样式在 style.css 的 .trace-thinking
+    // 思考文本与答案要一眼分得开：矮一档墨色 + 左边一道竖线（v0.30 与原生同排版）。
+    // 原来靠斜体：中文没有斜体字形，浏览器只会把字拉斜，读着更累。样式在 .trace-thinking
     row.textContent = String(s.text || "");
     return row;
   }
@@ -1421,8 +1434,10 @@ function traceStepNode(step) {
     const pending = !!s.pending;
     const mark = document.createElement("span");
     mark.className = "trace-tool-status " + (pending ? "pending" : (s.ok ? "ok" : "bad"));
-    // ✓/✗ 是字形不是 emoji；还没等到结果的那一步（停在块边界、断线）画一个点
-    mark.textContent = pending ? "…" : (s.ok ? "✓" : "✗");
+    // v0.30 与原生对齐：三态（进行中/成功/失败）一律 CSS 画，这里一个字都不填。
+    // 原来填的是 ✓/✗/… 字形——浏览器基本都有这些字形所以网页没出过事，但"两套客户端
+    // 两套标记"本身就是分裂，而原生那边已经真机判过缺字变豆腐块（Icons.kt 那一族）。
+    mark.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
     label.className = "trace-tool-label";
     label.textContent = String(s.label || s.name || "工具调用");
@@ -1431,7 +1446,7 @@ function traceStepNode(step) {
     if (!pending && ms > 0) {
       const time = document.createElement("span");
       time.className = "trace-tool-time";
-      time.textContent = ms + " ms";
+      time.textContent = fmtTraceSecs(ms);
       line.appendChild(time);
     }
     row.appendChild(line);
@@ -1452,7 +1467,12 @@ function traceStepNode(step) {
   if (s.kind === "search") {
     const q = document.createElement("div");
     q.className = "trace-search-query";
-    q.textContent = "搜索：" + String(s.query || "");
+    // 与原生 TraceStepRow 的 search 臂同形：一枚"看见过程"的眼 + 「搜索：」那句。
+    // 眼是 CSS 画的（.trace-eye），这里只 append 一个空 span：一个字形都不往 DOM 里打。
+    const eye = document.createElement("span");
+    eye.className = "trace-eye";
+    eye.setAttribute("aria-hidden", "true");
+    q.append(eye, document.createTextNode("搜索：" + String(s.query || "")));
     row.appendChild(q);
     const list = document.createElement("div");
     list.className = "trace-results";
@@ -1504,18 +1524,48 @@ function traceResultNode(r) {
   return item;
 }
 
-/** 面板的开合：`hidden` 类是本仓库既有的习惯（没有用 <details>，老 WebView 不好统一样式）。 */
+/** 面板的开合：`hidden` 类是本仓库既有的习惯（没有用 <details>，老 WebView 不好统一样式）。
+ *  v0.30：箭头不再换 ▾/▸ 两个字形——CSS 里画一枚下箭头，`.open` 那一档转 180°，
+ *  与原生 IconChevronDown + rotate(chevron) 同一做法。标题的动词跟着开合换
+ *  （查看/收起），所以这里要重算一次 summary 文案。 */
 function setTraceOpen(panel, open) {
   if (!panel) return;
   const on = !!open;
   panel.classList.toggle("open", on);
   const steps = panel.querySelector(".trace-steps");
   if (steps) steps.classList.toggle("hidden", !on);
-  const caret = panel.querySelector(".trace-caret");
-  if (caret) caret.textContent = on ? "▾" : "▸";
+  const summary = panel.querySelector(".trace-summary");
+  if (summary) summary.textContent = traceSummaryText(panel._traceLast || [], on);
   const head = panel.querySelector(".trace-head");
   if (head) head.setAttribute("aria-expanded", on ? "true" : "false");
 }
+
+/** 现在正在跑的那一步：工具发出去了还没等到结果。没有则 null（态由调用方给的话填）。 */
+function traceRunningStep(trace) {
+  const steps = Array.isArray(trace) ? trace : [];
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const s = steps[i];
+    if (s && s.kind === "tool" && s.pending) return s;
+  }
+  return null;
+}
+
+/* 实时秒表：服务端只有 tool_result 帧带 elapsed_ms，"正在跑的这一步"没人报进度，
+ * 只能客户端自己数（与原生 TraceLiveBar 的 elapsedRealtime + 每 100ms 一格同一判据）。
+ * 全页一条 interval：同时最多一条消息在流，扫 .trace-live 那一条就够；节点被
+ * renderMessages 整棵换掉也不漏——querySelectorAll 只看得见还挂在树上的那些。
+ * 起停在 runStream 里配对，finally 必停：泄漏一条 100ms 的定时器比多写两行脏得多。 */
+let traceTicker = 0;
+function traceTickOnce() {
+  const host = $("messages");
+  if (!host || !host.querySelectorAll) return;
+  host.querySelectorAll(".msg-trace.trace-live .trace-status-time").forEach((el) => {
+    const since = Number(el.dataset.since) || 0;
+    if (since) el.textContent = fmtTraceSecs(Date.now() - since);
+  });
+}
+function traceTickStart() { if (!traceTicker) traceTicker = setInterval(traceTickOnce, 100); }
+function traceTickStop() { if (traceTicker) { clearInterval(traceTicker); traceTicker = 0; } }
 
 /** 把 trace 画进这一条消息的面板。
  *  full 为真整块重画（落定那一拍与历史回放），否则增量：只补新步、只重画脏步。
@@ -1544,10 +1594,47 @@ function paintTrace(node, holder, opts) {
   }
   if (dirty) dirty.clear();
 
+  // 标题文案要随开合换动词（查看/收起），所以把这一拍的步交给面板存一份：
+  // 人点标题那一趟只走 setTraceOpen，拿不到 holder，不存就得再抄一份状态出去。
+  panel._traceLast = trace;
+  const openNow = panel.classList.contains("open");
   const summary = panel.querySelector(".trace-summary");
-  if (summary) summary.textContent = traceSummaryText(trace);
-  panel.classList.toggle("hidden", !trace.length);
-  panel.classList.toggle("trace-live", live && !!trace.length);
+  if (summary) summary.textContent = traceSummaryText(trace, openNow);
+
+  // v0.30 与原生对齐的两条"看得见现在"：
+  // ① trace 还空着但在流——面板不能整块藏起来，否则手机上看到的就是条空气泡
+  //    （原生那边是 TraceThinkingNow）。trace-empty 那一档由 CSS 把标题行摘掉，
+  //    面板里只留「正在思考 ···」一行。
+  // ② 已经在跑的那一步——底部那条实时状态条一直在，收起着也看得见在干什么、跑了多久。
+  const empty = !trace.length;
+  panel.classList.toggle("trace-empty", empty);
+  panel.classList.toggle("hidden", empty && !live);
+  panel.classList.toggle("trace-live", live && !empty);
+  const now = panel.querySelector(".trace-now");
+  if (now) now.classList.toggle("hidden", !(live && empty));
+  const bar = panel.querySelector(".trace-status");
+  if (bar) {
+    if (live && !empty) {
+      const running = traceRunningStep(trace);
+      // 计时起点挂在"是哪一步"上：换步归零，同一步反复重画不重置。id 可能为空串，
+      // 空串是 falsy，所以要一路兜到 label/name，最后才落到 "live" 这个兜底键。
+      const key = running ? String(running.id || running.label || running.name || "step") : "live";
+      if (panel._liveKey !== key) { panel._liveKey = key; panel._liveSince = Date.now(); }
+      const lab = bar.querySelector(".trace-status-label");
+      if (lab) {
+        lab.textContent = running ? String(running.label || running.name || "处理中")
+          : (holder.content ? "正在生成" : "正在思考");
+      }
+      const secs = bar.querySelector(".trace-status-time");
+      if (secs) {
+        secs.dataset.since = String(panel._liveSince);
+        secs.textContent = fmtTraceSecs(Date.now() - panel._liveSince);
+      }
+      bar.classList.remove("hidden");
+    } else {
+      bar.classList.add("hidden");
+    }
+  }
   if (!panel.dataset.manual) setTraceOpen(panel, o.open === undefined ? live : o.open);
 }
 
@@ -1803,6 +1890,25 @@ async function send(text) {
   await streamInto();
 }
 
+/* 触屏那一侧发完问题把输入框焦点交出去，软键盘随之收起；桌面留着焦点，下一句直接打字。
+ * 判据用 (hover: none) and (pointer: coarse) 而不是"有没有 touch 事件"：带触屏的笔记本
+ * 用鼠标打字时收键盘纯属添乱。认不到 matchMedia 的老 WebView 退回 maxTouchPoints。 */
+function isTouchPrimary() {
+  try {
+    if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+      return !!window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    }
+  } catch (_) { /* 老 WebView 没有 matchMedia：落到下面那条兜底 */ }
+  const points = (typeof navigator !== "undefined" && navigator.maxTouchPoints) || 0;
+  return points > 0;
+}
+
+function stashKeyboardAfterSend() {
+  if (!isTouchPrimary()) return;
+  const el = $("input");
+  if (el && typeof el.blur === "function") el.blur();
+}
+
 async function runStream(holder) {
   state.streaming = true;
   state.controller = new AbortController();
@@ -1817,9 +1923,16 @@ async function runStream(holder) {
   // data-live 的容器——半截代码块此刻高亮是无效功，流结束后的全量渲染才补。
   // 摘除在 finally 里，renderMessages 整棵重建之前。
   if (body) body.setAttribute("data-live", "1");
-  // 过程面板进入"正在进行"态：默认展开、标题带一点呼吸；摘除在下面的 finally 里，
+  // 过程面板进入"正在进行"态：默认展开、底部挂实时状态条；摘除在下面的 finally 里，
   // 与 .typing / data-live 同一拍，所以一条已经答完的消息不会还在闪。
   holder._traceLive = true;
+  // 实时状态条那格秒数自己走：帧可以几十秒不来一条（正在跑的那一步在等结果），
+  // 那时 rAF 闸门根本不拍，秒表必须靠这条独立的心跳才不像卡死。
+  traceTickStart();
+  // v0.30 与原生对齐：发完问题把键盘收掉，人直接看输出，少一次手动收键盘的动作。
+  // 原生那边是 stashIme()（clearFocus + 连发压 IME），网页这边 blur() 就够——而且
+  // 现网输入框的 blur 监听本来就在键盘收起后清 body 高度，正好走同一条收尾路。
+  stashKeyboardAfterSend();
 
   /* chunk 到达的频率远高于帧率：每个 chunk 都全量重渲 + 强制滚底，长回复是
      O(n²)，而且用户在生成期间一旦上翻，下一帧就被拽回底部。改成把「渲染 +
@@ -1907,6 +2020,7 @@ async function runStream(holder) {
     // 未决的那帧要取消：流结束后 renderMessages 会整棵重建消息区，
     // 迟到的 paint 会打到已经摘掉的旧节点上。
     if (pending) cancelRaf(pending);
+    traceTickStop();
     if (node) node.classList.remove("typing");
     if (body) body.removeAttribute("data-live");
     // 过程面板跟着落定：摘掉"进行中"的呼吸态、把没等到结果的步收落成一句话、
@@ -1927,7 +2041,9 @@ async function runStream(holder) {
   await loadSessions().catch(() => {});
   if (!failed && !aborted) setStatus("");
   updateSendEnabled();
-  $("input").focus();
+  // 手机上这一句会把刚收起来的键盘又顶出来（用户诉求就是"发完直接看输出"）；
+  // 桌面留着焦点，下一句直接打字才对。判据与 stashKeyboardAfterSend 同一把尺子。
+  if (!isTouchPrimary()) $("input").focus();
 }
 
 async function persistCurrent() {
