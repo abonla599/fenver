@@ -1397,6 +1397,17 @@ function fmtTraceSecs(ms) {
   return (n / 1000).toFixed(1) + "s";
 }
 
+/** 搜索源名的上屏口径（v0.32 W3）：三端同一张表——backend/app/core/stream_events.py
+ *  的 SEARCH_SOURCE_LABELS/SEARCH_SOURCE_PREFIX 与本文件与 ChatUi.kt 逐字互锁。
+ *  已知源给中文名；未知源原样显示：新源进链时不许有一端把它编没或写错。 */
+const SEARCH_SOURCE_LABELS = { bocha: "博查", tavily: "Tavily", bing: "必应" };
+const SEARCH_SOURCE_PREFIX = " · 来自 ";
+function searchSourceName(source) {
+  const s = String(source == null ? "" : source).trim();
+  if (!s) return "";
+  return SEARCH_SOURCE_LABELS[s] || s;
+}
+
 /** 折叠着也能读的那一行标题：查看 3 个步骤 · 5 个网页 / 收起 3 个步骤（v0.30 与原生同文案）。
  *  展开态换动词是原生那版定的口径（"查看/收起"），两边各写一套就是体验分裂。
  *  步数不数 omitted 那一条：它是"这里被裁过"的记账，不是一步，算进去等于虚报进度。 */
@@ -1472,7 +1483,11 @@ function traceStepNode(step) {
     const eye = document.createElement("span");
     eye.className = "trace-eye";
     eye.setAttribute("aria-hidden", "true");
-    q.append(eye, document.createTextNode("搜索：" + String(s.query || "")));
+    // W3：帧/步带 source 时在标题行尾追加「 · 来自 X」；没有（W1 之前的历史步、
+    // 或全链空的旧帧）就连前缀一起省，与 v0.30 已锁文案逐字一致。
+    const src = searchSourceName(s.source);
+    q.append(eye, document.createTextNode("搜索：" + String(s.query || "") +
+      (src ? SEARCH_SOURCE_PREFIX + src : "")));
     row.appendChild(q);
     const list = document.createElement("div");
     list.className = "trace-results";
@@ -1690,8 +1705,13 @@ function accumulateTrace(holder, evt) {
     return true;
   }
   if (evt.type === "search") {
-    trace.push({ kind: "search", id: String(evt.id || ""), query: String(evt.query || ""),
-                 results: Array.isArray(evt.results) ? evt.results : [] });
+    const step = { kind: "search", id: String(evt.id || ""), query: String(evt.query || ""),
+                   results: Array.isArray(evt.results) ? evt.results : [] };
+    // 与服务端 step_search 同一先例：没有 source 就不出现这个键——回写会话时
+    // 双端存回的步形状不许一端多一个空键。
+    const src = String(evt.source || "");
+    if (src) step.source = src;
+    trace.push(step);
     mark(trace.length - 1);
     return true;
   }

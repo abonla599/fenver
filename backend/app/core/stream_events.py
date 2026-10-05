@@ -51,6 +51,22 @@ TRACE_CHARS_MAX = 12000
 
 _URL_SAFE_SCHEMES = ("http://", "https://")
 
+# ---------- 来源名的用户侧显示口径（v0.32 W3） ----------
+# search 帧/trace 步里的 source 是降级链的机器源名（search_chain.SOURCES 的 name）。
+# 上屏时两个客户端不许各写各的：这张映射表、这句连接词就是双端逐字锁的第三方真源
+# （先例：approval.py 的 APPROVAL_* 常量）。服务端只在契约测试里读它当基准，
+# 运行时不把它写进任何一帧——帧的字节形状与 W1 定稿完全一致，一个比特都不动。
+SEARCH_SOURCE_LABELS = {"bocha": "博查", "tavily": "Tavily", "bing": "必应"}
+SEARCH_SOURCE_PREFIX = " · 来自 "
+
+
+def source_display_name(source: Any) -> str:
+    """源名 → 上屏显示名：已知源用中文名，未知源原样显示（如实、不炸），空回空串。"""
+    name = str(source or "").strip()
+    if not name:
+        return ""
+    return SEARCH_SOURCE_LABELS.get(name, name)
+
 
 def _cap(value: Any, limit: int) -> str:
     """转成字符串并按**字符**封顶，超出补一个省略号。
