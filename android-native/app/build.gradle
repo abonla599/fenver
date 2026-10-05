@@ -13,8 +13,8 @@ android {
         applicationId "xyz.fenever.assistant.native"
         minSdk 24
         targetSdk 34
-        versionCode 56
-        versionName "0.31.0"
+        versionCode 57
+        versionName "0.32.0"
 
         // 与壳同一判据：三个值主机名一致（backend 的 test_android_shell.py 同族约束）。
         buildConfigField "String", "DEFAULT_BASE_URL", "\"https://ai.fenever.xyz\""
