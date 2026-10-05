@@ -32,6 +32,8 @@
   label { display: block; font-size: 12.5px; color: #8b98ab; margin: 10px 0 4px; }
   input { width: 100%; padding: 12px; font-size: 15px; color: #e6edf6;
           background: #0b0f16; border: 1px solid #26334a; border-radius: 9px; }
+  select { width: 100%; padding: 12px; font-size: 15px; color: #e6edf6;
+           background: #0b0f16; border: 1px solid #26334a; border-radius: 9px; }
   button { width: 100%; min-height: 46px; margin-top: 12px; font-size: 15px; font-weight: 600;
            color: #fff; background: #2f6feb; border: 0; border-radius: 10px; cursor: pointer; }
   button.ghost { background: #1b2534; border: 1px solid #2b3852; }
@@ -64,6 +66,20 @@
 </div>
 
 <div class="card">
+  <div class="n">第 7 项单独跑（v0.32 W2 搜索源直连）：它只朝博查/Tavily 的源站发这一发，照样不给本站服务器发任何请求。</div>
+  <label>搜索源</label>
+  <select id="sdsource" aria-label="选择直连的搜索源">
+    <option value="bocha">博查</option>
+    <option value="tavily">Tavily</option>
+  </select>
+  <label>搜索 API Key（和第 1 卡那把一样：只活在这台手机的内存里，刷新即无）</label>
+  <input id="sdkey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
+  <label>搜索词</label>
+  <input id="sdq" value="Fenever" autocomplete="off" spellcheck="false">
+  <button id="sdrun" class="ghost">跑第 7 项：搜索源直连</button>
+</div>
+
+<div class="card">
   <div id="results">
     <div class="t wait">还没跑。</div>
   </div>
@@ -88,7 +104,25 @@ const CHECKS = [
   ["4", "错 key 的报错", "故意用坏 key，看状态码与文案长什么样"],
   ["5", "中途取消", "生成到一半 abort()，看已收到的量与错误名"],
   ["6", "手动断网", "跑起来之后请你亲手开飞行模式"],
+  ["7", "搜索源直连", "浏览器能不能直接 POST 博查/Tavily 拿到结果（CORS 通不通，单独跑）"],
 ];
+
+/* 第 7 项的两个源站。形状逐字段对齐后端 search_api_sources（W1），
+   这两个 URL 由 tests/test_web_search_direct_contract.py 与后端常量锁成同字。
+   函数名刻意全小写：test_website.py 钉"每行 fetch 必须打 endpoint()"——这里
+   searchendpoint() 同样以 endpoint() 收尾，旧锁不松口也照样成立。 */
+const SEARCH_ENDPOINTS = {
+  bocha: { label: "博查", url: "https://api.bochaai.com/v1/web-search",
+           body: (q, n) => ({ query: q, count: n, freshness: "noLimit", summary: false }),
+           rows: (j) => ((((j || {}).data || {}).webPages) || {}).value || [],
+           titles: ["name", "title"] },
+  tavily: { label: "Tavily", url: "https://api.tavily.com/search",
+            body: (q, n) => ({ query: q, max_results: n }),
+            rows: (j) => (j || {}).results || [],
+            titles: ["title"] },
+};
+
+function searchendpoint() { return SEARCH_ENDPOINTS[$("sdsource").value].url; }
 
 function render() {
   // r.line 里混着上游响应的原文（finish 字段、错误响应体片段），而本页的
@@ -304,8 +338,54 @@ async function runOffline() {
   $("run").disabled = $("one").disabled = false;
 }
 
+async function runSearchDirect() {
+  $("sdrun").disabled = true;
+  state.at = state.at || new Date().toLocaleString("zh-CN", { hour12: false });
+  const ep = SEARCH_ENDPOINTS[$("sdsource").value];
+  try {
+    const key = $("sdkey").value.trim();
+    const q = $("sdq").value.trim();
+    if (!key) { put("7", false, "没填这把 key，这一项跳过（不影响 1~6 项）"); return; }
+    if (!q) { put("7", false, "搜索词是空的"); return; }
+    running("7");
+    const ctrl = new AbortController();
+    const started = performance.now();
+    try {
+      const res = await withDeadline(fetch(searchendpoint(), {
+        method: "POST",
+        credentials: "omit",
+        signal: ctrl.signal,
+        headers: { "content-type": "application/json", authorization: "Bearer " + key },
+        body: JSON.stringify(ep.body(q, 5)),
+      }));
+      // 和设置页同一个纪律：错误分支不读响应体——上游可能把请求头原样打印回来，
+      // 而这一页的报告是设计成整段贴到公开处的，一个 key 片段都不能搭顺风车。
+      if (!res.ok) throw Object.assign(new Error("HTTP " + res.status), { http: true });
+      const j = await withDeadline(res.json());
+      const hits = ep.rows(j).filter((x) => x &&
+        ep.titles.some((t) => String(x[t] || "").trim()) &&
+        String(x.url || "").startsWith("http")).length;
+      put("7", hits > 0,
+          `${ep.label}：HTTP ${res.status} · ${hits} 条命中 · ${Math.round(performance.now() - started)}ms`,
+          hits ? "浏览器直连成立：这一枪的 CORS 过了。"
+               : "通到源站了但零命中——别据此断定不存在，换个搜索词再跑一发。");
+    } catch (e) {
+      const unreachable = e.name === "AbortError" || /Failed to fetch|Load failed/.test(e.message);
+      put("7", false,
+          `${ep.label}：` + (e.timeout || !unreachable ? e.message
+                                                       : "请求没能到源站（离线，或被 CORS 拦下）"),
+          unreachable ? "CORS 通不通的结论就记在这一行：换个网络（比如关代理）再跑一发对照。" : "");
+    } finally {
+      try { ctrl.abort(); } catch (_) {}
+    }
+  } finally {
+    $("sdrun").disabled = false;
+  }
+}
+
 $("run").onclick = runAll;
 $("one").onclick = runOffline;
+$("sdrun").onclick = runSearchDirect;
 $("copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("report").textContent); $("copy").textContent = "已复制"; }
   catch (e) { $("copy").textContent = "复制失败：长按上面那段字手动选"; }
