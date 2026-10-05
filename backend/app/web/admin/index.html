@@ -103,6 +103,26 @@
         <tbody id="usageRows"></tbody>
       </table></div>
       <p class="pane-note" style="margin-top:10px">token 数一律取上游回传的 <code>usage</code>，服务端不估算：各家分词器不同，本地算出来的数拿去对账是错的。上游没回数字的那几次各项记 0，并在「账全不全」里点出来——那种行的 token 是个<b>下限</b>，不是准确数。日期只认 <code>YYYY-MM-DD</code>，接口也只认 <code>day</code> 这一个参数，所以按人细看就是读完上面这张表，它本来就一人一行。</p>
+
+      <h3 style="margin-top:20px">搜索用量</h3>
+      <p class="pane-note">下面这一节是<b>另一本账</b>（<code>/v1/admin/search-usage</code>，文件是 <code>data/search_usage.json</code>）：它按「这一天 · 这一个源」记 <code>web_search</code> 真跑了多少次、挂在谁身上、每个源成功率。它上面没有「谁」这一栏，不是漏了：搜索工具只收一个 query 参数，拿不到调用者身份，而「谁的钱」归上面那本账管。这本账里没有任何查询原文，也没有哈希——失败原因只有写死的那几个枚举值，凑不出第二套说法。</p>
+      <div class="row">
+        <span class="dim" style="font-size:12.5px">看几天</span>
+        <select id="searchUsageDays">
+          <option value="7">7 天</option>
+          <option value="30">30 天</option>
+          <option value="90">90 天</option>
+        </select>
+        <button id="btnSearchUsage" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新读搜索这本账"></button>
+      </div>
+      <div class="row" id="searchUsageTotals"></div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>搜索源</th><th>出网尝试</th><th>给结果</th><th>失败</th><th>没出网</th><th>成功率</th><th>失败归因</th>
+        </tr></thead>
+        <tbody id="searchUsageRows"></tbody>
+      </table></div>
+      <p class="pane-note warn" id="searchUsageNote" style="margin-top:10px"></p>
     </section>
 
     <!-- ---------------- 记忆 ---------------- -->

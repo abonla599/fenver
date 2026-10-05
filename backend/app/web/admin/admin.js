@@ -584,6 +584,81 @@
     return tr;
   }
 
+  /* ---------- 搜索用量（另一本账：/v1/admin/search-usage） ---------- */
+
+  // 归因标签与后端 core/search_usage.py 的写死枚举一一对应。这里只是把它翻成人话：
+  // 账本里没有自由文本，界面也就编不出第二种说法（枚举多一个值而这里少一条，
+  // 会由 tests/test_v032_w4_search_usage_contract.py 钉住）。
+  const SEARCH_REASON = {
+    ok: "给结果",
+    not_enabled: "未启用（这台机器没配它的 key）",
+    empty_query: "空查询",
+    network: "连不上/超时",
+    non_200: "上游回了非 200",
+    oversize: "响应超字节上限",
+    parse_empty: "回来了但认不出",
+    no_result: "回空（爬取源说不清为什么）",
+    source_raised: "源违约抛异常",
+  };
+  let searchUsageDays = 7;   // 窗口选项是 index.html 里那三格静态 option（7/30/90 天）
+
+  function pct(rate) {
+    // null = 这个源在窗口里一次网都没出过（比如没配 key），那不是 0%：
+    // 把"没用它"显示成"用它全败"是本页最想说谎的一格。
+    if (rate === null || rate === undefined) return "—";
+    return (Math.round(rate * 1000) / 10).toFixed(1) + "%";
+  }
+
+  async function loadSearchUsage() {
+    const data = await req("/v1/admin/search-usage?days=" + searchUsageDays);
+    const w = data.window || {};
+    const t = data.totals || { calls: 0, ok: 0, failed: 0 };
+
+    const box = $("searchUsageTotals");
+    box.textContent = "";
+    const card = cell("div", undefined, "card grow");
+    const stat = cell("div", undefined, "stat");
+    stat.appendChild(cell("b", fmtN(t.calls)));
+    stat.appendChild(cell("span", "次搜索 · " + (w.from || "—") + " → " + (w.to || "—")));
+    card.appendChild(stat);
+    card.appendChild(cell("p", "给出结果 " + fmtN(t.ok) + " / 全链空 " + fmtN(t.failed)
+      + "（一次执行一笔：主源空、备用源答上，calls 仍算 1 次，两个源各记 1 次尝试）", "pane-note"));
+    box.appendChild(card);
+
+    const tbody = $("searchUsageRows");
+    tbody.textContent = "";
+    const rows = data.sources || [];
+    if (!rows.length) {
+      tbody.appendChild(emptyRow("这个窗口里一次搜索都没跑过。上面那张卡是零，不是读不到。", 7));
+    }
+    rows.forEach((r) => tbody.appendChild(searchUsageRow(r)));
+
+    // 边界那句话只从后端读，前端不另写一套：两份措辞迟早有一份先说谎。
+    const b = data.boundaries || {};
+    const bits = [];
+    if (b.direct_browser) bits.push(b.direct_browser);
+    if (b.probe) bits.push(b.probe);
+    if (b.no_query_text) bits.push(b.no_query_text);
+    $("searchUsageNote").textContent = bits.join(" ");
+  }
+
+  function searchUsageRow(r) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell("td", r.source, "name"));
+    tr.appendChild(cell("td", fmtN(r.attempts)));
+    tr.appendChild(cell("td", fmtN(r.ok)));
+    tr.appendChild(cell("td", fmtN(r.failed)));
+    tr.appendChild(cell("td", r.skipped ? fmtN(r.skipped) : "0"));
+    tr.appendChild(cell("td", pct(r.success_rate)));
+    const reasons = Object.keys(r.reasons || {})
+      .filter((k) => k !== "ok")
+      .map((k) => (SEARCH_REASON[k] || k) + " " + fmtN(r.reasons[k]));
+    const note = cell("td");
+    note.appendChild(cell("span", reasons.length ? reasons.join(" · ") : "—", "dim"));
+    tr.appendChild(note);
+    return tr;
+  }
+
   /* ---------- 记忆 ---------- */
 
   async function loadMemory() {
@@ -720,7 +795,8 @@
 
   async function refresh() {
     await loadUsers();          // 用量与反馈两节的「谁」要读它填的名字表，所以不能并到下一行里
-    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadConfig(), loadFeedback()]);
+    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadSearchUsage(),
+                       loadConfig(), loadFeedback()]);
   }
 
   $("btnLogin").addEventListener("click", async () => {
@@ -780,6 +856,12 @@
     busy(null, loadUsage);
   });
   $("btnUsage").addEventListener("click", (e) => busy(e.currentTarget, loadUsage));
+  // 搜索这本账与上面那本同一天窗口口径、各自独立请求：换窗口只重读这一节。
+  $("searchUsageDays").addEventListener("change", (e) => {
+    searchUsageDays = parseInt(e.target.value, 10) || 7;
+    busy(null, loadSearchUsage);
+  });
+  $("btnSearchUsage").addEventListener("click", (e) => busy(e.currentTarget, loadSearchUsage));
   $("btnFeedback").addEventListener("click", (e) => busy(e.currentTarget, loadFeedback));
   $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
   $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
