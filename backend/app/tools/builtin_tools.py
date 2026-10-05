@@ -15,7 +15,7 @@ import re
 import time
 from app.tools import availability
 from app.tools.registry import register_tool, tools_registry, is_available
-from app.tools import web_search as search_source
+from app.tools import search_chain
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
 sandbox = SandboxManager()
@@ -160,7 +160,7 @@ def web_search_tool(query: str) -> ToolResponse:
     走另一条通道进"过程面板"（search 帧），让用户能核对它到底搜了哪些网页。
     artifacts 绝不掺进 data——掺了就等于改了模型输入。
     """
-    rows = search_source.search(query)
+    rows, used_source = search_chain.search(query)
     if not rows:
         return ToolResponse(True, data=(
             "这次搜索没有返回结果。可能是源站暂时不给，也可能是关键词的问题；"
@@ -179,8 +179,11 @@ def web_search_tool(query: str) -> ToolResponse:
                  "换个关键词（更少、更具体的词）再搜一次。")
     # artifacts 原样带上结构化行：URL/摘要的安全裁剪与条数封顶在 stream_events 里做，
     # 这里只负责"把源头给的东西如实交出去"，不改任何一个字节。
+    # source 是降级链里实际给出结果的那个源的名字：留痕通道（search 帧/trace 步）
+    # 把它一路带给过程面板，用户侧才说得清"这次搜到的是谁"。
     return ToolResponse(True, data=body,
-                        artifacts={"kind": "web_search", "query": query, "results": rows})
+                        artifacts={"kind": "web_search", "query": query, "results": rows,
+                                   "source": used_source})
 
 
 # 虚词与标点。它们不进"实词"：页面上到处都是「的/是/了」，认它们等于任何两条中文

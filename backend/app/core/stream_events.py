@@ -125,12 +125,16 @@ def tool_result_frame(call_id: str, name: str, ok: bool, summary: str,
 
 
 def search_frame(call_id: str, query: str,
-                 results: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                 results: Optional[List[Dict[str, Any]]] = None,
+                 source: Optional[str] = None) -> Dict[str, Any]:
     """把一次搜索命中的网页原样交给客户端。
 
     以前这些 {title,url,snippet} 只在 app/tools/web_search.py 的源头存在，
     builtin_tools 把它压成一段给模型看的文本之后就丢了——于是「它到底搜了什么网页」
     这件事用户永远看不见，也没法核对来源。这一帧就是为了把 URL 还给人。
+
+    `source` 是降级链里实际给出结果的源名（v0.32 W1）。与 done_frame 的可选 trace
+    同一个先例：不给就不出现这个键——帧的既有字节形状对老客户端一个比特都不变。
     """
     rows: List[Dict[str, Any]] = []
     for item in (results or [])[:SEARCH_RESULTS_MAX]:
@@ -143,12 +147,15 @@ def search_frame(call_id: str, query: str,
         if not row["title"] and not url:
             continue
         rows.append(row)
-    return {
+    frame: Dict[str, Any] = {
         "type": FRAME_SEARCH,
         "id": _cap(call_id, 64),
         "query": _cap(query, SEARCH_QUERY_MAX),
         "results": rows,
     }
+    if source:
+        frame["source"] = _cap(source, TOOL_NAME_MAX)
+    return frame
 
 
 def content_frame(text: str) -> Dict[str, Any]:
@@ -193,10 +200,14 @@ def step_tool(call_id: str, name: str, label: str, ok: bool, summary: str,
 
 
 def step_search(call_id: str, query: str,
-                results: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    frame = search_frame(call_id, query, results)
-    return {"kind": "search", "id": frame["id"], "query": frame["query"],
-            "results": frame["results"]}
+                results: Optional[List[Dict[str, Any]]] = None,
+                source: Optional[str] = None) -> Dict[str, Any]:
+    frame = search_frame(call_id, query, results, source)
+    step: Dict[str, Any] = {"kind": "search", "id": frame["id"], "query": frame["query"],
+                            "results": frame["results"]}
+    if "source" in frame:
+        step["source"] = frame["source"]
+    return step
 
 
 def _trace_chars(steps: List[Dict[str, Any]]) -> int:
