@@ -97,6 +97,7 @@ DATA_PATH_ENV_VARS = {
     "运行时配置": "CONFIG_DB_PATH",
     "审计流水": "AUDIT_LOG_PATH",
     "搜索源密钥": "SEARCH_KEYS_DB_PATH",
+    "搜索用量账本": "SEARCH_USAGE_DB_PATH",
 }
 
 
@@ -124,6 +125,7 @@ def resolve_all_data_paths() -> list:
     from app.core.schedule import _default_path as schedule_path
     from app.core.usage import _default_path as usage_path
     from app.core.search_keys import path as search_keys_path
+    from app.core.search_usage import _default_path as search_usage_path
     from app.session.session_store import _default_path as sessions_path
 
     resolved = {
@@ -141,6 +143,7 @@ def resolve_all_data_paths() -> list:
         "运行时配置": config_path(),
         "审计流水": audit_path(),
         "搜索源密钥": search_keys_path(),
+        "搜索用量账本": search_usage_path(),
     }
     # 按 DATA_PATH_ENV_VARS 的顺序出：日志行序稳定，两份日志才比得出差别
     return [(label, resolved[label]) for label in DATA_PATH_ENV_VARS]

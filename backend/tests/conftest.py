@@ -60,6 +60,10 @@ os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_DATA_DIR, "audit.jsonl")
 # 全绿得没有意义了）。隔离判据同样在 test_test_isolation.py 的派生清单里。
 os.environ["SEARCH_KEYS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "search_keys.json")
 
+# 搜索用量账本（v0.32 W4）同样是进程级 JSON：指走之后**不建文件**，缺文件 = 空账，
+# 于是任何一次 web_search 记账都只落进这个临时目录，碰不到用户真实的 data/。
+os.environ["SEARCH_USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "search_usage.json")
+
 # v0.24 T1.4：运行时配置同样是指不走的进程级单例。指到临时目录之外，还要显式
 # 把注册打开——产品默认注册是关的（D9：开源版"给你自己用"），而既有的注册/登录
 # 用例全部从"注册可用"出发；注册关闭本身由契约测试单独判（test_v024_foundation_contract）。

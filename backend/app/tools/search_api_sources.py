@@ -17,6 +17,10 @@ web_search.py 一一对应——有界超时、不跟跳转、系统信任锚且
   （开了 summary 才会另有一份长 summary——留作回退，别赌对面默认值不变）。
 - Tavily POST https://api.tavily.com/search
   请求体 {query, max_results}；结果在顶层 results[]，字段 title/url/content。
+
+v0.32 W4 多了 `search_with_reason`：源合同那个 `search` 原样保留（回列表），它只是
+把带归因的那一份投影成列表。归因值必须与 core/search_usage.py 的写死枚举同名——
+枚举漂移的代价由合同测试钉（test_v032_w4_search_usage_contract.py），不靠人记忆。
 """
 import json
 
@@ -30,7 +34,12 @@ API_MAX_BYTES = 1 * 1024 * 1024    # JSON 结果比 HTML 页小一个量级；�
 
 
 def _ask(url: str, key: str, payload: dict, extract):
-    """POST 一次问上游；非 200、超时、TLS 失败、坏 JSON、超大、坏结构——全是 []。"""
+    """POST 一次问上游，回 `(rows, reason)`。
+
+    rows 的判空口径与原来逐字一致：非 200、超时、TLS 失败、坏 JSON、超大、坏结构
+    ——全是 []。v0.32 W4 多带回来的那个 reason 只服务用量账本（core/search_usage.py
+    的写死枚举），不参与任何判空判断：链仍然只看 rows。
+    """
     try:
         with httpx.Client(verify=system_ssl_context(), timeout=TIMEOUT_SECONDS,
                           follow_redirects=False) as client:
@@ -38,16 +47,22 @@ def _ask(url: str, key: str, payload: dict, extract):
                                headers={"Authorization": f"Bearer {key}",
                                         "Content-Type": "application/json"}) as response:
                 if response.status_code != 200:
-                    return []
+                    return [], "non_200"
                 chunks, total = [], 0
                 for part in response.iter_bytes():
                     total += len(part)
                     if total > API_MAX_BYTES:
-                        return []
+                        return [], "oversize"
                     chunks.append(part)
-        return extract(json.loads(b"".join(chunks).decode("utf-8", "replace")))
     except Exception:
-        return []
+        return [], "network"
+    try:
+        rows = extract(json.loads(b"".join(chunks).decode("utf-8", "replace")))
+    except Exception:
+        # 坏 JSON / 结构不是预期的形状：与"200 但一条也认不出"归到同一档，
+        # 因为对上游而言这两件事是同一句话——回来的东西我们用不了。
+        return [], "parse_empty"
+    return rows, ("ok" if rows else "parse_empty")
 
 
 def _first(item: dict, fields) -> str:
@@ -75,41 +90,52 @@ def _rows(items, title_fields, snippet_fields):
 
 
 class BochaSource:
-    """博查 AI 搜索（主源）。未配 key 即未启用：不联网，直接回空给链换源。"""
+    """博查 AI 搜索（主源）。未配 key 即未启用：不联网，直接回空给链换源。
+
+    `search` 是源合同（回列表），`search_with_reason` 是它的多带一栏版：同一个实现，
+    前者只是把后者投影成列表——与 tools/executor.py 的 `execute_tool` /
+    `execute_tool_detailed` 同一套"唯一实现 + 薄投影"，不允许两份逻辑各跑各的。
+    """
 
     name = "bocha"
     URL = "https://api.bochaai.com/v1/web-search"
 
-    def search(self, query, max_results=None):
+    def search_with_reason(self, query, max_results=None):
         want = _clamp(max_results)
         if not str(query or "").strip():
-            return []
+            return [], "empty_query"
         key = search_keys.get(self.name)
         if not key:
-            return []
-        rows = _ask(self.URL, key,
-                    {"query": query, "count": want, "freshness": "noLimit",
-                     "summary": False},
-                    lambda data: _rows(
-                        ((data.get("data") or {}).get("webPages") or {}).get("value") or [],
-                        ("name", "title"), ("snippet", "summary")))
-        return rows[:want]
+            return [], "not_enabled"
+        rows, reason = _ask(self.URL, key,
+                           {"query": query, "count": want, "freshness": "noLimit",
+                            "summary": False},
+                           lambda data: _rows(
+                               ((data.get("data") or {}).get("webPages") or {}).get("value") or [],
+                               ("name", "title"), ("snippet", "summary")))
+        return rows[:want], reason
+
+    def search(self, query, max_results=None):
+        return self.search_with_reason(query, max_results)[0]
 
 
 class TavilySource:
-    """Tavily（备用源）。同上，未启用不发请求。"""
+    """Tavily（备用源）。同上，未启用不发请求；归因口径与 BochaSource 一份实现。"""
 
     name = "tavily"
     URL = "https://api.tavily.com/search"
 
-    def search(self, query, max_results=None):
+    def search_with_reason(self, query, max_results=None):
         want = _clamp(max_results)
         if not str(query or "").strip():
-            return []
+            return [], "empty_query"
         key = search_keys.get(self.name)
         if not key:
-            return []
-        rows = _ask(self.URL, key, {"query": query, "max_results": want},
-                    lambda data: _rows(data.get("results") or [],
-                                       ("title",), ("content", "snippet")))
-        return rows[:want]
+            return [], "not_enabled"
+        rows, reason = _ask(self.URL, key, {"query": query, "max_results": want},
+                            lambda data: _rows(data.get("results") or [],
+                                               ("title",), ("content", "snippet")))
+        return rows[:want], reason
+
+    def search(self, query, max_results=None):
+        return self.search_with_reason(query, max_results)[0]

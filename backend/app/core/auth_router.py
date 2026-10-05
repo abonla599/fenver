@@ -21,6 +21,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.core import authz, usage
+# v0.32 W4：搜索这本账独立一份文件、独立一个读面（口径见 core/search_usage.py 头部）。
+from app.core import search_usage
 # v0.24 T1.4：注册闸门与配置端点读的是同一份 config_store，不在路由层留第二默认值。
 from app.core import config_store
 # R4a 个人用量面的 provider 显示名要查这份配置——只查 label 一个字段，见 _my_provider_name。
@@ -598,6 +600,41 @@ def admin_usage(day: str = None, _: Principal = RequireAdmin):
     from app.core import credits
     return {"day": target or _today(), "rows": rows, "totals": totals,
             "days": usage.days(), "credits": credits.shadow_breakdown(target)}
+
+
+@router.get("/v1/admin/search-usage")
+def admin_search_usage(days: int = search_usage.DEFAULT_WINDOW_DAYS,
+                       _: Principal = RequireAdmin):
+    """搜索用量：这个窗口里搜了几次、挂在哪个源几次、每源成功率。
+
+    与 `/v1/admin/usage` 的分工：那本账答"谁用了多少 token、谁的钱"，这本答
+    "搜索这门外部依赖的现状"。两本各存各的文件，`usage.py` 的写口径一个字没动
+    （这里只是多一个读面）。
+
+    `days` 由 FastAPI 收成整数（非整数 422），范围在这一层闸死成 1–90：读面是按天
+    枚举再查字典，不给它一个可以喊"读一整年"的无界参数。窗口按服务端本地时区切天，
+    与 `/v1/admin/usage` 的 `day` 同一把尺子。缺账的那天如实列成零——"这周没搜过"
+    是合法答案，不是错误（v0.25 R4a 同一条判据）。
+
+    三条必须说清的边界，都在 `boundaries` 里原样带出去，界面不重述第二套口径：
+    1. 只记本站服务端真跑过降级链的那几次（`web_search` 工具每次执行一笔）；
+    2. 用户在「设置 → 搜索源」用自己的 key 走浏览器/WebView 直连的搜索**不在这本账上**
+       ——那是用户设备上的出站请求，本站一个字节都看不见，也不拿 0 冒充"用户没用";
+    3. 每 15 分钟一次的可用性探针不记账（那是运维检查，记了就等于每小时虚增 4 次）。
+    """
+    if not search_usage.MIN_WINDOW_DAYS <= days <= search_usage.MAX_WINDOW_DAYS:
+        raise HTTPException(status_code=400,
+                            detail=f"days 要在 {search_usage.MIN_WINDOW_DAYS}–"
+                                   f"{search_usage.MAX_WINDOW_DAYS} 之间")
+    data = search_usage.aggregate(days)
+    data["boundaries"] = {
+        "server_only": "只含本站服务端跑降级链的真实搜索（web_search 工具每次执行记一笔，按天×源聚合）。",
+        "no_query_text": "账上没有查询原文，也没有哈希：失败归因是写死的枚举，不存自由文本。",
+        "direct_browser": "用户自带 key 的浏览器/WebView 直连不计：那些请求从用户设备直接出站，本站看不见。",
+        "probe": "每 15 分钟一次的可用性探针不计：它搜的是固定的「北京 天气」，不是有人搜了东西。",
+        "success_rate": "成功率 = 给出结果的次数 ÷ 真出网的尝试次数；没出过网回 null（不是 0%）。",
+    }
+    return data
 
 
 def _my_provider_name(provider_id: str) -> str:
