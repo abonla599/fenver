@@ -446,6 +446,7 @@ from app.core import stream_events
 from app.core import credits
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
                                 looks_placeholder, build_client, scrub_secrets)
+from app.core import search_keys
 from app.core.uploads import (store as upload_store, build_user_content,
                               UploadError, MAX_UPLOAD_BYTES)
 
@@ -1346,6 +1347,46 @@ def test_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
 def test_my_provider_draft(req: ProviderRequest, principal: Principal = CurrentPrincipal):
     """保存前草稿试连：密钥是这个人刚填的，出口照过 scrub。"""
     return _test_draft(req)
+
+# ---------- 搜索源密钥（v0.32 W2：配置面从手写文件升成 HTTP 面） ----------
+# 为什么只许管理员：登记在这里的 key 服务的是**全站**降级链——谁填的，
+# 谁的凭据就替所有人的搜索请求出头。边界与 /v1/providers 管理员面一模一样。
+# 纪律逐字照抄 providers.py：响应面永不回明文（只有 mask_key 的「末四位」）、
+# 存储与记录分离（core/search_keys.py 自持一份文件）、审计只记源名与掩码
+# （audit._redact 另兜一层）、错误文案里不出现任何值。
+
+class SearchKeyRequest(BaseModel):
+    api_key: str
+
+def _search_key_gate(source: str) -> None:
+    """源名白名单闸门：名单外的源与"这个源没配 key"是两种失败，前者 404。"""
+    if source not in search_keys.ALLOWED_SOURCES:
+        raise HTTPException(status_code=404, detail="搜索源不存在")
+
+@app.get("/v1/search-keys")
+def list_search_keys(_: Principal = RequireAdmin):
+    """配置面的整份视图：每个可登记的源一行，只有 configured 与末四位掩码。"""
+    from app.tools import search_chain   # 局部导入：order 只是给界面看的信息，不值得为它新增模块级依赖
+    return {"sources": search_keys.list_masked(),
+            "order": [s.name for s in search_chain.SOURCES]}
+
+@app.put("/v1/search-keys/{source}")
+def set_search_key(source: str, req: SearchKeyRequest, actor: Principal = RequireAdmin):
+    _search_key_gate(source)
+    try:
+        masked = search_keys.set_key(source, req.api_key)
+    except search_keys.SearchKeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    audit.log(actor, "search-key.set", target=source, after={"masked": masked})
+    return {"status": "saved", "source": source, "configured": True, "masked": masked}
+
+@app.delete("/v1/search-keys/{source}")
+def remove_search_key(source: str, actor: Principal = RequireAdmin):
+    _search_key_gate(source)
+    if not search_keys.delete_key(source):
+        raise HTTPException(status_code=404, detail="该搜索源没有登记过密钥")
+    audit.log(actor, "search-key.delete", target=source)
+    return {"status": "deleted", "source": source}
 
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")

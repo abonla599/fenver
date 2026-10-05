@@ -425,6 +425,16 @@ const API = (() => {
     testMyProvider: (id) => request(`/v1/me/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),
     testMyProviderDraft: (rec) => request("/v1/me/providers/test", { method: "POST", body: rec }),
 
+    /* 搜索源密钥（v0.32 W2，管理员面）：明文只在这一个请求体里过一趟，
+     * 任何响应都不回显它（后端只给「末四位」掩码）。普通用户拿到 403——
+     * 这把 key 服务全站降级链，边界与上面 /v1/providers 管理员面同一条。
+     */
+    searchKeys: () => request("/v1/search-keys"),
+    setSearchKey: (source, api_key) =>
+      request("/v1/search-keys/" + encodeURIComponent(source), { method: "PUT", body: { api_key } }),
+    deleteSearchKey: (source) =>
+      request("/v1/search-keys/" + encodeURIComponent(source), { method: "DELETE" }),
+
     /* 日程（v0.23 R3 · T2.6）：一天一份清单。day 留空 = 让服务端说今天是哪天，
      * 客户端自己不猜：手机改了系统时间、或跨天 0 点后才打开这一页，问出的"今天"
      * 都该是服务端那一份（R3-AC-3）。保存是整天 PUT 幂等替换，不是逐条增删——
