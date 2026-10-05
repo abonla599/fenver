@@ -457,6 +457,12 @@ def test_the_probe_page_is_anonymous_and_only_talks_to_the_vendor():
     # 正向对照：文件空了/改名了也不许"通过"
     assert "CHECKS" in code and code.count('["') >= 6, "探测页没读到内容或六项检查不见了：这条锁在空转"
 
+    # v0.32 W2 之后第 7 项会写死两个第三方源站地址，其中博查恰好以 /v1/ 开头——
+    # 这条锁要钉的一直是"别调**本站**接口"，所以只把后端注册表里那两个源站 URL
+    # （逐字取自 search_api_sources，另有 test_web_search_direct_contract 钉住）
+    # 从正文里摘掉再判：本站的 /v1 一旦出现，仍然当场变红。
+    from app.tools.search_api_sources import BochaSource, TavilySource
+    code = code.replace(BochaSource.URL, "").replace(TavilySource.URL, "")
     assert "/v1/" not in code, "探测页不许调本站接口：它一旦能碰 /v1，key 就进了我们的鉴权面"
     assert "XMLHttpRequest" not in code
     for storage in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):

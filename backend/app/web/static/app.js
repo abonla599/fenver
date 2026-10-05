@@ -2204,6 +2204,289 @@ async function sendFeedback(index, rating, btn) {
   } catch (e) { setStatus("反馈失败：" + e.message, true); }
 }
 
+/* ---------------- 搜索源（v0.32 W2）----------------
+ * 一页两把 key：服务端那份走 /v1/search-keys（管理员面，响应只有末四位掩码）；
+ * 本机直连那份只进这台设备的 localStorage——配好之后这一页的「直连搜索」直接
+ * POST 源站，查询与结果都不经本站服务器。key 的三条红线由构造保证：
+ * 不进 URL query（唯一出现处是 Authorization 头）、不进 console/日志、
+ * 不发给本站任何 /v1 之外的地址（本站侧只有 api.js 那三个不带 key 回显的调用）。
+ * 错误分支一律不读响应体：上游可能把请求头原样打印回来，那趟顺风车不能开。
+ * 请求形状逐字段对齐后端 search_api_sources（博查 {query,count,freshness,summary}；
+ * Tavily {query,max_results}），判空同一条：缺标题或网址的行不给——由
+ * tests/test_web_search_direct_contract.py 与后端锁成同构。
+ * 聊天里 agent 触发的搜索仍走服务端降级链：这个包没动那个协议，这一页是
+ * 「浏览器/WebView 直连」路线的前置阵地，不是它的替身。
+ */
+const SD_LOCAL_PREFIX = "sdkey.";   // localStorage 前缀：本机直连 key，只属于这台设备
+const SD_COUNT = 5;                 // 与后端 web_search.MAX_RESULTS 同值，直连不多要
+const SD_TIMEOUT_MS = 20000;        // 与探测页看门狗同量级：源站 20 秒不回就当不可达
+// 与后端 providers.PLACEHOLDER_HINTS 同一组形状（合同测试对一次数）：
+// 本机这一侧只是提示，真正的闸门在后端与链上。
+const SD_PLACEHOLDER_HINTS = ["your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme"];
+
+function sdEndpoints() {
+  // 源站地址住在 index.html 的 data-search-endpoints（为什么不放 JS 里，注释写在那处）。
+  // 读不出就当场说，不留到按按钮那一刻才静默失败。
+  const raw = document.getElementById("paneSearchKeys").dataset.searchEndpoints;
+  let eps = null;
+  try { eps = JSON.parse(raw); } catch (_) { /* 落到下面那句实话 */ }
+  if (!eps || typeof eps !== "object") throw new Error("搜索源配置读不出（data-search-endpoints 坏了）");
+  return eps;
+}
+
+function sdLocalKey(source) { return localStorage.getItem(SD_LOCAL_PREFIX + source) || ""; }
+
+function sdMask(key) {
+  // 后端 mask_key 的「末四位」口径，本机展示同样不给全文与长度。
+  if (!key) return "";
+  if (key.length <= 8) return "****";
+  return "末四位 " + key.slice(-4);
+}
+
+function sdLooksPlaceholder(key) {
+  const low = String(key || "").toLowerCase();
+  return SD_PLACEHOLDER_HINTS.some((h) => low.includes(h));
+}
+
+function sdBuildBody(source, query, count) {
+  return source === "tavily"
+    ? { query, max_results: count }
+    : { query, count, freshness: "noLimit", summary: false };
+}
+
+function sdPick(item, fields) {
+  for (const f of fields) {
+    const t = String(item[f] || "").trim();
+    if (t) return t;
+  }
+  return "";
+}
+
+function sdRows(items, titleFields, snippetFields) {
+  const rows = [];
+  for (const item of (Array.isArray(items) ? items : [])) {
+    if (!item || typeof item !== "object") continue;
+    const title = sdPick(item, titleFields);
+    const url = String(item.url || "").trim();
+    if (title && url.startsWith("http")) {
+      rows.push({ title, url, snippet: sdPick(item, snippetFields) });
+    }
+  }
+  return rows;
+}
+
+/** 一次真直连：只朝源站发，key 只进这一个请求的 Authorization 头。 */
+async function searchDirect(source, key, query, count) {
+  const ep = sdEndpoints()[source];
+  if (!ep || !ep.url) throw new Error("没有这个搜索源：" + source);
+  if (!key) throw new Error("本机还没存这个源的 key");
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SD_TIMEOUT_MS);
+  let data;
+  try {
+    const res = await fetch(ep.url, {
+      method: "POST",
+      credentials: "omit",       // 不带本站 cookie 去敲第三方：跨域就跨域
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify(sdBuildBody(source, query, count)),
+    });
+    if (!res.ok) throw new Error("源站没接住：HTTP " + res.status);
+    data = await res.json();
+  } finally {
+    clearTimeout(timer);
+    try { ctrl.abort(); } catch (_) { /* 放掉连接，手机上一条挂着的请求会一直吃流量 */ }
+  }
+  return source === "tavily"
+    ? sdRows((data && data.results) || [], ["title"], ["content", "snippet"])
+    : sdRows((((data || {}).data || {}).webPages || {}).value || [], ["name", "title"], ["snippet", "summary"]);
+}
+
+function sdSetStatus(text, bad) {
+  const el = $("sdStatus");
+  el.textContent = text || "";
+  el.classList.toggle("err", !!bad);
+}
+
+function sdRenderLocal() {
+  const eps = sdEndpoints();
+  const sel = $("sdSource");
+  if (!sel.options.length) {
+    for (const [name, cfg] of Object.entries(eps)) {
+      const o = document.createElement("option");
+      o.value = name;
+      o.textContent = cfg.label || name;
+      sel.appendChild(o);
+    }
+  }
+  $("sdLocalNote").textContent = Object.entries(eps).map(
+    ([name, cfg]) => `${cfg.label || name}：` +
+      (sdLocalKey(name) ? `本机已存（${sdMask(sdLocalKey(name))}）` : "未配"))
+    .join(" · ");
+}
+
+function sdSummaryVal() {
+  // 设置列表那一行的小结：管理员看服务端登记数，其他人看本机存了几把。
+  const eps = Object.keys(sdEndpoints());
+  if (isAdmin()) {
+    const n = eps.filter((s) => sdServerState[s]).length;
+    $("searchKeysVal").textContent = n ? `服务端 ${n}/${eps.length}` : "";
+    return;
+  }
+  const n = eps.filter((s) => sdLocalKey(s)).length;
+  $("searchKeysVal").textContent = n ? `本机 ${n}/${eps.length}` : "";
+}
+let sdServerState = {};   // name -> true，仅管理员面渲染用；来源永远是 /v1/search-keys
+
+function serverKeyRow(row, label) {
+  const el = document.createElement("div");
+  el.className = "prov";
+  const pm = document.createElement("div");
+  pm.className = "pm";
+  const b = document.createElement("b");
+  b.textContent = label || row.name;
+  const s = document.createElement("span");
+  const status = () => row.configured ? `已登记（${row.masked}）` : "未登记";
+  s.textContent = status();
+  pm.append(b, s);
+
+  const tag = document.createElement("span");
+  tag.className = "tag " + (row.configured ? "ok" : "bad");
+  tag.textContent = row.configured ? "启用" : "未启用";
+
+  const input = document.createElement("input");
+  input.type = "password";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "sk-…";
+  input.setAttribute("aria-label", (label || row.name) + " 服务端密钥");
+
+  const ops = document.createElement("div");
+  ops.className = "ops";
+  const mk = (text, title, fn) => {
+    const btn = document.createElement("button");
+    btn.className = "icon-btn";
+    btn.textContent = text;
+    btn.title = title;
+    btn.setAttribute("aria-label", title);
+    btn.onclick = fn;
+    return btn;
+  };
+  ops.append(
+    mk("✔", "登记/更新", async () => {
+      const key = input.value.trim();
+      if (!key) { s.textContent = "先填一把真 key"; return; }
+      try {
+        const r = await API.setSearchKey(row.name, key);
+        input.value = "";
+        row.configured = true;
+        row.masked = r.masked;
+        s.textContent = `已登记（${r.masked}）`;   // 响应里本来就只有掩码，这里不造第二个来源
+        tag.className = "tag ok";
+        tag.textContent = "启用";
+        sdServerState[row.name] = true;
+        sdSummaryVal();
+      } catch (e) { s.textContent = "登记失败：" + e.message; }
+    }),
+    mk("✕", "移除", async () => {
+      try {
+        await API.deleteSearchKey(row.name);
+        row.configured = false;
+        row.masked = "";
+        s.textContent = "未登记";
+        tag.className = "tag bad";
+        tag.textContent = "未启用";
+        sdServerState[row.name] = false;
+        sdSummaryVal();
+      } catch (e) { s.textContent = "移除失败：" + e.message; }
+    }));
+  el.append(pm, tag, input, ops);
+  return el;
+}
+
+async function loadSearchKeys() {
+  sdRenderLocal();
+  const box = $("serverKeyList");
+  box.innerHTML = "";
+  sdServerState = {};
+  if (!isAdmin()) { sdSummaryVal(); return; }   // 非管理员不发这枪：必然 403，那块面板本来也藏着
+  try {
+    const data = await API.searchKeys();
+    const eps = sdEndpoints();
+    for (const row of (data.sources || [])) {
+      sdServerState[row.name] = !!row.configured;
+      box.appendChild(serverKeyRow(row, (eps[row.name] || {}).label));
+    }
+  } catch (e) {
+    const p = document.createElement("p");
+    p.className = "pane-note";
+    p.textContent = "服务端密钥读不出：" + e.message;
+    box.appendChild(p);
+  }
+  sdSummaryVal();
+}
+
+$("sdSaveBtn").onclick = () => {
+  const source = $("sdSource").value;
+  const key = $("sdKey").value.trim();
+  if (!key) { sdSetStatus("先填 key，空格不算", true); return; }
+  if (sdLooksPlaceholder(key)) { sdSetStatus("这把 key 形如占位符，本机也没存", true); return; }
+  try {
+    localStorage.setItem(SD_LOCAL_PREFIX + source, key);
+    $("sdKey").value = "";
+    sdRenderLocal();
+    sdSummaryVal();
+    sdSetStatus("已存到本机——只有这台设备读得到它");
+  } catch (e) { sdSetStatus("本机存不下：" + e.message, true); }
+};
+$("sdClearBtn").onclick = () => {
+  localStorage.removeItem(SD_LOCAL_PREFIX + $("sdSource").value);
+  sdRenderLocal();
+  sdSummaryVal();
+  sdSetStatus("");
+};
+$("sdSearchForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const source = $("sdSource").value;
+  const eps = sdEndpoints()[source] || {};
+  const query = $("sdQuery").value.trim();
+  const list = $("sdResults");
+  list.innerHTML = "";
+  if (!query) { sdSetStatus("要搜点什么？", true); return; }
+  const key = sdLocalKey(source);
+  if (!key) {
+    sdSetStatus(`本机没存${eps.label || source}的 key；聊天里的搜索不受影响（走服务端降级链）`, true);
+    return;
+  }
+  sdSetStatus(`正在直连 ${eps.label || source}…`);
+  const started = Date.now();
+  try {
+    const rows = await searchDirect(source, key, query, SD_COUNT);
+    if (!rows.length) { sdSetStatus("直连通了，但零命中——别据此断定不存在", true); return; }
+    for (const r of rows) {
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = r.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = r.title;          // 第三方可控文本：一律 textContent，一个标签不进 DOM
+      li.appendChild(a);
+      if (r.snippet) {
+        const sn = document.createElement("span");
+        sn.textContent = r.snippet;
+        li.appendChild(sn);
+      }
+      list.appendChild(li);
+    }
+    sdSetStatus(`直连 ${eps.label || source} · ${rows.length} 条 · ${Date.now() - started}ms`);
+  } catch (e) {
+    // 错误只有两类能如实说：没到源站（网络/CORS）与到了但没接住（HTTP 状态）。
+    sdSetStatus(e.name === "AbortError" || e.message === "Failed to fetch"
+      ? "直连失败：请求没能到源站（网络不通或被 CORS 拦下）"
+      : "直连失败：" + e.message, true);
+  }
+};
+
 /* ---------------- 设置弹层 ----------------
  * 一级是分组列表，二级页在同一个弹层内换 view（不新开一张弹层：手机上两层弹层
  * 意味着人不知道自己按哪个 × 才能出去）。二级页**不进弹层的 DOM 层级，但要进层栈**——
@@ -2211,7 +2494,7 @@ async function sendFeedback(index, rating, btn) {
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
                     persona: "角色设定", memory: "长期记忆", reminders: "提醒",
-                    schedule: "日程", feedback: "意见反馈" };
+                    schedule: "日程", feedback: "意见反馈", searchkeys: "搜索源" };
 
 function openSettings(page) {
   // 从侧栏点进别的页面，也是离开日程页：先确认，再把弹层换掉。
@@ -2246,6 +2529,7 @@ function openSetPage(name) {
   if (name === "reminders") renderReminders($("paneReminders"));
   if (name === "schedule") loadSchedule();
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
+  if (name === "searchkeys") loadSearchKeys();
 }
 function closeSetPage() { Layers.close("setPage"); }
 
@@ -3746,6 +4030,7 @@ function bind() {
   $("rowReminders").onclick = () => openSetPage("reminders");
   $("rowSchedule").onclick = () => openSetPage("schedule");
   $("rowFeedback").onclick = () => openSetPage("feedback");
+  $("rowSearchKeys").onclick = () => openSetPage("searchkeys");
   wireFeedback();
   // 「添加一项」= 追加一条空事项并立刻进编辑态。空文本不进 PUT 也能被服务端拦住，
   // 但那样错误条会盖掉整张清单，不如让这一行先被写满（Esc 就撤掉，等于没加）。
@@ -4034,6 +4319,7 @@ async function boot() {
   else showAuth(currentEntry() ? "login" : "register");   /* 记着人却被拒才换登录面；谁的会话都没有的仍停在注册 */
   renderMessages();
   syncPersonaChip();
+  sdSummaryVal();   // 设置列表里「搜索源」那行的角标：本机那半现在就准，服务端那半等进页再刷
 
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => {});
   /* 冷启动时壳里可能已经躺着一件"分享 → Fenver"送进来的文件（人在没打开网页时就分享了）。
