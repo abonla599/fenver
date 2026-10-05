@@ -15,7 +15,7 @@
 import threading
 import time
 
-from app.tools import web_search
+from app.tools import search_chain
 
 PROBE_QUERY = "北京 天气"       # 一个永远有结果、又不含任何用户内容的查询
 REFRESH_SECONDS = 900            # 一次探测 = 一次真实抓取，别把它当免费的心跳
@@ -36,19 +36,26 @@ def _refresh() -> None:
         if _fresh():
             return                              # 刚有真人搜成功过，不用再敲源站
     try:
-        value = bool(web_search.search(PROBE_QUERY, 1))
+        rows, used = search_chain.search(PROBE_QUERY, 1)
+        value, source = bool(rows), used
     except Exception as e:  # 探测代码自己出问题（依赖没装、解析器抛错…）
         print(f"⚠️ 搜索源探测异常，按可用处理：{e}")
-        value = True
+        value, source = True, None
     with _lock:
         changed = _state["value"] != value
         _state["value"] = value
         _state["checked_at"] = time.monotonic()
     if changed:
         # 只在翻转时打印。这事的唯一用户可见症状是"web_search 从清单里消失了"，
-        # 而清单是动态裁的，不看这行日志就只能靠猜。
-        print(f"🔎 搜索源{'可用' if value else '不可用'}，"
-              f"web_search {'给得出' if value else '不再递给模型'}")
+        # 而清单是动态裁的，不看这行日志就只能靠猜。多源之后还要能说清
+        # "现在给结果的是谁"——降级链上单源翻转不是功能生死，指到源才查得动。
+        if value:
+            who = f"当前由源 {source} 给结果" if source else "探测异常按可用处理"
+            print(f"🔎 搜索链路可用（{who}），web_search 给得出")
+        else:
+            names = "、".join(getattr(s, "name", "?") for s in search_chain.SOURCES)
+            print(f"🔎 搜索链路全部源无结果（{names}），"
+                  f"web_search 不再递给模型")
 
 
 def _loop() -> None:

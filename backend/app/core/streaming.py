@@ -497,11 +497,12 @@ def stream_chat_events(
                     art = outcome.artifacts
                     if isinstance(art, dict) and art.get("kind") == "web_search":
                         sframe = se.search_frame(call_id, art.get("query", ""),
-                                                 art.get("results"))
+                                                 art.get("results"), art.get("source"))
                         _push_frame(sframe)
                         yield sframe
                         _record_step(se.step_search(call_id, art.get("query", ""),
-                                                    art.get("results")))
+                                                    art.get("results"),
+                                                    art.get("source")))
 
 
     except BaseException:

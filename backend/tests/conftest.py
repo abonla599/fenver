@@ -53,6 +53,13 @@ os.environ["USER_FEEDBACK_FILE"] = os.path.join(_TEST_DATA_DIR, "user_feedback.j
 # data/audit.jsonl。隔离判据在 test_test_isolation.py，新增可重定向的存储时那里会红。
 os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_DATA_DIR, "audit.jsonl")
 
+# 搜索源密钥（博查/Tavily）同样是可指走的进程级存储。指到临时目录**且不写文件**：
+# 缺文件 = 所有 API 源判「未启用」，降级链在测试里恒等于纯 Bing——这既是产品无 key
+# 形态的镜像（v0.32 W1 的硬验收），也让既有那些改 `web_search.search` 的桩继续有效
+# （若本机 data/search_keys.json 真配了 key，bocha 会抢在 Bing 前面答掉，那些桩就
+# 全绿得没有意义了）。隔离判据同样在 test_test_isolation.py 的派生清单里。
+os.environ["SEARCH_KEYS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "search_keys.json")
+
 # v0.24 T1.4：运行时配置同样是指不走的进程级单例。指到临时目录之外，还要显式
 # 把注册打开——产品默认注册是关的（D9：开源版"给你自己用"），而既有的注册/登录
 # 用例全部从"注册可用"出发；注册关闭本身由契约测试单独判（test_v024_foundation_contract）。
