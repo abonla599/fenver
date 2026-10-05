@@ -198,6 +198,7 @@ data class TraceItem(
     val truncated: Boolean = false,
     val query: String = "",
     val results: List<TraceHit> = emptyList(),
+    val source: String = "",          // 降级链实际出结果的源名（v0.32 W3 上屏；老步没有）
     val omitted: Int = 0,
 )
 
@@ -232,6 +233,7 @@ internal fun traceFromStored(steps: List<JsonObject>?): List<TraceItem> =
                 ok = jtBool(o, "ok"), summary = jtStr(o, "summary"),
                 elapsedMs = jtInt(o, "elapsed_ms"), truncated = jtBool(o, "truncated"))
             "search" -> TraceItem(kind, id = jtStr(o, "id"), query = jtStr(o, "query"),
+                source = jtStr(o, "source"),
                 results = (o["results"] as? JsonArray)?.mapNotNull { r ->
                     val rj = r as? JsonObject ?: return@mapNotNull null
                     TraceHit(jtStr(rj, "title"), jtStr(rj, "url"), jtStr(rj, "snippet"))
@@ -256,6 +258,8 @@ internal fun traceToJson(steps: List<TraceItem>): List<JsonObject> = steps.map {
             }
             "search" -> {
                 put("id", t.id); put("query", t.query)
+                // 与服务端 step_search 同一先例：没有 source 就不出现这个键
+                if (t.source.isNotEmpty()) put("source", t.source)
                 put("results", JsonArray(t.results.map { r ->
                     buildJsonObject {
                         put("title", r.title); put("url", r.url); put("snippet", r.snippet)
@@ -718,6 +722,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         }
                         is ChatEvent.Search -> {
                             traceAcc.add(TraceItem("search", id = ev.id, query = ev.query,
+                                source = ev.source,
                                 results = ev.results.map {
                                     TraceHit(it.title, it.url, it.snippet)
                                 }))
@@ -2288,6 +2293,18 @@ private fun ApprovalCard(state: ApprovalState,
     }
 }
 
+/* 搜索源名的上屏口径（v0.32 W3）。与 PWA app.js、backend/app/core/stream_events.py
+ * 同一张映射表、同一句连接词——三端逐字互锁，谁也不许自己另写一套。 */
+private const val SEARCH_SOURCE_PREFIX = " · 来自 "
+private val SEARCH_SOURCE_LABELS =
+    mapOf("bocha" to "博查", "tavily" to "Tavily", "bing" to "必应")
+
+internal fun searchSourceName(source: String): String {
+    val s = source.trim()
+    if (s.isEmpty()) return ""
+    return SEARCH_SOURCE_LABELS[s] ?: s
+}
+
 @Composable
 private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
@@ -2335,7 +2352,11 @@ private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 IconTraceEye(scheme.primary, Modifier.size(14.dp))
-                Text("搜索：${t.query}", fontSize = 12.sp, color = text3Color())
+                // W3：步带 source 时在标题行尾追加「 · 来自 X」；没有就连前缀一起省，
+                // 与 PWA traceStepNode 的 search 臂逐字同文案。
+                val src = searchSourceName(t.source)
+                Text("搜索：${t.query}" + if (src.isEmpty()) "" else SEARCH_SOURCE_PREFIX + src,
+                    fontSize = 12.sp, color = text3Color())
             }
             t.results.forEach { TraceResultRow(it, onOpenUrl) }
         }

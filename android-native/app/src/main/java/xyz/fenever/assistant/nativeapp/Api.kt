@@ -85,7 +85,7 @@ class ApiException(val status: Int, message: String) : Exception(message)
 /* /v1/chat/stream 的帧集合（v0.29.0 定稿，唯一真源是 backend/app/core/stream_events.py，
    与网页 api.js 那份内核逐条对齐）。完整八类帧，按出现序：
      start(message_id,model) → thinking(text)* → tool_call(id,name,label,arguments|arguments_text)
-     → tool_result(id,name,ok,summary,elapsed_ms,truncated) → search(id,query,results[])
+     → tool_result(id,name,ok,summary,elapsed_ms,truncated) → search(id,query,results[,source])
      → content(text)* → done(full_text,message_id,model[,trace]) / error(message)。
    旧的 start/content/done/error 字段一个都不动（两个客户端都按 data.type 分发，
    改了名字会先打断线上）；thinking/tool_call/tool_result/search 是 v0.29.0 新增；
@@ -94,7 +94,7 @@ class ApiException(val status: Int, message: String) : Exception(message)
 
    trace 步（done.trace 与会话历史里存的是同一套形状）按 kind 区分：
    thinking{text} / tool{id,name,label,ok,summary,elapsed_ms,truncated} /
-   search{id,query,results[{title,url,snippet}]} / omitted{count}。
+   search{id,query,results[{title,url,snippet}][,source]} / omitted{count}。
 
    终帧纪律：cancelled 与 cannot_resume **都不是终止帧**——它们是 done 之前的一帧，
    必须等随后那条 type:"done" 收尾。停/续不上的信息全进 done 的新字段
@@ -116,7 +116,8 @@ sealed class ChatEvent {
                           val summary: String, val elapsedMs: Int,
                           val truncated: Boolean) : ChatEvent()
     data class Search(val id: String, val query: String,
-                      val results: List<SearchHit>) : ChatEvent()
+                      val results: List<SearchHit>,
+                      val source: String = "") : ChatEvent()
     // v0.31 审批层：服务端发来的确认请求。客户端据此显示确认卡片，用户允许/拒绝后
     // POST /v1/approval/confirm。票据一次性消费，超时作废。
     data class ApprovalRequest(val ticketId: String, val toolName: String,
@@ -647,7 +648,8 @@ object Api {
                     val r = el as? JsonObject ?: return@mapNotNull null
                     SearchHit(sOf(r, "title"), sOf(r, "url"), sOf(r, "snippet"))
                 } ?: emptyList()
-                col.emit(ChatEvent.Search(sOf(o, "id"), sOf(o, "query"), hits))
+                col.emit(ChatEvent.Search(sOf(o, "id"), sOf(o, "query"), hits,
+                    sOf(o, "source")))
             }
             "cancelled" -> col.emit(ChatEvent.Cancelled(str("full_text"), str("message_id"),
                 str("message")))
