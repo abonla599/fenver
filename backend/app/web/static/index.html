@@ -207,6 +207,16 @@
               <span class="set-lbl">模型服务</span><span class="set-val" id="chatNote"></span><span class="set-go">›</span></button>
           </div>
 
+          <!-- 搜索（v0.32 W2）：搜索源这一页管两把 key——服务端那份（管理员登记，
+               降级链在服务端用）与本机直连那份（只进这台设备的 localStorage，
+               配了就能在这页直接朝源站发搜索，请求与结果都不经本站服务器）。 -->
+          <p class="set-group">搜索</p>
+          <div class="set-card">
+            <button class="set-row" id="rowSearchKeys">
+              <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.6-4.6"/></svg></span>
+              <span class="set-lbl">搜索源</span><span class="set-val" id="searchKeysVal"></span><span class="set-go">›</span></button>
+          </div>
+
           <p class="set-group">对话</p>
           <div class="set-card">
             <button class="set-row" id="rowPersona">
@@ -469,6 +479,43 @@
             <button class="btn btn-block btn-primary" id="fbSubmitBtn">提交反馈</button>
             <p class="pane-note" id="fbStatus"></p>
           </div>
+        </section>
+        <!-- 搜索源（v0.32 W2）：两把 key、一页两用。
+             「服务端密钥」走 /v1/search-keys（管理员面）：登记进 data/search_keys.json，
+             聊天里 agent 触发的降级链在服务端用它——状态只报「末四位」掩码，明文
+             从不回显。「本机直连密钥」不进本站任何请求：只存这台设备的
+             localStorage，配好之后下面那格搜索由页面直接 POST 源站（CORS 逐源
+             结论见 docs/搜索源浏览器直连矩阵.md）。
+             源站地址刻意放在这份 data-search-endpoints 属性里而不是 app.js：
+             test_frontend_uses_relative_api_paths_only 禁 JS 出现绝对 URL，
+             外部服务地址留在 markup 是「检查更新」那行 releases 链接的同款先例。
+             请求形状与后端 W1 的 search_api_sources 逐字段同构，由
+             tests/test_web_search_direct_contract.py 钉死，界面直连与链上走的
+             必须是同一种问法。 -->
+        <section class="set-page hidden" data-page="searchkeys" id="paneSearchKeys"
+          data-search-endpoints='{"bocha":{"label":"博查","url":"https://api.bochaai.com/v1/web-search"},"tavily":{"label":"Tavily","url":"https://api.tavily.com/search"}}'>
+          <div class="hidden" data-admin-only>
+            <p class="set-group">服务端密钥（管理员维护 · 降级链在服务端用）</p>
+            <div id="serverKeyList" class="prov-list"></div>
+            <p class="pane-note">这把 key 替所有人的搜索请求出头，所以只有管理员能登记；页面上永远只显示末四位。</p>
+          </div>
+
+          <p class="set-group">本机直连（key 只留在这台设备）</p>
+          <label class="field"><span>搜索源</span>
+            <select id="sdSource" class="set-sel" aria-label="选择直连搜索源"></select></label>
+          <label class="field"><span>API Key（只存这台设备，不上传本站）</span>
+            <input id="sdKey" type="password" placeholder="sk-…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+          <div class="row">
+            <button class="btn" id="sdSaveBtn" type="button">存到本机</button>
+            <button class="btn btn-ghost" id="sdClearBtn" type="button">从本机移除</button>
+          </div>
+          <p class="pane-note" id="sdLocalNote"></p>
+          <form class="row" id="sdSearchForm">
+            <input id="sdQuery" type="search" placeholder="搜一下（这句只发给源站）" autocomplete="off">
+            <button class="btn btn-primary" type="submit">直连搜索</button>
+          </form>
+          <p class="pane-note" id="sdStatus" aria-live="polite"></p>
+          <ul class="mem-list" id="sdResults"></ul>
         </section>
         </div>
       </div>
