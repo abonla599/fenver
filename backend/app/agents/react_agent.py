@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 
 from app.core.providers import store, build_client, scrub_secrets
 from app.core import usage
+from app.core.guardrails import RoundGuard
 from app.tools.executor import execute_tool
 from app.tools.registry import get_available_tools_schema
 
@@ -75,6 +76,12 @@ class ReActAgent:
 
         # --- 超时控制 ---
         start_time = time.time()
+
+        # v0.31 护栏：单轮工具护栏。原先这条路径完全没有护栏，于是 max_turns（默认 10）
+        # 高于 MAX_TOOL_ROUNDS（5）时，一次请求能连拉 10 轮容器、烧 10 次真钱，
+        # 而且没有任何重复检测与失败退避。护栏实例必须是**每次 run 一个**：
+        # 跨请求复用会把不同用户/不同问题的计数混在一起。
+        guard = RoundGuard()
 
         # --- 初始化消息列表 ---
         messages = []
@@ -179,15 +186,41 @@ class ReActAgent:
                             print(f"[ReActAgent] 🔧 调用工具: {tool_name}")
                             print(f"[ReActAgent] 参数: {json.dumps(tool_args, ensure_ascii=False)}")
 
+                        # v0.31 护栏：执行前检查（成本上限 + 重复检测 + 失败退避）。
+                        # 与两条聊天路径同一口径，接在同一个 RoundGuard 上。
+                        guard_blocked = guard.check(
+                            tool_name, tool_args if isinstance(tool_args, dict) else {})
+                        if guard_blocked:
+                            if self.verbose:
+                                print(f"[ReActAgent] 🚫 护栏拦下 {tool_name}: {guard_blocked}")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": guard_blocked,
+                            })
+                            continue
+
                         try:
+                            # 注意这里**不传 granted_ticket**：审批闸门在执行器里，
+                            # 没带票据的 execute_code 会被执行器直接拒掉。ReAct 这条路
+                            # 是同步跑完就返回的，装不下"等用户点确认"这个交互，
+                            # 所以这里如实告诉模型改用聊天路径，而不是替用户批准。
                             tool_result = execute_tool(tool_name, tool_args, user_id=user_id)
+                            # 局部名不叫 ok：run 级的 ok 在 :108 已有含义（这次
+                            # 上游调用整体成不成功），在这里覆盖它会让一次工具失败
+                            # 被记成整轮 run 失败。护栏只认这一次调用自己的成败。
+                            tool_ok = str(tool_result).startswith("✓")
+                            guard.record_outcome(tool_name, tool_ok)
                             if self.verbose:
                                 print(f"[ReActAgent] ✅ 工具结果: {str(tool_result)[:200]}...")
                         except Exception as e:
                             tool_result = f"工具执行错误: {str(e)}"
+                            guard.record_outcome(tool_name, False)
                             if self.verbose:
                                 print(f"[ReActAgent] ❌ {tool_result}")
 
+                        # 单轮累计输出预算闸（与 executor 的 per-call 4000 互补）。
+                        tool_result, _ = guard.clip_output(str(tool_result))
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,

@@ -918,6 +918,12 @@ def confirm_approval(request: ApprovalConfirmRequest,
 
     票据一次性消费，超时作废，绝不默认放行。
     跨属主隐私：非票据属主返回 404（不泄露票据存在）。
+
+    decision == "allow" 时**在这里真正执行**工具，并把结果写回票据供客户端轮询。
+    这一段原先是空的：消费掉票据就返回"已允许执行"，而工具从未被调用——用户在
+    App 上点"允许"，什么都不会发生。执行用的参数一律取票据.arguments（服务端
+    创建票据时的快照），不重新解析任何客户端回传内容，所以不存在"批准的是A、
+    执行的是B"这种调包。
     """
     from app.core import approval
     ticket = approval.consume_ticket(request.ticket_id, request.decision,
@@ -925,12 +931,27 @@ def confirm_approval(request: ApprovalConfirmRequest,
     if ticket is None:
         # 票据不存在、已消费、超时、或跨属主——统一 404
         raise HTTPException(status_code=404, detail="审批票据不存在或已失效")
+    if request.decision != "allow":
+        return {
+            "status": "rejected",
+            "ticket_id": request.ticket_id,
+            "tool_name": ticket.tool_name,
+            "message": "已拒绝，本轮该工具不再重试",
+        }
+    # allow：真执行。granted_ticket=ticket 让执行器那道闸门放行——判据在执行器里，
+    # 不在这里（这里若自己判断，等于又多一份要跟执行器同步的副本）。
+    from app.tools.executor import execute_tool_detailed
+    outcome = execute_tool_detailed(
+        ticket.tool_name, ticket.arguments, user_id=ticket.user_id,
+        granted_ticket=ticket)
+    approval.record_execution(ticket.ticket_id, outcome.text, outcome.ok)
     return {
-        "status": "confirmed" if request.decision == "allow" else "rejected",
+        "status": "executed" if outcome.ok else "executed_with_error",
         "ticket_id": request.ticket_id,
         "tool_name": ticket.tool_name,
-        "message": ("已允许执行" if request.decision == "allow"
-                    else "已拒绝，本轮该工具不再重试"),
+        "ok": outcome.ok,
+        "result": outcome.text,
+        "message": "已执行" if outcome.ok else "已执行，但工具返回失败",
     }
 
 @app.get("/v1/approval/{ticket_id}")
@@ -941,11 +962,24 @@ def get_approval_status(ticket_id: str,
     ticket = approval.get_ticket(ticket_id)
     if ticket is None or ticket.user_id != principal.user_id:
         raise HTTPException(status_code=404, detail="审批票据不存在或已失效")
+    if ticket.decision == "allow" and not ticket.executed:
+        # allow了但还没跑完/没跑：如实说，别让客户端以为已经执行过
+        status = "approved_pending_execution"
+    elif ticket.decision == "allow":
+        status = "executed"
+    elif ticket.decision == "reject":
+        status = "rejected"
+    elif ticket.decision == "timeout":
+        status = "timeout"
+    else:
+        status = "pending"
     return {
         "ticket_id": ticket.ticket_id,
         "tool_name": ticket.tool_name,
         "plan_summary": ticket.plan_summary,
-        "status": "pending" if not ticket.consumed else ticket.decision,
+        "status": status,
+        "ok": ticket.ok,
+        "result": ticket.result,
         "expires_at": ticket.expires_at,
     }
 
