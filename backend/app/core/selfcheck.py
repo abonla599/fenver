@@ -10,9 +10,13 @@
 ① **不因为哪一项坏了就返回非 200。** 那会让"配错了密钥"变成"看门狗每分钟重启一次
    后端"——重启修不好任何配置问题，只会把正在进行的对话一起带走。判据交给日志与
    运维，不交给进程管理器。
-② **不回显绝对路径、不读任何用户内容。** `/health` 是免鉴权端点（见
-   `backend/tests/test_route_auth_contract.py` 的 EXEMPT_PATHS），公开进程目录结构
-   与用户名对探针没有用处，只多一个泄露面。所以这里只有状态与一句原因。
+② **不回显绝对路径、不读任何用户内容，也不回显模型服务配置的内容。**
+   `/health` 是免鉴权端点（见 `backend/tests/test_route_auth_contract.py` 的
+   EXEMPT_PATHS），公开进程目录结构与用户名对探针没有用处，只多一个泄露面。
+   label 与 model 同理：管理员给配置起的名字和上游模型标识，是"我们用的是哪家"
+   这种项目别处当秘密的信息（memory_manager.py 对嵌入后端是同一口径）。
+   所以这里只有状态、一句原因，和几个数字。**具体是哪个 provider 坏了，走日志**
+   ——见 `log_startup_summary`，它只往 server.log 写，不出公网。
 """
 
 import json
@@ -26,17 +30,33 @@ _SEVERITY = {OK: 0, DEGRADED: 1, BROKEN: 2}
 
 
 def _check_provider_config() -> tuple:
-    """有没有一个真能拿去调用的模型配置。resolve() 就是聊天时会走的那条判断。"""
+    """有没有一个真能拿去调用的模型配置。resolve() 就是聊天时会走的那条判断。
+
+    详情里**只有条数，没有 label 也没有 model**，这条不是洁癖：
+    `/health` 在 EXEMPT_PATHS 里免鉴权，而 label 是管理员自己给配置起的名字
+    （"公司网关-主""备用那套"）、model 是上游模型标识——"我们用的是哪家"本身就是
+    项目在别处当秘密的信息（app/memory/memory_manager.py 里对嵌入后端就是同一口径：
+    这个仓库是公开的，"哪家在替我们做嵌入"本身就是不想公开的信息）。
+    出口脱敏（_scrub）只挡 key 的形状，挡不住一个正常的模型名，所以这里只能不回。
+
+    要看具体是哪一条坏了，看日志：`log_startup_summary` 走的是另一条路，
+    它把 label/model 印进 server.log，不出公网。
+    """
     from app.core.providers import ProviderError, store as provider_store
 
     try:
-        provider = provider_store.resolve()
-    except ProviderError as e:
-        # 没配 / 配了但没密钥 / 占位符——这些是同一类"服务其实不能用"，说清楚是哪一种
-        return BROKEN, f"没有可用的模型服务：{e}"
+        provider_store.resolve()
+    except ProviderError:
+        # ProviderError 原文描述的是配置形状（"还没配任何模型服务" / "N 条都缺密钥"
+        # / "key 还是占位符"），回显它等于把管理员的密钥库现状播给路人。归成一句话。
+        return BROKEN, "没有可用的模型服务（详见服务端日志）"
     except Exception as e:
         return BROKEN, f"读取模型服务配置时出错：{type(e).__name__}"
-    return OK, f"{provider.get('label') or provider.get('id')} / {provider.get('model')}"
+    try:
+        total = len(provider_store.all())
+    except Exception:
+        total = 0
+    return OK, f"已配置 {total} 条"
 
 
 def _check_key_vault() -> tuple:
@@ -186,9 +206,27 @@ def log_startup_summary() -> None:
 
     只在 /health 上给结论不够：出事的时候人多半在看日志，而不是去猜当时 /health
     回过什么。
+
+    而"是哪个 provider 坏了"恰恰是 _check_provider_config 在 /health 上不再说的事
+    （那里只回条数，见该函数的注释）。所以模型服务这一项在这里**单独再问一遍**，
+    把 label/model 与 ProviderError 原文补进日志——日志只进 server.log，
+    不出公网，正是该放这些细节的地方。少了这一段，运维就只剩"没配"三个字，
+    还得自己去翻 providers.json 才知道是哪一条、缺的是密钥还是占位符。
     """
+    from app.core.providers import ProviderError, store as provider_store
+
     result = run()
     bad = {k: v for k, v in result["checks"].items() if v["status"] != OK}
+    if bad and "模型服务" in result["checks"]:
+        try:
+            provider = provider_store.resolve()
+            detail = f"{provider.get('label') or provider.get('id')} / {provider.get('model')}"
+        except ProviderError as e:
+            detail = f"没有可用的模型服务：{e}"
+        except Exception as e:
+            detail = f"读取模型服务配置时出错：{type(e).__name__}: {e}"
+        bad["模型服务"] = {"status": result["checks"]["模型服务"]["status"],
+                           "detail": _scrub(detail)}
     if not bad:
         print("✅ 自检通过：模型服务、密钥库、账本、记忆、限流账、数据落点都齐")
         return
