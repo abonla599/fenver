@@ -85,6 +85,13 @@ docs-internal/
 # 找不到脚本会当场红，而下一次想换配色的人只能对着 PNG 手抠。脚本只画几何、
 # 不含任何密钥，输出路径全在 android-native/ 与 backend/app/web/static/ 里。
 !/tools/render-app-icon.ps1
+# 打 tag 前的闸门。这条例外**不是可选的方便，是这条机制成立的前提**：
+# release-apk.yml 里那一步跑的就是本仓 checkout 中的 tools/pre_tag_gate.py，
+# 它进不了仓库，CI 那次 checkout 就没有这个文件，整条锁当场变成一句注释。
+# 而 `/tools/*` 默认全排除，历史上 _diag_shell_bench.py 就是撞在这条上永远进不去
+# （见上面 shell_jvm_tests.py 那段）。脚本纯标准库、只读一个 URL 与两个本地文件，
+# 不含任何凭据，也不写盘。
+!/tools/pre_tag_gate.py
 server.log
 tunnel.log
 PATH_backup_*.txt
