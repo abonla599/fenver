@@ -14,6 +14,13 @@ if str(backend_path) not in sys.path:
 # 会话已持久化到磁盘，必须让测试写临时文件，否则会污染应用真实的会话列表。
 # SessionStore 在导入 app.main 时即构造，因此这些设置必须早于下面的 import。
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="ai-assistant-tests-")
+# **数据根本身**也要隔离，不只是它下面那十几份文件的路径。
+# 理由（2026-10-08 实测）：这台开发机同时就是生产机，`dist\run_backend\` 里跑着的
+# 线上服务持有仓库根的 `.data-root.lock`（v0.33 的 E1 独占锁）。凡是"起整个 app
+# 跑一遍 lifespan"的测试都会去抢同一把锁并**正确地**被拒——`uvicorn 没起来`，
+# 连带把全局日志状态留在半还原的位置，红成另一个文件里的"脱敏坏了"。
+# CI 永远看不见这件事，因为 CI 机器上没有那个进程。锁没错，错的是测试借用生产数据根。
+os.environ["DATA_ROOT"] = _TEST_DATA_DIR
 os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "sessions.json")
 
 # 测试统一以"本机管理员"运行：既无需真凭据，也保持既有断言不变。
