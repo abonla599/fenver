@@ -119,9 +119,15 @@ def real_stack(upstream, monkeypatch):
     import app.core.llm_client as llm_client
     import app.core.streaming as streaming
     import app.pipeline as pipeline
+    from app.core import providers as providers_module
 
     prev_default = next((p["id"] for p in provider_store.all()
                          if p.get("is_default")), None)
+    # 假上游监听在本机回环上，而 providers._validate 的 SSRF 闸门默认拒回环
+    # （providers.ALLOW_LOCALHOST_BASE_URL，默认 False）。这条上游是本用例自己
+    # 起的，不是外部输入，所以显式开开关而不是给闸门开后门。
+    # 判据见 tests/test_v033_ssrf_guards.py：默认仍是拒。
+    monkeypatch.setattr(providers_module, "ALLOW_LOCALHOST_BASE_URL", True)
     provider_store.upsert({
         "id": "e2elive", "label": "E2E 实时留痕上游", "base_url": upstream,
         "api_key": "sk-e2e-a1b2c3d4", "model": "e2e-live", "is_default": True,

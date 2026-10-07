@@ -13,6 +13,7 @@ releases.py、注册开关的口径只存在于文档。这个模块把它们收
 """
 import json
 import os
+import re
 import threading
 from typing import Tuple
 
@@ -55,6 +56,28 @@ DEFAULTS = {
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
 # 会话存储、供应商地址这类东西上时，忘了改这张表的管理端点就等于开了个任意写口子。
 MUTABLE_KEYS = frozenset(DEFAULTS)
+
+# v0.33 SSRF：`update_repo` 是唯一一个"管理员能改、但值会被拼进服务端出站 URL"的键
+# （releases.latest_url_for = _API_HOST + repo + "/releases/latest"）。只靠 _type_ok
+# 的话任何字符串都过，于是 `../../../../169.254.169.254/latest/meta-data/` 会被
+# HTTP 客户端路径归一化吃掉前缀，让服务端替管理员去读云元数据。
+#
+# 白名单而不是黑名单：这个值唯一的合法形状就是 GitHub 的 owner/repo——两段、
+# 各由字母数字与 _ . - 组成。白名单同时顺手挡掉了 `../`、绝对 URL、`\`、
+# 端口与 userinfo（`@`）这些形状，而它们各自都能拼出别的目标主机。
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+# 逐键的值域校验。与 _type_ok（形状）并列的另一道闸门，两者都过才写入。
+# 拒的键与类型不对、未知键走同一条路：进 rejected，不抛异常也不静默吞——
+# 界面上"保存"的人有权知道这一格没被接受。
+_VALUE_CHECKS = {
+    "update_repo": lambda v: bool(_REPO_RE.match(str(v).strip())),
+}
+
+
+def _value_ok(key: str, value) -> bool:
+    check = _VALUE_CHECKS.get(key)
+    return check is None or check(value)
 
 _lock = threading.RLock()
 _config = dict(DEFAULTS)
@@ -222,6 +245,8 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
 
     未知键不写入也不报错——回一份"哪些没被接受"比 422 整单拒绝友好，因为
     界面上"保存"的人想知道的是改成了什么；类型不对同样拒，但只拒那一个键。
+    值域不对（_VALUE_CHECKS，目前只有 update_repo 的 owner/repo 白名单）也一样：
+    它出站时会拼进服务端要请求的 URL，放行任意字符串等于开一条 SSRF。
     """
     rejected = []
     with _lock:
@@ -230,6 +255,9 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
                 rejected.append(key)
                 continue
             if not _type_ok(value, DEFAULTS[key]):
+                rejected.append(key)
+                continue
+            if not _value_ok(key, value):
                 rejected.append(key)
                 continue
             _config[key] = value

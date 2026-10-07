@@ -6,11 +6,13 @@
 "选了没反应的模型"这类问题无法根治。
 """
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import threading
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -108,6 +110,89 @@ def looks_placeholder(key: str) -> bool:
         return True
     lowered = key.strip().lower()
     return any(h in lowered for h in PLACEHOLDER_HINTS)
+
+
+# ---------- base_url 的出网闸门（SSRF）----------
+# v0.33。`base_url` 此前唯一的校验是 startswith(("http://", "https://"))，于是
+# `http://169.254.169.254/`、`http://localhost:8000/`、`http://10.0.0.5/` 全过。
+# 两条危害，第二条比第一条重：
+#   1. SSRF——`POST /v1/providers/{id}/test`（store.ping）会真发一次请求并把
+#      异常回显给管理员，是一条能把内网当扫描器用的读口。
+#   2. 凭据外泄——**全局** provider（owner 为空、站级默认那条）的 base_url 被改成
+#      攻击者的地址后，此后每一个走默认 provider 的用户每轮聊天，都会把管理员的
+#      api_key 作为 `Authorization: Bearer` 发给攻击者。改一次配置，赔上全站的钱。
+#
+# 为什么是白名单式的"这段网段不许"而不是 `ip.is_global`：后者会连同
+# 100.64.0.0/10、192.0.2.0/24 这些各版本 Python 语义还在漂的保留段一起拒，
+# 部署者被拒时看不出自己撞了哪一条。这里的判据是显式、可念出来的。
+_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
+    "127.0.0.0/8",     # 回环：宿主机自己，以及本机所有 127.x 别名
+    "::1/128",         # IPv6 回环。**不在**下面 fc00::/7 里——那是唯一本地地址，
+                       # 与回环是两段，写漏这一条就是 `http://[::1]/` 一路放行
+    "10.0.0.0/8",      # RFC1918
+    "172.16.0.0/12",   # RFC1918
+    "192.168.0.0/16",  # RFC1918
+    "169.254.0.0/16",  # 链路本地：云厂商的元数据地址就在这里（169.254.169.254）
+    "0.0.0.0/8",       # 全零：0.0.0.0 与任何 0.x
+    "fc00::/7",        # IPv6 唯一本地地址
+))
+
+# 「localhost 放行」做成开关而不是写死：确实存在把模型自建在本机/内网直连的部署
+# （http://localhost:11434/v1 那种 Ollama），一刀切拒掉会把它们连配置都保存不了。
+# 但默认必须是**拒**——这个开关翻成 True 的代价是管理员本人就能把全站默认上游
+# 指到回环，而默认这条路的危害是上面第 2 条（每次聊天送出一把 api_key）。
+# 想开的人应当是知道自己在内网自建模型的那少数部署，而不是随手一个布尔。
+ALLOW_LOCALHOST_BASE_URL = False
+
+
+def _base_url_reject_reason(base_url: str) -> str:
+    """这个 base_url 能不能让服务端替它出网。返回 "" = 放行，否则返回拒的理由。
+
+    拒的判据（说清是哪一条，管理员才改得动）：
+    * 解析不出主机名——`http:///v1`、`http://:80/v1` 这类空壳；
+    * 主机名是本机——回环（127.0.0.0/8、::1）、全零（0.0.0.0、::）或 localhost
+      这个名字：受 ALLOW_LOCALHOST_BASE_URL 管，默认拒；
+    * 主机名是 IP 且落在下面任何一段私有/链路本地网段里：无论如何都拒。
+
+    只管"这一串地址本身"。DNS 把一个公网名字解析到内网 IP（rebinding）不在这一层，
+    真要挡它得在连接时钉住解析结果，那是另一处改法，不该混进配置校验里假装覆盖了。
+    """
+    try:
+        host = urlparse(base_url).hostname
+    except ValueError:
+        return "base_url 解析失败"
+    if not host:
+        return "base_url 里没有主机名"
+
+    lowered = host.strip().lower().strip("[]")
+    try:
+        addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        addr = None
+
+    if addr is not None:
+        # 回环与"全零"是同一个开关管的（都是"本机"，只是写法不同：
+        # localhost / 127.0.0.1 / ::1 / 0.0.0.0 全都指着这台服务器），
+        # 私有网段与链路本地则无论如何都拒——那个开关是"允许自建模型"，
+        # 不是"允许扫内网"。
+        if addr.is_loopback or addr.is_unspecified:
+            if ALLOW_LOCALHOST_BASE_URL:
+                return ""
+            return (f"base_url 指向本机地址 {host}，服务端不做本机请求；"
+                    "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+        for network in _PRIVATE_NETWORKS:
+            if addr in network:
+                return f"base_url 指向内网地址 {host}（{network}），服务端不做内网请求"
+        return ""
+
+    # 主机名而不是 IP：只对"人人都知道指向本机"的那个名字（及其子域）留口子，
+    # 与上面回环/全零那几条受同一个开关控制。
+    if lowered == "localhost" or lowered.endswith(".localhost"):
+        if ALLOW_LOCALHOST_BASE_URL:
+            return ""
+        return ("base_url 指向 localhost，服务端不做本机请求；"
+                "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+    return ""
 
 
 # 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。
@@ -487,6 +572,15 @@ class ProviderStore:
             raise ProviderError("label 不能为空")
         if not base_url.startswith(("http://", "https://")):
             raise ProviderError("base_url 必须以 http:// 或 https:// 开头")
+        # SSRF 闸门紧跟在这一行后面，而不是散在各路由里：_validate 是**唯一**的
+        # 写路径入口（upsert 走它，POST /v1/providers/test 的草稿试连也直接走它），
+        # 放这里就等于新增、改配置、存前试连三条路一次都跑不掉。
+        # 读路径（catalog/_public）刻意不复验：老记录里可能有当年合法的内网地址，
+        # 复验会让升级后这些模型在界面上凭空消失，而它们从未被当作合法配置写入过
+        # （本函数从 v0.33 起就是闸门，之前的版本不在这条纪律的追溯范围内）。
+        blocked = _base_url_reject_reason(base_url)
+        if blocked:
+            raise ProviderError(blocked)
         if not model:
             raise ProviderError("model 不能为空")
         # 「这口钱谁出」是账本上的一列，不是可选备注：内置=operator、用户自带=user。
