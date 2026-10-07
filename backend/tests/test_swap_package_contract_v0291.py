@@ -203,6 +203,58 @@ def test_mutation_reordering_a_step_turns_the_order_lock_red():
     assert not ordered("\n".join(lines)), "把停用看门狗挪到停进程之后，顺序锁必须红"
 
 
+def test_swap_window_hands_the_backend_restart_budget_back():
+    """换包窗口结束时必须把后端的重启预算还回去——**机制，不是打印一句提醒**。
+
+    看门狗在 `data\\watchdog-state.json` 里按小时滚动记账（`MaxRestartsPerHour`）。
+    换包窗口本身就是"合法起不来"的时段：旧 exe 已停、新包还在冷启动；v0.33.1 之前
+    隧道那条探针还认不出自己拉起的隧道（见 test_ops_scripts 那条闭环锁），会自己
+    再拉几次。这些次数如果留在账上，**下一次真正的崩溃**撞上的就是一个已经打空的
+    预算——运维重新启用的看守早没子弹了。
+
+    原来的写法只是 `Write-Output 'REMINDER ... clear the backend counter'`：提醒
+    不是机制，换包的人当时忙着验收，第二天的崩溃没人记得账是昨天烧的。所以这条锁
+    钉三件事：① 真有清账这一步（且排在 ENABLED 之后）；② 只清 `backend` 一个键，
+    别的一律不碰（`tunnel` 那些是既有故障现场的证据，`seen:*` 是日志节流标记，清掉
+    等于把问题藏起来）；③ 写回必须保住 UTF-8 BOM——watchdog.ps1 用
+    `Set-Content -Encoding UTF8` 写这个文件，PS 5.1 那个编码带 BOM，写成无 BOM
+    会让下一次 Read-State 把 U+FEFF 读进第一个键名里。
+
+    负向锁见最后一个断言：把清账退回成一句 REMINDER，这条红。
+    """
+    assert re.search(r"function Clear-BackendBudget", CODE), "清账必须是脚本里的一步"
+    assert re.search(r"Clear-BackendBudget -StatePath", CODE), "主流程里真的调用了它"
+    assert re.search(r"\$state\.PSObject\.Properties\.Remove\('backend'\)", CODE), \
+        "只许删 backend 一个键"
+    assert "Remove('tunnel')" not in CODE and "Properties.Remove('seen" not in CODE, \
+        "不许顺手清隧道记录或节流标记：那是既有故障的证据，清掉等于藏起来"
+
+    # BOM 保形：读的时候判有没有 BOM，写的时候按同一个形状写回
+    assert re.search(r"\$hadBom", CODE), "必须按原文件的 BOM 形状写回"
+    assert re.search(r"New-Object System\.Text\.UTF8Encoding\(\$hadBom\)", CODE), \
+        "写回编码必须跟随原文件：watchdog 用 Set-Content -Encoding UTF8（带 BOM）"
+
+    # 坏文件不许猜：空文件 / 解析不了 / 不存在，三种都跳过而不是造一个 {} 覆盖
+    for guard in ("state=empty-file skipped", "state=unparsable skipped",
+                  "state=absent"):
+        assert guard in PS1, f"缺 {guard} 这条保护：拿一个不确定归属的文件当自己的账本"
+
+    # 顺序：清账在 re-enable 之后（验收都过了才谈得上"把看守重新武装起来"）
+    assert _line_of(r"Clear-BackendBudget -StatePath", CODE) > \
+        _line_of(r"Enable-ScheduledTask -TaskPath \$task\.TaskPath -TaskName \$task\.TaskName \| Out-Null",
+                 CODE, last=True), "清账必须在启用回看门狗之后"
+    assert _line_of(r"BUDGET", CODE) < _line_of(r"^Write-Output 'SWAP-DONE'$", CODE), \
+        "清账步要在 SWAP-DONE 之前打印结果，否则失败时看不出来有没有清过"
+
+    mutated = PS1.replace("Clear-BackendBudget -StatePath (Join-Path $ProjectRoot 'data\\watchdog-state.json')",
+                          "Write-Output ('REMINDER clear the backend counter')", 1)
+    assert "function Clear-BackendBudget" in _strip_comments(mutated) \
+        and "Clear-BackendBudget -StatePath" not in _strip_comments(mutated), \
+        "变异样本没生效：这条负向锁形同虚设"
+    assert not re.search(r"Clear-BackendBudget -StatePath", _strip_comments(mutated)), \
+        "把清账退回成一句提醒，这条锁必须红"
+
+
 def test_startup_window_is_polled_with_a_knob_not_a_hardcoded_sleep():
     """v0.29.1 换包当晚实测到的脚本自身缺陷：冻结版起进程要过 chromadb 导入与
     服务商探测，**进程活着但 /health 还没应答**是常态（20:44:42 起、20 秒后才通）。

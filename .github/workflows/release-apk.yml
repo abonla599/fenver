@@ -50,6 +50,23 @@ jobs:
             exit 1
           fi
 
+      # 线上正在被服务的那一版，必须先等于这个 tag —— 发版顺序里"换包上线 + 线上验收"
+      # 排在"打 tag"之前，而这条顺序**连着被违反过两次**（v0.29.0、v0.33.0，两次的事后
+      # 记录里都写了同一段"提醒不是机制"的检讨）。所以把它做成脚本，让 CI 在生成
+      # Release 之前再跑一遍：人在本机跳过一次闸门，这里还有第二道跳不过去的。
+      #
+      # 为什么放在签名/构建**之前**：这一步红，说明线上还是上一版，那这次 Release
+      # 无论构建得多干净都不该存在。越早红，越少浪费 runner 时间，也越少一份"看起来
+      # 已经发了"的半成品。
+      #
+      # --no-versionname-check：上一条步骤已经专门核过 build.gradle 了，这里不重复；
+      # 这条步骤管的是**现实侧**——线上自报的 build 戳。
+      - name: "LIVE BUILD NOT THIS VERSION -> 换包/验收还没做完，不许出 Release"
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -eu
+          python3 tools/pre_tag_gate.py --expect "$GITHUB_REF_NAME" --no-versionname-check
+
       # 签名密钥从 Secrets 落盘。为什么这步必须先于构建、缺了就直接失败而不是退回去
       # 签一把新的：Android 覆盖安装判的是签名，不是版本号。之前这里跑 assembleDebug，
       # 而 runner 每次现造一把 debug keystore——实测 v0.15 与 v0.16 两个 Release 的

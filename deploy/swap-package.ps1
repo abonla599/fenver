@@ -19,7 +19,7 @@ after the live directory was moved aside - an auto-rollback there can turn one
 half-swap into two).
 
 Progress lines are one-token machine-parsable (PRECHECK / DISABLED / STOPPED /
-BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / SWAP-DONE) so a future
+BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / BUDGET / SWAP-DONE) so a future
 automation can watch a swap without reading prose.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
@@ -53,6 +53,12 @@ param(
     # how long to wait for the frozen backend to appear AND to answer /health;
     # a cold start with chromadb plus the provider probe is not a two-second job
     [int] $StartTimeoutSeconds = 90,
+
+    # keep the watchdog restart counter exactly as this swap window left it.
+    # Default is OFF (i.e. the budget IS handed back), because the whole point of
+    # clearing it is that the next real crash must not meet a spent allowance.
+    # Set this only when the spent budget is itself evidence you want to read.
+    [switch] $KeepBackendBudget,
 
     # run every precheck and print the plan; touches no process and no file
     [switch] $DryRun
@@ -139,6 +145,72 @@ function Get-HealthOnce {
     } catch {
         return $null
     }
+}
+
+function Clear-BackendBudget {
+    # Give the BACKEND its restart allowance back at the end of a swap window.
+    #
+    # Why this is a step and not a printed reminder: the watchdog keeps a
+    # rolling budget (MaxRestartsPerHour, default 3) in data\watchdog-state.json.
+    # The swap window itself is a period where launches legitimately fail - the
+    # old exe is gone while the new one is still booting, and until v0.33.1 the
+    # tunnel probe could not even recognise the tunnel it launched, so it fired
+    # its own relaunches. If those consume the counter, the NEXT real crash -
+    # the one someone actually needs rescued - meets a spent budget and the
+    # watchdog logs "budget exhausted" instead of starting the service. The
+    # operator then re-enables a guardian that is already out of ammo.
+    #
+    # Scope is deliberately the smallest thing that is safe: remove ONLY the
+    # 'backend' key. Every other entry (tunnel records, the seen:* throttle
+    # markers) is left byte-for-byte as the watchdog wrote it. Touching them
+    # would hide a pre-existing condition, and the seen:* markers are what keep
+    # the log from repeating the same warning every minute.
+    #
+    # Shape constraints, each learned the hard way in this repo:
+    #   - BOM preserved: watchdog.ps1 writes this file with Set-Content -Encoding
+    #     UTF8, which under PowerShell 5.1 produces a UTF-8 BOM, and it reads it
+    #     back the same way. Writing UTF-8-without-BOM from here would make the
+    #     next Read-State see a leading U+FEFF inside the first key name.
+    #   - never Remove-Item: the whole no-delete rule of this script applies to
+    #     every file it touches, and the watchdog may be mid-write.
+    #   - writes with [System.IO.File]::WriteAllBytes, one shot, so a failure
+    #     leaves the previous file intact rather than a half-written state.
+    param([string] $StatePath)
+    if (-not (Test-Path -LiteralPath $StatePath)) {
+        Write-Output 'BUDGET state=absent (nothing to clear)'
+        return
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($StatePath)
+    $hadBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    if ($hadBom) { $text = $text.TrimStart([char]0xFEFF) }
+    if (-not $text.Trim()) {
+        # An empty or whitespace-only file is what a killed mid-write leaves
+        # behind. Do NOT invent a "{}" and overwrite it: that would erase real
+        # budget history for a file we cannot prove is ours to rewrite.
+        Write-Output 'BUDGET state=empty-file skipped (not overwritten)'
+        return
+    }
+    try {
+        $state = $text | ConvertFrom-Json
+    } catch {
+        Write-Output ('BUDGET state=unparsable skipped: ' + $_.Exception.Message)
+        return
+    }
+    # ConvertFrom-Json gives a PSCustomObject; remove the one property by name.
+    $had = $null
+    if ($state.PSObject.Properties['backend']) {
+        $had = @($state.backend).Count
+        $state.PSObject.Properties.Remove('backend')
+    }
+    $json = $state | ConvertTo-Json -Depth 10
+    # PS 5.1 escapes non-ASCII in ConvertTo-Json output as \uXXXX in some
+    # positions; that is still valid JSON for the watchdog's reader, so it is
+    # left alone rather than "fixed" with a regex that could corrupt values.
+    $enc = New-Object System.Text.UTF8Encoding($hadBom)
+    [System.IO.File]::WriteAllText($StatePath, $json, $enc)
+    Write-Output ('BUDGET backend-entries-cleared=' + $(if ($null -eq $had) { '0' } else { $had }) +
+                  ' bom=' + $hadBom + ' other-keys-kept=true')
 }
 
 function Show-Rollback {
@@ -430,6 +502,16 @@ try {
 }
 $finalState = (Get-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName).State
 Write-Output ('ENABLED state=' + $finalState)
-Write-Output ('REMINDER if this swap window logged failed launches, clear the "backend" restart counter in ' +
-              (Join-Path $ProjectRoot 'data\watchdog-state.json') + ' so the watchdog does not inherit a spent budget')
+
+# ------------------------------------------------- step 9: hand the budget back
+# Comes AFTER re-enable and after both acceptance assertions: the counter is
+# only meaningless once we know the package we are guarding is the right one.
+# Opt-out exists for the case where the operator wants the spent budget kept as
+# evidence of a bad swap window.
+if ($KeepBackendBudget) {
+    Write-Output ('BUDGET kept -operator-choice state=' +
+                  (Join-Path $ProjectRoot 'data\watchdog-state.json'))
+} else {
+    Clear-BackendBudget -StatePath (Join-Path $ProjectRoot 'data\watchdog-state.json')
+}
 Write-Output 'SWAP-DONE'
