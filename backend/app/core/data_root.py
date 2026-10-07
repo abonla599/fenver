@@ -19,8 +19,8 @@ mkstemp 唯一临时名 + fsync + os.replace。但 JSON 存储的写入口径是
 跨平台文件锁要分平台（`fcntl.flock` / `msvcrt.locking`），而本项目是
 **PyInstaller 打包的桌面版 EXE**（`run_backend.py` 绑 127.0.0.1，`Dockerfile` 是
 备用形态），开发和运行主要在 Windows。锁文件的好处是行为全平台一致、跨网络
-文件系统也生效、并且**能被运维直接看懂**——`data/.data-root.lock` 里写着 pid 和
-启动时间，出问题时不用推理。
+文件系统也生效、并且**能被运维直接看懂**——`<项目根>/.data-root.lock`（`data_root()`
+就是项目根，见 `paths.py`）里写着 pid 和启动时间，出问题时不用推理。
 
 ## 判据：为什么是启动期而不是运行期
 
@@ -35,12 +35,16 @@ mkstemp 唯一临时名 + fsync + os.replace。但 JSON 存储的写入口径是
 ## 重启必须能接管自己上次留的锁
 
 watchdog 会把崩溃进程原样拉起，那是一个**新进程**、新 pid。所以锁里的 pid 常常
-已经是死的。判据因此分两路：
+已经是死的。判据因此分三路（**三路，不是两路——这是 v0.33.0 上线后补的**）：
 
-- pid 还在、且命令行看起来是同一个服务 → 真的冲突，拒绝启动。
-- pid 不在了 / 位置被别人复用 → 当作**陈旧锁**，接管它。
+- pid 确认活着 → 真的冲突，拒绝启动。
+- pid 确认已死 → 当作**陈旧锁**，接管它。
+- **判不出** → 拒绝启动，且**不碰锁文件**。判不出不等于已死。
 
 不按"pid 不在就跳过"处理的代价是：锁会永久挡住所有重启。这比误判冲突严重得多。
+但反过来的代价更严重：v0.33.0 就是把"判不出"并进了"已死"，Windows 上对分离进程
+恒判不出（见 `classify_pid`），于是每次重启都"成功接管"了一个**活着的**服务的锁，
+两个进程同写一份数据根——这把锁要防的事故由这把锁自己制造了。
 
 ## 测试
 
@@ -60,27 +64,99 @@ def _lock_path(data_root: str) -> str:
     return os.path.join(data_root, LOCK_NAME)
 
 
-def _pid_alive(pid: int) -> bool:
-    """这个 pid 上还有没有活着的进程。
+# 进程活死的三种结局。**第三种必须存在**：v0.33.0 在生产上出的事，就是"判不出"
+# 被当成了"已死"——判不出的一方于是删掉了**活着的**服务留下的锁，再自己起一份，
+# 两个进程同写一份数据根，而这恰恰是这把锁存在的全部理由。
+_ALIVE = "alive"
+_DEAD = "dead"
+_UNKNOWN = "unknown"
 
-    Windows 上 `os.kill(pid, 0)` 对不存在的进程抛 OSError，对**有权限的活进程**
-    也可能抛 PermissionError——后者恰恰说明它活着。POSIX 上signal 0 只做权限与
-    存在性检查。
+# Windows 上 OpenProcess 拿不到句柄时，只有这两个错误码是**确定的"进程不在了"**；
+# 其余一律按"判不出"处理，不许据此删别人的锁。
+# 本机实测（不存在的 pid，跨 1/2/3/32768/65535/70000/424242/999998/999999 九个取值）
+# 一律返回 87，与 MSDN 对 OpenProcess 只列 ERROR_INVALID_PARAMETER 的说法一致；
+# 3 一并算"确定没有"是因为它同属"路径找不到"这一类，从来不是权限问题。
+# 刚退出还没被回收的 pid 句柄仍开得到（返回 0），那种情况由下面的退出码分支判死，
+# 不靠错误码——watchdog 重启接管陈旧锁走的就是这条路。
+_ERR_NOT_FOUND = 3
+_ERR_ACCESS_DENIED = 5                 # 句柄开不动，但进程确实在
+_ERR_INVALID_PARAMETER = 87            # 分离进程被判死的元凶，见 classify_pid 注释
+
+
+def classify_pid(pid: int) -> str:
+    """这个 pid 上是 _ALIVE / _DEAD / _UNKNOWN。**判不出就不猜**。
+
+    ## 为什么不能用 `os.kill(pid, 0)`
+
+    Windows 上 **signal 0 就是 `signal.CTRL_C_EVENT`**，CPython 走的是
+    `GenerateConsoleCtrlEvent(0, pid)`：对被 `Start-Process` 起在另一个控制台/
+    进程组的进程直接失败，抛 `OSError [WinError 87] 参数错误`（errno EINVAL）。
+    v0.33.0 那版判据把"抛异常且不是 EACCES/EPERM"当成"进程没了"，于是
+    **看门狗与登录自启拉起的那一份后端——恰好就是生产的形状——永远被判成死进程**。
+    而本解释器自己 Popen 出来的子进程反而判得对，所以单测与 Linux CI 一起绿：
+    这条盲区只有"用分离进程去测"才会暴露（见 test_v033_data_root_lock.py 里
+    `test_detached_holder_is_alive_and_lock_is_respected`，那条在本机用 Start-Process
+    起真分离进程；把判据改回 `os.kill` 后只有它红，其余全绿——这就是"旧测试锁不住
+    这个形状"的直接证据）。
+
+    ## 正解
+
+    开 `PROCESS_QUERY_LIMITED_INFORMATION` 句柄读退出码，`STILL_ACTIVE(259)` 才算活着。
+    句柄开不出来时按错误码分死/活/未知，不再一锅端。
+
+    ## 已知的代价（如实写着，不是隐藏）
+
+    pid 复用：锁里的 pid 恰好被另一个活进程占用时会判成真冲突，第二次启动被拒。
+    这是**故意选择的方向**——宁可拒绝启动并让运维删文件，也不能删掉活着的服务的
+    独占记录。报错文案里把"怎么人工确认"写清楚，就是为了这种时刻不至于没人会处理。
     """
     if pid <= 0:
-        return False
+        return _DEAD                   # 非法 pid：确定不是任何进程，接管陈旧锁的正常入口
     if os.name == "nt":
-        try:
-            os.kill(pid, 0)
-        except OSError as exc:
-            # errno.ESRCH = 确实没有；EPERM/EACCES = 活着但不属于当前用户
-            return exc.errno == errno.EACCES or exc.errno == errno.EPERM
-        return True
+        return _classify_pid_windows(pid)
     try:
         os.kill(pid, 0)
     except OSError as exc:
-        return exc.errno == errno.EPERM
-    return True
+        if exc.errno == errno.ESRCH:
+            return _DEAD
+        if exc.errno in (errno.EPERM, errno.EACCES):
+            return _ALIVE              # 活着，只是不属于当前用户
+        return _UNKNOWN
+    except Exception:
+        return _UNKNOWN
+    return _ALIVE
+
+
+def _classify_pid_windows(pid: int) -> str:
+    """Windows 判活：句柄 + 退出码，而不是给目标进程发 Ctrl+C。"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                            ctypes.POINTER(wintypes.DWORD)]
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        code = kernel32.GetLastError()
+        if code in (_ERR_NOT_FOUND, _ERR_INVALID_PARAMETER):
+            return _DEAD
+        if code == _ERR_ACCESS_DENIED:
+            return _ALIVE
+        return _UNKNOWN
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return _UNKNOWN            # 读不到退出码就不许判死
+        return _ALIVE if exit_code.value == STILL_ACTIVE else _DEAD
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _read_holder(path: str) -> Optional[dict]:
@@ -131,15 +207,19 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
     判定是**同一个原子操作**。不是"先判断存在再创建"：那两步之间有窗口，两
     个进程会同时认为自己拿到了锁。
 
-    四种结局，每一种都有判据（fail-closed 优先于 fail-open）：
+    五种结局，每一种都有判据（fail-closed 优先于 fail-open）：
 
     1. `O_EXCL` 成功 → 拿到锁，**把 pid 一起写进同一次 open**。
     2. 撞到锁，里面 pid 还活着 → 抛（真冲突）。
     3. 撞到锁，**内容为空**（别人正在写） → 短暂退避后重读；连续读不到就抛。
        **绝不能当成陈旧锁去删**：那份内容马上就会被填上。
     4. 撞到锁，pid 已死 → 当陈旧锁接管：删掉重试一次；仍撞上就抛。
+    5. 撞到锁，**pid 死活判不出** → 抛，且**不碰文件**。第 4 条只允许发生在
+       "确定已死"上。
 
     第 3 条是第 2 篇那次失败的教训：最初没有它，6 进程并发下有 4 个同时拿到锁。
+    第 5 条是 v0.33.0 上线后的教训：判据用 `os.kill`，Windows 上对分离进程恒
+    判死，于是第 4 条被无条件触发（见 classify_pid）。
     """
     os.makedirs(data_root, exist_ok=True)
     path = _lock_path(data_root)
@@ -177,7 +257,21 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
                 pid = int(holder.get("pid") or 0)
             except (TypeError, ValueError):
                 pid = 0
-            if _pid_alive(pid):
+            # 三种结局分三路。**关键改动是第三种**：判不出时既不算活也不算死，
+            # 而是原地不动地抛错。v0.33.0 把"判不出"并进了"已死"，于是第二个进程
+            # 删掉了活着的服务的锁——两个进程同写一份数据根，锁的存在理由被自己
+            # 摧毁。宁可启动失败让运维看一眼，也不能赌。
+            state = classify_pid(pid)
+            if state == _UNKNOWN:
+                raise DataRootBusyError(
+                    "数据根 %s 的锁 %s 里写着 pid=%d（%s），但本机**无法判定**它是否还活着"
+                    "（不是确认已死）。为避免误删活服务的独占记录，本次拒绝启动。\n"
+                    "请人工确认：任务管理器或 `Get-Process -Id %d` 看那个进程在不在。\n"
+                    "  · 在   → 说明已有服务占用这份数据根，本次启动本就该终止；\n"
+                    "  · 不在 → 删掉 %s 再启动即可。"
+                    % (data_root, path, pid, holder.get("service", "?"), pid, path)
+                )
+            if state == _ALIVE:
                 # 活的持有者 → 真冲突。任何 pid 都一样，包括本进程自己的：
                 # 两次调用都认为自己独占，而一把独占锁只该有一个持有者。
                 raise DataRootBusyError(

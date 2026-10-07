@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -145,7 +146,7 @@ def test_permissions_are_0600(tmp_path):
 def test_second_acquire_while_holder_alive_is_refused(tmp_path):
     """占着的时候再来一个，必须拒绝。
 
-    负向锁：把 `_pid_alive` 改成恒返回 False（"永远当成陈旧锁"），这条测试红。
+    负向锁：把 `classify_pid` 改成恒返回 "dead"（"永远当成陈旧锁"），这条测试红。
     """
     from app.core.data_root import DataRootBusyError, acquire_data_root_lock
 
@@ -172,10 +173,10 @@ def test_stale_lock_from_dead_process_is_taken_over(tmp_path):
     root = tmp_path / "data"
     root.mkdir()
     lock = root / ".data-root.lock"
-    # 锁内容是 **key=value 文本行**（实现里payload 的格式），不是 JSON。
+    # 锁内容是 JSON（与实现里的 payload 同一套格式，见 data_root.acquire 注释）。
     # pid 用一个不可能活着的值：**不能用 0x7FFFFFFF**——它在 Windows 上是合法的
-    # pid 上限，_pid_alive 会判它"活着"，于是本用例测的是真冲突分支而不是陈旧锁。
-    # 用 -1：POSIX 与 Windows 都把负 pid 视为非法，_pid_alive 的 pid<=0 前置
+    # pid 上限，`classify_pid` 可能判它"活着"，于是本用例测的是真冲突分支而不是陈旧锁。
+    # 用 -1：POSIX 与 Windows 都把负 pid 视为非法，classify_pid 的 pid<=0 前置
     # 直接判死，这才是稳定的"死 pid"。
     lock.write_text(json.dumps({"pid": -1, "service": "old", "started": 0.0}),
                    encoding="utf-8")
@@ -185,6 +186,36 @@ def test_stale_lock_from_dead_process_is_taken_over(tmp_path):
     with open(path, encoding="utf-8") as f:
         holder = json.loads(f.read())
     assert holder["pid"] == os.getpid(), "接管后应写入当前 pid"
+
+
+def test_unknown_pid_is_never_taken_over(tmp_path, monkeypatch):
+    """**判不出死活 ≠ 已死**：这种时候必须拒绝启动并且**不碰锁文件**。
+
+    这条是 v0.33.0 事故的直接回归锁。当时的判据把"判不出"并进了"已死"，于是第二
+    个进程理直气壮地删掉**活着的**服务的独占记录再自己起一份——两个进程同写一份
+    数据根，正是这把锁要防的事，而防它的那段代码成了破门的人。
+
+    负向锁：把 acquire 里的 `state == _UNKNOWN` 分支删掉（让它落到接管分支），红。
+    把判据从"抛错"改成"打印警告后继续"，也红。
+    """
+    from app.core import data_root
+    from app.core.data_root import _UNKNOWN, DataRootBusyError, acquire_data_root_lock
+
+    root = tmp_path / "data"
+    root.mkdir()
+    lock = root / ".data-root.lock"
+    lock.write_text(json.dumps({"pid": 424242, "service": "mystery", "started": 0.0}),
+                    encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(data_root, "classify_pid", lambda pid: _UNKNOWN)
+    with pytest.raises(DataRootBusyError) as exc:
+        acquire_data_root_lock(str(root))
+
+    assert "无法判定" in str(exc.value), "文案要说明是判不出，不是确认冲突"
+    assert lock.exists(), "判不出时绝不能删锁——删掉的就是活着的服务的独占记录"
+    assert lock.read_text(encoding="utf-8") == before, "判不出时也不能改写锁内容"
+
 
 
 def test_lock_records_holder_readable_by_operator(tmp_path):
@@ -197,6 +228,111 @@ def test_lock_records_holder_readable_by_operator(tmp_path):
         holder = json.loads(f.read())
     assert holder["pid"] == os.getpid()
     assert holder["service"] == "fenver-backend"
+
+
+def test_detached_holder_is_alive_and_lock_is_respected(tmp_path):
+    """**分离进程**形状下必须判活并且拒绝第二次启动——v0.33.0 生产事故的原样重现。
+
+    为什么已有的"本进程 pid"那条测试不够：`os.kill(pid, 0)` 在 Windows 上是
+    `GenerateConsoleCtrlEvent`，对自己 Popen 出来的**子进程**恰好能用，所以旧判据
+    在这条测试上是绿的；而生产的形状是看门狗 / 登录自启用 `Start-Process` 起的
+    **另一个控制台、另一个进程组**的进程，那种调用直接 `WinError 87` 失败，旧判据
+    把它当成"进程没了"，于是第二个进程删掉活服务的锁并起来。
+    判据只能靠"真的起一个分离进程"来锁住，任何在本解释器里 Popen 的写法都测不到
+    这条盲区。
+
+    只在 Windows 上跑（Linux 上没有这个平台差异，POSIX 分支另有上面的用例）。
+    """
+    if os.name != "nt":
+        pytest.skip("Windows 平台差异用例：Linux 上 os.kill 语义本来就对")
+
+    from app.core.data_root import (DataRootBusyError, acquire_data_root_lock,
+                                    classify_pid)
+
+    # 用 powershell 的 Start-Process 起一个真正分离、且会自己活足够久的进程。
+    # 注意别用 `cmd /c timeout /t N`：timeout 在 stdin 被重定向时立刻退出
+    # （"ERROR: Input redirection is not supported"），那会测到一个真死 pid。
+    launcher = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "$p = Start-Process -FilePath powershell.exe -ArgumentList "
+         "'-NoProfile','-Command','Start-Sleep -Seconds 120' -WindowStyle Hidden "
+         "-PassThru; Write-Output $p.Id"],
+        capture_output=True, text=True, timeout=120)
+    pids = [ln.strip() for ln in launcher.stdout.splitlines() if ln.strip().isdigit()]
+    assert pids, f"未能起出分离进程：{launcher.stdout!r} {launcher.stderr!r}"
+    holder_pid = int(pids[-1])
+    try:
+        time.sleep(1.0)                          # 让它真的站上那个 pid
+
+        # 独立事实源确认它活着，避免用被测判据自证
+        check = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-Process -Id %d | Select-Object -Expand Id" % holder_pid],
+            capture_output=True, text=True, timeout=60)
+        assert check.stdout.strip(), "探针起的分离进程自己就没了，这条测试没有意义"
+
+        assert classify_pid(holder_pid) == "alive", (
+            "分离进程被判成非存活——这正是 v0.33.0 让两个进程同写一份数据根的判据"
+        )
+
+        root = tmp_path / "data"
+        root.mkdir()
+        lock = root / ".data-root.lock"
+        lock.write_text(json.dumps({"pid": holder_pid, "service": "detached",
+                                    "started": 0.0}), encoding="utf-8")
+        before = lock.read_text(encoding="utf-8")
+
+        with pytest.raises(DataRootBusyError) as exc:
+            acquire_data_root_lock(str(root))
+        assert str(holder_pid) in str(exc.value)
+        assert lock.read_text(encoding="utf-8") == before, (
+            "持有者活着的时候，第二次启动一个字都不许改锁"
+        )
+    finally:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % holder_pid],
+            capture_output=True, text=True, timeout=60)
+
+
+def test_lock_file_is_gitignored():
+    """锁必须在 `.gitignore` 里：它是运行时产物，入库会让"工作区干净"这个门禁失效。
+
+    换包与发版流程都拿 `git status` 判干净（见 `deploy/swap-backend.ps1` 与
+    `.github/workflows/release-apk.yml` 的前置门禁）。锁文件落在**项目根**而不是
+    `data/` 下（`data_root()` 返回项目根），所以上面那条 `data/` 挡不住它；不显式
+    记一行，每次本机启动都会多出一条脏文件，久而久之门禁就被"习惯性忽略"了。
+
+    判据走 `git check-ignore` 的真实语义而不是搜字符串：`.gitignore` 的匹配规则
+    （前导 `/`、`**`、否定行）搜是搜不准的。
+
+    负向锁：删掉那行 `/.data-root.lock` → 红。
+    """
+    from app.core import paths
+
+    # 测试自己的位置反推仓库根：backend/tests/ 上两级
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    # 锁的**真实落点**：data_root() + LOCK_NAME。用运行时值而不是写死".data-root.lock"，
+    # 于是将来若真把它搬进 data/，这条测试照样锁得住。
+    from app.core.data_root import LOCK_NAME
+    data_root_dir = paths.data_root()
+    assert os.path.isabs(data_root_dir), "data_root() 应返回绝对路径"
+    rel = os.path.relpath(os.path.join(data_root_dir, LOCK_NAME), repo_root)
+    if rel.startswith(os.pardir):
+        pytest.skip("本机把数据根指到了仓库之外，gitignore 判据不适用")
+
+    # input 走 **bytes**：text=True 时 Python 在 Windows 上会把 "\n" 换成 "\r\n"，
+    # git 于是拿 ".data-root.lock\r" 去匹配，永远匹配不上——判据会因为换行符自己变红。
+    res = subprocess.run(
+        ["git", "-C", repo_root, "check-ignore", "-q", "--stdin"],
+        input=(rel.replace(os.sep, "/") + "\n").encode("utf-8"),
+        capture_output=True, timeout=60)
+    assert res.returncode == 0, (
+        "数据根锁 %s 没有被 gitignore 覆盖（check-ignore 退出码 %d，stderr=%r）"
+        "——加一行 /.data-root.lock，别让运行时锁污染发版门禁的工作区判据"
+        % (rel, res.returncode, res.stderr.strip())
+    )
 
 
 def test_release_lets_next_acquire_in(tmp_path):
