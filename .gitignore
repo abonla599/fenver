@@ -5,6 +5,12 @@
 # 精确名 `preference.txt` 挡不住它。feedback/preference 现在默认落在 data/ 下
 # （见 backend/app/core/paths.py::data_file），下面两行是给历史遗留的根目录那一份兜底。
 data/
+
+# 数据根独占锁落在**项目根**，不在 data/ 里（`data_root()` 返回的就是项目根，见
+# backend/app/core/paths.py），所以上面那行挡不住它。它是纯运行时产物，内容只有
+# 当前持有者的 pid / service / 启动时间：入库之后每次启动都会让工作区变脏，而换包
+# 与发版门禁都靠"工作区干净"作判据，一个必然脏的文件会让那个判据失去意义。
+/.data-root.lock
 *.sqlite3
 feedback.json
 preference*.txt
