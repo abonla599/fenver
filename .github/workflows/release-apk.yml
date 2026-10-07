@@ -250,7 +250,7 @@ jobs:
           echo "::error::新包签名指纹与 ${prev} 不一致：new=$new_fp prev=$old_fp"
           echo "::error::Android 覆盖安装判签名不判版本号，签错钥匙发出去 = 全体老用户必须卸载重装。"
           echo "::error::若确认是 keystore 有意轮换：把上面 new= 的指纹一字不差设为仓库变量 SIGNATURE_GUARD_EXEMPT 再重跑，本步会放行并在 Summary 留痕。"
-          echo "::error::若不是有意行为（比如 secret 被换过）：回到 APK_KEYSTORE_BASE64 的源头核对，参考 docs/APK正式签名落地指引.md。"
+          echo "::error::若不是有意行为（比如 secret 被换过）：回到 APK_KEYSTORE_BASE64 的源头核对，参考本机的 docs-internal/APK正式签名落地指引.md（这份指引按仓库约定不入公开库）。"
           exit 1
 
       - name: Stage APK with a friend-friendly filename
