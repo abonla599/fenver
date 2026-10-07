@@ -156,6 +156,11 @@ def test_a_label_that_happens_to_contain_a_key_shape_is_scrubbed(monkeypatch, tm
 
     详情一句要经过出口脱敏才回得去——同一件事在 /v1/providers 上已经做过（A-2），
     这里是第二个出口，容易被忘记的就是这种"第二个出口"。
+
+    2026-10-07 起这条锁的**机制**变了，但判据没变：模型服务这一项不再回显 label
+    与 model（只回"已配置 N 条"），所以那个带 key 形状的名字压根没进过详情。
+    也就是说，脱敏从"最后一道网"退成了纵深防御——原先这条断言盯的是"网还在"，
+    现在盯的是"根本没有东西需要网来接"。
     """
     from app.core import providers
 
@@ -175,6 +180,24 @@ def test_a_label_that_happens_to_contain_a_key_shape_is_scrubbed(monkeypatch, tm
     monkeypatch.setattr(providers, "store", _Store)
     body = json.dumps(run(), ensure_ascii=False)
     assert secret not in body, "自检详情把密钥原样带出去了"
+    # 连"名字"本身都不该出现，而不只是名字里的密钥被替换掉
+    assert "我的" not in body, body
+
+
+def test_scrubbing_still_catches_a_key_shape_from_another_check(monkeypatch):
+    """脱敏本身不能因为模型服务那项不再回显 label 就一起废掉。
+
+    上面那条锁证明的是"这一项不回显"。这一条证明的是**出口那道网还在**：别的自检项
+    （将来新增的、或者 ProviderError 原文之类）一旦带出 key 形状，_scrub 仍要接住。
+    少了这一条，把 _scrub 删掉换成一个恒等函数，测试依然全绿——那才叫假覆盖。
+    """
+    secret = "sk-" + "b7c8d9e0" * 4
+
+    monkeypatch.setattr(selfcheck, "CHECKS", (
+        ("用量账本", lambda: (OK, f"回传 usage 的那家 key 是 {secret}")),
+    ))
+    body = json.dumps(run(), ensure_ascii=False)
+    assert secret not in body, "出口脱敏被摘掉了，别的自检项带出的密钥会直发"
     assert "已隐去" in body or "末四位" in body, body
 
 
