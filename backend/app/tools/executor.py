@@ -96,7 +96,8 @@ class ToolOutcome(NamedTuple):
     elapsed_ms: int
 
 
-def execute_tool(tool_name: str, arguments: dict, user_id: str = None) -> str:
+def execute_tool(tool_name: str, arguments: dict, user_id: str = None,
+                 granted_ticket=None) -> str:
     """执行一条工具，返回**已在上下文预算内**的结果文本。
 
     这是全站对外稳定的文本契约：两条聊天路径与 ReAct 那条都靠它，签名与返回类型
@@ -106,12 +107,18 @@ def execute_tool(tool_name: str, arguments: dict, user_id: str = None) -> str:
     `user_id` 由调用方从**凭据**里算出来传进来（两条聊天路径都是这么做的），它不进
     模型可见的参数表：标了 needs_user 的工具，执行器用服务端那份覆盖掉模型可能传上
     来的同名参数。方向反过来（让模型说了算）就是"读谁的日程"由模型编。
+
+    `granted_ticket` 是审批放行证明，只在用户**真的点了允许**之后由confirm 端点
+    传进来（一张服务端 ApprovalTicket）。默认 None = 未获批准。这道闸门必须挂在
+    执行器而不是调用方：原先判据只写在两条聊天路径的调用侧，于是 react_agent 与
+    task_agent 绕开它直接拿到无审批的代码执行。见_dispatch 里的注释。
     """
-    return execute_tool_detailed(tool_name, arguments, user_id=user_id).text
+    return execute_tool_detailed(tool_name, arguments, user_id=user_id,
+                                 granted_ticket=granted_ticket).text
 
 
 def execute_tool_detailed(tool_name: str, arguments: dict,
-                          user_id: str = None) -> ToolOutcome:
+                          user_id: str = None, granted_ticket=None) -> ToolOutcome:
     """执行一条工具，返回文本 + 结构化元数据。唯一实现，两条路共用。
 
     流式那条要拿 artifacts/truncated 发帧，非流式与 ReAct 只要 `.text`——它们各自
@@ -119,7 +126,7 @@ def execute_tool_detailed(tool_name: str, arguments: dict,
     `_dispatch` 与出口裁剪，量到的是这一次调用的人为感知耗时（不含上游排队）。
     """
     start = time.monotonic()
-    response = _dispatch(tool_name, arguments, user_id)
+    response = _dispatch(tool_name, arguments, user_id, granted_ticket)
     raw = response.to_string()
     clipped = clip_for_model(raw)
     truncated = len(clipped) != len(raw)
@@ -132,12 +139,14 @@ def execute_tool_detailed(tool_name: str, arguments: dict,
                        truncated=truncated, elapsed_ms=elapsed_ms)
 
 
-def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> ToolResponse:
+def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
+              granted_ticket=None) -> ToolResponse:
     """把一次调用收敛成一个 ToolResponse（含 success/artifacts），不再吐裸字符串。
 
-    所有分支都回 ToolResponse：未知工具、参数非对象、缺身份、schema 外参数、频控
-    闸门、正常执行、执行炸了——每个出口都带正确的 success 位与（搜索这类工具的）
-    artifacts，好让上层既能原样拿到给模型的文本，又能拿到结构化元数据去发过程帧。
+    所有分支都回 ToolResponse：未知工具、参数非对象、缺身份、schema 外参数、
+    **未获审批**、频控闸门、正常执行、执行炸了——每个出口都带正确的 success 位与
+    （搜索这类工具的）artifacts，好让上层既能原样拿到给模型的文本，又能拿到结构化
+    元数据去发过程帧。
     """
     if tool_name not in tools_registry:
         return ToolResponse(False, error=f"未知工具: {tool_name}", hint="使用 help 工具查看可用工具列表")
@@ -148,6 +157,23 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None) -> ToolRespo
     if not isinstance(arguments, dict):
         return ToolResponse(False, error="参数错误: arguments 必须是对象",
                             hint="请检查工具参数是否正确")
+    # v0.31 审批闸门，挂在这里而不是调用侧。
+    #
+    # 为什么必须在执行器：审批是"这件事有副作用、执行前要用户点头"，那就必须由
+    # **真正执行的那一层**来校验。只写在 pipeline/streaming 的调用侧，等于假设
+    # 所有未来的调用方都记得检查——而 react_agent 与 task_agent 已经证明这个假设
+    # 不成立，它们直接 execute_tool 就拿到了无审批的代码执行。
+    #
+    # 为什么两条聊天路径不会双弹卡片：它们在调用侧已经拦下并continue 了，根本走不到
+    # 这里；真正走到这里又没有票据的，只可能是绕开调用侧的那两条路。
+    if info.get("requires_approval"):
+        from app.core import approval
+        if not approval.is_granted(granted_ticket, tool_name, user_id):
+            return ToolResponse(
+                False,
+                error=(f"{tool_name} 需要用户确认后才能执行，当前这次调用没有获得批准。"
+                       "请改为直接回答用户，或提示用户在确认卡片上点允许。"),
+                hint="这条工具需要审批")
     # 只放行 schema 里声明过的参数。函数签名上的形参（比如 execute_code 的
     # max_retries）模型一律不许给——否则传个 max_retries=100 就能串行拉起
     # 上百个容器。schema 是模型能碰的唯一契约。

@@ -2,8 +2,10 @@
 import io
 import json
 import re
+import struct
 import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -14,8 +16,29 @@ from app.main import app
 
 client = TestClient(app)
 
+
+def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + ctype + data
+            + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF))
+
+
+def _real_png(width: int = 1, height: int = 1) -> bytes:
+    """一只真的 1×1 PNG：签名 + IHDR(带 CRC) + IDAT(zlib 压过的扫描线) + IEND。
+
+    为什么不再用 `PNG_MAGIC + b"\\x00" * 64`：后端自 2026-10-07 起在签名之后还要按
+    格式走一遍结构（见 app/core/uploads.py 的 _verify_image），那种字节过不了
+    chunk CRC——它当初能当"合法图片"用，正因为当时只验文件头。
+    """
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(raw))
+            + _png_chunk(b"IEND", b""))
+
+
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-FAKE_PNG = PNG_MAGIC + b"\x00" * 64
+FAKE_PNG = _real_png()
 
 
 def _upload(name, content, mime="application/octet-stream"):
