@@ -436,7 +436,6 @@ def test_released_apks_are_signed_with_one_pinned_key():
     # 判 YAML 的正文，不判注释：这条锁要禁的字符串（assembleDebug）正是注释里
     # 解释"为什么禁它"时用到的那个词——拿原文去 grep，锁会因为它自己说的话而红。
     workflow = "\n".join(ln for ln in raw_workflow.splitlines() if not ln.lstrip().startswith("#"))
-    gradle = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
 
     for forbidden in ("assembleDebug", "apk/debug/"):
         assert forbidden not in workflow, f"发布流又回到 {forbidden}：每次一把新 debug 钥匙，老用户永远装不上"
@@ -446,10 +445,55 @@ def test_released_apks_are_signed_with_one_pinned_key():
         "缺 secret 时没有停下来：宁可发布失败，也不该发一把新钥匙签的包")
     assert "keytool" in workflow, "不再把签进包里的指纹打进日志——下次查签名问题又要靠回忆"
 
-    assert 'System.getenv("APK_KEYSTORE")' in gradle, "gradle 不再从环境变量读密钥路径"
-    assert "APK_KEYSTORE_PASSWORD" in gradle and "APK_KEY_ALIAS" in gradle, "签名四项缺项：配了路径没配口令"
-    for leak in ("storeFile file(\"release.jks\")", "keyPassword \""):
-        assert leak not in gradle, f"gradle 里出现了写死的密钥材料：{leak}"
+    # 2026-10-08 重挂：这里从前只读 `android/app/build.gradle`（壳），而发版管线
+    # `gradle -p android-native ... assembleRelease` 出的是原生模块——也就是说
+    # **真正签给用户那个包的签名配置，一条锁都没有**。现在按管线自己报的模块来钉，
+    # 上线模块必在，壳还在时顺带一起钉（壳退役后这条清单自然只剩上线模块）。
+    gradles = _shipped_gradles()
+    assert any(mod == "android-native" for mod, _ in gradles), \
+        "上线模块的 build.gradle 没被钉住：这条锁又变成盯着不出包的那个模块空转"
+    for mod, gradle in gradles:
+        # 只问"这些名字在文件里出现过吗"是不够的——2026-10-08 变异验证实测：把
+        # signingConfigs 里的 `System.getenv("APK_KEYSTORE")` 改成读一个不存在的
+        # 变量名，这条锁仍然是绿的，因为 buildTypes 里那句
+        # `if (System.getenv("APK_KEYSTORE"))` 把整个文件的substring判据救活了。
+        # 于是把它收进 signingConfigs 那一格里判：密钥四项必须**在配密钥的地方**读环境变量。
+        signing = _gradle_block(_strip_java_comments(gradle), "signingConfigs")
+        for need in ('System.getenv("APK_KEYSTORE")',
+                    'System.getenv("APK_KEYSTORE_PASSWORD")',
+                    'System.getenv("APK_KEY_ALIAS")',
+                    'System.getenv("APK_KEY_PASSWORD")'):
+            assert need in signing, f"{mod} 的 signingConfigs 里没有 {need}：密钥不再从环境变量读"
+        for leak in ("storeFile file(\"release.jks\")", "keyPassword \""):
+            assert leak not in gradle, f"{mod} 的 gradle 里出现了写死的密钥材料：{leak}"
+
+
+def _released_apk_module() -> str:
+    """从 release-apk.yml 正文里抓出**真正被 assemble 的那个模块目录**。
+
+    这条函数存在的理由：签名纪律的锁此前只读 `android/`（壳），而发版管线跑的是
+    `gradle -p android-native` ——锁盯着一个不出包的模块，上线那个模块今天
+    一条签名锁都没有。判据不能靠人记住"管线改过没有"，要从管线自己嘴里读。
+    """
+    raw = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    body = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+    hits = re.findall(r"gradle\s+-p\s+(\S+)", body)
+    assert hits, "release-apk.yml 里找不到 `gradle -p <模块>`：不知道谁在替我们出正式包"
+    assert len(set(hits)) == 1, f"发布流同时 assemble 了多个模块：{sorted(set(hits))}"
+    return hits[0]
+
+
+def _shipped_gradles() -> list:
+    """签名纪律要钉的 build.gradle 清单：**上线模块必在，壳在任时期顺带一起钉**。"""
+    shipped = _released_apk_module()
+    paths = []
+    for mod in (shipped, "android"):
+        path = REPO_ROOT / mod / "app" / "build.gradle"
+        if path.exists():
+            paths.append((mod, path.read_text(encoding="utf-8")))
+    assert shipped == "android-native", \
+        f"发版管线换模块了（现在是 {shipped}）：先确认这个模块有签名配置，再改这条锁"
+    return paths
 
 
 def _gradle_block(text: str, header: str) -> str:
@@ -481,22 +525,22 @@ def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
     当时是全绿的，因为它只问"这些名字在文件里出现过吗"，而它们确实出现过、只是位置错了。
     本机没有 AGP 也跑不了 gradle，所以位置只能这样钉。
     """
-    raw = (REPO_ROOT / "android" / "app" / "build.gradle").read_text(encoding="utf-8")
-    gradle = _strip_java_comments(raw)          # 注释里也出现过 storeFile 这个词
-    signing = _gradle_block(gradle, "signingConfigs")
-    build_types = _gradle_block(gradle, "buildTypes")
+    for mod, raw in _shipped_gradles():
+        gradle = _strip_java_comments(raw)          # 注释里也出现过 storeFile 这个词
+        signing = _gradle_block(gradle, "signingConfigs")
+        build_types = _gradle_block(gradle, "buildTypes")
 
-    for prop in ("storeFile", "storePassword", "keyAlias", "keyPassword", "storeType"):
-        assert prop in signing, f"{prop} 不在 signingConfigs 里：密钥配不出签名"
-        assert prop not in build_types, (
-            f"{prop} 又回到 buildTypes 里了：BuildType 没这个属性，配置期直接报错，"
-            "而 CI 之前跑 assembleDebug 时这段根本不执行，所以看不见")
+        for prop in ("storeFile", "storePassword", "keyAlias", "keyPassword", "storeType"):
+            assert prop in signing, f"{mod}：{prop} 不在 signingConfigs 里：密钥配不出签名"
+            assert prop not in build_types, (
+                f"{mod}：{prop} 又回到 buildTypes 里了：BuildType 没这个属性，配置期直接报错，"
+                "而 CI 之前跑 assembleDebug 时这段根本不执行，所以看不见")
 
-    release = _gradle_block(build_types, "release")
-    assert re.search(r"signingConfig\s+signingConfigs\.release", release), \
-        "release 这个 buildType 没挂上 signingConfig：签出来的包与那把钉死的密钥无关"
-    assert 'storeType "PKCS12"' in signing, \
-        "storeType 不再写死：JDK 默认值一改，gradle 就会拿 JKS 去读一把 PKCS12"
+        release = _gradle_block(build_types, "release")
+        assert re.search(r"signingConfig\s+signingConfigs\.release", release), \
+            f"{mod}：release 这个 buildType 没挂上 signingConfig——签出来的包与那把钉死的密钥无关"
+        assert 'storeType "PKCS12"' in signing, \
+            f"{mod}：storeType 不再写死：JDK 默认值一改，gradle 就会拿 JKS 去读一把 PKCS12"
 
     # 两边说的是同一件事：生成脚本也得显式写 PKCS12，不能靠 keytool 的默认值
     generator = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
