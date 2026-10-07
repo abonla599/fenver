@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -44,6 +45,24 @@ PASSWORD_MAX = 512          # 上限只为挡"贴进来一本書"，真正的长
 # 一次 401 撞上旧壳的 clearAuth 放大成全机身份丢失）。30 仍然挡脚本刷表，
 # 但正常多设备使用碰不到边。
 MAX_SESSION_TOKENS = 30
+
+# 会话令牌的有效期。此前这枚令牌**永不过期**——一枚 2026-09-18 签发的令牌到
+# 2027 年仍然有效。MAX_SESSION_TOKENS 只防表膨胀，不是过期。
+# 30 天是权衡出来的：短到"令牌躺在磁盘上被翻出来"时还有窗口收敛，长到
+# 正常用户不会天天重登。同仓的导出票据早就有 300 秒 TTL，这里是同一类东西。
+SESSION_TOKEN_TTL_SECONDS = 30 * 24 * 3600
+
+# **存量令牌**的宽限期（升级到带TTL 的版本之前签发的那些）。
+#
+# 它们在落盘格式里没有签发时刻（token_issued_at 是新加的表，旧记录里没有），
+# 而这份库里13 个真实账号的 24 枚令牌全都还活着——直接判它们过期等于全员
+# 被登出。所以给一次**有界**的宽限：首次升级时为每个账号钉一个
+# token_legacy_deadline，此后**永不改动**。
+#
+# 为什么不按 last_used_at 给每枚令牌算：那个字段是每账号一个（resolve 每命中
+# 任意一枚令牌就刷新它），用它背书等于"手机上活跃就顺带让另一枚三个月没碰的
+# 令牌也永不过期"。详见 _token_expired 的注释。
+LEGACY_TOKEN_GRACE_SECONDS = 30 * 24 * 3600
 
 # bootstrap 管理员口令的 env 名：authz 与 main 共用这一个，别再各写一份字面量
 BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
@@ -245,6 +264,10 @@ class AuthStore:
         self.path = os.path.abspath(path or _default_users_path())
         self._lock = threading.Lock()
         self._users = {}
+        # 有内存改动但还没落盘。用于那些"读路径顺手写的字段"（如首次写入
+        # token_legacy_deadline）——它们不紧急，但丢了会导致 TTL 判据在下次
+        # 进程启动后重新计时。跟着 LAST_USED_FLUSH_AFTER 的节流一起flush。
+        self._dirty = False
         self._load(self._users, self.path)
 
     @staticmethod
@@ -329,10 +352,77 @@ class AuthStore:
         """给这个账号追加一枚会话令牌，超出上限就丢最老的那一枚。"""
         token = secrets.token_urlsafe(32)
         tokens = record.setdefault("tokens", [])
-        tokens.append(hash_token(token))
+        digest = hash_token(token)
+        tokens.append(digest)
+        # 签发时刻存在**一张平行的表**里，不去改 tokens 项的形状。
+        #
+        # 为什么不用 [{"h":..., "iat":...}]：令牌项的形状被 _token_matches 抽象着
+        # （resolve 走的就是它），但 revoke / change_password / rotate_token 三处
+        # 都在按 stored 做列表推导——改形状要动五处，加平行表只动这里与 resolve。
+        issued = record.setdefault("token_issued_at", {})
+        issued[digest] = time.time()
         if len(tokens) > MAX_SESSION_TOKENS:
+            dropped = tokens[:len(tokens) - MAX_SESSION_TOKENS]
             del tokens[:len(tokens) - MAX_SESSION_TOKENS]
+            # 两张表必须同步裁剪，否则 token_issued_at 随登录次数无界增长，
+            # 而它本身就是"某个曾经存在的令牌的签发时刻"这份留痕。
+            for old in dropped:
+                issued.pop(old, None)
+        # 顺手清掉过期的签发记录：只在**签发时**做，不在 resolve 里做。
+        # resolve 是热路径（每个请求都过），在那里落盘会废掉 LAST_USED_FLUSH_AFTER
+        # 的降频设计。
+        self._prune_token_issued_at(record)
         return token
+
+    @staticmethod
+    def _prune_token_issued_at(record: dict) -> None:
+        """丢掉已过期的签发记录。O(令牌数)，最多 30 项。"""
+        issued = record.get("token_issued_at")
+        if not isinstance(issued, dict) or not issued:
+            return
+        now = time.time()
+        for digest, ts in list(issued.items()):
+            try:
+                if now - float(ts) > SESSION_TOKEN_TTL_SECONDS:
+                    issued.pop(digest, None)
+            except (TypeError, ValueError):
+                issued.pop(digest, None)
+
+    def _token_expired(self, record: dict, digest: str) -> bool:
+        """这枚令牌是不是过期了。判据两路，**顺序不能反**：
+
+        - `token_issued_at` 里有它 → 按签发时刻 + TTL 判。
+        - 没有它 → 存量令牌（升级前签发的）。比 `token_legacy_deadline`，
+          那个值是**全账号一个固定常量**，首次写入后永不改动。
+
+        **刻意不用 `last_used_at` 参与判据**：那个字段是**每账号一个**，resolve
+        每命中任意一枚令牌就刷新它（且按 LAST_USED_FLUSH_AFTER 一小时才落盘）。
+        一个账号可能挂着多枚令牌，用它给存量令牌背书，等于"手机上活跃就顺带
+        让另一枚三个月没碰过的令牌永不过期"，TTL 形同虚设。
+
+        存量令牌的宽限期是**有界**的：deadline 到了就是到了，不因持续活跃而
+        延长。这是有意的取舍——用一次有界的宽限换存量用户零登出，而不是留一个
+        能永远续命的口子。
+        """
+        issued = record.get("token_issued_at")
+        if isinstance(issued, dict) and digest in issued:
+            try:
+                return time.time() - float(issued[digest]) > SESSION_TOKEN_TTL_SECONDS
+            except (TypeError, ValueError):
+                return True              # 时间戳坏掉按"过期"处理（fail-closed）
+        # 存量令牌：比全账号固定的宽限期 deadline
+        deadline = record.get("token_legacy_deadline")
+        if deadline is None:
+            # 还没写过 deadline —— 升级后第一次落盘时钉上。
+            # 写在读路径而不是登录流程里：存量用户可能一直不重新登录，
+            # 读路径每命中一次就有一��写入机会。
+            record["token_legacy_deadline"] = time.time() + LEGACY_TOKEN_GRACE_SECONDS
+            self._dirty = True
+            return False
+        try:
+            return time.time() - float(deadline) > LEGACY_TOKEN_GRACE_SECONDS
+        except (TypeError, ValueError):
+            return True
 
     def register(self, username: str, password: str, security_answers: list = None):
         """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。
@@ -489,10 +579,15 @@ class AuthStore:
                 if not any(_token_matches(stored, digest)
                            for stored in (record.get("tokens") or [])):
                     continue
+                if self._token_expired(record, digest):
+                    # 过期即拒。不从 tokens 里删——那是热路径，删了就要落盘；
+                    # 清理交给 _issue_token 的 prune（下次登录时顺带做）。
+                    continue
                 # 热路径：先判断该不该落盘，再改内存——顺序反了阈值就永远不满。
                 stale = _stale_for_flush(record.get("last_used_at"), moment)
                 record["last_used_at"] = moment.isoformat()
-                if stale:
+                if stale or self._dirty:
+                    self._dirty = False
                     self._flush()
                 return Principal(user_id=record["user_id"],
                                  username=record["username"],

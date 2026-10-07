@@ -5,12 +5,35 @@
 也借这条面读不到别人的附件）。存储文件与截图目录都指进 tmp，测试不碰真实数据。
 """
 import os
+import struct
+import zlib
 
 import pytest
 
 from app import user_feedback_storage
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"fake-ihdr-bytes-for-tests"
+
+def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + ctype + data
+            + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF))
+
+
+def _real_png(width: int = 1, height: int = 1) -> bytes:
+    """一只真的 1×1 PNG（chunk 带 CRC）。
+
+    原先这里写的是 `PNG_MAGIC + b"fake-ihdr-bytes-for-tests"`——那只在上传端只验
+    文件头的年代是好用的夹具。2026-10-07 起上传还要按格式走一遍结构
+    （app/core/uploads.py 的 _verify_image），那种字节过不了 chunk CRC。
+    """
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr)
+            + _png_chunk(b"IDAT", zlib.compress(raw))
+            + _png_chunk(b"IEND", b""))
+
+
+PNG = _real_png()
 
 
 @pytest.fixture

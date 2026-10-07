@@ -211,23 +211,48 @@ def fake_code_runner(monkeypatch):
     return calls
 
 
+def _granted(user_id):
+    """造一张"用户已点允许"的票据。
+
+    为什么频控测试要带这个：v0.31 的审批闸门现在挂在 executor._dispatch 上
+    （修复前它只在 pipeline/streaming 的调用侧，于是这里能无审批直接调用——
+    那正是本次修掉的漏洞）。这几条测试要走到频控闸门，就必须先过审批，
+    于是得给一张真票据。
+
+    频控与审批是两道独立的闸，不互相顶替：审批管"这件事该不该做"，
+    频控管"这件事一分钟内能做几次"。测试要验的是后者，所以补上前者的凭据，
+    而不是把后者关掉。
+    """
+    from app.core import approval
+
+    req = approval.create_approval_request(
+        "execute_code", {"code": "x"}, user_id=user_id or "")
+    ticket = approval.consume_ticket(req["ticket_id"], "allow", user_id or "")
+    assert ticket is not None
+    return ticket
+
+
 def test_execute_code_is_capped_per_caller(fake_code_runner):
     from app.tools import executor as ex
 
     calls = fake_code_runner
     _window, cap = ex._FREQ_LIMITS["execute_code"]
     for i in range(cap):
-        out = ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice")
+        out = ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice",
+                              granted_ticket=_granted("alice"))
         assert "过于频繁" not in out
     assert len(calls) == cap
 
-    out = ex.execute_tool("execute_code", {"code": "over"}, user_id="alice")
+    out = ex.execute_tool("execute_code", {"code": "over"}, user_id="alice",
+                          granted_ticket=_granted("alice"))
     assert "过于频繁" in out and "还需等待" in out, f"闸门没给出等待出口：{out!r}"
     assert len(calls) == cap, "被拦下的调用仍然执行了：频控只拦返回值不拦副作用就是假闸"
 
     # 桶按人分开：alice 攒满不该饿死 bob，也不该给匿名调用开平行免检通道之外的口
-    assert "过于频繁" not in ex.execute_tool("execute_code", {"code": "b"}, user_id="bob")
-    assert "过于频繁" not in ex.execute_tool("execute_code", {"code": "n"})   # anon
+    assert "过于频繁" not in ex.execute_tool("execute_code", {"code": "b"}, user_id="bob",
+                                             granted_ticket=_granted("bob"))
+    assert "过于频繁" not in ex.execute_tool("execute_code", {"code": "n"},
+                                             granted_ticket=_granted(None))
     assert len(calls) == cap + 2
 
 
@@ -240,11 +265,15 @@ def test_blocked_attempts_do_not_reset_the_window(fake_code_runner, monkeypatch)
     clock = SimpleNamespace(now=1000.0)
     monkeypatch.setattr(ex, "time", SimpleNamespace(monotonic=lambda: clock.now))
     for i in range(cap):
-        ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice")
+        ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice",
+                        granted_ticket=_granted("alice"))
     clock.now += _window - 10          # 窗口将满未满
-    ex.execute_tool("execute_code", {"code": "retry"}, user_id="alice")   # 被拦
+    # 被拦
+    ex.execute_tool("execute_code", {"code": "retry"}, user_id="alice",
+                    granted_ticket=_granted("alice"))
     clock.now += 20                    # 距最后一次**放行**已超过窗口
-    out = ex.execute_tool("execute_code", {"code": "after"}, user_id="alice")
+    out = ex.execute_tool("execute_code", {"code": "after"}, user_id="alice",
+                          granted_ticket=_granted("alice"))
     assert "过于频繁" not in out, f"拦下的重试自己续了命：{out!r}"
     assert len(calls) == cap + 1
 
@@ -263,9 +292,11 @@ def test_failed_executions_still_cost(fake_code_runner, monkeypatch):
     monkeypatch.setitem(tools_registry["execute_code"], "function", boom)
     _window, cap = ex._FREQ_LIMITS["execute_code"]
     for i in range(cap):
-        out = ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice")
+        out = ex.execute_tool("execute_code", {"code": f"c{i}"}, user_id="alice",
+                              granted_ticket=_granted("alice"))
         assert "容器起不来" in out
-    out = ex.execute_tool("execute_code", {"code": "x"}, user_id="alice")
+    out = ex.execute_tool("execute_code", {"code": "x"}, user_id="alice",
+                          granted_ticket=_granted("alice"))
     assert "过于频繁" in out, "失败不计数：模型可以无限重试烧容器"
 
 

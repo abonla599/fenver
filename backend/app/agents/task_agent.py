@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # backend 目录
 
 import json
+from app.core.guardrails import RoundGuard
 from app.core.llm_client import get_llm_response
 from app.tools.executor import execute_tool
 from app.tools.registry import is_available
@@ -69,6 +70,11 @@ class TaskAgent:
             {"role": "user", "content": prompt}
         ]
 
+        # v0.31 护栏：与 ReAct/两条聊天路径同口径。原先这条路径没有护栏，
+        # max_turns 循环里能连续拉起 N 次容器，且无重复检测与失败退避。
+        # 每次 execute 建一个实例：跨请求复用会把不同人的计数混在一起。
+        guard = RoundGuard()
+
         for turn in range(self.max_turns):
             response = get_llm_response(self.model, messages,
                                         provider_id=self.provider_id,
@@ -88,11 +94,27 @@ class TaskAgent:
                     if self.verbose:
                         print(f"    [{self.name}] 调用工具: {tool_name}({tool_args})")
 
+                    # v0.31 护栏：执行前检查（成本上限 + 重复检测 + 失败退避）
+                    guard_blocked = guard.check(
+                        tool_name, tool_args if isinstance(tool_args, dict) else {})
+                    if guard_blocked:
+                        if self.verbose:
+                            print(f"    [{self.name}] 🚫 护栏拦下 {tool_name}: {guard_blocked}")
+                        messages.append({"role": "assistant", "content": response})
+                        messages.append({"role": "user",
+                                         "content": f"工具执行结果: {guard_blocked}"})
+                        continue
+
                     # 执行工具走执行器，不直接 call 注册表里的函数对象。差三件事：
                     # ① needs_user 的工具必须由服务端补身份，模型自己填的 user_id 作废；
                     # ② 输出要按上下文预算截断；③ 未知工具/参数错误要回一句模型读得懂的话。
                     # 绕过它，这三条同时失效。
+                    #
+                    # 第④件：审批。执行器那道闸门在没带票据时直接拒掉需要审批的工具
+                    # （这里不传 granted_ticket），所以这条路径同样拿不到无审批的代码执行。
                     result = execute_tool(tool_name, tool_args, user_id=self.user_id)
+                    guard.record_outcome(tool_name, str(result).startswith("✓"))
+                    result, _ = guard.clip_output(str(result))
 
                     # 将结果反馈给模型
                     messages.append({"role": "assistant", "content": response})

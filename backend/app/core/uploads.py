@@ -3,8 +3,24 @@
 落盘在 data/uploads/，文件名一律用生成的 uuid，绝不采用客户端给出的路径或
 文件名，避免目录穿越与互相覆盖；原始文件名只作为元数据保存用于界面展示。
 
-图片类型按文件头字节判定，不信任浏览器上报的 MIME。PDF 与 .docx 在上传时即抽取为
-纯文本再落盘，因此下游的预览与上下文注入不必区分来源格式。
+图片先按文件头字节**认格式**（MAGIC），再按该格式的**结构**走一遍——两件事都必须过。
+只认文件头是不够的：BM 只有 2 字节、JPEG 的 SOI 只有 3 字节，
+`b"BM" + b"<html>…"` 与 `b"\xff\xd8\xff<script>…"` 都能过签名判定，于是任意二进制
+（谁都能随手造一段）被当成图片存下来，再以 data: URI 送模型反复烧多模态 token。
+
+所以签名之后还有第二道：`_verify_image` 按各格式真正必需的字段读一遍
+（PNG 的 chunk 长度与 CRC、BMP 的 DIB 头尺寸与宽高、GIF 的逻辑屏幕宽高、
+JPEG 走到 SOF 帧头、WebP 的 RIFF 容器与 chunk 尺寸），缺一即拒。
+文档类早就这么做（_docx_document_xml 的解压上限 + XXE 防护），图片类此前是真校验
+与只信文件头的差距，这一轮把它补平。
+
+为什么不用现成解码库：`requirements.txt` 里没有 Pillow，而为一个 10MB 上限的上传
+校验引入一个新的二进制依赖不划算（PyInstaller 冻结 EXE 还会多一个隐藏导入点，
+见 _docx_text 的注释）。`imghdr` 更不能用——它在 3.11 起废弃、3.13 已移除，
+且它本身也只是文件头嗅探器（实测 `imghdr.what(b"BM" + b"<html>"*10)` 就返回 b"bmp"），
+比现有 MAGIC 强不了半点。这里手写的量级也就几十行标准库。
+
+PDF 与 .docx 在上传时即抽取为纯文本再落盘，因此下游的预览与上下文注入不必区分来源格式。
 
 每条索引记录带 owner：这里存的是别人上传的合同、账单、论文，索引一旦共用，
 "知道 id"就等于"拿到文件"，所以读、下载、删除都必须先过归属。
@@ -56,6 +72,150 @@ MAGIC = (
     (b"GIF89a", "image/gif"),
     (b"BM", "image/bmp"),
 )
+
+
+def _png_ok(blob: bytes) -> bool:
+    """走一遍 chunk 链：长度自洽，每个 chunk 的 CRC32 对得上，最后以 IEND 收尾。
+
+    CRC 这一条是关键：PNG 的 chunk 是 (长度, 类型, 数据, CRC32)，攻击者要伪造就得
+    把整条 chunk 重算一遍，而"文件头对了、chunk 是乱码"这种最常见的伪造成本为零。
+    只读 IHDR 的宽高是不够的——`PNG_MAGIC + b"\x00" * 64` 的宽高都是 0，
+    但真正骗得过解码器的是那些宽高看着正常、数据却根本不是图片的字节。
+    """
+    if len(blob) < 8 + 12 + 12:          # 签名 + 至少一个 chunk 头 + IEND
+        return False
+    pos = 8
+    seen_ihdr = False
+    total = len(blob)
+    while pos + 12 <= total:
+        length = int.from_bytes(blob[pos:pos + 4], "big")
+        ctype = blob[pos + 4:pos + 8]
+        # 长度自述必须落在文件内，否则后面全是越界读
+        if length > total - pos - 12:
+            return False
+        data = blob[pos + 8:pos + 8 + length]
+        crc = int.from_bytes(blob[pos + 8 + length:pos + 12 + length], "big")
+        if zlib.crc32(ctype + data) & 0xFFFFFFFF != crc:
+            return False
+        if not seen_ihdr:
+            # 第一个 chunk 必须是 IHDR，且宽高都非 0（0×0 不是任何解码器认的图）
+            if ctype != b"IHDR" or length != 13:
+                return False
+            if int.from_bytes(data[0:4], "big") == 0 or int.from_bytes(data[4:8], "big") == 0:
+                return False
+            seen_ihdr = True
+        elif ctype == b"IEND":
+            return length == 0
+        pos += 12 + length
+    return False                            # 没走到 IEND：文件被截断了
+
+
+# BMP 的 DIB 头尺寸：OS/2 位图头 12、其余（BITMAPINFOHEADER 及其后继）40/52/56/64/108/124。
+# 只放行这组，"BM" 后面随便接 HTML 时按 little-endian 读出来的是乱码，落在表外即拒。
+_BMP_DIB_SIZES = frozenset((12, 16, 40, 52, 56, 64, 108, 124))
+
+
+def _bmp_ok(blob: bytes) -> bool:
+    if len(blob) < 26:
+        return False
+    dib = int.from_bytes(blob[14:18], "little")
+    if dib not in _BMP_DIB_SIZES:
+        return False
+    # BITMAPINFOHEADER 起的宽高在 18/22，是有符号 32 位（top-down 位图高度为负）
+    if dib == 12:                            # OS/2 位图头：宽高是 16 位且偏移不同
+        width = int.from_bytes(blob[18:20], "little")
+        height = int.from_bytes(blob[20:22], "little")
+    else:
+        width = int.from_bytes(blob[18:22], "little", signed=True)
+        height = int.from_bytes(blob[22:26], "little", signed=True)
+    if width == 0 or height == 0:
+        return False
+    # 文件头自报的体积必须容得下这份 DIB（bfSize 在 2..6）
+    declared = int.from_bytes(blob[2:6], "little")
+    return declared == 0 or len(blob) >= declared
+
+
+def _gif_ok(blob: bytes) -> bool:
+    """逻辑屏幕宽高（6..10）非 0，且以 0x3B  trailer 收尾。"""
+    if len(blob) < 13:
+        return False
+    if int.from_bytes(blob[6:8], "little") == 0 or int.from_bytes(blob[8:10], "little") == 0:
+        return False
+    return blob[-1:] == b"\x3b"
+
+
+# SOFn：除 DHT(c4)/JPG(c8)/DAC(cc) 外的全部 SOF 变体，都带同样的宽高字段
+_JPEG_SOF = frozenset((0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                       0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF))
+
+
+def _jpeg_ok(blob: bytes) -> bool:
+    """从 SOI 逐段走到 SOF 帧头：高度(2) 宽度(2) 都要非 0。
+
+    熵编码段（SOS 之后）里 0xFF 一定被转义成 0xFF00，所以逐段解析在 SOS 处就该停；
+    再往后按段长走只会走进压缩数据里，那是解码器的事，不是这里要判的。
+    """
+    if len(blob) < 4:
+        return False
+    pos = 2
+    total = len(blob)
+    while pos + 4 <= total:
+        if blob[pos] != 0xFF:
+            return False
+        marker = blob[pos + 1]
+        if marker == 0xD8:                  # 嵌套 SOI 不是合法段
+            return False
+        length = int.from_bytes(blob[pos + 2:pos + 4], "big")
+        if length < 2 or length > total - pos - 2:
+            return False
+        if marker in _JPEG_SOF:
+            if length < 8:
+                return False
+            height = int.from_bytes(blob[pos + 5:pos + 7], "big")
+            width = int.from_bytes(blob[pos + 7:pos + 9], "big")
+            return width != 0 and height != 0
+        if marker == 0xDA:                  # SOS：后面是熵编码数据，不再逐段解析
+            return False
+        pos += 2 + length
+    return False
+
+
+def _webp_ok(blob: bytes) -> bool:
+    """RIFF 容器：自报尺寸必须容得下文件，且首个 chunk 是 VP8/VP8L/VP8X 之一。
+
+    只查 blob[8:12] == b"WEBP" 的话，`RIFF....WEBP` + 任意尾巴都能过——那 4 个
+    WEBP 字节和 4 个尺寸字节同样是可以随手填的。
+    """
+    if len(blob) < 16:
+        return False
+    declared = int.from_bytes(blob[4:8], "little")
+    if declared < 4 or declared > len(blob) - 8:
+        return False
+    return blob[12:16] in (b"VP8 ", b"VP8L", b"VP8X")
+
+
+_IMAGE_STRUCTURE = {
+    "image/png": _png_ok,
+    "image/jpeg": _jpeg_ok,
+    "image/gif": _gif_ok,
+    "image/bmp": _bmp_ok,
+    "image/webp": _webp_ok,
+}
+
+
+def _verify_image(filename: str, blob: bytes, mime: str) -> None:
+    """签名过了不等于是一张图。这里按 mime 走一遍该格式的结构，缺一即拒。"""
+    checker = _IMAGE_STRUCTURE.get(mime)
+    if checker is None:                     # 新增签名忘了配校验器：宁可拒，不放行
+        raise UploadError("这个图片格式暂不支持校验，请另存为 PNG 或 JPEG 后再上传")
+    try:
+        ok = checker(blob)
+    except Exception:                        # 校验器自己都不该把异常透给调用方
+        ok = False
+    if not ok:
+        raise UploadError(
+            f"{filename} 不是有效的图片内容"
+            f"（文件头像是 {mime}，但按该格式解不开）")
 
 
 def _default_dir() -> str:
@@ -166,6 +326,8 @@ def detect_kind(filename: str, blob: bytes):
             mime = "image/webp"
         if mime is None:
             raise UploadError(f"{filename} 不是有效的图片内容（文件头无法识别）")
+        # 签名只认出"像哪张图"，还要结构走一遍才认它是图
+        _verify_image(filename, blob, mime)
         return "image", mime
 
     if ext in TEXT_EXTS:

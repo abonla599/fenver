@@ -9,3 +9,31 @@ venv
 # _default_persist_dir → data_root()/chroma_db）；这一条此前写的是 chroma_data，
 # 一个从来不存在的路径名，所以它从来没有挡过任何东西。
 chroma_db
+
+# ---- 桌面版打包产物与本地运维脚本：一个字节都不该进镜像 ----
+#
+# 为什么现在补：这份清单原先只有上面那几行，`grep dist|build|worktrees` 零命中，
+# 而根 Dockerfile 是 `COPY backend/ ./backend/`，**构建上下文是仓库根**——某个文件
+# 进不进镜像只取决于 .dockerignore，不取决于它有没有被 COPY 到。所以下面这些
+# 目录此前每一份都完整躺在 docker build 的上传量里：backend/dist/ai-assistant.exe
+# 18.9MB、build/ 86MB（内含一整份仓库快照，连带它自己的 Dockerfile）、
+# .worktrees/ 101MB（3 份完整源码副本）、dist_new/、deploy_local/。
+#
+# `dist_*/` 与 `build*/` 带尾斜杠 = 只匹配目录，这条约束是刻意的：
+# 按**文件名**匹配的 `build*`/`dist*` 会顺手打中 app/core/buildinfo.py 与
+# run_backend.spec 之类，那是真的会炸——所以这里只挡目录。
+dist/
+dist_*/
+build*/
+.worktrees/
+deploy_local/
+
+# 二进制与日志：gitleaks.exe、以及各处 *.log（含 data/backend.log、data/watchdog.log）。
+# 后者是运行时产物，而容器里 data/ 由 compose 挂载进来，镜像内那份只会是过期的。
+*.exe
+*.log
+
+# ⚠️ 不要在这里挡 docker/：docker/sandbox/Dockerfile 与 Dockerfile.node 是
+# 沙箱镜像（ai-sandbox / ai-sandbox-node，app/sandbox/sandbox_manager.py 用）的
+# 唯一构建描述。挡掉它，镜像还在但再也重建不出来——而"重建不出来"要等到真要修
+# 沙箱的那天才发现，正是本文件想避免的那类事故。
