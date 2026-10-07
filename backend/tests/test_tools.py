@@ -131,6 +131,29 @@ class _RecordingSandbox:
         return {"stdout": "", "stderr": "", "error": "脚本已用尽"}
 
 
+def _granted(user_id="tool-tester"):
+    """造一张"用户已点允许"的票据，交给 `execute_tool(..., granted_ticket=...)`。
+
+    为什么这里三条走容器的 execute_code 用例都要带它：v0.31 的审批闸门从两条聊天
+    路径的调用侧下沉到了 `executor._dispatch`（38a30e48）。闸门挂上执行器之后，
+    任何直连 `execute_tool("execute_code", ...)` 而没有凭据的调用都会被 fail-closed
+    拦下——这正是那次修复要堵的洞，所以本文件里原先"不带票据也能跑代码"的写法不再
+    是合法路径。CI 第一次跑到这三条（本机没 Docker 会 skip），于是 python 那条红、
+    另外两条只是侥幸：`test_code_tool_syntax_error` 的断言里有 `"错误" in result`，
+    而审批拒绝的话术正好带"错误"二字——那是假绿，不是覆盖。
+
+    补票据而不是关掉闸门：审批管"该不该做"，容器与频控管"怎么做、做几次"，两道闸
+    不互相顶替。判据与 test_medium2_batch_20260923.py 的 `_granted` 同一口径。
+    """
+    from app.core import approval
+
+    req = approval.create_approval_request(
+        "execute_code", {"code": "print('hello')"}, user_id=user_id)
+    ticket = approval.consume_ticket(req["ticket_id"], "allow", user_id)
+    assert ticket is not None, "票据造不出来，测试前提就没了"
+    return ticket
+
+
 def test_execute_code_runs_user_code_exactly_once(monkeypatch):
     """锁住"代码只跑一遍"：曾经的重试循环写完后，又在循环外无条件执行了一次。"""
     from app.tools import builtin_tools
@@ -156,7 +179,8 @@ def test_execute_code_retries_only_until_first_success(monkeypatch):
 
 def test_code_tool_python(sandbox_language):
     sandbox_language("python")
-    result = execute_tool("execute_code", {"code": "print('hello')", "language": "python"})
+    result = execute_tool("execute_code", {"code": "print('hello')", "language": "python"},
+                          user_id="tool-tester", granted_ticket=_granted("tool-tester"))
     assert "hello" in result
     assert "✗" not in result
 
@@ -168,14 +192,17 @@ def test_code_tool_javascript(sandbox_language):
     result = execute_tool("execute_code", {
         "code": "console.log('hi from js');",
         "language": "javascript",
-    })
+    }, user_id="tool-tester", granted_ticket=_granted("tool-tester"))
     assert "hi from js" in result
 
 
 def test_code_tool_syntax_error(sandbox_language):
     sandbox_language("python")
-    result = execute_tool("execute_code", {"code": "prin('typo')", "language": "python"})
-    assert "NameError" in result or "错误" in result or "error" in result
+    result = execute_tool("execute_code", {"code": "prin('typo')", "language": "python"},
+                          user_id="tool-tester", granted_ticket=_granted("tool-tester"))
+    # 断言收窄到容器真的报出来的那个名字错误：审批话术里也带"错误"二字，
+    # 留着它等于给"没跑到容器"留了一条蒙混过去的出口。
+    assert "NameError" in result, f"没拿到容器给出的名字错误：{result!r}"
 
 
 def test_code_tool_timeout_reports_timeout_to_the_model(monkeypatch):
