@@ -337,11 +337,21 @@ function Get-BackendProcess {
 
 function Get-TunnelProcess {
     param([string] $Name)
-    # 必须匹配命令行里的 `tunnel run <name>`：机器上可能残留 quick 隧道
+    # 必须匹配命令行里的 `tunnel ... run <name>`：机器上可能残留 quick 隧道
     # （`cloudflared.exe tunnel --url http://127.0.0.1:8000`），只按进程名找会把
     # 命名隧道的死活被残留进程盖掉。
+    #
+    # **`run` 与隧道名之间不许要求紧贴**：v0.33.0 那条判据写的是 `tunnel\s+run\s+<名>`，
+    # 而本脚本自己拉起用的却是 `tunnel --metrics 127.0.0.1:<port> run <名>`
+    # （--metrics 必须挂在 run 前面，否则 cloudflared 判"accepts only one argument"
+    # 当场退出，见下面 -Launch 里那段注释）。于是**看门狗永远认不出自己拉起来的那
+    # 条隧道**：探针判死 → 再拉一个 → 预算烧完 → 日志写着"已拉起"，真正在服务的
+    # connector 从头到尾没被数过。判据和被判的对象必须闭环，这条由
+    # `test_the_tunnel_probe_recognizes_the_tunnel_this_script_launches` 锁住。
+    #
+    # quick 隧道不会误命中的原因不变：它没有 `run <名>` 这一段。
     Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" |
-        Where-Object { $_.CommandLine -match ('tunnel\s+run\s+' + [regex]::Escape($Name)) }
+        Where-Object { $_.CommandLine -match ('\btunnel\b.*?\brun\s+' + [regex]::Escape($Name) + '(?:\s|$)') }
 }
 
 # -------------------------------------------------------- 核心：拉一把 + 记账
