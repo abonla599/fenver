@@ -129,8 +129,12 @@ BAD_BASE_URLS = {
 
 
 def _record(**over):
-    base = {"label": "内网自建", "api_key": "sk-real-looking-key-123456",
-            "model": "qwen-plus"}  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+    # secret-scan:allow —— 这颗是测试造的假密钥，这台机器上没有。
+    # 标记必须与密钥**同一行**：tools/secret_scan.py 只看密钥那一行的文本
+    # （suppressed=may_suppress and ALLOW_MARKER in line_text），字典字面量
+    # 跨行时加在收尾那行不生效——本条就是这么红过一次。
+    base = {"label": "内网自建", "api_key": "sk-real-looking-key-123456",  # secret-scan:allow
+            "model": "qwen-plus"}
     base.update(over)
     return base
 
