@@ -26,21 +26,75 @@ def _as_frozen(monkeypatch, exe_path: str):
     monkeypatch.setattr(sys, "executable", exe_path, raising=False)
 
 
+def _no_data_root_override(monkeypatch):
+    """让这几条"项目根怎么认"的判据回到没有 `DATA_ROOT` 覆写的世界。
+
+    测试会话里 conftest 会把 DATA_ROOT 指到临时目录（为了不去抢生产的数据根锁，
+    见 paths.data_root 的注释），而本文件这几条测的正是**没有覆写时**的推断规则。
+    """
+    monkeypatch.delenv("DATA_ROOT", raising=False)
+
+
 def test_source_run_points_at_repo_root(monkeypatch):
+    _no_data_root_override(monkeypatch)
     monkeypatch.delattr(sys, "frozen", raising=False)
     assert Path(data_root()).resolve() == REPO_ROOT
 
 
 def test_frozen_exe_inside_dist_resolves_to_project_root(monkeypatch):
+    _no_data_root_override(monkeypatch)
     _as_frozen(monkeypatch, str(REPO_ROOT / "dist" / "run_backend" / "run_backend.exe"))
     assert Path(data_root()).resolve() == REPO_ROOT
 
 
 def test_frozen_exe_with_no_project_falls_back_to_its_own_dir(tmp_path, monkeypatch):
     """真正独立分发（整个目录拷到别处）时不能找不到根就崩，退回 exe 同级保持可携带。"""
+    _no_data_root_override(monkeypatch)
     exe = tmp_path / "run_backend.exe"
     _as_frozen(monkeypatch, str(exe))
     assert Path(data_root()).resolve() == tmp_path.resolve()
+
+
+def test_data_root_env_override_wins_and_moves_the_lock(tmp_path, monkeypatch):
+    """`DATA_ROOT` 是最高优先级，而且**独占锁跟着它走**——这两件事必须同时成立。
+
+    只让存储路径改、锁仍钉在项目根，等于测试继续抢线上那份 `.data-root.lock`：
+    现象是"uvicorn 没起来"，而真凶在另一个进程里，查起来要命。
+    """
+    holder = tmp_path / "serving"
+    holder.mkdir()
+    monkeypatch.setenv("DATA_ROOT", str(holder))
+    assert Path(data_root()).resolve() == holder.resolve()
+
+    from app.core.data_root import LOCK_NAME, acquire_data_root_lock, release_data_root_lock
+    path = acquire_data_root_lock(data_root())
+    assert Path(path).parent == holder.resolve(), "锁没跟着数据根走：它还会去抢别人的根"
+    assert os.path.basename(path) == LOCK_NAME
+    # 同一个根第二次申请必须被拒（独占就是独占，哪怕来自同一个进程）
+    from app.core.data_root import DataRootBusyError
+    with pytest.raises(DataRootBusyError):
+        acquire_data_root_lock(data_root())
+    release_data_root_lock(path)
+
+
+def test_test_session_never_borrows_the_production_data_root():
+    """负向锁：测试会话**必须**跑在隔离数据根上，谁把 conftest 那行删掉谁红。
+
+    这台机器同时是生产机。少了这条隔离，症状不是"测试挂了"这么轻——是测试进程
+    与线上服务抢同一份数据根，抢赢的那次会把线上持有的锁判成陈旧锁删掉，
+    两个进程同写十几份 JSON，而两边都返回 200。v0.33 的 E1 防的就是这件事。
+    """
+    from app.core.data_root import LOCK_NAME
+    root = Path(data_root()).resolve()
+    assert root != REPO_ROOT.resolve(), (
+        "测试进程的数据根指回了仓库根：这里正是本机线上服务在跑的那一份")
+    assert os.sep + "ai-assistant-tests-" in str(root), f"数据根不像临时目录：{root}"
+    # 仓库根那把锁如果存在，必须仍属于线上进程，测试不许把它删了或接管了
+    prod_lock = REPO_ROOT / LOCK_NAME
+    if prod_lock.exists():
+        import json as _json
+        payload = _json.loads(prod_lock.read_text(encoding="utf-8") or "{}")
+        assert payload.get("pid") != os.getpid(), "测试进程占住了生产数据根的锁"
 
 
 def test_all_stores_share_one_root(monkeypatch):
@@ -70,6 +124,7 @@ def test_all_stores_share_one_root(monkeypatch):
     ]
     for var, _ in stores:
         monkeypatch.delenv(var, raising=False)
+    _no_data_root_override(monkeypatch)
     _as_frozen(monkeypatch, str(REPO_ROOT / "dist" / "run_backend" / "run_backend.exe"))
 
     root = Path(data_root()).resolve()
