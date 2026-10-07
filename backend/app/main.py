@@ -97,6 +97,14 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时执行
+    # 第一件事：占住数据根。必须早于下面每一步——日志摘要、配置摘要、启动探测、
+    # 后台调度器，每一个都会读或写那十几份 JSON 存储。两个进程同时开一份数据根时，
+    # 它们各自持有内存快照再整体覆盖写盘，丢的是整份数据且两边都返回 200。
+    # 判据、陈旧锁接管与"为什么不用 flock"见 app/core/data_root.py。
+    from app.core.data_root import acquire_data_root_lock, release_data_root_lock
+    from app.core.paths import data_root
+    _data_root_lock = acquire_data_root_lock(data_root())
+    print(f"[启动] 数据根已加独占锁：{_data_root_lock}")
     # 先把"这八份可变数据此刻到底写在哪儿"打出来：它原先只是文档里的一段散文，
     # 而 data_file() 会在 data/ 下没有同名文件时退回项目根那份历史文件——于是
     # "所有数据都在 data/ 下吗"取决于本机有没有一个老 preference.txt，光看文档猜不出来。
@@ -126,6 +134,10 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时执行（如果需要清理资源）
     print("服务正在关闭...")
+    # 放掉数据根锁。不放也能启动（判据会把它当陈旧锁接管），但那样每次重启
+    # 都要走一遍"接管上一个自己"的路径，把一条本该干净的启动判据变脏。
+    release_data_root_lock(_data_root_lock)
+    print("[关闭] 数据根锁已释放")
 
 # 记忆模块路由（包含完整的 /v1/memory/* 端点）
 from app.memory.memory_router import router as memory_router
