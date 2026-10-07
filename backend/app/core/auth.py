@@ -59,6 +59,10 @@ SESSION_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 # 被登出。所以给一次**有界**的宽限：首次升级时为每个账号钉一个
 # token_legacy_deadline，此后**永不改动**。
 #
+# deadline 是**日历时刻**（钉上时就是 now + 宽限期），判过期用 `now > deadline`。
+# v0.33.1 之前这里比的是 `now - deadline > 宽限期`——减掉一个未来时间，等于把
+# 宽限期悄悄翻倍，和发布说明对用户承诺的"30 天"不一致。
+#
 # 为什么不按 last_used_at 给每枚令牌算：那个字段是每账号一个（resolve 每命中
 # 任意一枚令牌就刷新它），用它背书等于"手机上活跃就顺带让另一枚三个月没碰的
 # 令牌也永不过期"。详见 _token_expired 的注释。
@@ -420,7 +424,14 @@ class AuthStore:
             self._dirty = True
             return False
         try:
-            return time.time() - float(deadline) > LEGACY_TOKEN_GRACE_SECONDS
+            # 这个字段的名字就是 **deadline**：写进去的那一刻它就已经是"未来的
+            # 某个时刻"（上面那行 = now + 宽限期），所以判过期只能拿 now 直接比。
+            # 从前这里写的是 `now - deadline > 宽限期`，而减掉的是个未来时间——
+            # 差值要再涨满一个宽限期才成立，于是每枚存量令牌实际吃到**两倍**宽限。
+            # 2026-10-07 第一次真实流量回读时这件事是看得见的：那一次钉上的
+            # deadline 是 2026-11-06，按旧写法要到 2026-12-06 才失效，而 v0.33.0
+            # 的发布说明对用户承诺的是"30 天"。
+            return time.time() > float(deadline)
         except (TypeError, ValueError):
             return True
 

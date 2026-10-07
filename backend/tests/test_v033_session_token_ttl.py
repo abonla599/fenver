@@ -142,6 +142,27 @@ def test_legacy_token_expires_after_grace_window(store):
     )
 
 
+def test_legacy_deadline_is_a_calendar_moment_not_a_reference_point(store):
+    """deadline 到点刚过一秒就必须失效——不许把宽限期再翻一倍。
+
+    钉上的值是 `now + 宽限期`，也就是一个**未来时刻**。旧实现判的是
+    `now - deadline > 宽限期`：减掉未来时间得到的差值要再涨满一个宽限期才成立，
+    于是用户拿到的是 60 天，而 v0.33.0 的发布说明白纸黑字写的是 30 天。
+    2026-10-07 真实流量第一次钉上 deadline（2026-11-06）时回读才暴露这件事。
+
+    负向锁：把判据改回 `now - deadline > LEGACY_TOKEN_GRACE_SECONDS`，这条红
+    （此刻 now-deadline 只有 1 秒，远小于 30 天，令牌会被判成还有效）。
+    """
+    token = _register(store)
+    record = store._users[store.resolve(token).user_id]
+    del record["token_issued_at"][hash_token(token)]
+    record["token_legacy_deadline"] = time.time() - 1
+
+    assert store.resolve(token) is None, (
+        "deadline 就是到期日：过了一秒也算过，不再额外送一个月"
+    )
+
+
 def test_legacy_deadline_is_never_extended_by_activity(store):
     """**负向锁的核心**：持续活跃不得延长存量令牌的宽限期。
 
