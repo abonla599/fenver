@@ -161,6 +161,121 @@ def test_the_replacement_connector_is_launched_with_usable_arguments():
     )
 
 
+def _launch_command_line(code: str, tunnel_name: str) -> str:
+    """把 -Launch 里那个参数数组还原成真实会出现在进程表里的命令行。
+
+    判据用的是脚本**自己的**拉起参数，不是我在测试里手抄的一份：手抄的那版会和
+    脚本各自漂移，而这条锁要防的正是"两边不一致"。
+    """
+    args_line = [ln for ln in code.splitlines() if "$tunnelArgs" in ln and "=" in ln]
+    assert len(args_line) == 1, f"参数数组应当只赋值一次，读到 {len(args_line)} 行"
+    # 逐元素解析整个 @(...)：里面有**裸变量** `$TunnelName` 和带变量的双引号串
+    # `"127.0.0.1:$TunnelAltMetricsPort"`。只抓单引号字面量的那版会把隧道名整个漏掉，
+    # 于是拼出来的"命令行"根本没有 run 的宾语——测的还是个假形状。
+    arr = re.search(r"@\((.*)\)", args_line[0])
+    assert arr, f"没能取回 @(...) 参数数组：{args_line[0]}"
+    parts = []
+    # 用 finditer 取 **group(0)**：findall 在有捕获组时只返回组内容，裸变量那一条
+    # 分支没有捕获组，findall 会把它变成 ('','') —— 于是 `$TunnelName` 整个消失，
+    # 拼出的"命令行"没有 run 的宾语（正是这条锁要防的形状，却先骗过了自己）。
+    for m in re.finditer(r"'([^']*)'|\"([^\"]*)\"|(\$[A-Za-z_][A-Za-z0-9_]*)",
+                         arr.group(1)):
+        tok = m.group(1) or m.group(2) or ""
+        if not tok:                                   # 裸变量项
+            if m.group(3) == "$TunnelName":
+                tok = tunnel_name
+            elif m.group(3) == "$TunnelAltMetricsPort":
+                tok = "127.0.0.1:34568"
+            else:
+                tok = m.group(3)                      # 其它变量原样留着，不影响判据
+        if tok.startswith("127.0.0.1:"):
+            tok = "127.0.0.1:34568"                   # 端口值不重要，形状才重要
+        parts.append(tok)
+    assert parts[:1] == ["tunnel"], f"参数数组第一元应是 'tunnel'，实际 {parts}"
+    assert tunnel_name in parts, f"参数数组里没有隧道名 {tunnel_name}：{parts}"
+    return " ".join(["cloudflared.exe"] + parts)
+
+
+def _probe_pattern(code: str, tunnel_name: str) -> str:
+    """从 Get-TunnelProcess 里取回它真正拿去 -match 的那个模式串。
+
+    `[regex]::Escape($Name)` 按字面替换成转义后的隧道名，字符串字面量原样取。
+    """
+    fn = _region(code, "function Get-TunnelProcess", "function Invoke-Guard",
+                 "Get-TunnelProcess")
+    # 不锚行尾：那一行以 `) }` 收尾，锚 `$` 会永远取不到。贪婪到**最后一个**右括号
+    # 正好取回整个 -match 表达式（字符串字面量里那个 `(?:\s|$)` 的括号不是候选终点，
+    # 因为后面还有闭合括号）。
+    m = re.search(r"-match\s*\((.+)\)", fn)
+    assert m, "没找到 Get-TunnelProcess 里的 -match 表达式，这条锁在空转"
+    expr = m.group(1)
+    esc_call = "[regex]::Escape($Name)"
+    pieces = []
+    pos = 0
+    while True:
+        lit = re.search(r"'([^']*)'", expr[pos:])
+        esc = expr.find(esc_call, pos)
+        if esc == -1:
+            if lit:
+                pieces.append(lit.group(1))
+            break
+        if lit and pos + lit.start() < esc:
+            pieces.append(lit.group(1))
+            pos = pos + lit.end()
+            continue
+        pieces.append(re.escape(tunnel_name))
+        pos = esc + len(esc_call)
+    pattern = "".join(pieces)
+    assert pattern.strip(), "取回的匹配模式是空的"
+    return pattern
+
+
+def test_the_tunnel_probe_recognizes_the_tunnel_this_script_launches():
+    r"""**探针必须认得自己拉起的那条隧道**——判据和对象之间不许有缝。
+
+    v0.33.0 上线后的实测形状：`-Launch` 用的是
+    `tunnel --metrics 127.0.0.1:<port> run <名>`（--metrics 必须挂在 run 前面，
+    否则 cloudflared 判 "accepts only one argument" 当场退出，脚本自己的注释就写着
+    这条），而 `Get-TunnelProcess` 当年搜的是 `tunnel\s+run\s+<名>`——中间插了
+    `--metrics …` 之后那个模式**永远匹配不上**。于是看门狗每分钟把自己正在服务的
+    隧道判成死的：再拉一个、烧完预算、日志写着"已拉起"，而真正在跑的 connector
+    从来没被数过。
+
+    这条锁不是搜关键字，是**把脚本自己的参数数组拼成命令行，再拿脚本自己的模式去
+    匹配**。任何一边改了参数顺序或匹配写法而没同步另一边，当场红。
+
+    负向锁：把 `-Launch` 的 `--metrics` 挪回 `run <名>` 之后 → 拉起那行红；
+    把探针模式改回 `tunnel\s+run\s+<名>` → 这条红。
+    """
+    code = _code(WATCHDOG.read_text(encoding="utf-8"))
+    # 隧道名从脚本自己的定义里取，取不到就当场报错——不许在测试里写死一个值，
+    # 那等于又造了第二个事实来源。
+    m = re.search(r"\$TunnelName\s*=\s*'([^']*)'", code)
+    assert m, "没读到 $TunnelName 的字面值，这条锁在空转"
+    name = m.group(1)
+
+    pattern = _probe_pattern(code, name)
+    cmdline = _launch_command_line(code, name)
+
+    assert re.search(pattern, cmdline), (
+        "Get-TunnelProcess 认不出本脚本 -Launch 起来的隧道：\n"
+        "  命令行 = %s\n  模式   = %s\n"
+        "探针判死 → 反复拉起 → 预算烧光，而真正在服务的 connector 从没被数过。"
+        % (cmdline, pattern)
+    )
+    # 反向：quick 隧道（没有 run <名> 这一段）不许被当成命名隧道的持有者
+    quick = "cloudflared.exe tunnel --url http://127.0.0.1:8000"
+    assert not re.search(pattern, quick), (
+        "探针把 quick 隧道也认成了命名隧道：残留的 --url 进程会给死掉的命名隧道"
+        "顶缸，看门狗从此不再拉起"
+    )
+    # 名字是别的命名隧道时也不许命中（前缀不算命中）
+    other = "cloudflared.exe tunnel --metrics 127.0.0.1:34568 run %s-other" % name
+    assert not re.search(pattern, other), (
+        "模式没在隧道名后收口：另一条同名前缀的隧道会被误判成本条活着"
+    )
+
+
 def test_the_watchdog_asks_whether_the_backend_is_complete():
     """后端那条守的是「进程在不在」，而这一轮加的东西全都能在进程活着时坏掉。
 
