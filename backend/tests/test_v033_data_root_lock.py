@@ -224,6 +224,12 @@ def test_acquire_is_atomic_under_racing_processes(tmp_path):
     # 长驻的，模拟也该如此。
     #
     # 用法：每个子进程拿完锁后 sleep 到测试放行，测试逐一收集结果再统一放行。
+    # 子进程要 import 的是 `app.core.*`，而 `app` 包在 backend/ 下。**不能取当前工作目录**：
+    # CI 是 `python -m pytest backend/tests/`（仓库根为 CWD），此时 abspath(".") 指向仓库根，
+    # 六个子进程全部 ModuleNotFoundError，一条 OK 都打不出来，断言就以 "实际 0 个" 收场——
+    # 红的是这条锁自己的取径写法，不是被测的锁。判据从测试文件自身位置反推 backend 目录，
+    # 于是仓库根与 backend/ 两种 CWD 下都成立。
+    backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     child = textwrap.dedent("""
         import sys, time
         sys.path.insert(0, %r)
@@ -236,9 +242,9 @@ def test_acquire_is_atomic_under_racing_processes(tmp_path):
             time.sleep(30)          # 被拒的进程也留一会儿，别立刻退
             raise SystemExit(0)
         time.sleep(30)# 拿到锁的留到测试放行
-    """) % (os.path.abspath("."), str(root))
+    """) % (backend_root, str(root))
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.path.abspath(".")
+    env["PYTHONPATH"] = backend_root
     procs = []
     try:
         for _ in range(6):
