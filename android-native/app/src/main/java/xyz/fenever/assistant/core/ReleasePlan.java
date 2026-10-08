@@ -75,9 +75,10 @@ public final class ReleasePlan {
     /**
      * 第二条信任规则（v0.23 T1.5 / R5-AC-3）：**与 APP_URL 同源**且路径【恰好等于】
      * 这一个的那条 URL 也算可信。精确路径不是前缀——这是"同源 + 精确路径"的题面，
-     * 也是这条链路唯一的字节出口（{@code web_router.py} 的 {@code GET /site/android.apk}，
-     * 与壳 {@code BuildConfig.UPDATE_APK_URL} 钉的是同一条；三处同值由下方测试与
-     * backend/tests/test_android_shell.py 各钉各的一段）。
+     * 也是这条链路唯一的字节出口（{@code web_router.py} 的 {@code GET /site/android.apk}
+     * 与 {@code releases.SELF_APK_PATH} 钉的是同一条；三处同值由下方测试与
+     * backend/tests/test_update_channel.py 各钉各的一段——旧 WebView 壳那份
+     * {@code BuildConfig.UPDATE_APK_URL} 随壳于 2026-10-08 退役，现在只剩这三处）。
      *
      * <p>信任的是"这条地址与自家服务器同源且只能是那个代取端点"，不是"JSON 里写了
      * 什么 host 都放行"：host 必须逐字符等于传入的 appUrl 的 host（https、不带端口、
