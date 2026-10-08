@@ -13,7 +13,6 @@
 """
 import os
 import re
-import time
 from collections import defaultdict
 from typing import List, Optional
 
@@ -21,6 +20,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.core import authz, usage
+# v0.34.0 D1：限流账"住在哪儿"抽成一层后端（默认内存，Redis 那条路不落生产）。
+from app.core import ledger_backend
 # v0.32 W4：搜索这本账独立一份文件、独立一个读面（口径见 core/search_usage.py 头部）。
 from app.core import search_usage
 # v0.24 T1.4：注册闸门与配置端点读的是同一份 config_store，不在路由层留第二默认值。
@@ -73,9 +74,43 @@ MAX_RESETS_PER_SOURCE = 3
 # 以前只用 request.client.host，经过隧道后恒为 127.0.0.1——全网共用一个桶，
 # 一个人手滑就能把所有人挡在门外，所以这既是功能也是修 bug。
 MAX_TRACKED_SOURCES = 4096
-_FAILS = defaultdict(list)
-_REGISTERS = defaultdict(list)
-_RESETS = defaultdict(list)
+
+
+class _Ledger(defaultdict):
+    """一本限流账：还是原来那个 `defaultdict(list)`，只是多背一个后端认得的名字。
+
+    为什么仍要是 dict：conftest 与既有用例直接 `_FAILS.clear()`、`sum(len(v) for v in
+    _FAILS.values())`——账本对象自己就是内存后端的存储，这不是将就，是"抽一层但不换一套
+    事实来源"。名字那半边是给 Redis 后端拼键用的：没有它，两本账的同名来源键会在共享存储
+    里撞成一本（`_Ledger.name` 缺失时 `RedisLedgers._key` 直接抛，不静默拼键）。
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(list)
+        self.name = name
+
+
+# 后端在这一层选，不在每个调用点选：八本账共用一条"记/读/裁"的通路，多进程时只需要
+# 换这一个对象；默认内存实现（见 ledger_backend 头上的两条取舍）。
+_LEDGER_BACKEND = ledger_backend.select_backend()
+
+
+def _window_of(ledger) -> float:
+    """这本账的窗口，唯一出处是 `_LEDGERS`（"有哪几本账"的同一份清单）。
+
+    记一次也要窗口，是因为共享存储里桶的寿命就是窗口：让调用点各抄一份数字，就等于给
+    "两本账窗口不一致"这种错位留了第二个来源——新加一本没登记进 `_LEDGERS` 时会当场炸，
+    那正是我们要的症状（不炸就是只胀不收）。
+    """
+    for known, window in _LEDGERS:
+        if known is ledger:
+            return window
+    raise RuntimeError(f"限流账 {getattr(ledger, 'name', ledger)!r} 没登记进 _LEDGERS")
+
+
+_FAILS = _Ledger("fails")
+_REGISTERS = _Ledger("registers")
+_RESETS = _Ledger("resets")
 # 猜找回答案的失败单独一册（窗口与上限沿用 FAILURE_WINDOW_SECONDS /
 # MAX_FAILURES_PER_WINDOW，换的只是账本）。
 # 拆开之后仍然站得住的两条理由：一，猜口令与猜三题是两种不同的猜测面，共用一格预算时
@@ -86,7 +121,7 @@ _RESETS = defaultdict(list)
 # 当初拆账的**原始**理由是"_FAILS 会被登录或注册成功清空，猜答案的人随手就能拿到一次
 # 那样的成功"——终审 F3 把那两处 pop 删掉之后，那半边理由已经不成立了，留着的是上面这两条。
 # 别把这段再读成"那本会被成功清、这本不会"。
-_RESET_FAILS = defaultdict(list)
+_RESET_FAILS = _Ledger("reset_fails")
 
 # 账号维度的找回失败账（审查 #6，2026-09-23）：_RESET_FAILS 按来源 IP 记账，
 # 而三题是全站固定的低熵常量（手机号后四位只有 10^4 种）——换得起 IP 的人
@@ -98,7 +133,7 @@ _RESET_FAILS = defaultdict(list)
 # ② 代价如实认： Anyone 用 10 次错答案就能把真号主的自助找回挡 10 分钟
 #    （找回锁不碰登录，管理员也能人工解）。低熵三题下"能被猜"比"能被锁"更先
 #    发生，所以这笔交换是划算的。
-_RESET_FAILS_BY_ACCOUNT = defaultdict(list)
+_RESET_FAILS_BY_ACCOUNT = _Ledger("reset_fails_by_account")
 
 # 每本账配自己的窗口：_prune 是内存闸门，拿十分钟那把尺子去过 24 小时那两本，就是
 # 在来源数超过 4096 时把整桶有效记录提前丢掉——配额被悄悄放宽，是一条 fail-open。
@@ -108,7 +143,7 @@ _RESET_FAILS_BY_ACCOUNT = defaultdict(list)
 # 它当成密不透风的防线（真正花钱的那本在 app/core/usage.py，两件事互补）。
 CHAT_WINDOW_SECONDS = 60
 MAX_CHAT_CALLS_PER_WINDOW = 20
-_CHATS = defaultdict(list)
+_CHATS = _Ledger("chats")
 
 # v0.34.0：reauth 是全站唯一"不带会话凭据、只带续命凭据"的公开端点，所以它自己
 # 需要两本账。为什么是两本而不是复用 _FAILS：
@@ -121,8 +156,8 @@ _CHATS = defaultdict(list)
 # 查无此 secret 的失败同样记进它自己那个键（键就是摘要本身，不含身份信息），
 # 于是 429 不泄露"这把手里有没有对应的账号"。
 MAX_REAUTH_FAILURES_PER_WINDOW = 10
-_REAUTH_FAILS = defaultdict(list)
-_REAUTH_BY_SECRET = defaultdict(list)
+_REAUTH_FAILS = _Ledger("reauth_fails")
+_REAUTH_BY_SECRET = _Ledger("reauth_by_secret")
 
 
 def _reauth_secret_key(digest: str) -> str:
@@ -143,8 +178,8 @@ def _reauth_throttled(ip: str, digest: str) -> bool:
 
 def _note_reauth_failure(ip: str, digest: str) -> None:
     moment = _now()
-    _REAUTH_FAILS[ip].append(moment)
-    _REAUTH_BY_SECRET[_reauth_secret_key(digest)].append(moment)
+    _note(_REAUTH_FAILS, ip, moment)
+    _note(_REAUTH_BY_SECRET, _reauth_secret_key(digest), moment)
 
 
 def _chat_key(ip: str, user_id: str) -> str:
@@ -172,30 +207,48 @@ def _store():
 
 
 def _now() -> float:
-    """单调时钟，独立成函数只为让"窗口过期"这一条测得到。"""
-    return time.monotonic()
+    """后端自己的时钟，独立成函数这一条不变：为的是"窗口过期"这一条要测得到。
+
+    内存实现给单调钟（本机时钟跳变不该把窗口拉长或缩短）；共享存储那侧必须给水钟
+    （monotonic 是本进程开机以来的秒数，两个 worker 的数互相不可比）。这条差异写在
+    ledger_backend 的头，不在这里再抄一份。
+    """
+    return _LEDGER_BACKEND.now()
 
 
 def _recent(ledger, ip: str, window: float, moment: float) -> list:
-    recent = [t for t in ledger[ip] if moment - t < window]
-    ledger[ip] = recent
-    return recent
+    """读"这一键在窗口内记了几次"。判据一条没变，只是记账本的动作交给后端（D1）。
+
+    留在模块层的理由：它同时是既有用例与 conftest 认的那个入口，而窗口的唯一出处在
+    `_LEDGERS`——把这两件事搬进后端会让"哪本账用哪个窗口"再没有一个可读的地方。
+    """
+    return _LEDGER_BACKEND.recent(ledger, ip, window, moment)
+
+
+def _note(ledger, key: str, moment: float = None) -> None:
+    """记一次（失败/注册/找回/聊天/reauth 共一条通路）。
+
+    窗口不在调用点抄，从 `_LEDGERS` 现取：共享存储里桶的寿命就是这个窗口，抄错一个数字
+    在内存后端上毫无症状、在 Redis 后端上就是一本活得比判据长的账。
+    `moment` 留给"同一件事要同时记进两本账"的那一处（reauth 的 IP 账与 secret 账）：
+    两笔取同一个时刻，注入式假时钟下也不会出现"同一件事在两本账里差一个刻度"。
+    """
+    _LEDGER_BACKEND.note(ledger, key, _window_of(ledger),
+                         _now() if moment is None else moment)
 
 
 def _prune(moment: float) -> None:
-    """来源数超出上限时丢掉"整桶都已过期"的那些键——四本账都要扫，且各按自己的窗口过。
+    """来源数超出上限时丢掉"整桶都已过期"的那些键——八本账都要扫，且各按自己的窗口过。
 
     触发条件是**内存**上限，不是安全窗口，所以两件事都不能凑：漏掉一本就是只胀不收，
     拿统一的最短窗口去过 24 小时的那两本则会在来源数超过 4096 时把整桶有效记录提前丢掉
     （注册与改密的配额被悄悄放宽，那是一条 fail-open）。窗口就在 _LEDGERS 里跟账本绑在
     一起，判据见 test_prune_uses_each_ledgers_own_window。
+
+    怎么扫交给后端：内存侧是 len(dict) 与整桶判空，共享存储侧对应的是键数与整桶出窗
+    （两条语义必须一致，由 D1 的成对用例钉，不靠"看着像"）。
     """
-    for ledger, window in _LEDGERS:
-        if len(ledger) <= MAX_TRACKED_SOURCES:
-            continue
-        for key in [k for k, v in ledger.items()
-                    if not any(moment - t < window for t in v)]:
-            ledger.pop(key, None)
+    _LEDGER_BACKEND.prune(_LEDGERS, moment, MAX_TRACKED_SOURCES)
 
 
 def _throttled(ip: str) -> bool:
@@ -216,11 +269,11 @@ def _reset_throttled(ip: str) -> bool:
 
 
 def _note_failure(ip: str) -> None:
-    _FAILS[ip].append(_now())
+    _note(_FAILS, ip)
 
 
 def _note_reset_failure(ip: str) -> None:
-    _RESET_FAILS[ip].append(_now())
+    _note(_RESET_FAILS, ip)
 
 
 def _reset_account_key(username: str) -> str:
@@ -239,7 +292,7 @@ def _reset_account_throttled(username: str) -> bool:
 
 
 def _note_reset_failure_account(username: str) -> None:
-    _RESET_FAILS_BY_ACCOUNT[_reset_account_key(username)].append(_now())
+    _note(_RESET_FAILS_BY_ACCOUNT, _reset_account_key(username))
 
 
 def _registrations_full(ip: str) -> bool:
@@ -250,7 +303,7 @@ def _registrations_full(ip: str) -> bool:
 
 
 def _note_registration(ip: str) -> None:
-    _REGISTERS[ip].append(_now())
+    _note(_REGISTERS, ip)
 
 
 def _resets_full(ip: str) -> bool:
@@ -261,7 +314,7 @@ def _resets_full(ip: str) -> bool:
 
 
 def _note_reset(ip: str) -> None:
-    _RESETS[ip].append(_now())
+    _note(_RESETS, ip)
 
 
 LOOPBACK = ("127.0.0.1", "::1")
@@ -295,7 +348,7 @@ def chat_allowed(ip: str, user_id: str) -> bool:
 def note_chat(ip: str, user_id: str) -> None:
     """记一次尝试。调用点在**放行之后、叫模型之前**，所以失败的、模型报错的那次
     一样占额度——成功还不还预算是这四本旧账定下来的裁决，第五本沿用。"""
-    _CHATS[_chat_key(ip, user_id)].append(_now())
+    _note(_CHATS, _chat_key(ip, user_id))
 
 
 def chat_retry_after(ip: str, user_id: str) -> int:

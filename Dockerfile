@@ -45,4 +45,8 @@ WORKDIR /app/backend
 # HOST 与 uvicorn --host 保持同一份事实：authz 的 disabled 远程护栏读它。
 # 容器天然绑 0.0.0.0，因此镜像里配 AUTH_MODE=disabled 会被 503 拒绝，除非显式 ALLOW_DISABLED_REMOTE=1。
 ENV HOST=0.0.0.0
+# 本镜像默认单进程；加 --workers 前必须先把限流账迁到共享存储
+# （每个 worker 一本账 = 登录/注册/找回/聊天的每窗口预算按进程数悄悄放宽，且没有任何症状。
+#  v0.34.0 D1 已把存储抽成 app/core/ledger_backend.py：默认内存实现，Redis 实现不落生产。
+#  判据锁见 backend/tests/test_v0340_d1_ledger_backends.py。）
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
