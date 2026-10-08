@@ -59,6 +59,95 @@ const API = (() => {
     return UNSAFE_METHODS.has(String(method || "").toUpperCase()) ? { "X-CSRF": "1" } : {};
   }
 
+  /* ---------------- v0.34.0 续期阶梯（判据 1、9；PRD 第四节 Web 那一行） ----------------
+   *
+   * 页面依旧不持有任何凭据：会话在 httpOnly Cookie 里，所以续期就是**用 Cookie 打**
+   * /v1/auth/renew。响应体里的新令牌只活在这一次调用的局部作用域，当场交给 adopt 收编
+   * 成新 Cookie——adopt 仍然是全服务端唯一 Set-Cookie 的地方，会话固定那道缝不开。
+   *
+   * 触发口径是**服务端告诉我们的**：每个 2xx 已鉴权响应带 X-Token-Expires-In，值是
+   * min(滑动剩余, 绝对剩余)。客户端自己不猜时间——本机时钟偏一点就能把"还剩 8 天"
+   * 算成"还剩 6 天"，那是一条只有服务端知道答案的问题。
+   *
+   * renewSession 把全部依赖收在 deps 里、兜底值写字面量，是为了这份控制流能被单独取出
+   * 来用 node 真跑（test_v0340_web_renew_ladder）："剩余还多就不许动手"与"有流在跑就
+   * 绝不动手"读源码读不出对错，只有拿运行时说话（沿用 runResilientStream 的规矩）。
+   */
+  const TOKEN_EXPIRES_HEADER = "X-Token-Expires-In";
+  const RENEW_TRIGGER_SECONDS = 7 * 24 * 3600;    // 与后端 RENEW_ALLOWED_BELOW_SECONDS 同一个数
+  const RENEW_COOLDOWN_SECONDS = 6 * 3600;        // 失败不追着敲：限速器不吃自杀式重试
+
+  const SESSION = { remaining: null, streams: 0, renewing: false, lastRenewAt: 0 };
+
+  async function renewSession(deps) {
+    // 兜底值写字面量而不是引用上面那两个模块作用域的常量：这份函数要能被单独取出来
+    // 用 node 真跑（沿用 runResilientStream 的同一条规矩），引用体外名字会炸 ReferenceError。
+    // 数字的唯一出处仍是 RENEW_TRIGGER_SECONDS / RENEW_COOLDOWN_SECONDS 那两行。
+    const threshold = deps.threshold === undefined ? 7 * 24 * 3600 : deps.threshold;
+    const cooldown = deps.cooldown === undefined ? 6 * 3600 : deps.cooldown;
+    const now = deps.now || (() => Date.now() / 1000);
+    // 没有头条 = 这次响应没告诉我们还剩多久（未鉴权、bootstrap、或老版本服务端）。
+    // 不猜：续期这件事的判据在服务端，这里缺输入就什么都不做。
+    if (deps.remaining === null || deps.remaining === undefined) return "no-header";
+    if (deps.remaining > threshold) return "not-due";        // 判据 1：还早，别把续期当心跳
+    if (deps.streamBusy) return "deferred";                   // 判据 9：在途 SSE 一个字都不碰
+    if (deps.renewing) return "already-running";
+    const moment = now();
+    if (moment - deps.lastRenewAt < cooldown) return "cooling-down";
+    deps.setRenewing(true);
+    deps.setLastRenewAt(moment);
+    try {
+      const data = await deps.renew();
+      if (!data || !data.token) return "failed";     // 没拿到新明文就不动现有 Cookie
+      await deps.adopt(data.token);
+      return "renewed";
+    } catch (e) {
+      // 判据原文：renew 失败**什么都不做**。老令牌还能用到绝对上限，界面照常可用；
+      // 真到上限那一次 401 由 needsAuth 落登录页——那是最后一层，不是这一层的事。
+      return "failed";
+    } finally {
+      deps.setRenewing(false);
+    }
+  }
+
+  function noteSessionExpiry(res) {
+    // 只从 2xx 取头：401/403/429 的头条（如果有）说的不是"你这个会话还剩多久"。
+    try {
+      if (!res || !res.ok || !res.headers) return;
+      const raw = typeof res.headers.get === "function"
+        ? res.headers.get(TOKEN_EXPIRES_HEADER) : null;
+      if (raw === null) return;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0) SESSION.remaining = n;
+    } catch (_) { /* 读头这件事永远不许把业务打停 */ }
+  }
+
+  /* 真正的续期动作：fire-and-forget。调用点不 await 它——一次后台续期不该让
+     用户等，更不该因为它炸了就把这轮的正文弄丢。 */
+  function sessionTick() {
+    return renewSession({
+      remaining: SESSION.remaining,
+      streamBusy: SESSION.streams > 0,
+      renewing: SESSION.renewing,
+      lastRenewAt: SESSION.lastRenewAt,
+      threshold: RENEW_TRIGGER_SECONDS,
+      cooldown: RENEW_COOLDOWN_SECONDS,
+      renew: async () => {
+        const res = await fetch("/v1/auth/renew", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: csrfHeaders("POST"),
+        });
+        if (!res.ok) throw await parseError(res);
+        noteSessionExpiry(res);          // 续完立刻用服务端给的头条重新校准
+        return res.json();
+      },
+      adopt,
+      setRenewing: (v) => { SESSION.renewing = v; },
+      setLastRenewAt: (t) => { SESSION.lastRenewAt = t; },
+    }).catch(() => "failed");
+  }
+
   /* 记忆检索的条数上限，与后端 SearchMemoryRequest.top_k 的 le=20 同源
    * （test_web_pwa 会把这两个数字对一次）。越过上限不是"少给几条"，而是整个
    * 请求 422：搜索框看上去就是坏的。所以在这里夹回来，宁可少给也要有结果。
@@ -123,6 +212,8 @@ const API = (() => {
     } catch (e) { NetMinder.note(e); throw e; }
     if (!res.ok) throw await parseError(res);
     NetMinder.ok();
+    noteSessionExpiry(res);
+    sessionTick();                       // 续期在后台发生，不占这一请求的时间
     return res.status === 204 ? null : res.json();
   }
 
@@ -330,14 +421,27 @@ const API = (() => {
         });
       } catch (e) { NetMinder.note(e); throw e; }
       if (res.ok && res.body) NetMinder.ok();
+      noteSessionExpiry(res);
       return res;
     };
-    const out = await runResilientStream({
-      open, onChunk, onEvent: onEvent || (opts && opts.onEvent),
-      onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
-      sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
-      resumeStatus: STREAM_RESUME_STATUS,
-    });
+    /* 这一轮流在跑的时候，续期一律不动手（判据 9）：renew 一成功，老 digest 就进
+       60 秒排水窗，超过 60 秒还在用老令牌的流会被硬拒——而"回答正在一个字一个字
+       往外冒"时把令牌换掉，症状就是输出当场断。计数在 finally 里减：正常收尾、
+       报错、被停止都算流没了，被推迟的那一次续期在流尾补上。 */
+    SESSION.streams += 1;
+    let out;
+    try {
+      out = await runResilientStream({
+        open, onChunk, onEvent: onEvent || (opts && opts.onEvent),
+        onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
+        sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
+        resumeStatus: STREAM_RESUME_STATUS,
+      });
+    } finally {
+      SESSION.streams -= 1;
+      if (SESSION.streams < 0) SESSION.streams = 0;
+      sessionTick();                     // 流尾补做被推迟的那一次续期
+    }
     return out.done;   // 兼容旧调用点：done 里有 message_id/model/full_text/status
   }
 
