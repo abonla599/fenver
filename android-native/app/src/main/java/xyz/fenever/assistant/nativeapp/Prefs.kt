@@ -29,6 +29,8 @@ object Prefs {
 
     fun init(ctx: Context) {
         sp = ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        // 续命凭据落在另一个文件：ai_native_prefs 是明文的，那一把必须进 Keystore 加密区（v0.34.0）
+        SecretStore.init(ctx)
         // 冷启动第一帧就带上外观，不闪一下深色
         xyz.fenever.assistant.nativeapp.theme.ThemeMode.value = themeMode
     }
@@ -111,14 +113,24 @@ object Prefs {
             token = res.token, addedAt = "%013d".format(System.currentTimeMillis())))
         saveIdentities(list)
         currentId = res.user_id
+        /* v0.34.0：登录/注册这一刻服务端发的续命凭据落**加密区**，不落这个明文文件
+         * （判据 4、11）。服务端只在 register / login / reauth 三处发它（见 auth_router.py
+         * 的那三个 return）；adopt 一个外来令牌拿到的 AuthResult 里这个字段是默认空串，
+         * save 收到空串直接不写——语义与"这条来路没有静默重登，到点重输一次口令"一致。 */
+        SecretStore.save(res.user_id, res.device_secret)
         while (readIdentities().size > IDENTITY_CAP) {
             val oldest = readIdentities().minByOrNull { it.addedAt }!!
             saveIdentities(readIdentities().filter { it.userId != oldest.userId })
+            // 人从清单上挤出去，加密区那把也得跟着走：留着就成了一枚没人认领的续命凭据
+            SecretStore.drop(oldest.userId)
         }
     }
 
     fun dropIdentity(userId: String) {
         saveIdentities(readIdentities().filter { it.userId != userId })
+        // 本机忘掉这个人 = 服务端那把续命凭据在本机也不再留着（它已被服务端连带
+        // 吊销的那一批里，见 auth.py 的 revoke：退出清全部 secrets）。
+        SecretStore.drop(userId)
         if (currentId == userId) currentId = ""
     }
 
@@ -177,5 +189,7 @@ object Prefs {
     fun clearAuth() {
         saveIdentities(emptyList())
         currentId = ""
+        // 清单整本清空 = 加密区也不能留任何一把（换服务器时旧地址那把在新地址上毫无意义）
+        SecretStore.clear()
     }
 }
