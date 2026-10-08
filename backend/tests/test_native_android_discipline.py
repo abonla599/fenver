@@ -17,12 +17,14 @@ WebView 的 onPermissionRequest 白名单（"网页要什么就批什么"那格�
 WebView，录音走运行时 RECORD_AUDIO 权限，没有那一格可守（原判据在
 test_medium2_batch_20260923.py，原地留了指针）。
 
-还有一件**不是退役而是缺口**，如实记在这里：壳的 PermissionStatus.notificationsGranted
-同时问运行时权限与通知总开关（areNotificationsEnabled），原生
-Reminders.kt 的 notificationsGranted 只问 checkSelfPermission。总开关被关掉时，
-原生会照旧 notify()（被系统吞掉）并记 markFired，屏幕上那句"上次发出 xx:xx"因此
-谎报。这条锁今天没有挂上来——挂上就是红的，而它属于产品行为改动，需要发版后再走
-真机验收。留作 v0.35 的第一条待办，不要让它因为这段注释而消失。
+还有一件从前**只记在注释里的缺口**，本版（v0.34.0）按用户那句"本版顺手修"补上并挂成了
+锁：壳的 PermissionStatus.notificationsGranted 同时问运行时权限与通知总开关
+（areNotificationsEnabled），原生搬过来时只留了 checkSelfPermission 那一半——总开关被
+关掉时权限依旧 GRANTED，于是照旧 notify()（被系统静默吞掉）并记 markFired，屏幕上那句
+"上次发出 xx:xx"因此说的是件没发生过的事。判据见
+`test_the_notification_gate_asks_the_master_switch_too`：它钉"两个都问"、钉"问完必须
+用 && 合起来"，也钉"接收器不许自己判权限"（那等于把总开关那一半绕过去）。真机验收
+仍排在发版后：关掉通知总开关点一条 once 提醒，看那一行是不是"没授权：到点发不出去"。
 """
 
 import re
@@ -61,6 +63,30 @@ def _call_args(src: str, open_paren: int) -> str:
             if depth == 0:
                 return src[open_paren + 1:i]
     return src[open_paren:]
+
+
+def _fun_body(src: str, name: str) -> str:
+    """取 `fun <name>(…) {…}` 那一段的正文（花括号深度配对，跨行算）。
+
+    为什么不能只问"这个词在文件里出现过吗"：`areNotificationsEnabled` 这个词现在还躺在
+    那个 KDoc 注释里。（`_code` 会把注释剥掉，所以判据读的是剥完的那份——但**位置**仍然
+    判不出来：把总开关那一半从函数里挪到别的函数里、或者只在注释里承诺它，字面判据都绿。）
+    表达式函数体（`fun x(): Boolean = …`）在这里不当隐藏分支放过：head 里出现 `=` 就红，
+    让下一个人改尺子而不是让锁静默地读错一段。
+    """
+    at = src.index(f"fun {name}(")
+    open_at = src.index("{", at)
+    assert "=" not in src[at:open_at], \
+        f"fun {name} 改成表达式函数体了：这段尺子读不到正文，先改尺子再改代码"
+    depth = 0
+    for i in range(open_at, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_at + 1:i]
+    raise AssertionError(f"fun {name} 这块没有闭合，源文件本身就不对")
 
 
 def test_no_runtime_receiver_registration_without_an_export_flag():
@@ -130,6 +156,54 @@ def test_the_reminder_receiver_books_both_branches_and_always_advances():
     assert "ReminderScheduler.schedule(context, next)" in after, \
         "重排不在共用段里：daily/weekly 会重新变成孤儿轮次"
     assert "byId(r.id)" in after, "推进后没有回查 once 是否已被删：重排会对不存在的记录开火"
+
+
+def test_the_notification_gate_asks_the_master_switch_too():
+    """"通知能不能发出去"必须同时问运行时权限与通知总开关，而且是 && 关系。
+
+    这条锁为一次真实的谎报而写（v0.34.0 顺手修）：原生从壳搬这一处时只带走了
+    checkSelfPermission 那一半。Android 13+ 上"给了权限但在系统设置里把通知总开关关了"
+    是很常见的一种状态，此时权限依旧 GRANTED，于是旧代码照旧 notify()——消息被系统
+    吞掉，而 markFired 已经记上，屏幕上那句"上次发出 xx:xx"就成了假证据；用户下一次
+    不看那一行才怪。壳的 PermissionStatus.notificationsGranted 一直是两个都问的。
+
+    判据三段，各防一种改法：
+    ① 函数体内两个检查都在（把总开关那一半删掉 → 红；把权限那一半删掉 → 红）；
+    ② return 用 && 把两份合起来（写成 || 就等于"任一边为真就发"，那另一半白问 → 红）；
+    ③ 接收器不许自己去判权限（在那儿内联一份只看权限的判断，等于把这整个函数绕过去，
+       而字面上函数还在 → 红）。
+    `SDK_INT < 33` 是权限那一半的分岔（POST_NOTIFICATIONS 是 API 33 才有的运行时权限），
+    它跟着一起钉：低版本设备上问那个权限是恒为 false 的错判。
+
+    正对照：源文件路径写错时 rglob 一个文件都找不到，"函数不存在"与"守住了"不能长得
+    一样，所以这里先钉 REMINDERS_KT 里确有这个函数。
+    """
+    src = _code(REMINDERS_KT)
+    assert "fun notificationsGranted(" in src, \
+        f"在 {REMINDERS_KT.relative_to(REPO_ROOT).as_posix()} 里找不到 notificationsGranted：" \
+        "这条锁已经不在守任何东西"
+
+    body = _fun_body(src, "notificationsGranted")
+    for need in ("checkSelfPermission", "POST_NOTIFICATIONS", "PERMISSION_GRANTED",
+                 "areNotificationsEnabled"):
+        assert need in body, f"notificationsGranted 不再问 {need}：那一半的门没了"
+    assert "< 33" in body, "不再按 SDK_INT 分岔：API < 33 上问 POST_NOTIFICATIONS 会恒判失败"
+
+    ret = body[body.index("return"):]
+    assert "&&" in ret, "两份判据不再用 && 合并：任一边为真就发，等于另一白问"
+    assert "||" not in ret, "return 里用了 ||：总开关关了也放行，谎报的那一幕就回来了"
+    assert "areNotificationsEnabled" in ret, \
+        f"总开关那一半被挪出 return：{ret}"
+    # 读到 null 时默认放行（= 修之前的行为）这件事必须写在字面上：默认不发和默认发
+    # 是两种事故，而 getSystemService 在这里几乎不可能为 null，谁也不想靠回忆选边。
+    assert "?: true" in ret, "总开关读不到时的默认值漂了：默认放行还是默认不发，得写明"
+    assert "== null" not in ret, "把「开关读不到」当成结论：那是另一种静默放行"
+
+    receiver = src[src.index("class ReminderReceiver"):]
+    assert "checkSelfPermission" not in receiver, \
+        "接收器自己内联了权限判断：notificationsGranted 这个门被绕过去了，总开关那一半形同删除"
+    assert "ReminderChannels.notificationsGranted(" in receiver, \
+        "接收器不再走那扇共用的门：导出与设置页和到点这一支会各看一套口径"
 
 
 def test_the_apk_provider_imports_parcelfiledescriptor_from_the_real_package():
