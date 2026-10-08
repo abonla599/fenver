@@ -193,7 +193,7 @@ def test_the_digest_contract_is_the_same_shape_in_the_workflow_the_backend_and_t
     assert releases.APK_SHA256_RE.pattern == r"^APK-SHA256: ([0-9a-f]{64})$", \
         "后端解析的形状漂了，要和上面工作流写的那一份一起改"
 
-    plan = (repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
+    plan = (repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
             / "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
     assert '"apk_sha256"' in plan, "壳不再从透传 JSON 读这个字段了"
     assert "length() != 64" in plan, "壳认的长度不再是 64？"
@@ -494,16 +494,19 @@ def test_the_self_hosted_origin_is_accepted_only_in_the_shape_the_shell_trusts(o
     assert releases.self_hosted_apk_url(origin) == expect
 
 
-def test_the_self_hosted_apk_path_is_the_same_string_in_the_server_the_route_and_the_shell():
-    """三处同名锁：换出去的地址必须是壳写死的那条路径、也必须是真注册了的那条路由。
+def test_the_self_hosted_apk_path_is_the_same_string_in_the_server_the_route_and_the_client():
+    """三处同名锁：换出去的地址必须是客户端写死的那条路径、也必须是真注册了的那条路由。
 
     少一个字符的症状不是报错，是老壳对着一句"看起来是下载地址"的东西回 UNUSABLE。
+    2026-10-08 前这里对两个模块各数一遍（WebView 壳 + 原生）；壳退役后只剩一份，
+    但判据不降级：路径必须真的是文件里那一行常量，文件必须存在（空转的锁长得和守住时一样）。
     """
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     router = (root / "backend" / "app" / "web" / "web_router.py").read_text(encoding="utf-8")
     assert f'@app.get("{releases.SELF_APK_PATH}"' in router, "自家出口没真注册在这条路径上"
-    for shell in ("android", "android-native"):
-        java = (root / shell / "app" / "src" / "main" / "java" / "xyz" / "fenever" /
-                "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
-        assert f'SELF_APK_PATH = "{releases.SELF_APK_PATH}"' in java, f"{shell} 的那条路径对不上"
+    java_path = (root / "android-native" / "app" / "src" / "main" / "java" / "xyz" /
+                 "fenever" / "assistant" / "core" / "ReleasePlan.java")
+    assert java_path.is_file(), f"上线客户端的判断核不见了：{java_path}"
+    java = java_path.read_text(encoding="utf-8")
+    assert f'SELF_APK_PATH = "{releases.SELF_APK_PATH}"' in java, "客户端的那条路径对不上"

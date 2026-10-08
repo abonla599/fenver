@@ -5,7 +5,7 @@ Kotlin + Jetpack Compose 编写的 Android 客户端，与既有资产的关系�
 | 形态 | 位置 | 说明 |
 |------|------|------|
 | 浏览器网页版 | `backend/app/web/static` | 原样保留，不受本工程影响 |
-| WebView 壳 App | `android/` | 旧形态，保留可继续发布 |
+| WebView 壳 App | ~~`android/`~~ | 旧形态；2026-09-25 起不再发布，2026-10-08 源码从仓库删除 |
 | **混合 App（本工程）** | `android-native/` | 主体界面原生，仅"设置与管理"一页内嵌 WebView 复用 Web 前端 |
 
 ## 界面构成（主体原生）

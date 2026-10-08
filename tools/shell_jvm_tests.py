@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""在没有 Gradle、也没有 Android SDK 的机器上跑一遍壳的 core/ 单测。
+"""在没有 Gradle、也没有 Android SDK 的机器上跑一遍 android-native 的 core/ 单测。
 
-为什么要有这个文件：CI 那一条（.github/workflows/android-tests.yml）跑的是
+名字里的 "shell" 是历史名：2026-10-08 WebView 壳（android/）退役后，这个台架数的是
+真正出包那个模块（android-native）的 core/——那批类是纯 JVM 的判断核，改名要动的
+是它们源码注释里的路径，不值得。判据不变，变的只是目录。
+
+为什么要有这个文件：CI 那一条（.github/workflows/build-native-apk.yml）跑的是
 `gradle testDebugUnitTest`，从推上去到看见红要一两分钟，而且本机根本没有 Gradle
 ——以前每次改完 core/ 里那点纯逻辑，唯一的反馈来源就是"推上去赌一把"。这个台架
 把那段等待换成三秒钟的本地判据，代价是它只跑 core/：那里的类不 import android.*，
@@ -31,11 +35,11 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-MAIN_SRC = REPO / "android" / "app" / "src" / "main" / "java"
-TEST_SRC = REPO / "android" / "app" / "src" / "test" / "java"
+MAIN_SRC = REPO / "android-native" / "app" / "src" / "main" / "java"
+TEST_SRC = REPO / "android-native" / "app" / "src" / "test" / "java"
 CORE_PKG_DIR = MAIN_SRC / "xyz" / "fenever" / "assistant" / "core"
 TEST_PKG_DIR = TEST_SRC / "xyz" / "fenever" / "assistant" / "core"
-RELEASE = "17"          # 与 android/app/build.gradle 的 sourceCompatibility 同值
+RELEASE = "17"          # 与 android-native/app/build.gradle 的 sourceCompatibility 同值
 
 IS_WINDOWS = os.name == "nt"
 

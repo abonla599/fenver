@@ -1,7 +1,9 @@
 # backend/tests/test_v0340_native_prefs_lock.py
 """v0.34.0 判据 4 与 11 的原生半边：安卓那一侧哪些东西落在哪儿，源码级就能定生死。
 
-为什么单独一份文件、而且**不许挂回 test_android_shell.py**（判据 11 原文）：那份读的是
+为什么单独一份文件、而且**不许挂回那份读壳源码的锁文件**（判据 11 原文点名
+`test_android_shell.py`，2026-10-08 壳退役后它的上线半边住在
+`test_apk_release_discipline.py` 与 `test_native_android_discipline.py`）：老的那一份读的是
 `android/`（正在退役的 WebView 壳），壳一删它就跟着消失，本地存储纪律会从"盯错对象"
 变成"没人盯"。这里读的是发版管线真正出包的那一个：`android-native/app/src/main`。
 
@@ -43,8 +45,9 @@ pytestmark = pytest.mark.skipif(
 def _strip_kt_comments(src: str) -> str:
     """去掉 `//` 与 `/* */`，但【尊重字符串字面量】。
 
-    自己实现而不 import test_android_shell 的同名函数：那条依赖就是判据 11 点名要拆掉
-    的东西（壳文件会随 `android/` 一起消失）。算法同源，两处注释掉的都是同一件事。
+    自己实现而不 import 那把共用尺子（test_apk_release_discipline 的同名函数）：判据 11
+    点名要拆掉的正是那条依赖（当时它住在壳的锁文件里，会随 `android/` 一起消失）。
+    算法同源，两处注释掉的都是同一件事。
 
     不尊重字符串就毁在自家门口：`baseUrl` 校验里的 "https://" 会被当注释整段切掉，
     于是拿剥完的源码去数 URL 形状的锁会永远读不到、永远绿着。

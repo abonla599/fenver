@@ -315,18 +315,20 @@ public class ReleasePlanTest {
 
     @Test
     public void theConstantMatchesTheRealPinnedDownloadAddress() throws Exception {
-        // SELF_APK_PATH 不是装饰：它必须恰好是 build.gradle 里钉死的 UPDATE_APK_URL 的路径，
-        // 且与 APP_URL 同 host。漂移的样子是"规则放行一个根本没人监听的地址"。
-        // backend/tests/test_android_shell.py 从后端数那三个地址的同源；这条从壳这边数
-        // 白名单常量与钉死地址的一致——两处各数各的，合起来没有缝。
+        // SELF_APK_PATH 不是装饰：它必须恰好是 native 真拼得出来的那个下载地址的路径。
+        // native 不再往清单里钉第三个地址——问与取都从 Prefs.baseUrl 现拼，本机钉死的
+        // 只有 DEFAULT_BASE_URL 这一个默认出口。所以这条接缝检查读的就是那一个字段：
+        // 漂移的样子与壳时代同一种——"规则放行一个根本没人监听的地址"，而且不报错。
+        // backend/tests/test_apk_release_discipline.py 从后端数同源；这条从客户端这边数
+        // 白名单常量与钉死默认值的一致——两处各数各的，合起来没有缝。
         //
-        // 找文件不赌工作目录：JVM 台架从仓库根跑（"android/app/build.gradle" 命中），
-        // Gradle 的 testDebugUnitTest 在模块目录 android/app 里跑（"build.gradle" 命中）——
-        // CI 第一次红就红在只认了前一种。候选逐个试，用【内容】认货：没有那两个
-        // buildConfigField 的文件哪怕同名也不算找到，免得 root 的 android/build.gradle 混进来。
+        // 找文件不赌工作目录：JVM 台架从仓库根跑（"android-native/app/build.gradle" 命中），
+        // Gradle 的 testDebugUnitTest 在模块目录 android-native/app 里跑（"build.gradle" 命中）
+        // ——当年 CI 第一次红就红在只认了前一种。候选逐个试，用【内容】认货：没有那个
+        // buildConfigField 的文件哪怕同名也不算找到，免得 root 的 android-native/build.gradle 混进来。
         StringBuilder sb = new StringBuilder();
-        String[] candidates = {"android/app/build.gradle", "build.gradle",
-                "../android/app/build.gradle"};
+        String[] candidates = {"android-native/app/build.gradle", "build.gradle",
+                "../android-native/app/build.gradle"};
         for (String cand : candidates) {
             java.io.File f = new java.io.File(cand);
             if (!f.isFile()) {
@@ -338,29 +340,28 @@ public class ReleasePlanTest {
                 String line;
                 while ((line = r.readLine()) != null) text.append(line).append('\n');
             }
-            if (text.indexOf("APP_URL") >= 0 && text.indexOf("UPDATE_APK_URL") >= 0) {
+            if (text.indexOf("DEFAULT_BASE_URL") >= 0) {
                 sb.append(text);
                 break;
             }
         }
-        assertTrue("在 " + java.util.Arrays.toString(candidates) + " 里没找到钉死地址所在的 build.gradle（cwd="
+        assertTrue("在 " + java.util.Arrays.toString(candidates) + " 里没找到钉死默认出口所在的 build.gradle（cwd="
                 + new java.io.File("").getAbsolutePath() + "）", sb.length() > 0);
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                "buildConfigField\\s+\"String\",\\s+\"(APP_URL|UPDATE_APK_URL)\",\\s+\"\\\\\"(.*?)\\\\\"\"")
+                "buildConfigField\\s+\"String\",\\s+\"DEFAULT_BASE_URL\",\\s+\"\\\\\"(.*?)\\\\\"\"")
                 .matcher(sb);
-        java.util.Map<String, String> pinned = new java.util.LinkedHashMap<>();
-        while (m.find()) pinned.put(m.group(1), m.group(2));
-        assertEquals("build.gradle 里的钉死地址少了字段：" + pinned.keySet(),
-                2, pinned.size());
-        java.net.URL apk = new java.net.URL(pinned.get("UPDATE_APK_URL"));
-        java.net.URL app = new java.net.URL(pinned.get("APP_URL"));
-        assertEquals("UPDATE_APK_URL 的路径不再是白名单常量那一个",
-                ReleasePlan.SELF_APK_PATH, apk.getPath());
-        assertTrue("白名单的第二条与钉死地址不同源",
-                apk.getHost().equalsIgnoreCase(app.getHost()));
-        // 拿钉死的真值走一遍完整判定：真链路必须被放行，这是规则与现实的接缝检查
-        assertTrue(ReleasePlan.downloadUrlIsTrusted(pinned.get("UPDATE_APK_URL"),
-                "ai-assistant-native-0.15.apk", pinned.get("APP_URL")));
+        assertTrue("build.gradle 里没有 DEFAULT_BASE_URL 这个 buildConfigField：" +
+                "native 的默认出口不再由 gradle 钉死，这条锁要跟着换读的地方", m.find());
+        String base = m.group(1);
+        java.net.URL apk = new java.net.URL(base + ReleasePlan.SELF_APK_PATH);
+        assertEquals("默认出口拼上白名单常量之后，路径不再是自家代取端点那一个",
+                "/site/android.apk", apk.getPath());
+        assertTrue("默认出口是 http：native 不开 cleartext，钉死的值必须是 https",
+                "https".equalsIgnoreCase(apk.getProtocol()));
+        // 拿钉死的真值走一遍完整判定：Updater.apkUrl() 那个形状（baseUrl + SELF_APK_PATH）
+        // 必须被自家白名单放行——不然换域名那天，"检查更新"永远是 UNUSABLE。
+        assertTrue(ReleasePlan.downloadUrlIsTrusted(base + ReleasePlan.SELF_APK_PATH,
+                ReleasePlan.assetName("0.15"), base));
     }
 
     // ---------- 校验值：形状不对等于没有 ----------

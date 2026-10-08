@@ -2760,7 +2760,7 @@ function renderAboutRows() {
   // 「关于」卡片里的最后一行，另一颗只是 display:none、:last-child 看不见它，
   // 所以要手动补；现在它挪到了「版本」下面，上下都有行，分隔线本来就该在。
 
-  // 版本这一行：壳在时报壳的 versionName（唯一来源 android/app/build.gradle），
+  // 版本这一行：旧壳在时报旧壳的 versionName（唯一来源是出包那份 gradle），
   // 壳不在或旧壳不报时报**服务端**的构建戳（唯一来源是打包时的 git tag）。
   // 两个都不许写死在前端：抄一份进来，下次升版必然有一处是旧的，而且它显示得理直气壮。
   const box = $("versionVal");
@@ -2843,7 +2843,7 @@ function markUpdateSheetShown() {
   catch (e) { /* 写不进去只是"今天可能多弹一次"，不值得为它打断更新提示本身 */ }
 }
 
-// 壳报的安装包版本（唯一来源 android/app/build.gradle）。浏览器与不报版本的老壳 → 空串。
+// 旧壳报的安装包版本（唯一来源是打那个 APK 时那份 gradle，源码已随壳退役）。浏览器与不报版本的老壳 → 空串。
 function shellVersion() {
   if (!SHELL.present) return "";
   const caps = SHELL.capabilities() || {};
