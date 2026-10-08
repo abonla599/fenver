@@ -216,7 +216,7 @@ def test_ci_runs_this_gate():
 
     判据从"找同时含 run: 与 pytest 的那一行"改成"按 YAML 取出跑 pytest 的那一步的
     shell 正文"。上一版那把尺子在命令被写成 `run: |` + 缩进块之后读到的是空清单
-    （把失败抄成 annotation 就得那么写，见 test_android_shell.py 里那条），
+    （把失败抄成 annotation 就得那么写，见 test_apk_release_discipline.py 里那条），
     于是这条锁红成"形状变了：[]"——红是对的（它确实该跟着改），但红话说得不像人话，
     下一个人会以为是自己数错了行。
     """

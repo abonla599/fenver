@@ -1,7 +1,7 @@
 name: Build Native Android APK
 
-# 原生（混合）客户端专用构建：与 build-apk.yml 同一策略——
-# 本机不装 Android SDK，编译验证完全交给 GitHub runner。
+# 原生（混合）客户端专用构建：本机不装 Android SDK，编译验证完全交给 GitHub runner。
+# 2026-10-08 起它也是唯一的安卓出包流水线——WebView 壳与它的两条流水线一起退役。
 on:
   workflow_dispatch:
   push:
@@ -29,6 +29,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
+
+      # 先测后包：core/ 那批类不 import android.*，这一段是纯 JVM 真跑（不引 Robolectric）。
+      # 顺序有意——单测挂了就没必要再花两分钟出一个不该存在的包。2026-10-08 这一段从
+      # android-tests.yml 搬过来：那份流水线随 WebView 壳一起退役，判据跟着判断核走。
+      - name: Unit tests (pure JVM)
+        run: gradle -p android-native --no-daemon --stacktrace testDebugUnitTest
 
       - name: Assemble debug APK
         # 失败时 Gradle 的 `e:` 行原本只进作业日志，而日志要登录才能读——

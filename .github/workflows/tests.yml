@@ -36,7 +36,9 @@ jobs:
           # 命令，而 tee 总是成功）——但"把 ::error:: 发出去"不该依赖"管道末尾恰好是个
           # 会成功的命令"这种巧合：哪天有人把 tee 拿掉、或改成 `pytest ...; rc=$?`，
           # -e 就会抢在 annotation 之前中止整步。发布流那三步第一次就是这么栽的。
-          # 也就是说：撤掉下面这行，本仓那条锁今天不会红（判据见 test_android_shell.py 的说明）。
+          # 也就是说：撤掉下面这行，本仓那条锁今天不会红（判据见
+          # backend/tests/test_apk_release_discipline.py 的 test_the_ci_test_step_names_the_lock_that_went_red；
+          # 2026-10-08 从前那条住在 test_android_shell.py，那个文件随 WebView 壳一起退役，锁搬到了这里）。
           set +e
           python -m pytest backend/tests/ -q --tb=short 2>&1 | tee "$RUNNER_TEMP/pytest.log"
           rc=${PIPESTATUS[0]}

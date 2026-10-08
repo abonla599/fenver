@@ -5,9 +5,10 @@
   「每次我发送问题之后键盘自动收起，这样我能少一个收起键盘的动作，直接看到输出结果。」
   「软件的图标也可以改一下了，因为图标太普通了，没有任何我这个软件的元素。」
 
-读法沿用本仓库判例：CI 里没有 Kotlin 测试运行器（build-native-apk.yml 只跑
-assembleDebug），所以前两条把 Kotlin 源码当文本读；图标那两条读 PNG 文件头与
-res/ 下的 XML —— 都是"改坏了当场红"而不是"装到手机上才发现"。
+读法沿用本仓库判例：本机没有 Gradle 也没有 Android SDK，所以前两条把 Kotlin 源码当文本读
+（CI 那条 `build-native-apk.yml` 从今天起确实会跑 `testDebugUnitTest`，但那是推上去之后的事，
+本机改一行等两分钟不是反馈回路；纯 JVM 判断核那一段由 tools/shell_jvm_tests.py 三秒出结果）。
+图标那两条读 PNG 文件头与 res/ 下的 XML —— 都是"改坏了当场红"而不是"装到手机上才发现"。
 """
 import re
 import struct

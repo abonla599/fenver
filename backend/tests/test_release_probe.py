@@ -263,7 +263,7 @@ def _java_compare_cases():
     from pathlib import Path
 
     path = (Path(releases.__file__).resolve().parents[3]
-            / "android" / "app" / "src" / "test" / "java" / "xyz" / "fenever"
+            / "android-native" / "app" / "src" / "test" / "java" / "xyz" / "fenever"
             / "assistant" / "core" / "ReleasePlanTest.java")
     text = path.read_text(encoding="utf-8")
     cases = []
@@ -498,7 +498,7 @@ def test_the_asset_name_is_the_one_the_workflow_publishes():
     assert releases._ASSET_NAME_RE.match("totally-other-0.24.0.apk") is None, \
         "形状正则放宽到任意前缀了：它唯一的活儿就是只认这两个名字（防响应头注入）"
 
-    plan = (repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
+    plan = (repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever"
             / "assistant" / "core" / "ReleasePlan.java").read_text(encoding="utf-8")
     shell = tuple(re.findall(r'String (?:APK_PREFIX|LEGACY_APK_PREFIX) = "([^"]+)"', plan))
     assert shell == ASSET_PAIR, f"壳认的两个前缀与发布/后端不是同一对：{shell}"
@@ -544,34 +544,50 @@ def test_a_release_with_only_the_legacy_name_still_resolves():
     assert releases._pick_asset(only_old, "0.24.0") is None
 
 
-def test_the_native_shell_ships_byte_identical_core_classes():
-    """android-native 复用同一份纯 JVM 判断核：两边必须是逐字节相同的文件。
+def test_the_jvm_bench_and_the_shipped_core_are_one_and_the_same_copy():
+    """纯 JVM 判断核只剩一份：台架编译的那批 == 出包模块里的那批，而且每个类都有用例。
 
-    两份拷贝一定漂（digest 契约那条注释说的同一件事），所以这里不是"内容大致一致"，
-    是 sha256 相等。native 没有本地 JVM 台架可跑（tools/shell_jvm_tests.py 数的是
-    android/ 那一份），台架测试对这份拷贝**同样成立**——前提是它真的一个字节都没改。
+    从前这条是 sha256 逐字节相等，因为 core/ 在 `android/` 与 `android-native/` 各躺一份，
+    两份拷贝一定漂（digest 契约那条注释说的同一件事）。2026-10-08 WebView 壳退役之后
+    "两边对齐"没有对象了，于是把它真正在守的那件事钉死：**本机三秒台架跑的就是发版
+    那个模块里的源码**——台架对这份拷贝成立，不需要"前提是它一个字节没改"。
+
+    判据从台架脚本自己嘴里读（它自己数 CORE_PKG_DIR / TEST_PKG_DIR），所以脚本的目录
+    写错、改名、或者只改一边，都会当场红：目录不存在时 glob 回空集，而空集不等于清单。
     """
-    import hashlib
+    import importlib.util
     from pathlib import Path
 
     repo = Path(releases.__file__).resolve().parents[3]
-    shared = ("MiniJson.java", "ReleasePlan.java", "ApkDigest.java", "ApkDownloader.java",
-              "ExportName.java", "ExportRedeem.java", "ScheduleBoard.java")
-    for name in shared:
-        old = repo / "android" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
-            / "assistant" / "core" / name
-        new = repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" \
-            / "fenever" / "assistant" / "core" / name
-        assert old.is_file() and new.is_file(), f"共享核心类缺文件：{name}"
-        assert hashlib.sha256(old.read_bytes()).hexdigest() == \
-               hashlib.sha256(new.read_bytes()).hexdigest(), \
-            f"android-native 的 {name} 与 android/ 那份漂移了——要么同步字节，要么别拷"
+    spec = importlib.util.spec_from_file_location(
+        "shell_jvm_bench", repo / "tools" / "shell_jvm_tests.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)                      # 只有常量与函数，main() 在 guard 里
+
+    shipped = sorted(p.name for p in
+                     (repo / "android-native" / "app" / "src" / "main" / "java" / "xyz"
+                      / "fenever" / "assistant" / "core").glob("*.java"))
+    assert shipped == ["ApkDigest.java", "ApkDownloader.java", "ExportName.java",
+                       "ExportRedeem.java", "MiniJson.java", "ReleasePlan.java",
+                       "ScheduleBoard.java"], \
+        f"上线模块的判断核与名单对不上（现在是 {shipped}）：先确认谁被加/删，再改这条"
+
+    benched = sorted(p.name for p in bench.CORE_PKG_DIR.glob("*.java"))
+    assert benched == shipped, (
+        f"台架编译的 core（{benched}）与出包模块里的（{shipped}）不是同一批——"
+        "台架绿不再等于上线代码绿")
+
+    tested = sorted(p.stem[:-len("Test")] for p in bench.TEST_PKG_DIR.glob("*Test.java"))
+    assert tested == [n[:-len(".java")] for n in shipped], (
+        f"判断核与用例名单不再一一对应（类 {shipped} / 用例 {tested}）："
+        "要么新增的类没人测，要么测的文件跟着壳一起没了")
 
 
 def test_the_native_shell_never_talks_to_github_directly():
     """v0.23 T1.8 起，native 壳与 WebView 壳同一条纪律：源码里不许出现 api.github.com。
 
-    Android 壳那份锁在 test_android_shell.py（"the_shell_never_talks_to_github_directly"）；
+    WebView 壳那份同源锁（test_android_shell 的 "the_shell_never_talks_to_github_directly"）
+    随 2026-10-08 壳退役；原生这条从那天起是唯一一份，判据没变。
     native 壳换的是同一层皮——它上一次「检查更新」还是直接 GET releases/latest，
     2026-09-23 的迅雷劫持链路在 native 里原样重演了一遍，只是这次连下载都没回自家。
     现在问与取都从 Prefs.baseUrl 现拼（/v1/update/info + /site/android.apk），
@@ -581,7 +597,7 @@ def test_the_native_shell_never_talks_to_github_directly():
     且注释剥完才算数（这里唯一的合法出现是 Api.kt 解释"为什么封死"的那行注释）。
     """
     from pathlib import Path
-    from tests.test_android_shell import _code   # 剥注释的尺子只有一份，不抄第二遍
+    from tests.test_apk_release_discipline import _code   # 剥注释的尺子只有一份，不抄第二遍
 
     src = Path(releases.__file__).resolve().parents[3] / "android-native" \
         / "app" / "src" / "main" / "java"
@@ -624,7 +640,7 @@ def _decode_java_literal(s):
 
 def _java_exportname_cases():
     """从 ExportNameTest.java 里把 safeFilename 的用例行读出来（同 _java_compare_cases 的招）。"""
-    path = (_repo_root() / "android" / "app" / "src" / "test" / "java" / "xyz"
+    path = (_repo_root() / "android-native" / "app" / "src" / "test" / "java" / "xyz"
             / "fenever" / "assistant" / "core" / "ExportNameTest.java")
     text = path.read_text(encoding="utf-8")
     pairs = [(_decode_java_literal(a), _decode_java_literal(b)) for b, a in
@@ -656,7 +672,7 @@ def test_exportname_mirrors_the_python_rules_verbatim():
     from pathlib import Path
     from app.session import export_store
 
-    java = (_repo_root() / "android" / "app" / "src" / "main" / "java" / "xyz"
+    java = (_repo_root() / "android-native" / "app" / "src" / "main" / "java" / "xyz"
             / "fenever" / "assistant" / "core" / "ExportName.java").read_text(encoding="utf-8")
     py = Path(export_store.__file__).read_text(encoding="utf-8")
 
@@ -688,7 +704,7 @@ def test_the_native_export_row_goes_through_the_gates():
     持有兑换权，也拿不到"落系统 Downloads + 已下载通知"。这条锁同时钉住：
     票据不经浏览器外流、兑换只走 DownloadManager、空会话文案与网页逐字同值。
     """
-    from tests.test_android_shell import _code
+    from tests.test_apk_release_discipline import _code
 
     repo = _repo_root()
     ui = repo / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever" \
@@ -728,7 +744,7 @@ def test_expired_ticket_detail_is_the_same_sentence_on_both_sides():
     from pathlib import Path
     import app.main as main_mod
 
-    java = (_repo_root() / "android" / "app" / "src" / "main" / "java" / "xyz"
+    java = (_repo_root() / "android-native" / "app" / "src" / "main" / "java" / "xyz"
             / "fenever" / "assistant" / "core" / "ExportRedeem.java").read_text(encoding="utf-8")
     m = re.search(r'TICKET_INVALID_DETAIL\s*=\s*"([^"]+)"', java)
     assert m, "Java 侧的过期判据字面量不见了"
@@ -744,7 +760,7 @@ def test_the_expired_ticket_gets_exactly_one_reissue():
     两次签发之间没有别的凭据面可钻：预算 set 加过一次就不再进重签分支。
     """
     from pathlib import Path
-    from tests.test_android_shell import _code
+    from tests.test_apk_release_discipline import _code
 
     tracker = (_repo_root() / "android-native" / "app" / "src" / "main" / "java"
                / "xyz" / "fenever" / "assistant" / "nativeapp" / "export"
@@ -770,7 +786,7 @@ def test_the_permission_denied_fallback_names_the_private_path():
     （fetchTicketBytes 不带 Authorization 且自带形状门）。
     """
     from pathlib import Path
-    from tests.test_android_shell import _code
+    from tests.test_apk_release_discipline import _code
 
     ui = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
                / "xyz" / "fenever" / "assistant" / "nativeapp" / "ui" / "SettingsUi.kt")

@@ -13,8 +13,9 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 
-/* 设备侧提醒：整套语义从旧壳（android/app 的 ReminderStore/ReminderScheduler/
- * ReminderReceiver）逐条移植——服务端没有"提醒"这件事，它只活在这台手机上。
+/* 设备侧提醒：整套语义从旧 WebView 壳的 ReminderStore/ReminderScheduler/
+ * ReminderReceiver 逐条移植（那份源码已于 2026-10-08 从仓库删除，形态见 git 历史）——
+ * 服务端没有"提醒"这件事，它只活在这台手机上。
  * - at 是 epoch 毫秒，由界面用本机时区算好交进来，这里不做任何日历运算；
  * - once 响过即删；daily/weekly 推进到下一个【未来】时刻，不补发错过的轮次；
  * - 通知权限没给时记一笔 missed 但照样推进重排——否则会变成"列表里看得见、

@@ -31,8 +31,7 @@ Desktop packaging (built via PyInstaller):
     permitting distribution of bundled applications; see
     https://pyinstaller.org for the exact terms)
 
-Android client (installed via Gradle; see android-native/app/build.gradle.kts
-and android/app/build.gradle):
+Android client (installed via Gradle; see android-native/app/build.gradle):
   - androidx.* (Jetpack Compose, core, activity, etc.)   (Apache-2.0)
   - google material components                            (Apache-2.0)
   - okhttp, okio                                          (Apache-2.0)

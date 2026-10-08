@@ -218,14 +218,33 @@ def test_the_temporary_file_is_not_world_readable_either(tmp_path):
     assert captured["mode"] == 0o600, oct(captured["mode"])
 
 
-# ---------- 5. 两个壳都不许被备份导出 ----------
+# ---------- 5. 每个安卓模块都不许被备份导出 ----------
 
-@pytest.mark.parametrize("manifest", [
-    REPO_ROOT / "android" / "app" / "src" / "main" / "AndroidManifest.xml",
-    REPO_ROOT / "android-native" / "app" / "src" / "main" / "AndroidManifest.xml",
-])
+MANIFESTS = sorted(REPO_ROOT.glob("android*/app/src/main/AndroidManifest.xml"))
+
+
+def test_the_backup_lock_actually_scans_a_manifest():
+    """正对照必须是一条独立的锁：parametrize 拿到空列表时 pytest 记的是 **skip**，不是 fail。
+
+    2026-10-08 变异验证实测：把上面的 glob 改成 `androidZZZ*/...`，整条
+    test_no_shell_leaves_backup_enabled 变成 "1 skipped" 而不是红——空参数集压根不产生
+    用例，写在函数体里的那句 `assert MANIFESTS` 永远轮不到执行。"守住了"和"什么都没扫到"
+    在同一份报告里长得一模一样，正是这条锁要防的事，所以判据放在用例之外。
+    """
+    assert MANIFESTS, "一个 AndroidManifest.xml 都没扫到：上面那条备份锁已经不在守任何东西"
+    names = sorted(p.relative_to(REPO_ROOT).parts[0] for p in MANIFESTS)
+    assert "android-native" in names, f"上线模块没被这条锁扫到：{names}"
+
+
+@pytest.mark.parametrize("manifest", MANIFESTS)
 def test_no_shell_leaves_backup_enabled(manifest):
-    """allowBackup 默认 true：一次 `adb backup` 或云备份就能把会话 Cookie 与令牌捞走。"""
+    """allowBackup 默认 true：一次 `adb backup` 或云备份就能把会话 Cookie 与令牌捞走。
+
+    判据从仓库里现数模块（glob 到几个钉几个），不写死名单：2026-10-08 WebView 壳退役
+    之后名单少了一个，写死的清单要么指着不存在的文件红（看起来像环境问题），要么被人
+    顺手删掉整条；现数的方式两头都不占，而且新增模块自动被覆盖。
+    空扫的代价由上面那条正对照负责，这里只判每一份清单本身。
+    """
     assert manifest.exists(), manifest
     assert 'android:allowBackup="false"' in manifest.read_text(encoding="utf-8")
 

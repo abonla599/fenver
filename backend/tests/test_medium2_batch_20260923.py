@@ -15,16 +15,12 @@
 import re
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.agents import task_store as ts
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MAIN_ACTIVITY = REPO_ROOT / "android" / "app" / "src" / "main" / "java" / \
-    "xyz" / "fenever" / "assistant" / "MainActivity.java"
 
 
 @pytest.fixture(autouse=True)
@@ -311,33 +307,9 @@ def test_tools_outside_the_limit_table_are_not_throttled(fake_code_runner):
 
 
 # ---------- #16 Android 壳：grant 只回白名单内的资源类型 ----------
-
-# 复用既有的 Java 注释剥离器（尊重字符串字面量，两种注释都处理）。自带一份只切
-# // 的反而会误报：解释这个白名单的 Javadoc 里就抄着旧写法"原来两处都是
-# request.grant(request.getResources())"——注释里的符号不该算数。
-from .test_android_shell import _strip_java_comments
-
-
-def test_webview_grants_only_the_whitelisted_resource_type():
-    src = _strip_java_comments(MAIN_ACTIVITY.read_text(encoding="utf-8"))
-
-    offenders = re.findall(r"\.grant\(\s*request\.getResources\(\)\s*\)", src)
-    assert not offenders, "网页要什么就批什么的透传又回来了"
-
-    grants = re.findall(r"\.grant\(([^)]*)\)", src)
-    assert grants, "找不到任何 grant，测试本身失效了"
-    for arg in grants:
-        assert "allowed" in arg, f"grant 没有走白名单过滤后的数组：grant({arg})"
-
-    assert "RESOURCE_VIDEO_CAPTURE.equals" in src, "白名单判据不再是摄像头类型"
-    deny = re.findall(r"\.deny\(\)", src)
-    assert len(deny) >= 2, "过滤为空 / 用户拒绝授权两条出口都必须 deny，网页在等回话"
-
-
-def test_runtime_permission_grant_path_also_filters():
-    """onRequestPermissionsResult 里用户点了"允许"之后，也只回白名单内的类型。"""
-    src = _strip_java_comments(MAIN_ACTIVITY.read_text(encoding="utf-8"))
-    idx = src.index("onRequestPermissionsResult")
-    tail = src[idx:idx + src[idx:].index("onActivityResult")]
-    assert "allowedResources(request)" in tail, "系统授权回来后改回透传了"
-    assert "grant(request.getResources())" not in tail
+#
+# 这一节的两条形状锁（透传守卫与 onRequestPermissionsResult 的二次过滤）跟着
+# WebView 壳一起退役于 2026-10-08：判据读的是 android/.../MainActivity.java 里那个
+# WebChromeClient.onPermissionRequest，而原生模块不嵌 WebView——录音走的是运行时
+# RECORD_AUDIO 权限（VoiceUi.kt），没有"网页要什么就批什么"这一格可守。
+# 已登记的退役清单在 tests/test_native_android_discipline.py 文件头。

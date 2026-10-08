@@ -2,14 +2,16 @@ name: Release Android APK
 
 # 打 tag 就出公开 Release：`git push origin v0.10` 之后，任何人都能用固定链接装包。
 #
-# 为什么不并进 build-apk.yml：那个文件带 `push.paths` 过滤（只在 android/** 变化时
+# 为什么不并进另一条出包流水线：那条带 `push.paths` 过滤（只在客户端源码变化时
 # 出 artifact）。把 tags 和 paths 写在同一个 push 触发器里，paths 会不会把 tag 推送
 # 一起挡掉，取决于 GitHub 的过滤语义——这种"能不能触发"的事不该靠猜，所以分开写。
 # 两个文件重复的是二十来行 CI 装配步骤，不是产品逻辑。
 #
 # Release 是公开的（本仓是公开仓库），这正是想要的效果。
 # 2026-09-25 起发的是**原生安卓客户端**（android-native/，Compose 全原生实现）：
-# 用户决定推送版只发安卓版；旧的 WebView 壳（android/）退役不再发布，
+# 用户决定推送版只发安卓版；旧的 WebView 壳（android/）退役不再发布，2026-10-08
+# 连源码一起删除（出包与测试流水线随之退役，签名纪律的锁搬进
+# backend/tests/test_apk_release_discipline.py）。
 # 浏览器网页版不受任何影响，照常从 https://ai.fenever.xyz/app/ 访问。
 on:
   push:

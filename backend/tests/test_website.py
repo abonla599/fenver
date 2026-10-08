@@ -154,7 +154,7 @@ def test_the_alarm_permission_claim_matches_the_manifest():
     也能让这条锁悄悄绿掉。
     """
     manifest = (Path(__file__).resolve().parents[2]
-                / "android" / "app" / "src" / "main" / "AndroidManifest.xml")
+                / "android-native" / "app" / "src" / "main" / "AndroidManifest.xml")
     declared = "SCHEDULE_EXACT_ALARM" in manifest.read_text(encoding="utf-8")
     page = _page()
     denial = re.search(r"不(获取|申请)(精确|精准)闹钟", page)
