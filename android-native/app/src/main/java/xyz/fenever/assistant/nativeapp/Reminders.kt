@@ -172,11 +172,22 @@ object ReminderChannels {
         }
     }
 
-    fun notificationsGranted(ctx: Context): Boolean =
-        Build.VERSION.SDK_INT < 33 ||
+    /** 两件事都要问：运行时权限（Android 13+）与**通知总开关**。
+     *
+     * 只问权限的那一份会谎报：总开关被关掉时权限仍然是 GRANTED，于是这里照旧放行、
+     * notify() 被系统静默吞掉，而 onReceive 已经记了 markFired——屏幕上"上次发出 xx:xx"
+     * 因此说的是件没发生过的事，用户从此不信这条记录（旧壳的
+     * PermissionStatus.notificationsGranted 一直是两个都问的，搬过来时少了一半）。
+     * areNotificationsEnabled 自 API 24 起就有，而 minSdk 就是 24，不必按版本分岔。
+     */
+    fun notificationsGranted(ctx: Context): Boolean {
+        val permission = Build.VERSION.SDK_INT < 33 ||
             androidx.core.content.ContextCompat.checkSelfPermission(ctx,
                 android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
+        val manager = ctx.getSystemService(NotificationManager::class.java)
+        return permission && (manager?.areNotificationsEnabled ?: true)
+    }
 }
 
 class ReminderReceiver : BroadcastReceiver() {
