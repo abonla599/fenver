@@ -68,6 +68,41 @@ SESSION_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 # 令牌也永不过期"。详见 _token_expired 的注释。
 LEGACY_TOKEN_GRACE_SECONDS = 30 * 24 * 3600
 
+# ---------- v0.34.0：三段时钟与续命凭据 ----------
+# 一句话验收（PRD 20261007 第一节）：一直用的人永远不需要再输口令，连续 400 天
+# 不打开的人必须重新输。三段各管一件事，少任何一段都退回原来的病：
+# 只有滑动期 → 一枚偷到的令牌可以无限续；只有绝对上限 → 正常人半年被登出一次。
+
+# 滑动期之外的**会话绝对上限**：从 session_anchor 起算， renew 不许把它往后推。
+SESSION_TOKEN_ABSOLUTE_CAP_SECONDS = 180 * 24 * 3600
+
+# 剩多少才允许 renew。剩余多于这个值时 /v1/auth/renew 直接 401：客户端不许把续期
+# 当成心跳来打（判据 1 的负向锁钉的就是"改成每次都续"必须红）。
+RENEW_ALLOWED_BELOW_SECONDS = 7 * 24 * 3600
+
+# 轮换式续期唯一一处有意的让步：renew 签出新令牌后，老 digest 在这个窗口内还能过
+# resolve()——否则同时在途的 SSE 回答会当场断。常量，**不开放配置**（PRD 第九节
+# 定稿 2）：可配置的安全让步迟早被调成 0 或被调成一天，两个方向都是事故。
+# 只对 renew 生效：改密、退出、封号的吊销一律立即（判据 6）。
+TOKEN_DRAIN_WINDOW_SECONDS = 60
+
+# 续命凭据的不活动上限：连续这么久没用它换过会话，就作废（reauth 回 410）。
+DEVICE_SECRET_INACTIVE_SECONDS = 400 * 24 * 3600
+
+# reauth 的失败措辞只有一句：secret 不对、没这个 secret、所属账号被封或改过密，
+# 全走同一句、同一格预算（与 _LOGIN_FAIL 同一条理由——免凭据端点不许是名单）。
+REAUTH_FAIL = "续命凭据不正确"
+
+# renew 的四个拒绝条件同一句话（PRD 第三节"全部 401，且不签发任何东西"）。
+# 这句话不区分"令牌不对"与"还早不用续"，是有意的：后者对已经出示会话令牌的调用方
+# 本可以说实话，但同一个端点上多一种措辞就多一条"这枚令牌是什么状态"的可问信道，
+# 而客户端要的行为完全一样（继续用老令牌，或去登录）。
+RENEW_FAIL = "现在不能续期，请继续使用或重新登录"
+
+# 32 字节强随机：与会话令牌同一档熵，所以同样只存 sha256 摘要（hash_secret 复用
+# hash_token 的形状），明文永不同库。
+DEVICE_SECRET_BYTES = 32
+
 # bootstrap 管理员口令的 env 名：authz 与 main 共用这一个，别再各写一份字面量
 BOOTSTRAP_TOKEN_ENV = "ACCESS_TOKEN"
 
@@ -105,6 +140,26 @@ def _now() -> str:
 
 def hash_token(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_secret(secret: str) -> str:
+    """续命凭据的摘要：与会话令牌同一套哈希纪律（同一前缀、同一函数形状）。
+
+    刻意与 hash_token 是两个名字而不是共用一个调用点：受众隔离要靠读代码也看得出
+    "这条路径算的是哪一类凭据"，而 device_secret 的摘要**只**进 device_secrets 表。
+    """
+    return hash_token(secret)
+
+
+def new_device_secret() -> str:
+    """32 字节强随机、base64url 给客户端（PRD 第九节定稿 1）。
+
+    用 urlsafe_b64encode 而不是 token_urlsafe：前者长度可预测（43 字符去掉填充），
+    客户端与日志里都不会出现 "+/"——会话令牌那边用 token_urlsafe 是历史形状，
+    新凭据不必跟着，两种编码互不相干也不会被拿错。
+    """
+    return base64.urlsafe_b64encode(secrets.token_bytes(DEVICE_SECRET_BYTES)) \
+        .decode("ascii").rstrip("=")
 
 
 def _prehash(password: str) -> bytes:
@@ -185,6 +240,17 @@ def _token_matches(stored, digest: str) -> bool:
     return hmac.compare_digest(_as_hash_bytes(stored), _as_hash_bytes(digest))
 
 
+def session_id(user_id: str, anchor: float) -> str:
+    """一段会话的对账编号（PRD 第三节响应里的 `session_id`）。
+
+    刻意不是新造的一套标识：它就是"这个人 + 这个锚点"的一个不可逆短摘要。客户端
+    拿它只做一件事——判断"我手里这枚令牌和服务器认为的那段会话是不是同一段"，
+    所以它**不是凭据**：既不在任何鉴权路径上被查询，也不许诺唯一性。
+    """
+    raw = ("%s|%.6f" % (user_id, anchor)).encode("utf-8")
+    return "s_" + hashlib.sha256(raw).hexdigest()[:12]
+
+
 def _stale_for_flush(stored, moment: datetime) -> bool:
     """时间戳缺失或被人改坏时按"该落盘"处理：宁可多写一次，不可丢记录。"""
     try:
@@ -198,6 +264,12 @@ class Principal:
     user_id: str
     username: str
     role: str      # "user" | "admin"
+    # v0.34.0：这枚会话还剩几秒（滑动期与绝对上限里更近的那个）。
+    # 默认 None 是**语义**而不是 convenience：bootstrap 管理员口令与 Cookie 之外的
+    # 非会话凭据没有"到期"这回事，中间件据此**不发** X-Token-Expires-In，
+    # 客户端就不会拿一个不存在的时间去触发 renew。
+    # 放在 Principal 上而不是让中间件再解一次：鉴权热路径只该做一次哈希与一次查表。
+    expires_in: float | None = None
 
 
 class AuthError(Exception):
@@ -219,7 +291,7 @@ class AuthError(Exception):
     """
 
     def __init__(self, reason: str, *, taken: bool = False, charge: bool = False,
-                 reauth: bool = False):
+                 reauth: bool = False, gone: bool = False):
         super().__init__(reason)
         self.reason = reason
         self.taken = taken
@@ -227,6 +299,10 @@ class AuthError(Exception):
         # v0.24 T3.1：本人改密这一支的"要重新出示凭据"标记（原口令不对、或
         # 身份已不在库里）——HTTP 层据此发 401，不靠 reason 等于哪句文案判。
         self.reauth = reauth
+        # v0.34.0：reauth 端点上"这把续命凭据过期太久了"（连续 400 天没用），
+        # HTTP 层据此发 410 而不是 401。同样走显式标记，不走文案相等——与
+        # taken/charge/reauth 一条纪律（终审 F4）：换措辞不许悄悄改状态码。
+        self.gone = gone
 
 
 def _quarantine(path: str, why: str) -> None:
@@ -352,8 +428,15 @@ class AuthStore:
             user_id = "u_" + secrets.token_hex(4)
         return user_id
 
-    def _issue_token(self, record: dict) -> str:
-        """给这个账号追加一枚会话令牌，超出上限就丢最老的那一枚。"""
+    def _issue_token(self, record: dict, absolute_deadline: float = None) -> str:
+        """给这个账号追加一枚会话令牌，超出上限就丢最老的那一枚。
+
+        `absolute_deadline` 是 v0.34.0 的**会话**绝对到期时刻：
+        - 不传（登录、管理员轮换）= 一段新会话，用 now + 绝对上限；
+        - 传（renew）= 继承老令牌的同一个值。
+        继承这一条是整个设计的轴：让 renew 自己算 now + 180d，等于每续一次白送
+        半年，绝对上限形同虚设（判据 3 的负向锁钉的就是这个）。
+        """
         token = secrets.token_urlsafe(32)
         tokens = record.setdefault("tokens", [])
         digest = hash_token(token)
@@ -365,13 +448,22 @@ class AuthStore:
         # 都在按 stored 做列表推导——改形状要动五处，加平行表只动这里与 resolve。
         issued = record.setdefault("token_issued_at", {})
         issued[digest] = time.time()
+        # 绝对上限同样是一张平行表（PRD 第二节）。它的键**只在两种时刻写**：
+        # 新会话（= 锚点 + 上限）与 renew 继承。没有任何代码路径往后推它。
+        absolute = record.setdefault("token_absolute_deadline", {})
+        absolute[digest] = (absolute_deadline if absolute_deadline is not None
+                            else time.time() + SESSION_TOKEN_ABSOLUTE_CAP_SECONDS)
         if len(tokens) > MAX_SESSION_TOKENS:
             dropped = tokens[:len(tokens) - MAX_SESSION_TOKENS]
             del tokens[:len(tokens) - MAX_SESSION_TOKENS]
-            # 两张表必须同步裁剪，否则 token_issued_at 随登录次数无界增长，
+            # 三张平行表必须同步裁剪，否则 token_issued_at 随登录次数无界增长，
             # 而它本身就是"某个曾经存在的令牌的签发时刻"这份留痕。
+            # v0.34.0 把这条从"两张"变成"三张"：漏一张就是漂移（PRD 第二节第 3 条
+            # 点名的正是这件事，而 token_issued_at 已经踩过一次）。
             for old in dropped:
                 issued.pop(old, None)
+                absolute.pop(old, None)
+                record.get("token_revoked_at", {}).pop(old, None)
         # 顺手清掉过期的签发记录：只在**签发时**做，不在 resolve 里做。
         # resolve 是热路径（每个请求都过），在那里落盘会废掉 LAST_USED_FLUSH_AFTER
         # 的降频设计。
@@ -391,6 +483,21 @@ class AuthStore:
                     issued.pop(digest, None)
             except (TypeError, ValueError):
                 issued.pop(digest, None)
+        # 绝对上限表跟着 tokens 走：令牌已经不在了，它的"什么时候必须重登"也就是
+        # 一条没人认领的留痕。不清它，这张表就只进不出。
+        absolute = record.get("token_absolute_deadline")
+        if isinstance(absolute, dict):
+            for digest in [d for d in absolute if d not in (record.get("tokens") or [])]:
+                absolute.pop(digest, None)
+        # 排水窗记录只活 60 秒：过期就删，否则每 renew 一次留一条永久痕迹。
+        drain = record.get("token_revoked_at")
+        if isinstance(drain, dict):
+            for digest, revoked_at in list(drain.items()):
+                try:
+                    if now - float(revoked_at) > TOKEN_DRAIN_WINDOW_SECONDS:
+                        drain.pop(digest, None)
+                except (TypeError, ValueError):
+                    drain.pop(digest, None)
 
     def _token_expired(self, record: dict, digest: str) -> bool:
         """这枚令牌是不是过期了。判据两路，**顺序不能反**：
@@ -411,9 +518,23 @@ class AuthStore:
         issued = record.get("token_issued_at")
         if isinstance(issued, dict) and digest in issued:
             try:
-                return time.time() - float(issued[digest]) > SESSION_TOKEN_TTL_SECONDS
+                if time.time() - float(issued[digest]) > SESSION_TOKEN_TTL_SECONDS:
+                    return True
             except (TypeError, ValueError):
                 return True              # 时间戳坏掉按"过期"处理（fail-closed）
+            # v0.34.0 第二道闸：**绝对上限也归在这里判**。
+            # 这条不能只写在 renew 里——renew 只是"能不能续"的判据，而绝对上限的
+            # 含义是"过了这个点，任何路径都不该再认这枚令牌"。只靠 renew 拒绝的
+            # 话，一枚到点的令牌仍然能正常调用全部业务端点（实测症状：
+            # resolve 返回 expires_in 为负的 Principal 并放行），那 180 天就是一句
+            # 写在文档里的数字。负向锁：tests/test_v0340_reauth.py 判据 4。
+            absolute = record.get("token_absolute_deadline")
+            if isinstance(absolute, dict) and digest in absolute:
+                try:
+                    return time.time() > float(absolute[digest])
+                except (TypeError, ValueError):
+                    return True
+            return False
         # 存量令牌：比全账号固定的宽限期 deadline
         deadline = record.get("token_legacy_deadline")
         if deadline is None:
@@ -435,7 +556,108 @@ class AuthStore:
         except (TypeError, ValueError):
             return True
 
+    def _token_seconds_left(self, record: dict, digest: str):
+        """这枚令牌还剩几秒到"**最近的那道闸**"；算不出来时返回 None。
+
+        两道闸取更近的：滑动期（issued + 30d）与会话绝对上限（anchor + 180d）。
+        只报滑动期的话，客户端会一直以为"还有二十九天"而从不去 renew，等到绝对
+        上限那天直接 401——那正是本版要消灭的掉线。
+
+        返回 None 是**有信息量的**：存量令牌没有绝对上限记录，v0.34 之前的会话
+        也就没有可承诺的到期时间，中间件据此不发 X-Token-Expires-In。
+
+        纯读，不落盘：这条走的是每个请求的热路径。
+        """
+        now = time.time()
+        issued = record.get("token_issued_at")
+        if not isinstance(issued, dict) or digest not in issued:
+            return None          # 存量令牌：没有签发时刻可算
+        try:
+            left = float(issued[digest]) + SESSION_TOKEN_TTL_SECONDS - now
+        except (TypeError, ValueError):
+            return None
+        absolute = record.get("token_absolute_deadline")
+        if isinstance(absolute, dict) and digest in absolute:
+            try:
+                left = min(left, float(absolute[digest]) - now)
+            except (TypeError, ValueError):
+                return None      # 上限读不懂按"不知道"处理，不承诺一个可能为负的时间
+        return left
+
+    def _in_drain_window(self, record: dict, digest: str) -> bool:
+        """老令牌是不是还在 renew 的 60 秒排水窗里（判据 6 的边界就在这）。
+
+        这张表**只有 renew 会写**。改密、退出、封号走的是"整表清掉 + 立即生效"，
+        永远不会把一次吊销放进这里——所以"排水窗普遍延迟吊销"这种外溢在结构上
+        不成立，不靠调用点自觉。
+        """
+        drain = record.get("token_revoked_at")
+        if not isinstance(drain, dict) or digest not in drain:
+            return False
+        try:
+            return time.time() - float(drain[digest]) <= TOKEN_DRAIN_WINDOW_SECONDS
+        except (TypeError, ValueError):
+            return False         # 时间戳坏掉 = 不放行（fail-closed）
+
+    def _clear_token_tables(self, record: dict) -> None:
+        """`tokens` 被整张清空时，三张平行表跟着清空。
+
+        漏一张就是漂移：留下的条目是"某个曾经存在的令牌的签发时刻/绝对上限/排水
+        窗"，没人认领却永久占位，而 PRD 第二节第 3 条点名的正是这件事。
+        """
+        for table_name in ("token_issued_at", "token_absolute_deadline",
+                           "token_revoked_at"):
+            record[table_name] = {}
+
+    def _wipe_secrets_only(self, record: dict) -> None:
+        """吊销"静默重登"这项能力，并让排水窗一并失效（判据 6 的前半）。
+
+        device_secrets 整张清空；token_revoked_at 整张清空是关键：排水窗记录是
+        "一枚刚被 renew 顶掉的老令牌还允许再用 60 秒"，而改密/退出/封号之后这条
+        宽容必须立刻作废，否则"我改了密码"就留下一个 60 秒的假动作。
+        """
+        record["device_secrets"] = {}
+        record["token_revoked_at"] = {}
+
+    def _new_session(self, record: dict):
+        """口令或注册换来的**全新会话**：钉锚点、发令牌、发一把新的续命凭据。
+
+        返回 (token, device_secret)。session_anchor 只在这里与 reauth 里写——
+        renew 走 `_renew_locked`，它**不许**动锚点（PRD 第二节第 2 条：reauth 是
+        唯一能重设锚点的非登录动作，这条把"续期"和"重登"分开，是整个设计的轴）。
+
+        刻意**不清**这个人已有的其它 device_secrets：登录是"追加一台设备"，与
+        tokens 的多设备并存同一条语义。如果登录清全表，用户在新手机上登录一次
+        就把旧手机的静默重登能力收走了——那与本版目标正好相反。
+        """
+        now = time.time()
+        record["session_anchor"] = now
+        token = self._issue_token(record)
+        secret = self._issue_device_secret(record, now)
+        return token, secret
+
+    def _issue_device_secret(self, record: dict, moment: float) -> str:
+        """发一把续命凭据：明文只在这一刻存在于返回值里，库里只有摘要。"""
+        secret = new_device_secret()
+        digest = hash_secret(secret)
+        secrets_table = record.setdefault("device_secrets", {})
+        secrets_table[digest] = {"created_at": moment, "last_used_at": moment,
+                                 "reauth_count": 0}
+        return secret
+
     def register(self, username: str, password: str, security_answers: list = None):
+        """兼容旧调用形状 (principal, token)：不返回续命凭据。
+
+        生产路径（HTTP 注册）走 register_for_new_session()。保留这条两元组的意义
+        只是不惊动几十处按老形状解包的测试与工具脚本；新调用点忘了也只是"这个
+        客户端拿不到静默重登"，不会松掉任何一道鉴权。
+        """
+        principal, token, _secret = self.register_for_new_session(
+            username, password, security_answers)
+        return principal, token
+
+    def register_for_new_session(self, username: str, password: str,
+                                 security_answers: list = None):
         """用户名 + 自设密码换一个可撤销的会话令牌。注册即登录。
 
         三条找回答案在这里是**可选**的，因为真实库里就有它们之前注册的账号，
@@ -479,11 +701,17 @@ class AuthStore:
                 # 问题本身不进库——它是全站那三句常量。
                 record["answer_hashes"] = answer_hashes
             self._users[record["user_id"]] = record
-            token = self._issue_token(record)
+            token, secret = self._new_session(record)
             self._flush()
-        return Principal(user_id=record["user_id"], username=cleaned, role="user"), token
+        return (Principal(user_id=record["user_id"], username=cleaned, role="user"),
+                token, secret)
 
     def login(self, username: str, password: str):
+        """兼容旧调用形状 (principal, token)：不返回续命凭据（见 register 同条理由）。"""
+        principal, token, _secret = self.login_for_new_session(username, password)
+        return principal, token
+
+    def login_for_new_session(self, username: str, password: str):
         """校验用户名与密码，成功则追加一枚会话令牌。
 
         查无此人与密码错走的是同一条出口：同一句 reason、同一个状态码，而且
@@ -511,11 +739,11 @@ class AuthStore:
                 # 让任何人确认账号存在、并知道该去找谁求情。查无此人同样走这句，
                 # 而且三支都已经在锁外付过一次 bcrypt 的耗时。
                 raise AuthError(_LOGIN_FAIL)
-            token = self._issue_token(record)
+            token, secret = self._new_session(record)
             record["last_used_at"] = _now()
             self._flush()
-        return Principal(user_id=record["user_id"], username=record["username"],
-                         role=record.get("role", "user")), token
+        return (Principal(user_id=record["user_id"], username=record["username"],
+                          role=record.get("role", "user")), token, secret)
 
     def reset_password(self, username: str, answers: list, new_password: str,
                        new_answers: list = None):
@@ -575,10 +803,19 @@ class AuthStore:
             if new_answer_hashes is not None:
                 record["answer_hashes"] = new_answer_hashes
             record["tokens"] = []
+            self._clear_token_tables(record)
+            self._wipe_secrets_only(record)
             record["last_used_at"] = _now()
             self._flush()
 
     def resolve(self, token: str):
+        """把一枚**会话令牌**换成 Principal。
+
+        受众隔离（PRD 第三节，本版最容易做错的一处）：这条查找路径**不知道**
+        `device_secrets` 这张表的存在——不是"查到了也拒绝"，而是根本没有那一步。
+        续命凭据能换到的只有"一次全新会话"（/v1/auth/reauth），它换不到任何业务
+        身份。负向锁：tests/test_v0340_reauth.py 判据 5 + 本函数源码级检查。
+        """
         if not token:
             return None
         digest = hash_token(token)
@@ -587,8 +824,16 @@ class AuthStore:
             for record in self._users.values():
                 if _is_disabled(record):
                     continue
-                if not any(_token_matches(stored, digest)
-                           for stored in (record.get("tokens") or [])):
+                in_tokens = any(_token_matches(stored, digest)
+                                for stored in (record.get("tokens") or []))
+                if not in_tokens:
+                    # 排水窗：只有 renew 会让一枚"已经不在 tokens 里"的 digest 进这张表。
+                    # 命中它**不刷新 last_used_at**：一条 60 秒后就硬的在途凭据不该
+                    # 获得"我还活着"的记账，否则排水窗会变成第二个滑动期。
+                    if self._in_drain_window(record, digest):
+                        return Principal(user_id=record["user_id"],
+                                         username=record["username"],
+                                         role=record.get("role", "user"))
                     continue
                 if self._token_expired(record, digest):
                     # 过期即拒。不从 tokens 里删——那是热路径，删了就要落盘；
@@ -602,15 +847,168 @@ class AuthStore:
                     self._flush()
                 return Principal(user_id=record["user_id"],
                                  username=record["username"],
-                                 role=record.get("role", "user"))
+                                 role=record.get("role", "user"),
+                                 expires_in=self._token_seconds_left(record, digest))
         return None
+
+    def _find_record_by_token(self, digest: str):
+        """按摘要找出持有这枚**当前有效**会话令牌的记录（renew 用；调用方须已持锁）。
+
+        刻意不认排水窗里的那一枚：续期要的是"当前还活着的会话"。用一条 60 秒后就
+        硬的在途凭据去换一枚全新的 30 天令牌，等于把排水窗变成续期入口。
+        """
+        for record in self._users.values():
+            if _is_disabled(record):
+                continue
+            if any(_token_matches(stored, digest) for stored in (record.get("tokens") or [])):
+                return record
+        return None
+
+    def renew(self, token: str):
+        """换一枚新令牌，**不换会话**：绝对上限原样继承（PRD 第三节）。
+
+        四个拒绝条件全部走同一句、同一个 401，而且**不签发任何东西**：
+        ① 出示的不是这个账号当前有效的会话令牌（含排水窗外的老 digest）；
+        ② 存量令牌——`token_absolute_deadline` 里没有它，v0.34 之前签发的会话
+          没有绝对上限可继承，让它续期等于把 v0.33 留的那个口子重新打开（判据 8）；
+        ③ 剩余有效期（滑动期与绝对上限里更近的那个）还多于 7 天；
+        ④ 已经过了绝对上限。
+
+        成功：新 digest 的绝对上限 = **老令牌那同一个值**（= session_anchor + 180d），
+        老 digest 移出 tokens 并进 60 秒排水窗。
+        """
+        if not token:
+            raise AuthError(RENEW_FAIL)
+        digest = hash_token(token)
+        moment = time.time()
+        with self._lock:
+            record = self._find_record_by_token(digest)
+            if record is None:
+                raise AuthError(RENEW_FAIL)
+            absolute = record.get("token_absolute_deadline")
+            if not isinstance(absolute, dict) or digest not in absolute:
+                raise AuthError(RENEW_FAIL)          # 条件 ②：存量令牌没有绝对上限
+            if self._token_expired(record, digest):
+                raise AuthError(RENEW_FAIL)          # 滑动期已过：走登录，不走续期
+            try:
+                cap = float(absolute[digest])
+            except (TypeError, ValueError):
+                raise AuthError(RENEW_FAIL)          # 上限读不懂 = 不放行（fail-closed）
+            if moment > cap:
+                raise AuthError(RENEW_FAIL)          # 条件 ④
+            left = self._token_seconds_left(record, digest)
+            if left is None or left > RENEW_ALLOWED_BELOW_SECONDS:
+                raise AuthError(RENEW_FAIL)          # 条件 ③：还早，别把续期当心跳
+            # 锚点：正常路径登录时就写了；这里兜一次"记录里没有锚点"——把老令牌的
+            # 签发时刻提升进来（PRD 第二节对 session_anchor 的定义就是这个动作），
+            # 而不是 now，否则又是一次白送 180 天。
+            if record.get("session_anchor") is None:
+                issued = record.get("token_issued_at") or {}
+                try:
+                    record["session_anchor"] = float(issued[digest])
+                except (KeyError, TypeError, ValueError):
+                    raise AuthError(RENEW_FAIL)
+            new_token = self._issue_token(record, absolute_deadline=cap)
+            record["tokens"] = [s for s in (record.get("tokens") or [])
+                                if not _token_matches(s, digest)]
+            # 老 digest 的滑动/绝对记录**当场**删掉，只留排水窗那一条时间戳。
+            # 两个理由：① 平行的三张表与 tokens 一一对应，驱逐与断言都不用解释
+            # "为什么这里多一项"；② 排水窗里的那一枚因此**不可能**再被算进任何
+            # 到期判据——它只剩"还能用几秒"这一个属性，续不了、也延不长（判据 2、6）。
+            for table_name in ("token_issued_at", "token_absolute_deadline"):
+                table = record.get(table_name)
+                if isinstance(table, dict):
+                    table.pop(digest, None)
+            record.setdefault("token_revoked_at", {})[digest] = moment
+            self._flush()
+            principal = Principal(user_id=record["user_id"], username=record["username"],
+                                  role=record.get("role", "user"))
+            return principal, new_token, self._token_payload(record, new_token)
+
+    def _token_payload(self, record: dict, token: str) -> dict:
+        """签发一条会话令牌时，随响应给客户端的那份"这枚令牌几点到点"。
+
+        expires_at 是滑动到期（issued + 30d），absolute_deadline 是会话绝对到期
+        （锚点 + 180d）。两个都是**epoch 秒**，与时区无关：客户端拿去做
+        "剩几天"的算式，不该碰任何本地日历。
+        """
+        digest = hash_token(token)
+        issued = (record.get("token_issued_at") or {}).get(digest)
+        absolute = (record.get("token_absolute_deadline") or {}).get(digest)
+        return {"expires_at": float(issued) + SESSION_TOKEN_TTL_SECONDS,
+                "absolute_deadline": float(absolute),
+                "session_id": session_id(record["user_id"],
+                                         float(record.get("session_anchor") or issued))}
+
+    def reauth(self, secret: str):
+        """用续命凭据开一段**全新会话**：这是唯一接受 device_secret 的入口。
+
+        受众隔离的反向半边（判据 5）：这里只查 `device_secrets` 一张表，会话令牌
+        打到这条路径上算不出摘要命中，必然 401——不是"查到了也拒绝"，而是那条
+        路径不存在。
+
+        三条失败出口各有自己的语义，但**不构成用户名或 secret 存在性名单**：
+        - 401（REAUTH_FAIL 同一句）：摘要对不上任何一把、所属账号被封、记录坏掉。
+          猜一把 256 位随机值与猜一枚令牌同样不可行，所以"这句只有一种含义"不是
+          泄露，而是省下一条可以问的问题。
+        - 410（gone=True）：摘要命中了，但连续 400 天没用过——同时把它从表里删掉，
+          重试不会把它变成"活着但被拒"。
+        - 429：限速，在路由层（reauth 是免会话凭据的端点，账按来源与 secret 各一本）。
+
+        成功即单次使用轮换：老 secret 立即消失，新 secret 与全新会话一起发出去。
+        """
+        if not isinstance(secret, str) or not secret:
+            raise AuthError(REAUTH_FAIL)
+        digest = hash_secret(secret)
+        moment = time.time()
+        with self._lock:
+            record = None
+            for candidate in self._users.values():
+                table = candidate.get("device_secrets")
+                if not isinstance(table, dict) or not table:
+                    continue
+                if any(_token_matches(stored, digest) for stored in table):
+                    record = candidate
+                    break
+            if record is None or _is_disabled(record):
+                raise AuthError(REAUTH_FAIL)
+            entry = record["device_secrets"].get(digest)
+            # 用摘要反查回来的 entry 可能因为人手改库而形状不对：与令牌那边同一套
+            # 纪律——读到坏数据是"这把凭据不对"，不是 500。
+            if not isinstance(entry, dict):
+                raise AuthError(REAUTH_FAIL)
+            try:
+                last_used = float(entry.get("last_used_at"))
+                used_count = int(entry.get("reauth_count") or 0)
+            except (TypeError, ValueError):
+                raise AuthError(REAUTH_FAIL)
+            if moment - last_used > DEVICE_SECRET_INACTIVE_SECONDS:
+                record["device_secrets"].pop(digest, None)
+                self._flush()
+                raise AuthError("这把续命凭据太久没用了，请重新输入密码一次", gone=True)
+            record["device_secrets"].pop(digest, None)      # 单次使用
+            token, new_secret = self._new_session(record)
+            record["device_secrets"][hash_secret(new_secret)]["reauth_count"] = used_count + 1
+            record["last_used_at"] = _now()
+            self._flush()
+            principal = Principal(user_id=record["user_id"], username=record["username"],
+                                  role=record.get("role", "user"))
+            return principal, token, new_secret, self._token_payload(record, token)
 
     def revoke(self, token: str) -> None:
         """摘掉这一枚会话令牌——"退出这台机器"的全部含义。
 
-        刻意不清整张表：那是 `rotate_token` 的语义（怀疑口令泄露，把所有设备一起
-        踢掉）。"退出"如果顺手把别人设备也踢下线，它就是一个能跨设备使坏的动作，
-        没人敢点。
+        与 renew 的排水窗相反，这里是**立即**吊销：令牌从 tokens 里删掉，
+        `token_revoked_at` 里同一条也删掉（那 60 秒的宽容只属于 renew，一次退出
+        不该在身后留一条还能用一分钟的凭据——判据 6 的负向锁盯的就是这件事）。
+
+        v0.34.0 起，退出同时清掉这个人**全部** device_secrets（PRD 判据 6 的原文
+        是"改密/退出/封号连带吊销全部 secrets"）。代价如实认：另一台设备上的静默
+        重登能力会跟着没了，它现在还能用手里的令牌用到绝对上限，但到点必须重新输
+        一次口令。选这一边而不是"只清这台设备的 secret"，是因为退出这个动作最常见的
+        动机就是"这台机器不是我的/我借了别人的电脑"，而"只清本地一枚"让攻击者留在
+        服务器上的续命凭据一根手指头都不用动。改成按设备清理是 0.34.1 可以谈的
+        收紧，不是本版默认。
 
         认不出这枚令牌时不抛、也不返回"在不在"：返回值上的任何差别都是一个
         oracle，外面可以拿它试探某枚令牌是否曾经有效过。
@@ -623,10 +1021,38 @@ class AuthStore:
                 stored = record.get("tokens") or []
                 kept = [s for s in stored if not _token_matches(s, digest)]
                 if len(kept) == len(stored):
+                    # 令牌不在 tokens 里——还有一种可能：它是刚被 renew 顶掉、正躺在
+                    # 排水窗里的那一枚。退出必须能把它当场收走，否则"我退出了"留出
+                    # 一条最长 60 秒的假动作（判据 6 的负向锁盯的就是这个形状）。
+                    drain = record.get("token_revoked_at")
+                    if isinstance(drain, dict) and any(
+                            _token_matches(stale, digest) for stale in list(drain)):
+                        for stale in [s for s in list(drain)
+                                      if _token_matches(s, digest)]:
+                            drain.pop(stale, None)
+                        self._wipe_secrets_only(record)
+                        self._flush()
+                        return
                     continue
                 record["tokens"] = kept
+                self._drop_token_tables(record, digest)
+                self._wipe_secrets_only(record)
                 self._flush()       # 不落盘的退出等于没退出：重启就又登得回来
                 return
+
+    @staticmethod
+    def _drop_token_tables(record: dict, digest: str) -> None:
+        """一枚令牌被摘掉时，它在三张平行表里的条目跟着消失。
+
+        排水窗表也在内不是顺手：revoke 的语义是"吊销立即生效"，而这条记录正是
+        "这条 digest 还允许再用一会儿"的唯一凭证。留着它，退出就只是把令牌从
+        tokens 里删了，而 resolve 仍然认它。
+        """
+        for table_name in ("token_issued_at", "token_absolute_deadline",
+                           "token_revoked_at"):
+            table = record.get(table_name)
+            if isinstance(table, dict):
+                table.pop(digest, None)
 
     def disable_user(self, user_id: str) -> bool:
         with self._lock:
@@ -639,6 +1065,11 @@ class AuthStore:
                 return False
             record["disabled"] = True
             record["status"] = "disabled"
+            # 封号也要连带清掉静默重登（判据 6）：否则"我先停用你"只是把人挡在
+            # 业务端点之外，而他手里那把 secret 还在，一旦有人误开 enable 或被别的
+            # 路径绕过停用判定，会话就自己回来了。令牌这边不删（enable_user 的
+            # 对称语义靠 status/disabled 判定，删了反而无法解释"恢复访问"）。
+            self._wipe_secrets_only(record)
             self._flush()
             return True
 
@@ -711,6 +1142,8 @@ class AuthStore:
                 return False
             record["pw_hash"] = pw_hash
             record["tokens"] = []
+            self._clear_token_tables(record)
+            self._wipe_secrets_only(record)
             record["must_change_password"] = True
             self._flush()
             return True
@@ -738,10 +1171,22 @@ class AuthStore:
             if keep_digest is not None:
                 # 留下调用方这一枚、作废其余——filter 的方向就是这句："留匹配、
                 # 删不匹配"。写反过一次，症状是改密的这台设备自己先掉线。
+                dropped = [s for s in (record.get("tokens") or [])
+                           if not _token_matches(s, keep_digest)]
                 record["tokens"] = [s for s in (record.get("tokens") or [])
                                     if _token_matches(s, keep_digest)]
             else:
+                dropped = list(record.get("tokens") or [])
                 record["tokens"] = []
+            # 被作废的那些枚，平行表跟着删；排水窗整张清空——改密是一次**吊销**，
+            # 吊销不许继承 renew 那 60 秒的宽容（判据 6 的后半）。
+            for stale in dropped:
+                for table_name in ("token_issued_at", "token_absolute_deadline"):
+                    table = record.get(table_name)
+                    if isinstance(table, dict):
+                        table.pop(stale, None)
+            record["token_revoked_at"] = {}
+            self._wipe_secrets_only(record)
             record["must_change_password"] = False
             self._flush()
             return dict(record)
@@ -774,6 +1219,14 @@ class AuthStore:
             if record is None:
                 raise AuthError("用户不存在")
             record["tokens"] = []
+            self._clear_token_tables(record)
+            self._wipe_secrets_only(record)
+            # 强制全端重登 = 一段**新**会话的起点：锚点必须跟着挪，否则当老锚点
+            # 已经贴近绝对上限时，刚发出来的这枚令牌生下来就带着一条"马上过期"的
+            # 绝对到期时间（症状：管理员点了轮换，当事人几秒后被踢下线）。
+            # 这里**不**发 device_secret：调用方是管理员，不是当事人本人，把静默
+            # 重登能力交给一个没有出示当事人凭据的响应，等于多一条凭据分发面。
+            record["session_anchor"] = time.time()
             token = self._issue_token(record)
             self._flush()
             return token

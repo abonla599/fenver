@@ -31,7 +31,7 @@ from app.core import providers
 from app.core import audit
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
-from app.core.auth import AuthError
+from app.core.auth import AuthError, hash_secret
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -110,6 +110,42 @@ CHAT_WINDOW_SECONDS = 60
 MAX_CHAT_CALLS_PER_WINDOW = 20
 _CHATS = defaultdict(list)
 
+# v0.34.0：reauth 是全站唯一"不带会话凭据、只带续命凭据"的公开端点，所以它自己
+# 需要两本账。为什么是两本而不是复用 _FAILS：
+# ① _FAILS 是"猜口令"的账（按来源 IP，十分钟十次）。reauth 猜的是 256 位随机值，
+#    爆破在数学上不成立，但**定向**使坏成立：拿到某把 secret 的人可以拿它换会话，
+#    而 secret 是一次性的——用错一次就废。给这条路径单开一本，是为了让 429 落在
+#    哪本账上仍然读得出来（与 _RESET_FAILS 拆账同一条理由）。
+# ② 按 secret 摘要记：换 IP 的人（秒拨、共享 NAT）对同一把 secret 可以无限试，
+#    这正是 _RESET_FAILS_BY_ACCOUNT 当年拆出账号维度的同一个形状。
+# 查无此 secret 的失败同样记进它自己那个键（键就是摘要本身，不含身份信息），
+# 于是 429 不泄露"这把手里有没有对应的账号"。
+MAX_REAUTH_FAILURES_PER_WINDOW = 10
+_REAUTH_FAILS = defaultdict(list)
+_REAUTH_BY_SECRET = defaultdict(list)
+
+
+def _reauth_secret_key(digest: str) -> str:
+    """账本键取摘要前 16 位：够区分（sha256 前 64 bit 碰撞概率可忽略），
+    又不把整枚摘要写进内存里那份可被 dump 的键表。"""
+    return (digest or "")[:16] or "anon"
+
+
+def _reauth_throttled(ip: str, digest: str) -> bool:
+    moment = _now()
+    _prune(moment)
+    key = _reauth_secret_key(digest)
+    return (len(_recent(_REAUTH_FAILS, ip, FAILURE_WINDOW_SECONDS, moment))
+            >= MAX_REAUTH_FAILURES_PER_WINDOW
+            or len(_recent(_REAUTH_BY_SECRET, key, FAILURE_WINDOW_SECONDS, moment))
+            >= MAX_REAUTH_FAILURES_PER_WINDOW)
+
+
+def _note_reauth_failure(ip: str, digest: str) -> None:
+    moment = _now()
+    _REAUTH_FAILS[ip].append(moment)
+    _REAUTH_BY_SECRET[_reauth_secret_key(digest)].append(moment)
+
 
 def _chat_key(ip: str, user_id: str) -> str:
     return f"{ip}|{user_id or 'anon'}"
@@ -120,7 +156,9 @@ _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_RESETS, RESET_WINDOW_SECONDS),
             (_RESET_FAILS, FAILURE_WINDOW_SECONDS),
             (_RESET_FAILS_BY_ACCOUNT, FAILURE_WINDOW_SECONDS),
-            (_CHATS, CHAT_WINDOW_SECONDS))
+            (_CHATS, CHAT_WINDOW_SECONDS),
+            (_REAUTH_FAILS, FAILURE_WINDOW_SECONDS),
+            (_REAUTH_BY_SECRET, FAILURE_WINDOW_SECONDS))
 
 
 def _store():
@@ -380,7 +418,7 @@ def register(req: RegisterRequest, request: Request):
     if _registrations_full(ip):
         raise _too_many(REGISTER_WINDOW_SECONDS)
     try:
-        principal, token = _store().register(
+        principal, token, device_secret = _store().register_for_new_session(
             username=req.username, password=req.password,
             security_answers=req.security_answers)
     except AuthError as e:
@@ -388,7 +426,10 @@ def register(req: RegisterRequest, request: Request):
     _note_registration(ip)
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
     return {"token": token, "user_id": principal.user_id,
-            "username": principal.username, "role": principal.role}
+            "username": principal.username, "role": principal.role,
+            # v0.34.0：续命凭据与会话令牌一起发——明文只在这一次出现（与 token
+            # 同一条纪律，见文件头第 3 条）。库里只留 sha256 摘要。
+            "device_secret": device_secret}
 
 
 def _register_error(e: AuthError, ip: str) -> HTTPException:
@@ -412,7 +453,8 @@ def login(req: LoginRequest, request: Request):
     if _throttled(ip):
         raise _too_many(FAILURE_WINDOW_SECONDS)
     try:
-        principal, token = _store().login(username=req.username, password=req.password)
+        principal, token, device_secret = _store().login_for_new_session(
+            username=req.username, password=req.password)
     except AuthError as e:
         _note_failure(ip)
         # 401 而不是 403：这里没有"身份是真的但角色不够"这一说，只有"没认出来"。
@@ -420,8 +462,68 @@ def login(req: LoginRequest, request: Request):
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role,
+            # v0.34.0：登录是"发续命凭据"的两个时刻之一（另一个是 reauth 的轮换）。
+            # 存量已登录的设备一把 secret 都没有——它们的降级路径是 renew 撑到
+            # 绝对上限、然后老老实实登录一次，从此才有静默重登（PRD 第四节）。
+            "device_secret": device_secret,
             # v0.24 T1.3：管理员建号/重置后要求首登改密；老记录缺字段读到 False。
             "must_change_password": _store().must_change_password(principal.user_id)}
+
+
+@router.post("/v1/auth/renew")
+def renew(request: Request, principal: Principal = CurrentPrincipal):
+    """换一枚新令牌，**不换会话**（v0.34.0，PRD 第三节）。
+
+    三条形状约束各自挡的东西：
+    ① **无请求体**：不接受任何"期望有效期"入参。让客户端自己许愿要多久，等于把
+       服务端唯一的到期判据交给最不可信的那一端。
+    ② 要正常会话凭据：这条**绝不进** authz.PUBLIC_PATHS（判据 10 的负向锁）。
+    ③ 不种 Cookie：全服务端发 Cookie 的门仍然只有 /v1/auth/adopt 一扇
+       （tests/test_cookie_auth.py 钉着）。浏览器侧要接手轮换后的新令牌，走
+       "拿着新 token 再 adopt 一次"这条既有路，不另开一条 Set-Cookie 信道。
+
+    失败一律 401 且不签发任何东西；措辞只有一句（见 auth.RENEW_FAIL）。
+    """
+    token = authz._credential(request)
+    try:
+        _, new_token, payload = _store().renew(token)
+    except AuthError as e:
+        raise HTTPException(status_code=401, detail=e.reason)
+    return {"token": new_token, **payload}
+
+
+class ReauthRequest(BaseModel):
+    # 字段名就是它的语义：这里只接受续命凭据，不接受会话令牌，也不接受口令。
+    device_secret: str
+
+
+@router.post("/v1/auth/reauth")
+def reauth(req: ReauthRequest, request: Request):
+    """用续命凭据开一段全新会话：免会话凭据，但**不是**免凭据（PRD 第三节）。
+
+    这条端点在 authz.PUBLIC_PATHS 里点了名——它必须免**会话**凭据才能被一个已经
+    掉线的人用到，这正是它存在的理由；代价是它自己变成攻击面，防线全部落在这里：
+    ① 256 位随机值不可爆破；② 单次使用，用错一次就废（猜中的那一次也一并废掉，
+       所以"猜"没有累积收益）；③ 两本限速账（来源 IP + 按 secret），见 _REAUTH_FAILS；
+    ④ 绝对不认会话令牌：会话令牌打进来算不出 device_secrets 里的命中，401
+       （判据 5 的反向半边）。
+
+    状态码走存储层带上来的显式标记，不靠 e.reason 等于哪句文案判（与 taken/
+    charge/reauth 同一条纪律，终审 F4）：401 = 不认这把，410 = 太久没用了。
+    """
+    ip = _client_ip(request)
+    digest = hash_secret(req.device_secret or "")
+    if _reauth_throttled(ip, digest):
+        raise _too_many(FAILURE_WINDOW_SECONDS)
+    try:
+        principal, token, new_secret, payload = _store().reauth(req.device_secret)
+    except AuthError as e:
+        _note_reauth_failure(ip, digest)
+        # 审计只记"有人拿续命凭据试过并被拒"，不记那把值：audit.jsonl 是明文日志。
+        audit.log(None, "auth.reauth.denied", target=_reauth_secret_key(digest))
+        raise HTTPException(status_code=410 if e.gone else 401, detail=e.reason)
+    audit.log(principal, "auth.reauth", target=principal.user_id)
+    return {"token": token, "device_secret": new_secret, **payload}
 
 
 @router.post("/v1/auth/reset")
