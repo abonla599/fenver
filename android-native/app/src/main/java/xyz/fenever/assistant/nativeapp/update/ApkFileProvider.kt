@@ -16,7 +16,8 @@ import java.io.FileNotFoundException
 /**
  * 把【本应用自己下载的更新包】以 content:// 交给系统安装页（v0.23 T1.7）。
  *
- * 与旧壳 android/.../ApkFileProvider.java 同一套边界，三条少一处都是一个可读任意路径的口子：
+ * 与旧 WebView 壳的同名类（ApkFileProvider.java，源码已于 2026-10-08 退役）同一套边界，
+ * 三条少一处都是一个可读任意路径的口子：
  * ① manifest 里 exported=false——除了我们主动 grant 的接收方，谁也解析不到这个 authority；
  * ② 只接受单段路径，canonical 后必须仍落在外部私有下载目录内（挡 ../ 与软链接逃逸），
  *    且文件名必须是更新包那一个形状（`fenver-*.apk`，或过渡期同包并发的旧名别名，

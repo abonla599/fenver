@@ -10,8 +10,9 @@ version: '3.8'
 # 这份 compose 是"把后端搬到大机器上"的那条**备用**路，不是本机现网的形态。
 # 现网只有一个 backend 服务：PyInstaller 的 onedir 产物（见 run_backend.spec 的
 # COLLECT(name='run_backend')）跑 uvicorn 127.0.0.1:8000（见 run_backend.py 末尾），
-# 再由 Cloudflare 隧道把它暴露成 https://ai.fenever.xyz/，安卓端只是指向那个地址的
-# WebView 壳（见 android/app/build.gradle 的 APP_URL 与 .github/workflows/release-apk.yml）。
+# 再由 Cloudflare 隧道把它暴露成 https://ai.fenever.xyz/，安卓端是装一个 APK：
+# 现为原生客户端（android-native/，默认出口见其 app/build.gradle 的 DEFAULT_BASE_URL）；
+# 早先那个只嵌 WebView 的壳已于 2026-10-08 从仓库删除。出包由 release-apk.yml 负责。
 # 所以：本机不要把这份 compose 和那份 exe 一起起来 —— "8000:8000" 绑的是 0.0.0.0，
 # 会直接和 run_backend.exe 抢 :8000，而且两个进程同写一份数据会互相覆盖
 # （见 docs/安装部署指南.md「一个数据根目录只允许一个服务进程」）。

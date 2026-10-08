@@ -5,9 +5,10 @@
   「每次我发送问题之后键盘自动收起，这样我能少一个收起键盘的动作，直接看到输出结果。」
   「软件的图标也可以改一下了，因为图标太普通了，没有任何我这个软件的元素。」
 
-读法沿用本仓库判例：CI 里没有 Kotlin 测试运行器（build-native-apk.yml 只跑
-assembleDebug），所以前两条把 Kotlin 源码当文本读；图标那两条读 PNG 文件头与
-res/ 下的 XML —— 都是"改坏了当场红"而不是"装到手机上才发现"。
+读法沿用本仓库判例：本机没有 Gradle 也没有 Android SDK，所以前两条把 Kotlin 源码当文本读
+（CI 那条 `build-native-apk.yml` 从今天起确实会跑 `testDebugUnitTest`，但那是推上去之后的事，
+本机改一行等两分钟不是反馈回路；纯 JVM 判断核那一段由 tools/shell_jvm_tests.py 三秒出结果）。
+图标那两条读 PNG 文件头与 res/ 下的 XML —— 都是"改坏了当场红"而不是"装到手机上才发现"。
 """
 import re
 import struct
@@ -295,9 +296,9 @@ def test_version_bumped_and_release_notes_brief():
     gradle = _text(BUILD)
     # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
     # v0.28.0 推到 48，v0.28.1 推到 49，v0.28.2 推到 50，v0.28.3 推到 51，v0.29.0 推到 52，
-    # v0.29.1 推到 53，v0.29.2 推到 54，v0.30.0 推到 55，v0.31.0 推到 56，v0.32.0 推到 57，v0.33.0 推到 58，v0.33.1 推到 59。下面断的是现在那一格。
-    assert "versionCode 59" in gradle and 'versionName "0.33.1"' in gradle, \
-        "gradle 那一格漂了：这一版应是 59 / 0.33.1，且必须与 docs/releases/v0.33.1.md 同时存在"
+    # v0.29.1 推到 53，v0.29.2 推到 54，v0.30.0 推到 55，v0.31.0 推到 56，v0.32.0 推到 57，v0.33.0 推到 58，v0.33.1 推到 59，v0.34.0 推到 60。下面断的是现在那一格。
+    assert "versionCode 60" in gradle and 'versionName "0.34.0"' in gradle, \
+        "gradle 那一格漂了：这一版应是 60 / 0.34.0，且必须与 docs/releases/v0.34.0.md 同时存在"
     doc = _text(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)

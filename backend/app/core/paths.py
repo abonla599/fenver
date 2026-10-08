@@ -29,7 +29,19 @@ def _source_repo_root() -> str:
 
 
 def data_root() -> str:
-    """会话、长期记忆、附件、模型服务配置共同挂在它下面。"""
+    """会话、长期记忆、附件、模型服务配置共同挂在它下面。
+
+    `DATA_ROOT` 环境变量优先。这条口子是 2026-10-08 为**测试**加的，不是给生产用的：
+    本仓的开发机同时就是生产机（`dist\run_backend\` 跑着线上服务），而 v0.33 的数据根
+    独占锁（`app/core/data_root.py`，E1）按数据根判冲突。于是凡是"起整个 app 跑一遍
+    lifespan"的测试都会撞上线上那份 `.data-root.lock`，`uvicorn` 起不来，本地全量复跑
+    从此不可能绿——而 CI 永远是绿的，因为 CI 机器上没有那个进程。锁本身没错，
+    **错的是测试借用生产的数据根**：一份数据根只许一个持有者，这是锁的全部意义。
+    所以 `tests/conftest.py` 把 `DATA_ROOT` 指到临时目录，让测试锁自己的那一份。
+    """
+    override = os.environ.get("DATA_ROOT")
+    if override:
+        return os.path.abspath(override)
     if getattr(sys, "frozen", False):
         # exe 一般在 dist/run_backend/ 或绿色版解压目录，先向上找项目根；
         # 真独立分发（找不到项目根）时退回 exe 同级，保证仍可整目录拷走。

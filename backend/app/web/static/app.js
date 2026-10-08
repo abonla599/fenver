@@ -94,6 +94,9 @@ async function dropIdentity(userId) {
     }
   }
   saveIdentities(readIdentities().filter((x) => x.userId !== userId));
+  // 名册忘掉他的同时，他那格续命凭据也要跟着忘：留着就是一把本机读得到、
+  // 服务端随时可能已作废的死钥匙（当前那位在 logout 里已经清过，这一句对他幂等）。
+  API.forgetDevice(userId);
   return true;
 }
 
@@ -660,6 +663,10 @@ function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden")
 async function afterAuth(res) {
   await API.adopt(res.token);       // 凭据落地 = 换 Cookie；明文到此为止
   addIdentity(res);                 // 只记名字进来并把这个人设为当前身份，不记凭什么
+  // 续命凭据（v0.34.0 判据 4 的 Web 半边）落在名册之后：这一格按 userId 存，
+  // currentId 得先指对人，之后 401 那一次才找得到自己的钥匙。存的是这把钥匙而不是
+  // 口令——判据 11 禁的是口令进本地存储，这条口径 2026-10-08 由用户点名扩到这里。
+  API.rememberDevice(res.user_id, res.device_secret);
   SHELL.setOwner(res.user_id);      // 告诉壳"现在是谁"：没这一步他看见的提醒是空集
   resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
@@ -2753,7 +2760,7 @@ function renderAboutRows() {
   // 「关于」卡片里的最后一行，另一颗只是 display:none、:last-child 看不见它，
   // 所以要手动补；现在它挪到了「版本」下面，上下都有行，分隔线本来就该在。
 
-  // 版本这一行：壳在时报壳的 versionName（唯一来源 android/app/build.gradle），
+  // 版本这一行：旧壳在时报旧壳的 versionName（唯一来源是出包那份 gradle），
   // 壳不在或旧壳不报时报**服务端**的构建戳（唯一来源是打包时的 git tag）。
   // 两个都不许写死在前端：抄一份进来，下次升版必然有一处是旧的，而且它显示得理直气壮。
   const box = $("versionVal");
@@ -2836,7 +2843,7 @@ function markUpdateSheetShown() {
   catch (e) { /* 写不进去只是"今天可能多弹一次"，不值得为它打断更新提示本身 */ }
 }
 
-// 壳报的安装包版本（唯一来源 android/app/build.gradle）。浏览器与不报版本的老壳 → 空串。
+// 旧壳报的安装包版本（唯一来源是打那个 APK 时那份 gradle，源码已随壳退役）。浏览器与不报版本的老壳 → 空串。
 function shellVersion() {
   if (!SHELL.present) return "";
   const caps = SHELL.capabilities() || {};

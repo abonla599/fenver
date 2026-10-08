@@ -12,7 +12,7 @@
 3. **文案与算式**：同一批中文字串必须在两端语料里都出现（缺一个字的漂动就地红）；
    日期算式则由两端各自真跑一遍同一张表——网页那份在 node 里执行仓库原文（下面
    `_run_sched_js`，与 test_web_pwa 里 `_run_shell_js` 同一手法），安卓那份在纯 JVM 的
-   `ScheduleBoard` 里由 `android/app/src/test/.../ScheduleBoardTest.java` 执行
+   `ScheduleBoard` 里由 `android-native/app/src/test/.../ScheduleBoardTest.java` 执行
    （本地 `python tools/shell_jvm_tests.py`，CI 跑 gradle 同一批）。
    本文件把这张表钉成**唯一一份期望值**，两端各自与它对齐。
 
@@ -31,7 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.test_android_shell import _code                       # noqa: E402
+from tests.test_apk_release_discipline import _code                       # noqa: E402
 from tests.test_web_pwa import (STATIC, _const_object, _css, _html, _js,  # noqa: E402
                               _js_fn)
 
@@ -40,7 +40,8 @@ REPO = Path(__file__).resolve().parents[2]
 # 契约本身不因此作废——留档在场（本机）时照样逐条跑；快照 CI 里没有稿子，
 # 依赖稿子的两条**明说理由地 skip**，而不是假装测过（skip 数会出现在交付表里）。
 MOCK = REPO / "docs-internal" / "v0.23-阶段0" / "T0.1-日程设计稿-双端同构.html"
-JVM_TEST = next((REPO / "android").glob("app/src/test/java/xyz/*/assistant/core/ScheduleBoardTest.java"))
+JVM_TEST = next((REPO / "android-native").glob(
+    "app/src/test/java/xyz/*/assistant/core/ScheduleBoardTest.java"))
 
 
 def _native(rel: str) -> Path:

@@ -59,6 +59,222 @@ const API = (() => {
     return UNSAFE_METHODS.has(String(method || "").toUpperCase()) ? { "X-CSRF": "1" } : {};
   }
 
+  /* ---------------- v0.34.0 续期阶梯（判据 1、9；PRD 第四节 Web 那一行） ----------------
+   *
+   * 页面依旧不持有任何凭据：会话在 httpOnly Cookie 里，所以续期就是**用 Cookie 打**
+   * /v1/auth/renew。响应体里的新令牌只活在这一次调用的局部作用域，当场交给 adopt 收编
+   * 成新 Cookie——adopt 仍然是全服务端唯一 Set-Cookie 的地方，会话固定那道缝不开。
+   *
+   * 触发口径是**服务端告诉我们的**：每个 2xx 已鉴权响应带 X-Token-Expires-In，值是
+   * min(滑动剩余, 绝对剩余)。客户端自己不猜时间——本机时钟偏一点就能把"还剩 8 天"
+   * 算成"还剩 6 天"，那是一条只有服务端知道答案的问题。
+   *
+   * renewSession 把全部依赖收在 deps 里、兜底值写字面量，是为了这份控制流能被单独取出
+   * 来用 node 真跑（test_v0340_web_renew_ladder）："剩余还多就不许动手"与"有流在跑就
+   * 绝不动手"读源码读不出对错，只有拿运行时说话（沿用 runResilientStream 的规矩）。
+   */
+  const TOKEN_EXPIRES_HEADER = "X-Token-Expires-In";
+  const RENEW_TRIGGER_SECONDS = 7 * 24 * 3600;    // 与后端 RENEW_ALLOWED_BELOW_SECONDS 同一个数
+  const RENEW_COOLDOWN_SECONDS = 6 * 3600;        // 失败不追着敲：限速器不吃自杀式重试
+
+  const SESSION = { remaining: null, streams: 0, renewing: false, lastRenewAt: 0, lastReauthAt: 0 };
+
+  async function renewSession(deps) {
+    // 兜底值写字面量而不是引用上面那两个模块作用域的常量：这份函数要能被单独取出来
+    // 用 node 真跑（沿用 runResilientStream 的同一条规矩），引用体外名字会炸 ReferenceError。
+    // 数字的唯一出处仍是 RENEW_TRIGGER_SECONDS / RENEW_COOLDOWN_SECONDS 那两行。
+    const threshold = deps.threshold === undefined ? 7 * 24 * 3600 : deps.threshold;
+    const cooldown = deps.cooldown === undefined ? 6 * 3600 : deps.cooldown;
+    const now = deps.now || (() => Date.now() / 1000);
+    // 没有头条 = 这次响应没告诉我们还剩多久（未鉴权、bootstrap、或老版本服务端）。
+    // 不猜：续期这件事的判据在服务端，这里缺输入就什么都不做。
+    if (deps.remaining === null || deps.remaining === undefined) return "no-header";
+    if (deps.remaining > threshold) return "not-due";        // 判据 1：还早，别把续期当心跳
+    if (deps.streamBusy) return "deferred";                   // 判据 9：在途 SSE 一个字都不碰
+    if (deps.renewing) return "already-running";
+    const moment = now();
+    if (moment - deps.lastRenewAt < cooldown) return "cooling-down";
+    deps.setRenewing(true);
+    deps.setLastRenewAt(moment);
+    try {
+      const data = await deps.renew();
+      if (!data || !data.token) return "failed";     // 没拿到新明文就不动现有 Cookie
+      await deps.adopt(data.token);
+      return "renewed";
+    } catch (e) {
+      // 判据原文：renew 失败**什么都不做**。老令牌还能用到绝对上限，界面照常可用；
+      // 真到上限那一次 401 由 needsAuth 落登录页——那是最后一层，不是这一层的事。
+      return "failed";
+    } finally {
+      deps.setRenewing(false);
+    }
+  }
+
+  function noteSessionExpiry(res) {
+    // 只从 2xx 取头：401/403/429 的头条（如果有）说的不是"你这个会话还剩多久"。
+    try {
+      if (!res || !res.ok || !res.headers) return;
+      const raw = typeof res.headers.get === "function"
+        ? res.headers.get(TOKEN_EXPIRES_HEADER) : null;
+      if (raw === null) return;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0) SESSION.remaining = n;
+    } catch (_) { /* 读头这件事永远不许把业务打停 */ }
+  }
+
+  /* 真正的续期动作：fire-and-forget。调用点不 await 它——一次后台续期不该让
+     用户等，更不该因为它炸了就把这轮的正文弄丢。 */
+  function sessionTick() {
+    return renewSession({
+      remaining: SESSION.remaining,
+      streamBusy: SESSION.streams > 0,
+      renewing: SESSION.renewing,
+      lastRenewAt: SESSION.lastRenewAt,
+      threshold: RENEW_TRIGGER_SECONDS,
+      cooldown: RENEW_COOLDOWN_SECONDS,
+      renew: async () => {
+        const res = await fetch("/v1/auth/renew", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: csrfHeaders("POST"),
+        });
+        if (!res.ok) throw await parseError(res);
+        noteSessionExpiry(res);          // 续完立刻用服务端给的头条重新校准
+        return res.json();
+      },
+      adopt,
+      setRenewing: (v) => { SESSION.renewing = v; },
+      setLastRenewAt: (t) => { SESSION.lastRenewAt = t; },
+    }).catch(() => "failed");
+  }
+
+  /* ---------------- 续命凭据的本地保管（v0.34.0 判据 4 的 Web 半边） ----------------
+   *
+   * 2026-10-08 用户改口径："Web 也持久化续命凭据"。PRD 第四节原本写的是"本地存储现状
+   * 不变"，那是"Web 只用 Cookie 续期"那一半的口径；这一句把它扩到"绝对上限之后也能
+   * 自己爬起来"——没有这把凭据，网页在 180 天绝对上限那一次 401 只能落登录页，而
+   * 同一台手机上的原生 App 已经能免口令续上，两边行为不一致才是更坏的结局。
+   *
+   * 与判据 11 的关系要说清楚：那条禁的是**口令**进本地存储，这条存的是 device_secret。
+   * 两者不同类，风险却同类——浏览器没有 Keystore，这一格是 JS 可读的明文。三条把风险
+   * 关在笼子里的现实约束，全部有对应的锁（test_v0340_web_device_vault）：
+   * ① 只有一格、只有一个键名前缀、只有三个出入口（写 / 读 / 清），名册仍然零凭据；
+   * ② 服务端已经是它的权威生命周期：改密与三题找回清全部 secrets、退出清全部、
+   *    单次使用、猜错即废、400 天不用即 410——本机这一格坏了也换不到会话；
+   * ③ 用一次就轮换：reauth 成功立刻落下新值，旧值在服务端同时作废，本机不留副本。
+   *
+   * 存量口径与原生一致：升级到本版之前登录的设备这一格是空的，reauthSession 读到空
+   * 就什么都不做，401 原样落登录页——发布说明那句"没重新登录过的设备暂时拿不到这个
+   * 能力"同样适用于浏览器。
+   */
+  const DEVICE_SECRET_PREFIX = "fenver.deviceSecret.";
+
+  function deviceVault() {
+    // localStorage 会被隐私模式 / 配额 / 禁用第三方存储抛异常：读不到就当没记过，
+    // 续期这件事永远不许把业务打停（与 noteSessionExpiry 同一个纪律）。
+    try { return window.localStorage || null; } catch (_) { return null; }
+  }
+
+  function rememberDevice(userId, value) {
+    const store = deviceVault();
+    if (!store || !userId || !value) return false;
+    try { store.setItem(DEVICE_SECRET_PREFIX + userId, value); return true; }
+    catch (_) { return false; }
+  }
+
+  function recallDevice(userId) {
+    const store = deviceVault();
+    if (!store || !userId) return "";
+    try { return store.getItem(DEVICE_SECRET_PREFIX + userId) || ""; }
+    catch (_) { return ""; }
+  }
+
+  function forgetDevice(userId) {
+    const store = deviceVault();
+    if (!store || !userId) return;
+    try { store.removeItem(DEVICE_SECRET_PREFIX + userId); } catch (_) {}
+  }
+
+  /* 阶梯第三层：会话过了绝对上限之后的那一次 401，用本机这一格换一段全新会话。
+   * 判据顺序逐字对齐原生 SessionRenew.reauthOnce（本机身份 → 有没有这把 → 冷却窗 →
+   * 是不是已经在敲），两边错开顺序就会出现"手机上能自愈、网页上不能"这类没法解释的差别。
+   * 依赖全从 deps 进来、兜底写字面量：这份控制流要被单独取出来用 node 真跑。 */
+  async function reauthSession(deps) {
+    const cooldown = deps.cooldown === undefined ? 6 * 3600 : deps.cooldown;
+    const now = deps.now || (() => Date.now() / 1000);
+    if (!deps.userId) return "no-identity";
+    if (!deps.secret) return "no-secret";          // 存量设备：不落登录页之外什么都不做
+    const moment = now();
+    if (moment - (deps.lastReauthAt || 0) < cooldown) return "cooling-down";
+    if (deps.busy) return "already-running";       // 与 renew 共用一把闸：同一时刻只敲一次
+    deps.setBusy(true);
+    deps.setLastReauthAt(moment);
+    try {
+      const out = await deps.reauth(deps.secret);
+      if (out && out.status === 410) { deps.forget(); return "gone"; }
+      // 连不上服务端（fetch 抛错）≠ 凭据失效：这一格一个字都不许动，
+      // 否则一次断网就把自愈能力弄没了，下次到点只能落登录页。
+      if (!out || out.status < 200 || out.status > 299) return "failed";
+      const token = (out.data && out.data.token) || "";
+      if (!token) return "failed";                 // 没拿到新明文就不动现有 Cookie
+      await deps.adopt(token);
+      /* 单次使用：老那把在服务端已经作废，本机必须立刻落下新的。服务端成功时一定带
+         新值；万一没带（老版本服务端 / 契约漂了），旧那把已经用掉，留着就是一把
+         永远换不到会话的死钥匙——所以是 forget，不是"什么都不做"。 */
+      const rotated = (out.data && out.data.device_secret) || "";
+      if (rotated) deps.save(rotated); else deps.forget();
+      return "reauthed";
+    } catch (e) {
+      return "unreachable";
+    } finally {
+      deps.setBusy(false);
+    }
+  }
+
+  /* 真正的自愈动作：给 request() 用，返回 true 才允许把原来那一枪重打一次。
+   * 走的是裸 fetch，不经 request()——不然 401 会顺着 request() 再敲一次自己，
+   * 那就是这条端点限速账要抓的形状。 */
+  function reauthOnce() {
+    const userId = (currentIdentityId && currentIdentityId()) || "";
+    return reauthSession({
+      userId,
+      secret: recallDevice(userId),
+      busy: SESSION.renewing,
+      lastReauthAt: SESSION.lastReauthAt,
+      cooldown: RENEW_COOLDOWN_SECONDS,
+      reauth: async (value) => {
+        const res = await fetch("/v1/auth/reauth", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", ...csrfHeaders("POST") },
+          body: JSON.stringify({ device_secret: value }),
+        });
+        const data = res.ok ? await res.json() : null;
+        if (res.ok) noteSessionExpiry(res);
+        return { status: res.status, data };
+      },
+      adopt,
+      save: (value) => rememberDevice(userId, value),
+      forget: () => forgetDevice(userId),
+      setBusy: (v) => { SESSION.renewing = v; },
+      setLastReauthAt: (t) => { SESSION.lastReauthAt = t; },
+    }).catch(() => "unreachable");
+  }
+
+  /* 本机"现在是谁"的唯一读法：名册条目只是显示用的，但这一格按 userId 存，
+   * 所以它得知道该读哪一格。app.js 的 currentEntry() 是同一份名册的另一半，
+   * api.js 不 import 它（这个文件是独立 script），于是这里读同样的两个键。
+   * 读法刻意保守：名册坏掉 / 没记过人 → 空串 → reauthSession 回 "no-identity"，
+   * 与"存量设备没这把"落在同一条降级路径上。 */
+  function currentIdentityId() {
+    try {
+      const list = JSON.parse(localStorage.getItem("identities") || "[]");
+      const current = localStorage.getItem("currentId");
+      const hit = Array.isArray(list) && list.find((x) => x && x.userId === current);
+      return (hit || (Array.isArray(list) && list[list.length - 1]) || {}).userId || "";
+    } catch (_) { return ""; }
+  }
+
   /* 记忆检索的条数上限，与后端 SearchMemoryRequest.top_k 的 le=20 同源
    * （test_web_pwa 会把这两个数字对一次）。越过上限不是"少给几条"，而是整个
    * 请求 422：搜索框看上去就是坏的。所以在这里夹回来，宁可少给也要有结果。
@@ -90,6 +306,10 @@ const API = (() => {
       },
     });
     if (!res.ok) throw await parseError(res);
+    /* 退出在服务端会连带清掉这个人全部续命凭据（auth.revoke 那一段），本机这一格
+       留着就是"一把永远换不到会话的死钥匙"。只在退当前会话时清：带 token 的那一形
+       是替清单里的另一个人撤销，他的 userId 不在 currentIdentityId() 的答案里。 */
+    if (!token) forgetDevice(currentIdentityId());
     return res.json();
   }
 
@@ -106,7 +326,16 @@ const API = (() => {
     return res.json();
   }
 
-  async function request(path, { method = "GET", body, signal } = {}) {
+  /* 401 有两种含义，自愈只服务其中一种：
+   * "会话过期"（业务请求）→ 拿续命凭据换一段新会话再重打；
+   * "口令/答案不对"（下面这四条）→ 这就是正常的失败文案，绝不能顺手再签一发新会话。
+   * 不排掉它们会同时踩两个坑：猜错一次密码 = 白得一个可用会话 + 失败账被记两格
+   * （重打那一枪又戳一次），而限速预算本来就只有几次。原生 Api.kt 里的
+   * SELF_HEAL_EXEMPT 是同一份名单，test_v0340_web_device_vault 逐字比两边。 */
+  const HEAL_EXEMPT_PATHS = new Set(["/v1/auth/login", "/v1/auth/register",
+    "/v1/auth/reset", "/v1/auth/change-password"]);
+
+  async function request(path, { method = "GET", body, signal } = {}, healed = false) {
     let res;
     try {
       res = await fetch(path, {
@@ -121,8 +350,17 @@ const API = (() => {
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (e) { NetMinder.note(e); throw e; }
+    if (res.status === 401 && !healed && !HEAL_EXEMPT_PATHS.has(path)) {
+      /* 绝对上限到点的那一次 401：先试阶梯第三层，成了就把原来这一枪原样重打一次。
+       * `healed` 是递归闸门——重打那一枪再 401 就照老路抛给 needsAuth 落登录页，
+       * 一次失败最多两发请求，绝不在这条缝里循环。 */
+      const outcome = await reauthOnce();
+      if (outcome === "reauthed") return request(path, { method, body, signal }, true);
+    }
     if (!res.ok) throw await parseError(res);
     NetMinder.ok();
+    noteSessionExpiry(res);
+    sessionTick();                       // 续期在后台发生，不占这一请求的时间
     return res.status === 204 ? null : res.json();
   }
 
@@ -330,14 +568,27 @@ const API = (() => {
         });
       } catch (e) { NetMinder.note(e); throw e; }
       if (res.ok && res.body) NetMinder.ok();
+      noteSessionExpiry(res);
       return res;
     };
-    const out = await runResilientStream({
-      open, onChunk, onEvent: onEvent || (opts && opts.onEvent),
-      onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
-      sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
-      resumeStatus: STREAM_RESUME_STATUS,
-    });
+    /* 这一轮流在跑的时候，续期一律不动手（判据 9）：renew 一成功，老 digest 就进
+       60 秒排水窗，超过 60 秒还在用老令牌的流会被硬拒——而"回答正在一个字一个字
+       往外冒"时把令牌换掉，症状就是输出当场断。计数在 finally 里减：正常收尾、
+       报错、被停止都算流没了，被推迟的那一次续期在流尾补上。 */
+    SESSION.streams += 1;
+    let out;
+    try {
+      out = await runResilientStream({
+        open, onChunk, onEvent: onEvent || (opts && opts.onEvent),
+        onStatus: opts.onStatus, onRun: opts.onRun, onUnknown: opts.onUnknown,
+        sleep: defaultSleep, maxAttempts: STREAM_RESUME_MAX_ATTEMPTS,
+        resumeStatus: STREAM_RESUME_STATUS,
+      });
+    } finally {
+      SESSION.streams -= 1;
+      if (SESSION.streams < 0) SESSION.streams = 0;
+      sessionTick();                     // 流尾补做被推迟的那一次续期
+    }
     return out.done;   // 兼容旧调用点：done 里有 message_id/model/full_text/status
   }
 
@@ -397,6 +648,12 @@ const API = (() => {
     // 漏了这一行，app.js 里那三处 API.adopt 会在手机上炸成"API.adopt is not a
     // function"（2026-09-23 v0.19 首发注册实测）。锁见 test_web_pwa。
     adopt,
+
+    /* 续命凭据这一格的两个对外口：写只在"服务端刚发新值"那一刻（app.js 的 afterAuth
+     * 覆盖注册、登录、找回后自动登录三条路），清在名册移除时。闸门本体仍在这个文件里，
+     * app.js 拿不到 localStorage 的键名，也就绕不出第三条写路径。 */
+    rememberDevice,
+    forgetDevice,
 
     models: () => request("/v1/models"),
     upload,

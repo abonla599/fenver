@@ -12,7 +12,7 @@ resumable）。**这一节钉的是安卓这一侧必须跟上同一套协议**�
 一样的助手消息**。用户的原始诉求就一句：「不要让用户关闭页面也烧钱」。
 
 本机没有 Android SDK（gradle/ANDROID_HOME 都缺），跑不了 :app:testDebugUnitTest，
-所以这里全是"读源文本"的形状锁（先例见 test_netminder_contract.py、test_android_shell.py
+所以这里全是"读源文本"的形状锁（先例见 test_netminder_contract.py、test_native_android_discipline.py
 的 _strip_java_comments），钉的是"客户端必须走的这条路"而非运行流本身；真正的控制流
 （退避逐次变大、410 转取历史、cancelled/cannot_resume 等随后的 done）编译与实机由
 build-native-apk.yml 的 assembleDebug 兜编译、其余仍需真机。
@@ -40,7 +40,7 @@ def _read(p: Path) -> str:
 
 
 def _strip_kotlin_comments(src: str) -> str:
-    """去掉 // 与 /* */ 注释，但【尊重字符串字面量】（照 test_android_shell.py 那把尺子）。
+    """去掉 // 与 /* */ 注释，但【尊重字符串字面量】（照 test_apk_release_discipline.py 那把尺子）。
 
     拿剥完的源码去判"某个符号还在不在"才不会被注释里解释旧行为的那句话骗到：
     把一行注掉不等于把那处调用删了，反之在注释里写一句"这里不再 Api.chat"也不算数。

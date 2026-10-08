@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -31,8 +32,19 @@ import java.util.concurrent.TimeUnit
 
 class ApiException(val status: Int, message: String) : Exception(message)
 
+/* 401 自愈（阶梯第三层）的豁免名单：这四条端点的 401 意思是"口令/答案不对"，不是
+ * "会话过期"。拿续命凭据去换一段新会话再重打，等于猜错一次密码反而白得一个可用会话，
+ * 而且重打那一枪把登录失败账记了两格。Web 侧 api.js 的 HEAL_EXEMPT_PATHS 是同一份
+ * 名单，两边错开就会出现"手机上被拦、网页上没拦"这种没法解释的差别
+ * （锁：backend/tests/test_v0340_web_device_vault.py 逐字比这两个集合）。 */
+private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
+                                     "/v1/auth/reset", "/v1/auth/change-password")
+
 @Serializable data class AuthResult(val token: String = "", val user_id: String = "",
-                                    val username: String = "", val role: String = "user")
+                                    val username: String = "", val role: String = "user",
+                                    // v0.34.0：登录/注册那一刻服务端同时发的续命凭据。
+                                    // 存量账号重新登录之前，这个字段一直是空串（判据 8）。
+                                    val device_secret: String = "")
 @Serializable data class MeResult(val user_id: String = "", val username: String = "",
                                   val role: String = "user")
 @Serializable data class SessionSummary(val session_id: String = "", val title: String = "新对话",
@@ -187,7 +199,31 @@ object Api {
         }.getOrNull() ?: "HTTP $status"
 
     private suspend fun call(path: String, method: String = "GET", body: String? = null,
-                             tokenOverride: String? = null): String =
+                             tokenOverride: String? = null): String {
+        val first = runCatching { withContext(Dispatchers.IO) { callOnce(path, method, body, tokenOverride) } }
+        val err = first.exceptionOrNull()
+        // 阶梯的第三层（判据 4 的原生半边）：首个 401 先试一次 reauth，成功就照原样
+        // 重打这一次；reauth 也不成才把 401 原样抛出去，由界面落登录页。
+        // `tokenOverride == null` 筛掉的是 adopt/logout：那两次是**替别人**或**替旧值**
+        // 动凭据，拿当前身份的 secret 换一段新会话再去重打，语义就错了。
+        // SELF_HEAL_EXEMPT 筛掉的是另外四条：它们的 401 意思是"口令/答案不对"，不是
+        // "会话过期"。不排掉就是猜错一次密码反而白得一个可用会话，而且重打那一枪把
+        // 登录失败账记了两格——限速预算本来就只有几次。Web 侧 api.js 的
+        // HEAL_EXEMPT_PATHS 是同一份名单（锁：test_v0340_web_device_vault 逐字比两边）。
+        if (err is ApiException && err.status == 401 && tokenOverride == null
+            && path !in SELF_HEAL_EXEMPT
+            && withContext(Dispatchers.IO) { SessionRenew.reauthOnce() }) {
+            return withContext(Dispatchers.IO) { callOnce(path, method, body, null) }
+        }
+        val value = first.getOrThrow()
+        // 续期发生在**响应已经关掉之后**：不在一条连接里再打另一条（每域名五条的
+        // 连接池上限会被这种嵌套自己占住），也不让一次界面渲染等这一次网络。
+        withContext(Dispatchers.IO) { SessionRenew.renewIfDue() }
+        return value
+    }
+
+    private suspend fun callOnce(path: String, method: String = "GET", body: String? = null,
+                                 tokenOverride: String? = null): String =
         withContext(Dispatchers.IO) {
             val rb = request(path, tokenOverride)
             when (method) {
@@ -204,9 +240,29 @@ object Api {
             client.newCall(req).execute().use { res ->
                 val text = res.body?.string() ?: ""
                 if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
+                // 2xx 才采：这个头说的是"你这个会话还剩几秒"，401/429 上的同名头说的
+                // 不是这件事。要不要续由 call() 在响应关掉之后判（见那里那一句）。
+                SessionRenew.noteExpiry(res.header("X-Token-Expires-In"), res.code)
                 text
             }
         }
+
+    /* 阶梯专用的同步调用：与 call() 隔开是有理由的——
+     * ① renew/reauth 的失败语义是"什么都不做"，走 call() 会把一次失败的续期变成
+     *    一次 401，再顺带触发 reauth，那是把阶梯的两层互相喂成递归；
+     * ② reauth 不许带任何会话凭据头（服务端那条端点只认 device_secret）；
+     * ③ 调用点已经在 IO 栈里，这里保持同步，不再开一层协程。
+     * 返回 (状态码, 响应体, X-Token-Expires-In)：头条一并带回去，续完立刻用服务端给的
+     * 数重新校准，不给本机留一个"猜出来的 30 天"。 */
+    internal fun ladderCall(path: String, body: String, credential: String?):
+            Triple<Int, String, String?> {
+        val rb = Request.Builder().url(Prefs.baseUrl.trimEnd('/') + path)
+        if (!credential.isNullOrEmpty()) rb.header("Authorization", "Bearer " + credential)
+        val req = rb.post(body.toRequestBody(JSON_MT)).build()
+        client.newCall(req).execute().use { res ->
+            return Triple(res.code, res.body?.string() ?: "", res.header("X-Token-Expires-In"))
+        }
+    }
 
     /* 元数据 GET 的一次快问快答：网络层失败（超时/断流/DNS）补一次重试——
      * GET 幂等，重试不重复扣费也不落第二条数据；HTTP 4xx/5xx 的 ApiException
@@ -218,6 +274,9 @@ object Api {
                 metaClient.newCall(req).execute().use { res ->
                     val text = res.body?.string() ?: ""
                     if (!res.isSuccessful) throw ApiException(res.code, failDetail(text, res.code))
+                    // GET 也是"服务端告诉我们还剩多久"的地方：只看不动手，
+                    // 触发统一收在 call() 那一处（两个入口一条判据，不各自造顺序）。
+                    SessionRenew.noteExpiry(res.header("X-Token-Expires-In"), res.code)
                     return text
                 }
             } catch (e: java.io.IOException) {
@@ -520,6 +579,10 @@ object Api {
                    onStatus: ((String) -> Unit)? = null,
                    onRun: ((String) -> Unit)? = null): Flow<ChatEvent> = flow {
         val st = StreamResumeState()
+        /* 判据 9 的原生落点：这一轮流在跑的时候续期一律不动手（见 SessionRenew）。
+           计数在 onCompletion 里减——正常收尾、异常、上层取消（"停止"）三条路都算
+           流结束，少一条都会把 streams 永远留在 >0，判据 9 反过来变成"永不续期"。 */
+        SessionRenew.streamOpen()
         var attempt = 0           // 已经续播过几次
         resumeLoop@ while (!st.terminal) {
             // open 抛出 = 这一枪根本没到服务端（断网 / DNS / 连不上）。
@@ -597,6 +660,11 @@ object Api {
                 res.close()
             }
         }
+        // 判据 9 的另一半：流一结束就把计数交还，并且**立刻补一次**被推迟掉的续期
+        // （多半是 no-op：remaining > 7 天直接返回，真到窗口了才多花一个 POST 的时间）。
+    }.onCompletion {
+        SessionRenew.streamClose()
+        withContext(Dispatchers.IO) { SessionRenew.renewIfDue() }
     }.flowOn(Dispatchers.IO)
 
     /* 单帧分发：先累加游标与 run_id（停止/续播都认它），再按 data.type 落成 ChatEvent。

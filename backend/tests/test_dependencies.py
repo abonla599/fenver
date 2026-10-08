@@ -20,6 +20,11 @@ IMPORT_TO_DIST = {"fitz": "pymupdf", "yaml": "pyyaml", "PIL": "pillow", "cv2": "
 # （sentence-transformers 会把几百 MB 模型拖进冻结版，而云端嵌入是默认路径）
 OPTIONAL_DEPS = {
     "sentence_transformers": "本地嵌入的退路；_init_local_embed 捕获 ImportError 后降级",
+    # 共享限流账（v0.34.0 D1）是"多 worker 之前才需要"的那条路，本版不落生产，所以不把
+    # redis 拖进必装清单和冻结包。方向要说清：捕获 ImportError **不是降级**，
+    # ledger_backend.select_backend 把它转成 RuntimeError——宁可启动失败，
+    # 也不要"每个 worker 一本账、把每窗口阈值悄悄乘以进程数"。
+    "redis": "共享限流账的可选后端；select_backend 捕获 ImportError 后抛 RuntimeError，不退回内存",
 }
 
 

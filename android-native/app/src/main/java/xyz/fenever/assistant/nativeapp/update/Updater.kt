@@ -27,8 +27,9 @@ import java.net.URL
 /* 「检查更新 → 立即更新 → 校验 → 系统安装页」的编排（v0.23 T1.7 + T1.8）。
 
  判断与字节纪律**全部住在共享核心类里**（ReleasePlan / ApkDownloader / ApkDigest / MiniJson
- 与旧壳逐字节同一份，android/app 那份由 JVM 台架 136 个用例钉着，字节一致性由
- backend/tests/test_release_probe.py 数着）——这里只做 Android 侧的三件事：
+ 这一份就是出包的那份——旧 WebView 壳已于 2026-10-08 退役，core/ 不再有两份拷贝；
+ 这七个类由 tools/shell_jvm_tests.py 的 JVM 台架钉着，台架数的正是这个模块，
+ 见 backend/tests/test_release_probe.py 的台架同源锁）——这里只做 Android 侧的三件事：
  ① 问与取的地址从 Prefs.baseUrl 现拼（服务换域名只改设置，链路上没有第二处真相）；
  ② 把状态灌进 Compose（全部经主线程 post，IO 线程绝不直接写快照）；
  ③ 下载完成后把包交给系统安装页，没授权时给出能走通的路。

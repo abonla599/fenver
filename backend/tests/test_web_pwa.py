@@ -2105,8 +2105,9 @@ def test_the_update_row_sits_right_under_the_version_row():
 def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():
     """关于里那行版本只能来自壳报上来的那个值。
 
-    在 HTML 里写死 `v0.16` 是这仓最眼熟的那种错：android/app/build.gradle 才是版本号的
-    唯一来源，抄一份到前端就等于下一次升版必然有一处是旧的，而且它显示得理直气壮。
+    在 HTML 里写死 `v0.16` 是这仓最眼熟的那种错：android-native/app/build.gradle 是版本号
+    的唯一来源（2026-10-08 起那份 WebView 壳源码已退役，"去壳的 gradle 里看"这句话也跟着换了指向），
+    抄一份到前端就等于下一次升版必然有一处是旧的，而且它显示得理直气壮。
     """
     html, js = _html(), _js()
     about = html.index('class="set-group">关于')
@@ -2119,7 +2120,7 @@ def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():
 
 # ---------- 「发现版本更新」底部卡片 ----------
 #
-# 这一节全是"读源码"的锁，与 test_android_shell.py 同一个理由：本机没有真机，也没有
+# 这一节全是"读源码"的锁，与 test_native_android_discipline.py 同一个理由：本机没有真机，也没有
 # 能跑 app.js 的 DOM。所以每条判据都挑**形状上可数**的东西（某一行的字面、出现次数、
 # 两个位置的先后），并且逐条做过变异验证——把要防的那件事真改一遍，它必须红。
 
@@ -2540,7 +2541,7 @@ def test_zero_arg_bridge_methods_are_called_with_no_arguments():
     present=false，于是界面和手机浏览器长得一模一样。2026-09-22 真机第一次装 v0.17
     就是这个表现——而它在此之前一直只在 JVM 单测里"通过"。
     下面这份名单对着 ShellBridge.java 的签名核过；方法名有没有漏接由
-    test_android_shell.py 那条派生锁管，这里只管参数个数。
+    test_native_android_discipline.py 那条冻结快照管，这里只管参数个数。
     """
     out = _run_shell_js("ok")
     calls = out["calls"]

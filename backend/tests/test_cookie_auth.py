@@ -193,5 +193,58 @@ def test_bootstrap_token_can_be_adopted_for_an_admin_cookie_session(enforced, cl
     assert client.get("/v1/admin/users").status_code == 200
 
 
+def test_renew_works_on_the_cookie_alone_and_never_sets_a_cookie_itself(enforced, client):
+    """Web 阶梯成立的前提有两条，各钉一条：renew **认 Cookie**，且它自己**不种 Cookie**。
+
+    - 认 Cookie：页面不持有任何凭据明文（方案 C），如果 renew 只认请求头，浏览器到点
+      就续不上——PRD 第四节那句"剩余 < 7 天才发一次 renew"每次都是 401，用户反而更早掉线。
+    - 不种 Cookie：这条路由一旦顺手 Set-Cookie，adopt 就不再是全服务端唯一的签发门，
+      会话固定那道缝等于从背面被打开。
+    """
+    token = _register(client)
+    assert _adopt(client, token).status_code == 200
+    _age_to_renewable(authz.auth_store, token)
+
+    out = client.post("/v1/auth/renew", headers={"X-CSRF": "1"})    # 零凭据头，只靠 Cookie
+    assert out.status_code == 200, out.text
+    new_token = out.json()["token"]
+    assert new_token and new_token != token, "renew 没换值：Cookie 时代它等于什么都没做"
+    assert _set_cookie_headers(out) == [], "renew 自己种了 Cookie：签发门变成两扇"
+    # 老的那一枚还在 60 秒排水窗里：这一刻用户面前的页面仍然可用
+    assert client.get("/v1/auth/me").status_code == 200
+    # 新明文交给 adopt 收编，Cookie 换到新的一枚上——门还是那一扇门
+    assert _adopt(client, new_token).status_code == 200
+    assert client.get("/v1/auth/me").status_code == 200
+
+
+def test_renew_needs_the_csrf_header_when_the_credential_comes_from_the_cookie(enforced, client):
+    """不安全方法 + 凭据出自 Cookie + 没有 X-CSRF = 403，新端点一处都不许例外。
+
+    少这道闸，"到点自动续期"就成了一条跨站表单能敲的门：它不泄露什么，但它把 CSRF 的
+    攻击面从"会改数据的动作"扩到了会话的生命周期本身。
+    """
+    token = _register(client)
+    assert _adopt(client, token).status_code == 200
+    _age_to_renewable(authz.auth_store, token)
+    res = client.post("/v1/auth/renew")
+    assert res.status_code == 403, "Cookie 会话下的 renew 没走 CSRF 第二道闸"
+
+
+def _age_to_renewable(store, token, seconds_left=60):
+    """把这枚会话令牌的**滑动**剩余推到续约阈值以内（模拟"用了 29 天又 23 小时"）。
+
+    沿用 test_v0340_session_renew 的同一招：改表里的时间戳，不 patch time。
+    """
+    import time as _time
+
+    from app.core.auth import SESSION_TOKEN_TTL_SECONDS, hash_token
+
+    principal = store.resolve(token)
+    assert principal is not None
+    record = store._users[principal.user_id]
+    record["token_issued_at"][hash_token(token)] = _time.time() - (
+        SESSION_TOKEN_TTL_SECONDS - seconds_left)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

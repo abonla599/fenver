@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.test_android_shell import _code                        # noqa: E402
+from tests.test_apk_release_discipline import _code                        # noqa: E402
 from tests.test_schedule_ui_contract import _native               # noqa: E402
 from tests.test_web_pwa import STATIC                             # noqa: E402
 

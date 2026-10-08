@@ -13,8 +13,8 @@ android {
         applicationId "xyz.fenever.assistant.native"
         minSdk 24
         targetSdk 34
-        versionCode 59
-        versionName "0.33.1"
+        versionCode 60
+        versionName "0.34.0"
 
         // 与壳同一判据：三个值主机名一致（backend 的 test_android_shell.py 同族约束）。
         buildConfigField "String", "DEFAULT_BASE_URL", "\"https://ai.fenever.xyz\""
@@ -74,6 +74,11 @@ dependencies {
     implementation "androidx.compose.ui:ui-tooling-preview"
 
     implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    /* v0.34.0 判据 4/11：续命凭据（device_secret）单独放进 Keystore 支撑的加密偏好区。
+     * 版本 1.1.0 是 Google Maven 上该构件最新的**稳定版**（非 alpha/beta），
+     * 拉不到就按 PRD 第七节那条备选退回"平台 Keystore 手写加密封装"——
+     * 唯一的禁止项是把 secret 塞进现有明文 Prefs。 */
+    implementation "androidx.security:security-crypto:1.1.0"
     implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
 

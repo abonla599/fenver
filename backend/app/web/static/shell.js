@@ -1,4 +1,4 @@
-/* 原生壳（android/ 里那个 WebView）的适配层。
+/* 旧 WebView 壳（android/ 里的形态，2026-10-08 源码退役）的适配层。
  *
  * 浏览器里没有 window.AssistantShell：这时 present 是 false，下面每个方法都退化成
  * "什么都不做 / 返回空"，页面其余功能一切照旧。这条降级不是兼容性装饰——同一份 JS

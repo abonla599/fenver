@@ -5,7 +5,7 @@
    收紧的只有"什么时候去拉"，「过期旧快照不许冒充最新」（AC-4）不许被顺手放松；
 2. 壳侧元数据 GET 的**快线与重试**——5 分钟读超时是流式那条路的，几 KB 的 JSON
    不该陪它挂死。这一半是 Compose 侧的 Kotlin，JVM 台架够不着，用同源剥注释的
-   尺子（test_android_shell._code）钉源码形状。
+   尺子（test_apk_release_discipline._code）钉源码形状。
 
 另钉 lifespan 接了 warmer：测试进程的 TestClient 不走 lifespan，真起线程发生在
 部署进程里，所以这里钉**接线本身**加幂等闩的行为。
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.core import releases
-from tests.test_android_shell import _code
+from tests.test_apk_release_discipline import _code
 from tests.test_release_probe import GOOD, _Urlopen
 
 BACKEND = Path(releases.__file__).resolve().parents[2]        # backend 目录

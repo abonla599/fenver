@@ -45,6 +45,10 @@ a = Analysis(
         # function 可能引用它。
         'torch', 'torchaudio', 'torchvision',
         'transformers', 'sentence_transformers', 'huggingface_hub',
+        # v0.34.0 D1：共享限流账那条路上的 redis 是**可选依赖**，本版不落生产，也不进冻结包。
+        # 显式排除而不是留一条 "missing module named redis" 的告警：那样下一次真装了它的
+        # 人会被静默打进包里，而这条路的正确失败方式是启动时报错（见 ledger_backend）。
+        'redis',
         'cv2', 'imageio_ffmpeg', 'moviepy',
         'scipy', 'sklearn', 'pandas',
     ],
