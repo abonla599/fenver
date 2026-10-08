@@ -237,8 +237,10 @@ public class ReleasePlanTest {
 
     @Test
     public void theOnlyAssetShapeIsTheVersionNamedApk() {
-        // 这一层不再持有"去哪问"的地址（v0.19 起问与取都在自家服务器，
-        // "壳源码不出现 GitHub API 地址" 由 backend/tests/test_android_shell.py 数着）；
+        // 这一层不再持有"去哪问"的地址（v0.19 起问与取都在自家服务器；
+        // "客户端源码里不许出现 api.github.com" 由
+        // backend/tests/test_release_probe.py 的
+        // "test_the_native_shell_never_talks_to_github_directly" 数 native 的 *.kt）；
         // 留在这里的是"只要那一个资产名"的形状。
         // v0.24 起 assetName 返回的是**主名**：本机下载文件就叫这个，冷启动清扫与
         // FileProvider 的文件门都按 APK_PREFIXES（主名 + 别名）两把一起认。

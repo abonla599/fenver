@@ -16,7 +16,11 @@ android {
         versionCode 60
         versionName "0.34.0"
 
-        // 与壳同一判据：三个值主机名一致（backend 的 test_android_shell.py 同族约束）。
+        // 默认出口只钉这一个值：它与 ReleasePlan.SELF_APK_PATH 拼出来的下载地址必须同源，
+        // 这条接缝由 android-native/app/src/test/.../ReleasePlanTest.java 的
+        // "theConstantMatchesTheRealPinnedDownloadAddress"（本机 tools/shell_jvm_tests.py 跑）
+        // 从客户端数，后端侧由 backend/tests/test_apk_release_discipline.py 数。
+        // 旧 WebView 壳那份"三个值同主机名"的同族约束随壳于 2026-10-08 退役。
         buildConfigField "String", "DEFAULT_BASE_URL", "\"https://ai.fenever.xyz\""
     }
 

@@ -8,8 +8,10 @@
  * 桥面方法一字不差、全部同步返回一段 JSON 字符串。这里刻意不列清单也不写"几个"：
  * 上一版加 checkUpdate 时那句方法数就已经少算一个，而当时唯一的锁只查"每个名字至少
  * 出现一次"——加方法永远不会红，于是那句散文独自谎了两个版本。
- * 真正的清单由 backend/tests/test_android_shell.py 从 ShellBridge.java 的 @JavascriptInterface
- * 和下面这些调用点各扫一遍比对出来。
+ * 真正的清单现在钉在 backend/tests/test_native_android_discipline.py 的
+ * test_the_page_only_uses_the_bridge_surface_the_shipped_shell_has：判据的另一半不再是
+ * 仓库里的源码（ShellBridge.java 随壳删除），而是**已经装在用户手机上的那个旧壳 APK**
+ * 曾提供的十个方法，那份冻结快照就是它——页面多调一个名字都会红。
  * 方法只加不减不改语义（老壳还在人手上，改名等于静默少一项功能）。
  *
  * 原生 → JS 只有一个入口 window.__shellEvent(payload)，payload 是**只含 type 与 id**
