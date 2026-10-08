@@ -22,6 +22,13 @@ BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 # 找回只有改密这一条公开端点：三题是全站常量，页面自己渲染，不必问服务器要。
 # 新增公开端点必须同时改这里，否则路由契约测试会红。
 PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
+                          # v0.34.0：静默重登。免的是**会话凭据**（掉线的人手里没有
+                          # 会话），不免"凭据"本身——body 里那把 256 位续命凭据就是
+                          # 凭据，且单次使用。防线（限速两本、措辞同形、绝不认会话
+                          # 令牌）全在 auth_router.reauth 与 auth.AuthStore.reauth 里。
+                          # 加这一条之前请先读 tests/test_route_auth_contract.py 的
+                          # test_public_allowlist_is_exactly_the_bootstrap_endpoints。
+                          "/v1/auth/reauth",
                           # 公开信息，不含任何用户数据：手机上那张「发现版本更新」的卡片
                           # 要问"最新是哪一版"，而它发生在人还没登录的时候。
                           # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
@@ -47,6 +54,12 @@ SESSION_COOKIE = "session"
 # 跨站 POST；而原生 HTTP 客户端从来不受同源约束，也就从来不需要这道门。
 # 值不校验内容，只要求非空：它是"我在 JS 里"的声明位，不是秘密。
 CSRF_HEADER = "x-csrf"
+
+# v0.34.0：这枚会话令牌还剩几秒（滑动期与会话绝对上限里更近的那个）。
+# 名字带 Expires-In 而不叫 Expires-At：值是**秒数**不是时刻，客户端不需要拿
+# 服务器时钟和自己的时钟做减法——那正是"提前 5 天续期"和"晚 5 天才发现要续"
+# 两种 bug 的产地。
+TOKEN_EXPIRES_HEADER = "X-Token-Expires-In"
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_DETAIL = "缺少 CSRF 校验头"
 
@@ -239,7 +252,18 @@ def install_auth(app) -> None:
         if principal is None:
             return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
         request.state.principal = principal
-        return await call_next(request)
+        response = await call_next(request)
+        # v0.34.0：把"这枚会话还剩几秒"贴在每一个已鉴权的响应上。
+        # 客户端据此决定要不要 renew（剩余 < 7 天才发一次，判据 1），所以这条头
+        # 必须走**响应**而不是新端点：新端点要么免凭据（多一条探测面），要么要
+        # 凭据（等于每个周期多一次往返）。
+        # 只报不写：resolve 已经把到期时间算好了，这里不再查一次库、更不落盘。
+        # bootstrap 管理员口令没有"到期"这回事，expires_in 是 None —— 头就不发，
+        # 客户端拿不到时间就不会对着一个不存在的时钟去续期。
+        remaining = getattr(principal, "expires_in", None)
+        if remaining is not None and 200 <= response.status_code < 300:
+            response.headers[TOKEN_EXPIRES_HEADER] = str(max(0, int(remaining)))
+        return response
 
 
 def current_principal(request: Request) -> Principal:

@@ -316,3 +316,52 @@ def test_tokens_shape_unchanged_on_disk(store):
     assert all(isinstance(t, str) for t in record["tokens"]), (
         "tokens 落盘形状不得变——改形状会让升级前的库读不出来"
     )
+
+
+# ---------- v0.34.0 追加：判据 8（存量令牌 renew / reauth 双拒） ----------
+# 这一组刻意住在 v0.33 的文件里而不是新开一份：它钉的是"v0.33 留的那条有界宽限
+# 不许被 v0.34 的续期能力重新撑开"。上面那些锁讲的是宽限期怎么到期，这一组讲的
+# 是到期的那天**不会有人来替它续命**。
+
+
+def test_legacy_tokens_cannot_be_renewed_into_a_second_life(store):
+    """存量令牌没有 token_absolute_deadline，因此 renew 必须直接拒。
+
+    变异：在 renew 里给缺绝对上限的令牌现场补一个 `now + 180d`（看起来"更友好"），
+    这条必须红——那个补法等于让一枚来历不明的存量令牌原地再活半年，而 v0.33 的
+    宽限期设计要点正是"有界、不因活跃而延长"。
+    """
+    from app.core.auth import AuthError, RENEW_ALLOWED_BELOW_SECONDS  # noqa: F401
+
+    token = _register(store)
+    record = store._users[store.resolve(token).user_id]
+    digest = hash_token(token)
+    # 手工造成"升级前签发"的形状：tokens 里有摘要，两张新表里没有。
+    record["token_issued_at"].pop(digest, None)
+    record.get("token_absolute_deadline", {}).pop(digest, None)
+    assert store.resolve(token) is not None, "存量令牌在宽限期内应当可用"
+    with pytest.raises(AuthError):
+        store.renew(token)
+    assert len(record["tokens"]) == 1, "被拒的 renew 签出了新令牌"
+
+
+def test_legacy_account_getting_a_session_gets_a_secret_only_at_login(store):
+    """存量账号的降级路径只有一个入口：重新输一次口令。
+
+    这条同时钉住"secret 只在登录/注册/reauth 三处签发"：如果哪天有人为了"让存量
+    用户也能静默续期"而在 renew 或 resolve 里补发 secret，判据 8 就变成了免凭据
+    铸凭据的路。
+    """
+    from app.core.auth import AuthError
+
+    token = _register(store)
+    record = store._users[store.resolve(token).user_id]
+    digest = hash_token(token)
+    record["token_issued_at"].pop(digest, None)
+    record.get("token_absolute_deadline", {}).pop(digest, None)
+    record["device_secrets"] = {}
+    store.resolve(token)                       # 走一次正常鉴权
+    assert record["device_secrets"] == {}, "resolve 顺带发了续命凭据"
+    with pytest.raises(AuthError):
+        store.renew(token)
+    assert record["device_secrets"] == {}, "renew 顺带发了续命凭据"

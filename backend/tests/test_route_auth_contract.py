@@ -246,14 +246,42 @@ def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     区别只在拉不到时的表态（那条回 ok:false 让卡片**不弹**，这条回 502 因为点按钮的
     人等着一句真话）。判据在 tests/test_update_channel.py。
 
+    第六条 `/v1/auth/reauth`（v0.34.0）是这一份名单里**唯一一条"免会话凭据但不免
+    凭据"**的：掉线的人手里没有会话令牌，所以这条门必须对他们开着；而它开着的只是
+    "拿一把 256 位续命凭据换一段全新会话"，防线在 auth_router.reauth（两本限速账）
+    与 auth.AuthStore.reauth（单次使用、封号与改密连带清空）。它免的是"会话"，不是
+    "身份"，所以判它能不能免凭据要看**它换不到任何业务动作**——那一半由
+    tests/test_v0340_reauth.py 判据 5 逐条端点钉死。
+
     PUBLIC_ROUTE_TEMPLATES 是带变量段的那一类，今天只有一条：导出票据兑换。它的凭据
     是链接里那段一次性票据本身，所以免登录是设计而非漏洞；"这条门只有一整段票据那么宽"
     由下面的 test_the_ticket_redemption_door_is_one_segment_thick 用真请求守着，这里先
     钉住"名单不许悄悄多第二条"。
     """
     assert PUBLIC_PATHS == {"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
+                            "/v1/auth/reauth",
                             "/v1/release/latest", "/v1/update/info"}
     assert set(PUBLIC_ROUTE_TEMPLATES) == {f"{EXPORT_PATH_PREFIX}{{ticket_id}}"}
+
+
+def test_renew_is_not_on_the_public_side_of_the_door(client, enforced):
+    """判据 10 的前半：/v1/auth/renew **绝不**进免凭据名单。
+
+    renew 是"拿一枚有效会话换一枚新会话"。它一旦免凭据，任何人不需要任何凭据就能
+    让服务器替他签新令牌——整条 TTL 与绝对上限立刻归零，而且这条路径没有口令可查。
+    所以这里要钉的不是"实现里有没有鉴权"（有），而是"名单里不许出现它"：名单是
+    中间件的判据，写在别处的鉴权都挡不住一个漏进名单的条目。
+    """
+    assert "/v1/auth/renew" not in PUBLIC_PATHS, "续期端点成了免凭据端点：TTL 归零"
+    res = client.post("/v1/auth/renew")
+    assert res.status_code != 200, "没带任何凭据也能续期"
+    # 反向半边：reauth 免的是会话凭据，所以一条不带凭据的请求要**打到端点里**
+    # （401 来自"这把 secret 不对"，不是来自中间件把门）。两者状态码一样，
+    # 判据在 detail：中间件那句是 UNAUTHORIZED_DETAIL，端点那句是 REAUTH_FAIL。
+    res = client.post("/v1/auth/reauth", json={"device_secret": "没有这把"})
+    assert res.status_code == 401
+    assert res.json()["detail"] != authz.UNAUTHORIZED_DETAIL, \
+        "reauth 被中间件挡在凭据之外：掉线的人再也拿不回会话"
 
 
 def test_the_reset_step_is_reachable_without_credentials(client, enforced):
