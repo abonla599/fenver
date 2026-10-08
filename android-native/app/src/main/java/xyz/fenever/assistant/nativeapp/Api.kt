@@ -32,6 +32,14 @@ import java.util.concurrent.TimeUnit
 
 class ApiException(val status: Int, message: String) : Exception(message)
 
+/* 401 自愈（阶梯第三层）的豁免名单：这四条端点的 401 意思是"口令/答案不对"，不是
+ * "会话过期"。拿续命凭据去换一段新会话再重打，等于猜错一次密码反而白得一个可用会话，
+ * 而且重打那一枪把登录失败账记了两格。Web 侧 api.js 的 HEAL_EXEMPT_PATHS 是同一份
+ * 名单，两边错开就会出现"手机上被拦、网页上没拦"这种没法解释的差别
+ * （锁：backend/tests/test_v0340_web_device_vault.py 逐字比这两个集合）。 */
+private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
+                                     "/v1/auth/reset", "/v1/auth/change-password")
+
 @Serializable data class AuthResult(val token: String = "", val user_id: String = "",
                                     val username: String = "", val role: String = "user",
                                     // v0.34.0：登录/注册那一刻服务端同时发的续命凭据。
@@ -198,7 +206,12 @@ object Api {
         // 重打这一次；reauth 也不成才把 401 原样抛出去，由界面落登录页。
         // `tokenOverride == null` 筛掉的是 adopt/logout：那两次是**替别人**或**替旧值**
         // 动凭据，拿当前身份的 secret 换一段新会话再去重打，语义就错了。
+        // SELF_HEAL_EXEMPT 筛掉的是另外四条：它们的 401 意思是"口令/答案不对"，不是
+        // "会话过期"。不排掉就是猜错一次密码反而白得一个可用会话，而且重打那一枪把
+        // 登录失败账记了两格——限速预算本来就只有几次。Web 侧 api.js 的
+        // HEAL_EXEMPT_PATHS 是同一份名单（锁：test_v0340_web_device_vault 逐字比两边）。
         if (err is ApiException && err.status == 401 && tokenOverride == null
+            && path !in SELF_HEAL_EXEMPT
             && withContext(Dispatchers.IO) { SessionRenew.reauthOnce() }) {
             return withContext(Dispatchers.IO) { callOnce(path, method, body, null) }
         }
