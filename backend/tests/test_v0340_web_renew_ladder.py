@@ -284,8 +284,17 @@ def test_no_password_or_secret_is_persisted_locally(name):
     判据 11 的原话是"任何一层都不许把口令写进本地存储，**也不许"加密保存"**"——所以
     这里盯的是键名与写入值两侧的形状，而不是"有没有 btoa"。引入"记住密码"这类明文键
     正是这条要红的形状。
+
+    2026-10-08 用户改口径之后，本版有一处**声明过的例外**：device_secret 那一格
+    （续命凭据，不是口令）。例外只开到那一行为止——整份文件里带 DEVICE_SECRET_PREFIX
+    的写入必须恰好一处，多一处就回到"凭据随便往本地存储塞"那条老路上；那一格自己的
+    生命周期（谁能写、什么时候清、用一次就轮换）由 test_v0340_web_device_vault.py 钉。
     """
     src = _js(name)
+    vault_writes = [l for l in src.splitlines()
+                    if "setItem" in l and "DEVICE_SECRET_PREFIX" in l]
+    assert len(vault_writes) == (1 if name == "api.js" else 0), \
+        f"{name} 里那处声明过的例外变了：续命凭据的写门应当只有 api.js 那一扇"
     # 词边界而不是子串：`contextTokensK`（上下文预算，一个数字）里就含 "token"，
     # 用子串匹配的锁第一跑就红在这个不相干的键上——而一条"永远红"或"永远绿"的锁
     # 都会在下一个 PR 被当噪声拆掉。
@@ -294,6 +303,8 @@ def test_no_password_or_secret_is_persisted_locally(name):
     for line in src.splitlines():
         if "setItem" not in line and "sessionStorage" not in line:
             continue
+        if "DEVICE_SECRET_PREFIX" in line:
+            continue                     # 上面已经数过这一处例外，且只许这一处
         assert not credential_word.search(line), \
             f"本地存储写入里出现了凭据字样：{line.strip()}"
     # 会话令牌的明文只该活过一次 adopt；老版本留在 localStorage 的那个键，今天仍然
@@ -318,9 +329,11 @@ def test_the_identity_roster_still_carries_no_credential():
 
 
 def test_static_assets_ship_the_ladder_without_new_storage_apis():
-    """PRD 第四节 Web 那一行：本地存储"现状不变"。阶梯不许顺手新增存储面。
+    """第二层（Cookie 续期）自己不碰本地存储：它的输入是服务端的头，状态只在内存里。
 
     变异：把 SESSION 改成 localStorage 持久化（"刷新页面就不续了"的"修法"），这条红。
+    本版新增的那一格续命凭据是**第三层**的存储面，不在这条的射程内——它由
+    test_v0340_web_device_vault.py 按"一个前缀、三个出入口、用一次就轮换"单独钉。
     """
     api = _js("api.js")
     body = _fn_text(api, "renewSession") + _fn_text(api, "sessionTick") \
