@@ -66,6 +66,24 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Relative inputs are made absolute HERE, before anything derives from them.
+# Why this exists: the same-volume precheck compares [IO.Path]::GetPathRoot() of
+# the stage path with the live path, and GetPathRoot returns an EMPTY string for a
+# relative path. So a perfectly normal "dist_new\run_backend" typed from the repo
+# root produced a FAKE 'stage-volume stage= live=C:\' failure. A fake failure on a
+# swap day is worse than no check at all - it trains the operator to distrust
+# prechecks and to reach for --force-style workarounds.
+# [Environment]::CurrentDirectory is deliberately NOT used: in PowerShell it can
+# disagree with the session location, and the location the operator is standing in
+# is the one the typed relative path refers to.
+function ConvertTo-AbsolutePath {
+    param([string] $Value)
+    if ([System.IO.Path]::IsPathRooted($Value)) {
+        return [System.IO.Path]::GetFullPath($Value)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $Value))
+}
+
 # --------------------------------------------------------------- path resolve
 if (-not $ProjectRoot) {
     if (-not $PSScriptRoot) {
@@ -73,7 +91,13 @@ if (-not $ProjectRoot) {
     }
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
+$ProjectRoot = ConvertTo-AbsolutePath -Value $ProjectRoot
 if (-not $StageDir) { $StageDir = Join-Path $ProjectRoot 'dist_new\run_backend' }
+# normalise AFTER the default is built (the default is already absolute; an
+# operator-typed value may not be) and BEFORE $StageExe/$StageAppJs/$StageStamp
+# are joined off it, so the version precheck and the volume precheck read the
+# same directory the rename step will move.
+$StageDir = ConvertTo-AbsolutePath -Value $StageDir
 if (-not $ExpectedVersion) { throw '-ExpectedVersion required, e.g. v0.29.1' }
 if (-not $Marker) { throw '-Marker required: a string only the NEW app.js contains, e.g. msg-trace' }
 
