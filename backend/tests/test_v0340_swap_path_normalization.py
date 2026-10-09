@@ -25,6 +25,7 @@
 不动文件、不碰计划任务**——所以行为层可以放心实跑，不需要 mock。
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -57,8 +58,16 @@ def _make_stub(root: Path) -> Path:
 
 
 def _run_dryrun(stage_dir: str, cwd: Path) -> list:
-    """-DryRun 实跑一次，返回所有 PRECHECK 行（失败也拿得到，退出码由调用方不管）。"""
-    assert POWERSHELL, "这台机器上没有 powershell.exe，行为层锁就无从跑起"
+    """-DryRun 实跑一次，返回所有 PRECHECK 行（失败也拿得到，退出码由调用方不管）。
+
+    非 Windows 上跳过而不是断言失败：现网脚本只在这台机器上跑，但 CI 是 ubuntu-latest
+    （.github/workflows/tests.yml:5）且整目录收 backend/tests/，这里硬断言会让三条行为锁
+    把 CI 变红、把发版闸口堵死。跳过只发生在行为层三条，文本层三条照跑（顺序与禁用的
+    写法在任何平台都判得动）——惯例与理由同 test_v033_data_root_lock.py 的平台分支。
+    """
+    if os.name != "nt" or not POWERSHELL:
+        pytest.skip("行为层要实跑 powershell.exe：非 Windows 上没有这个解释器，"
+                    "换包脚本本身也不会在那儿跑")
     p = subprocess.run(
         [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
          "-File", str(SWAP_PS1), "-DryRun",
