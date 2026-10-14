@@ -160,10 +160,14 @@ def test_asking_without_saying_what_is_installed_is_its_own_answer(cold_cache):
 # ---------- 缓存与"出网"/读盘 ----------
 
 def test_a_counted_read_shows_the_cache_holds(cold_cache, monkeypatch):
-    """免鉴权 + 会读盘（过去是会出网）= 必须自己挡住放大。十分钟一读，与来多少请求无关。
+    """免鉴权 + 会读盘（过去是会出网）= 必须自己挡住放大。一个缓存期一读，与来多少请求无关。
 
-    v0.34 起取数源是本地清单，"出网"变成"读盘 + 算 9MB 摘要"。这里数的是
+    v0.34 起取数源是本地清单，"出网"变成"读盘 + 判定那份 APK 的摘要"。这里数的是
     `_read_manifest_file` 的调用次数：同一份快照在缓存期内只许读一次。
+
+    缓存期今天由 `releases.CACHE_SECONDS` 决定（30 秒，用户要求"改完即近生效"），
+    这里不写死数字——写死的话调一次 TTL 就要改一处测试，很容易漏；真正被钉的是
+    "20 次问只读 1 次"这个行为。
     """
     prime()
     calls = []
@@ -196,9 +200,10 @@ def test_a_machine_that_just_booted_still_probes(cold_cache, monkeypatch):
     """刚开机的机器上 monotonic 只有几秒——缓存哨兵不能拿 0.0 当"该读了"。
 
     这不是假想出来的边界，是 CI 抓的（runner 是一台刚开的虚拟机，monotonic 远小于
-    CACHE_SECONDS）：`now - 0.0 >= 600` 在那台机器上为假，于是"从没读过"被判成
-    "缓存还新"，而 `_payload` 是空的。线上对应的症状是**每次重启后的头 10 分钟里那张
-    卡片永远不弹**——不弹、不报错、没人知道。
+    CACHE_SECONDS）：`now - 0.0 >= 30` 在那台机器上为假，于是"从没读过"被判成
+    "缓存还新"，而 `_payload` 是空的。线上对应的症状是**每次重启后的头 30 秒里那张
+    卡片永远不弹**——不弹、不报错、没人知道。（窗口从 600 收到 30 只是把这段缩短，
+    判据本身不变。）
     """
     prime()
     reads = []
@@ -208,7 +213,7 @@ def test_a_machine_that_just_booted_still_probes(cold_cache, monkeypatch):
     monkeypatch.setattr(releases.time, "monotonic", lambda: 5.0)        # 开机 5 秒
 
     out = releases.probe(have="0.16")
-    assert len(reads) == 1, "刚起来的机器一次都不去读：那这 10 分钟里没人能看到卡片"
+    assert len(reads) == 1, "刚起来的机器一次都不去读：那这 30 秒里没人能看到卡片"
     assert out["ok"] and out["has_update"] is True, out
 
 
@@ -235,6 +240,71 @@ def test_a_fresh_process_with_a_small_clock_probes():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          cwd=str(backend), timeout=120)
     assert "PROBED" in out.stdout, f"新进程 + 小钟 = 不去读：{out.stdout}{out.stderr}"
+
+
+# ---------- P2：状态变化必须有人喊（优先级陷阱与摘要不符） ----------
+
+def test_a_runtime_manifest_overriding_a_different_seed_says_so(capsys, cold_cache):
+    """运行时清单压过了**版本号不同**的种子时，必须响亮地说一声，且同一状态只说一次。
+
+    这是这套优先级的固有陷阱：有人在仓库里改了种子却忘了改生产机的 data/version.json，
+    新版本会**静默**发不出去，谁都不会发现——所以这一格必须有人喊。按"措辞变了才打"，
+    同一状态再问不刷屏。
+    """
+    runtime, seed = cold_cache
+    write_manifest(seed, make_manifest(version="0.34.0", apk_name="fenver-0.34.0.apk"))
+    write_manifest(runtime, make_manifest())                       # 运行时仍是 0.33.1
+    data, why, used = releases.load_manifest()
+    assert why == "" and data["version"] == VERSION
+    assert used == releases.runtime_manifest_path()
+    out = capsys.readouterr().out
+    assert "压过了打包种子" in out, out
+    assert VERSION in out and "0.34.0" in out, out
+
+    releases.load_manifest()                                       # 同一状态：不该再刷
+    assert "压过了打包种子" not in capsys.readouterr().out
+
+
+def test_runtime_and_seed_agreeing_in_version_stay_quiet(capsys, cold_cache):
+    """两份都在、版本号一致 = 正常运行，不喊——否则每次换包都先听到一句吓人的话。"""
+    runtime, seed = cold_cache
+    write_manifest(seed, make_manifest())
+    write_manifest(runtime, make_manifest())
+    releases.load_manifest()
+    assert "压过了打包种子" not in capsys.readouterr().out
+
+
+def test_a_manifest_digest_mismatch_gets_logged_and_clears_on_recovery(capsys, cold_cache):
+    """「清单摘要与磁盘字节不符」也要有人喊；恢复之后标记清掉，下次再坏还能再喊。
+
+    这一格对不上时 `/v1/update/info` 与 `/site/android.apk` 双双长期不可用，而过去
+    整个模块一句日志都没有——正是 P2 要堵的那格。第 4 步刻意**不** reset（reset 会把
+    标记一起清掉），改用时间旅行逼出一次同步重读，这样"恢复时清了标记"才真的被测到。
+    """
+    import time
+
+    runtime, _seed = cold_cache
+    apk_cache.store(VERSION, PKG, SHA)
+    write_manifest(runtime, make_manifest(sha256="b" * 64))        # 盘上真、清单假
+    releases.reset_for_tests()
+    assert releases.download_plan()[0] is None
+    out = capsys.readouterr().out
+    assert "[releases]" in out and VERSION in out and "不可用" in out, out
+
+    # 恢复：清单改回正确摘要、把包重新放回盘上（上一趟对不上时那份已被隔离保留）。
+    write_manifest(runtime, make_manifest())
+    apk_cache.store(VERSION, PKG, SHA)
+    releases.reset_for_tests()
+    assert releases.download_plan()[0] is not None
+    capsys.readouterr()
+
+    # 再坏一次（这次是包不在盘上）却**不** reset：标记若没在恢复时清掉，就不会再喊。
+    skew = time.monotonic() - releases.CACHE_SECONDS - 1
+    releases._fetched_at = skew
+    releases._payload_at = skew
+    os.remove(apk_cache.path_for(VERSION))
+    assert releases.download_plan()[0] is None
+    assert "不可用" in capsys.readouterr().out
 
 
 def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypatch):
