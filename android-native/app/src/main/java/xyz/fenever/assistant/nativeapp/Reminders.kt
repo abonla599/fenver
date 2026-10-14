@@ -186,7 +186,7 @@ object ReminderChannels {
                 android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
         val manager = ctx.getSystemService(NotificationManager::class.java)
-        return permission && (manager?.areNotificationsEnabled ?: true)
+        return permission && (manager?.areNotificationsEnabled() ?: true)
     }
 }
 
