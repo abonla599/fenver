@@ -2723,15 +2723,28 @@ function renderAccounts() {
  *  1) 新壳（capabilities 带 update）→ 露 button，调桥，走的是与长按图标、桌面组件
  *     完全同一条路；
  *  2) 旧壳（v0.14/v0.15 的 capabilities 只有 shell）→ 认不到 update，露那个 a，
- *     href 直接指向下载页。少了这一档，这一行在装不到新壳的手机上就是个看起来能点的
- *     死按钮：桥里没有 checkUpdate 这个方法，点了连一句错都不会显示；
- *  3) 浏览器（没有壳）→ 两个都藏。那里没有"安装包"可更新，页面本身永远是从服务器
- *     现加载的那一版，摆一行只会让人以为网页能自更新。
+ *     href 指向自家代取的 APK 出口；
+ *  3) 浏览器（没有壳）→ 同样露那个 a，但 href 换成更新日志页。那里没有"安装包"可换，
+ *     界面本身永远是从服务器现加载的那一版。
  *
- *  下载页地址写在 index.html 那个 a 上，不在这里：
- *  test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。
+ *  那颗 <a> 的两个去向都是**同源相对路径**（常量见下面 APK_EXIT_PATH / CHANGELOG_PATH），
+ *  markup 里那份默认值是给壳的，壳不在时这里按壳在不在换一次：
+ *  - 旧壳：唯一还有字节的出口就是服务端替它把这一版 APK 取回来那一条（与官网「安卓版」
+ *    同一个端点，判据在 core/releases.py::SELF_APK_PATH），拿不到字节时那条路由自己 302
+ *    回官网，所以最坏是慢一次，不是一张 404；
+ *  - 纯浏览器：没有可安装的包，送它一个 APK 是让它去装一个装不上的东西，送 /changelog
+ *    才是实话——这一行问的"有没有新版"在那儿有答案，"装"这件事没有。
+ *  v0.34 之前这两档共用一条 github.com/abonla599/fenver/releases/latest，而那个账号被
+ *  停用之后它恒 404：送去一个 404 比不放链接更糟（这条口径的扫描锁见
+ *  tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web）。
+ *  地址写成相对路径而不是绝对 URL：同源纪律，见 test_frontend_uses_relative_api_paths_only。
  *  点下去不改这一行的文字：原生那侧已经立刻弹了一条"正在检查更新…"的 Toast，
  *  这里再写一个"正在检查…"就会在对话框关掉之后一直挂着假状态。 */
+// 那颗「去下载页/看更新日志」的两个去向。相对路径：换域名、换内网地址、走隧道还是走
+// 本机端口，这一颗都不必跟着改（同源纪律那条锁的理由）。
+const APK_EXIT_PATH = "/site/android.apk";
+const CHANGELOG_PATH = "/changelog";
+
 // 服务端构建戳：/health 里的 build 字段，来自打包前生成的 version.txt。
 // null = 还没取到；"" = 取到了但这台机器没有戳（老包或手工拷走的包）。
 let serverBuild = null;
@@ -2751,11 +2764,15 @@ function renderAboutRows() {
   const caps = SHELL.present ? (SHELL.capabilities() || {}) : {};
   const shellVer = typeof caps.version === "string" && caps.version ? "v" + caps.version : "";
   const native = SHELL.present && !!caps.update;
-  // 浏览器里也露"去下载页"那颗：这一行问的是"有没有新安装包"，跟有没有桥无关。
+  // 浏览器里也露那颗 <a>：这一行问的是"有没有新安装包"，跟有没有桥无关。
   // 只有新壳才调桥去查（它会比对已装的版本），其余一律给链接——包括旧壳和纯浏览器。
   const shown = native ? btn : link;
 
   [btn, link].forEach((el) => el.classList.toggle("hidden", el !== shown));
+  // 这一句只管那颗被露出来的 <a> 的去向：壳在→去拿包，壳不在→去看日志（判据见函数头那段）。
+  // 写 href 而不是再摆第三个元素：这一行的契约就是"两个元素永远只露一个"，
+  // 多一颗就多一条"点了没反应"的候选路径，而它平时是藏着的、没人会去点它。
+  link.href = SHELL.present ? APK_EXIT_PATH : CHANGELOG_PATH;
   // 这里不再动 set-only（那一类只干一件事：抹掉行底的分隔线）。以前这一行是
   // 「关于」卡片里的最后一行，另一颗只是 display:none、:last-child 看不见它，
   // 所以要手动补；现在它挪到了「版本」下面，上下都有行，分隔线本来就该在。
@@ -2796,7 +2813,11 @@ function renderAboutRows() {
     btn.onclick = () => { SHELL.checkUpdate(); };
   } else {
     $("updateVal").textContent = "";
-    $("updateLinkVal").textContent = (shellVer || serverBuild || "当前版本") + " · 去下载页";
+    // 这一格写的必须是"点下去会得到什么"：壳在就写去下载页（真有一个包等着落盘），
+    // 壳不在就写看更新日志（什么包都装不上，只有"这一版改了什么"是实话）。
+    // 只写「检查更新」会被读成"这个页面能自己更新"，而界面本来就是每次现加载的那一版。
+    $("updateLinkVal").textContent = (shellVer || serverBuild || "当前版本")
+      + (SHELL.present ? " · 去下载页" : " · 看更新日志");
   }
 }
 
@@ -2876,6 +2897,9 @@ function offerUpdate(info) {
 
   // 与设置那一行完全同一条分流：报得出 update 能力才给 button（调桥，走原生那条
   // 带进度与安装对话框的路），其余一律给 <a>。老壳只报版本号不报能力，这里就得给链接。
+  // 这张卡只在壳里弹（maybeAskUpdate 按壳报的版本号放行），所以那颗 <a> 的 markup 默认
+  // 去向 /site/android.apk 就是给它的：这一版包体的唯一出口，同源相对路径，
+  // 不再指 github.com 的发布页（判据见 renderAboutRows 头上那段）。
   const caps = SHELL.capabilities() || {};
   const native = SHELL.present && !!caps.update;
   const shown = native ? btn : link;

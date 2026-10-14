@@ -287,16 +287,25 @@
             <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
                  只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
                  两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a
-                 （直接去下载页）。下载页的地址写在 markup 里而不是 app.js 里，是因为
-                 test_frontend_uses_relative_api_paths_only 禁前端出现绝对 URL——那条锁
-                 拦的是"把我们自己的服务地址写死"，这里顺着它把外部链接留在 HTML 里。
-                 2026-09-21 从「设备」那一组挪到这里：换安装包这件事和"这是什么版本"
-                 是同一个问题的两面，放在提醒旁边没人找得到。 -->
+                 （直接去下载页）。2026-09-21 从「设备」那一组挪到这里：换安装包这件事
+                 和"这是什么版本"是同一个问题的两面，放在提醒旁边没人找得到。
+                 v0.34 起这一颗的去向是**同源相对路径** `/site/android.apk`，不再写
+                 github.com 的发布页：`abonla599` 停用之后那条地址恒 404，而"送去一个
+                 404 比不放链接更糟"是官网已经判过的口径（扫描锁见
+                 tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web）。
+                 `/site/android.apk` 是服务端替访问者把这一版 APK 取回来的那条出口，与官网
+                 「安卓版」那颗同一个端点（core/releases.py::SELF_APK_PATH），拿不到字节时
+                 它自己 302 回官网，所以这里最坏也只是慢一次，不是一张 404。
+                 纯浏览器（没有壳）那一档由 app.js 的 renderAboutRows 把 href 换成
+                 `/changelog`：那台机器上没有可安装的包，给它一个 APK 不如给它"这一版改了什么"。
+                 地址为什么不写在 app.js 里而是留在 markup：同源纪律那条锁
+                 （test_frontend_uses_relative_api_paths_only）禁的是前端 JS 出现绝对 URL，
+                 这里顺着它把默认去向留在 HTML——JS 只在这颗真被露出来时按壳在不在改一次相对路径。 -->
             <button class="set-row hidden" id="rowUpdate">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
               <span class="set-lbl">检查更新</span><span class="set-val" id="updateVal"></span><span class="set-go">›</span></button>
             <a class="set-row hidden" id="rowUpdateLink" target="_blank" rel="noopener"
-               href="https://github.com/abonla599/fenver/releases/latest">
+               href="/site/android.apk">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg></span>
               <span class="set-lbl">检查更新</span><span class="set-val" id="updateLinkVal"></span><span class="set-go">↗</span></a>
             <button class="set-row" id="themeBtn">
@@ -309,10 +318,14 @@
             <button class="set-row" id="rowFeedback">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16v12H4z"/><path d="M4 7l8 6 8-6"/></svg></span>
               <span class="set-lbl">意见反馈</span><span class="set-val">提交问题与建议</span><span class="set-go">›</span></button>
-            <!-- 仓库这一行的地址也是硬写在 markup 里的，理由与上面那颗「去下载页」
-                 同一条：test_frontend_uses_relative_api_paths_only 禁的是前端 JS 出现
-                 绝对 URL，外部链接留在 HTML 里不受它管，也不必绕一层 JS 去拼。
-                 ↗ 后缀表示"点下去离开本应用"（与那棵旧壳退路同一个符号）。 -->
+            <!-- 开源仓库这一行是整个 PWA 里**仅剩**的一颗 github.com 外链，所以它是
+                 那把死链扫描锁（tests/test_changelog_page.py）里唯一被点名的豁免：
+                 它答的是"代码在哪"，不是"包在哪"，与上面那颗「检查更新」不是一件事，
+                 摘掉它就等于把开源项目自己的源码入口删了（官网那条同口径的锁
+                 tests/test_website.py::test_the_android_button_downloads_through_our_own_endpoint
+                 还专门写着"源码入口还在，别顺手把它也删了"）。它与原生「关于」屏逐字同值，
+                 判据在 tests/test_about_page_contract.py。
+                 ↗ 后缀表示"点下去离开本应用"。 -->
             <a class="set-row" href="https://github.com/abonla599/fenver" target="_blank" rel="noopener">
               <span class="set-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 8.5 5 12l4 3.5M15 8.5 19 12l-4 3.5"/></svg></span>
               <span class="set-lbl">开源仓库</span><span class="set-val">github.com/abonla599/fenver</span><span class="set-go">↗</span></a>
@@ -489,7 +502,9 @@
              结论见 docs/搜索源浏览器直连矩阵.md）。
              源站地址刻意放在这份 data-search-endpoints 属性里而不是 app.js：
              test_frontend_uses_relative_api_paths_only 禁 JS 出现绝对 URL，
-             外部服务地址留在 markup 是「检查更新」那行 releases 链接的同款先例。
+             而这是别人家的服务、本来就不在同源纪律管内——留在 markup 里不受那条锁管，
+             也不必绕一层 JS 去拼。（v0.34 之前这里举的先例是「检查更新」那行的 releases
+             链接；那颗已经改成同源相对路径了，见上面 about 屏那段注释。）
              请求形状与后端 W1 的 search_api_sources 逐字段同构，由
              tests/test_web_search_direct_contract.py 钉死，界面直连与链上走的
              必须是同一种问法。 -->
@@ -704,8 +719,12 @@
        发版它就腐烂，而且腐烂得理直气壮（和 versionVal 那条是同一个理由）。
        「立即更新」有两个元素（button 与 a），同一时刻只露一个，规则与设置那一行完全相同：
        报得出版本号、又带 update 能力的壳才调桥，其余一律给下载页——否则手机上会留下一颗
-       点了没反应的死按钮。下载页地址写在 markup 里而不是 app.js：
-       test_frontend_uses_relative_api_paths_only 禁前端 JS 出现绝对 URL。 -->
+       点了没反应的死按钮。这张卡只在**壳里**弹（判据是壳报的版本号），所以那颗 <a> 面向的
+       就是"装过旧包、桥里没有 checkUpdate 方法"的那些手机：给它同源相对路径
+       `/site/android.apk`（服务端代取这一版 APK 的出口，与官网「安卓版」同一端点），
+       不再给 github.com 的发布页——账号停用之后那条恒 404，而送去一个 404 比不放链接更糟。
+       这里是相对路径，不是绝对 URL：同源纪律见
+       test_frontend_uses_relative_api_paths_only。 -->
   <div class="update-sheet hidden" id="updateSheet" role="dialog" aria-label="发现版本更新">
     <div class="us-top">
       <div class="us-text">
@@ -724,7 +743,7 @@
       <button class="us-btn us-ghost hidden" id="updateLaterBtn" type="button">稍后</button>
       <button class="us-btn us-primary hidden" id="updateGoBtn" type="button">立即更新</button>
       <a class="us-btn us-primary hidden" id="updateGoLink" target="_blank" rel="noopener"
-         href="https://github.com/abonla599/fenver/releases/latest">立即更新</a>
+         href="/site/android.apk">立即更新</a>
     </div>
   </div>
 

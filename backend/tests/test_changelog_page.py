@@ -11,20 +11,68 @@
 3. **页面契约**：`/changelog` 与 `/`、`/app/` 同一套缓存口径与 CSP，且页面自己去读
    同目录那份 JSON；
 4. **入口**：官网导航与页脚各有一个能点到的入口。
+5. **死链扫描**：整张随包发布的 Web（`site/` + `static/` + `admin/`）不许再有可点的
+   github.com 链接——判据与那唯一一颗豁免见本文件末尾那两条。
 """
 import importlib.util
 import json
+import re
 import subprocess
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+# 死链扫描要先把注释剥掉才判：留在 `/* 曾经指向 github.com/… */` 里的一句话不是可点的链，
+# 而"把链接挪进注释"恰是让扫描锁静默失效的那条路。尺子复用 test_web_pwa 那两把（本文件
+# 与它同属 Web 面，再抄一份剥注释的实现就是第二份真相，它会比原件先腐烂）。
+from tests.test_web_pwa import _strip_html_comments, _strip_js_comments
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = REPO_ROOT / "tools" / "gen_changelog.py"
 ARTIFACT = REPO_ROOT / "backend" / "app" / "web" / "site" / "changelog.json"
 PAGE = REPO_ROOT / "backend" / "app" / "web" / "site" / "changelog.html"
+
+# ---------- 死链扫描的面（判据见 test_the_dead_github_hyperlinks_are_gone_from_the_web） ----------
+WEB = REPO_ROOT / "backend" / "app" / "web"
+# 用户点得到的那三面：官网、PWA、管理台。新增文件天然在面内，不需要谁记得补一处。
+SCANNED_DIRS = ("site", "static", "admin")
+SCANNED_SUFFIXES = {".html", ".js"}
+# vendor/ 里是第三方库自带的字符串（highlight.js 的项目地址、hljs-github-dark 这个主题名）。
+# 它们不是"我们把用户送去哪儿"，判红等于要求我们去改第三方源码。
+EXCLUDED_PARTS = {"vendor"}
+# 全仓唯一被允许挂着 github.com 链接的那一颗：PWA「关于」屏的仓库主叶（代码在哪），
+# 由 tests/test_about_page_contract.py 与原生屏逐字对齐。带任何路径段的 github 地址
+# （/releases、/releases/latest、/archive/…）都不在这个形状里，一律红。
+REPO_HOME = "https://github.com/abonla599/fenver"
+# "可点"的两种形状：href/src/action 属性，以及带引号的 URL 字面量（JS 里
+# `location.href = "…"`、`window.open("…")` 与 data-* 属性里那份 JSON 都走第二条）。
+_CLICKABLE_RE = re.compile(
+    r"""(?:href|src|action)\s*=\s*["']([^"']*)["']"""
+    r"""|['"`](https?://[^'"`\s]*)['"`]""")
+
+
+def _clickable_github_links() -> list:
+    """返回 [(仓库相对路径, 链接)]：注释剥掉之后，页面上真能把人带去 github 的那些形状。"""
+    hits = []
+    for d in SCANNED_DIRS:
+        root = WEB / d
+        assert root.is_dir(), f"死链扫描的面少了目录 {d}：面塌了不等于没违例"
+        for path in sorted(root.rglob("*")):
+            rel = path.relative_to(WEB).as_posix()
+            if not path.is_file() or path.suffix not in SCANNED_SUFFIXES:
+                continue
+            if EXCLUDED_PARTS & set(rel.split("/")[:-1]):
+                continue
+            text = path.read_text(encoding="utf-8")
+            text = (_strip_html_comments(text) if path.suffix == ".html"
+                    else _strip_js_comments(text))
+            for groups in _CLICKABLE_RE.findall(text):
+                url = next((g for g in groups if g), "")
+                if "github.com" in url:
+                    hits.append((path.relative_to(REPO_ROOT).as_posix(), url))
+    return hits
+
 
 client = TestClient(app)
 
@@ -121,18 +169,56 @@ def test_the_homepage_links_to_the_changelog():
     assert 'href="/changelog"' in index, "首页没有指向更新日志页的链接"
 
 
-def test_the_dead_github_hyperlinks_are_gone_from_the_site():
-    """官网不许再有指向 github.com/abonla599/fenver 的**超链接**。
+def test_the_dead_github_hyperlinks_are_gone_from_the_web():
+    """整张随包发布的 Web（官网 + PWA + 管理台）不许再有可点的 github.com 链接。
 
     `abonla599` 被停用后那条地址恒 404（本机实测），把访客送去一个 404 比不放链接更糟。
-    运维层面它仍可能解封，所以仓库地址作为**文字**保留在开源区块里（不是可点链接），
-    由 test_website 那几条继续看着。
+    这把锁原来只扫 `site/index.html`——v0.34 合流时 PWA（`static/index.html`）那两颗
+    「检查更新 / 立即更新」还挂在 `github.com/.../releases/latest` 上没人对齐，就是
+    "面只铺了一半"的代价：官网干净了，用户真点的那一面没干净。现在面按目录铺，
+    新增页面天然在扫描范围内，不需要谁记得再来补一处。
+
+    判据写成"除仓库主叶之外一律不许"，而不是"releases 那一层不许"：账号停用之后
+    github.com 上这个仓的**任何**地址都是 404，只钉 /releases 等于给下一次换个
+    `/releases/download/…` 或 `/archive/…` 留了门缝。
+
+    唯一豁免是 PWA「关于」屏那一颗仓库主叶（`开源仓库` 那一行）：它答的是"代码在哪"，
+    不是"包在哪"，摘掉它等于把开源项目自己的源码入口删了。官网把同一句话留成**纯文字**
+    （site/index.html 那句"仓库 github.com/abonla599/fenver 里的 docs/INSTALL.md"），
+    由 tests/test_website.py 两处钉着；PWA 这一颗则被 tests/test_about_page_contract.py
+    与原生「关于」屏逐字对齐，动它就是动双端同文案那条契约。两种留法都不是可点的更新链。
     """
-    index = (REPO_ROOT / "backend" / "app" / "web" / "site" / "index.html").read_text(
-        encoding="utf-8")
-    dead = [ln.strip() for ln in index.splitlines()
-            if 'href="https://github.com/abonla599' in ln]
-    assert not dead, f"官网还挂着失效的 GitHub 超链接：{dead}"
+    hits = _clickable_github_links()
+    off_home = [(f, u) for f, u in hits if u != REPO_HOME]
+    assert not off_home, (
+        "这些是可点的 github.com 链接，而那个账号停用之后它们恒 404——"
+        "更新链的出口在自家端点上（/site/android.apk、/changelog），别指回站外："
+        f"{off_home}")
+    homes = [f for f, u in hits if u == REPO_HOME]
+    assert homes == ["backend/app/web/static/index.html"], (
+        f"仓库主叶那一颗的豁免必须恰好一处、且只在 PWA 的「关于」屏，实际在：{homes}——"
+        "多了就说明有人又给 github 挂了一颗链，少了说明「关于」屏的源码入口被顺手删了")
+
+
+def test_the_changelog_page_keeps_release_notes_as_plain_text():
+    """更新日志页把 JSON 里的正文当**文字**渲染，这是那些历史 github 地址不成为死链的前提。
+
+    `site/changelog.json` 里 v0.23.x 那几条发版说明白纸黑字写着
+    `https://github.com/abonla599/fenver/releases/tag/…`。它们是历史证据（"那一版的包
+    当初发在哪儿"），改史等于说谎，所以不动；它们不构成上一条锁的违例，仅仅因为
+    `changelog.html` 的 `inline()` 刻意不解析链接（那句注释写着"免得把发版说明里一个
+    失效地址变成页面上一颗可点的按钮"）。哪天有人给它加上自动 linkify 或
+    `innerHTML`，那几段历史文字就当场变成可点死链——而上面那把扫描锁看不见 JSON 里的
+    字面量会变成链接。所以这里钉住"不建 <a>"这一件事本身。
+    """
+    page = PAGE.read_text(encoding="utf-8")
+    assert "function inline(" in page, "更新日志页的行内渲染被换了，本条的判据对象没了"
+    assert 'createElement("a")' not in page, \
+        "changelog.html 开始自己造 <a>：历史正文里的地址会变成可点死链"
+    assert "innerHTML" not in page, \
+        "更新日志页改用 innerHTML：Markdown/HTML 里的链接会被浏览器原样点亮"
+    assert "createTextNode" in page, \
+        "行内渲染不再走 createTextNode：上面那两句判的前提已经不成立了"
 
 
 def test_the_generated_artifact_is_a_project_file_not_a_runtime_asset():

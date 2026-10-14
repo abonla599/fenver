@@ -14,13 +14,27 @@ r"""机器真要读的那些路径，不许指着一个不存在的文件。
    这一类是主战场——脚本真去打开的东西多数长这样，光看 token 形状抓不到（判基准怎么认，
    见下面 `_ps_bases` / `_py_joined_pointers` 的注释）。
 
-判红条件：抽出来的路径相对仓库根不存在。立这条的理由（AGENTS.md 第 3 条）：
-"指向不存在的文件也是一种引用"，并给了一个真实判例——CI 的报错文案里指着
-`docs/APK正式签名落地指引.md`，而那份指引住在被 .gitignore 排除的 `docs-internal/`：
-人在 CI 上红着的时候按那句话去找文件，永远找不到。`docs-internal/` 因此**不在豁免名单里**，
-指过去就该红（本机才有的东西不能出现在机器读的引用里）。
+判红条件：抽出来的路径相对仓库根**不存在，而且 .gitignore 没说它是被有意排除的**。
+立这条的理由（AGENTS.md 第 3 条）："指向不存在的文件也是一种引用"，并给了一个真实判例
+——CI 的报错文案里指着 `docs/APK正式签名落地指引.md`，而那份指引住在被 .gitignore 排除的
+`docs-internal/`：人在 CI 上红着的时候按那句话去找文件，永远找不到。
 
-形状上的两处取舍，都是为了少误报而不是少判红：
+"运行期资产"与"真断链"这两类怎么分？**只问 git**（`_is_deliberately_excluded`），不再手挑
+一张前缀表。原来那张 `BUILD_OR_RUNTIME_ROOTS` 是第二份真相：它写的是 `"data/"`（带斜杠），
+而 watchdog.ps1 从 `Join-Path $ProjectRoot 'data'` 抽出来的 token 是 `data`（不带斜杠），
+漏过过滤 ⇒ 任何干净检出（含 CI，因为这两个东西都是 gitignored 的运行期资产）必红两条。
+现在判据直接落在 `.gitignore` 这一份唯一来源上：它说"这里的东西本来就不该在检出里"，
+那就不是断链；它没这么说而文件又不在，那就是断链。
+
+一处口径上的变化要说在前面：以 .gitignore 为唯一判据之后，**指向 `docs-internal/`
+这类"本机私有、被有意不入库的内容"也不再红**（旧表把它算作断链，是拿一张手挑的名单在
+替"这段文案该不该这么写"下判决）。那个判例真正要防的是"人在 CI 上红着的时候按那句话
+去找文件、永远找不到，而没人告诉他那儿本来就找不到"——现在那一层由文案自己承担：
+release-apk.yml 的对应那句写的是"参考**本机的** docs-internal/APK正式签名落地指引.md
+（这份指引按仓库约定不入公开库）"，指向与说明同时在场。要不要指过去是文案判断，
+不是这张表能替人做的决定；把它写成锁，只会得到第二份需要有人维护的真相。
+
+形状上的三处取舍，都是为了少误报而不是少判红：
 - 含 `://` 的词整词丢掉，前面紧跟 `/` 的匹配也丢掉——那是 URL 或 HTTP 路由，不是文件
   （`could not fetch /app/app.js` 里的 `/app/app.js` 是路由）。逐词判是刻意的：
   `python tools/pre_tag_gate.py --health-url https://ai.fenever.xyz/health` 这一行里
@@ -28,10 +42,16 @@ r"""机器真要读的那些路径，不许指着一个不存在的文件。
 - token 类只收"至少一个分隔符 + 白名单扩展名"的形状：裸文件名（`version.txt`、
   `run_backend.exe`）在脚本里常常是相对包内目录或运行期变量拼出来的，按仓库根判会把
   对的判成红的（这类改由第 3 条的拼接规则抓，基准是能证明的根）。
+- `Join-Path $某个变量 'a\b.ext'` 里那段字面量**不按仓库根判**（见 `_literals` 里那步
+  抹除）：基准证明不了的拼接交给 `_ps_joined_pointers`，那里只认能从 `$PSScriptRoot`
+  算出来的根。以前这一步漏了，swap-package.ps1 里 `Join-Path $StageDir '_internal\…'`
+  那两条相对**包内目录**的路径就被当成仓库根下的引用扫到了——它俩恰好都在旧表里，
+  于是这个形状一直没红过，而表一撤它俩就会变成两条新的假红。
 """
 
 import ast
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -52,13 +72,10 @@ PATH_TOKEN = re.compile(
 # 带这些字符的 token 不是"这里有个待打开的文件"：模板、变量、通配。
 PLACEHOLDER = ("$", "{", "}", "<", ">", "*", "?", "~", "%")
 
-# 构建产物与运行时资产：它们在两次构建/两次部署之间本就可能不在，按"引用是否存在"判
-# 会把每条正常文案判红。dist/ 是现网包、dist_new/ 是暂存包、build/ 是 PyInstaller 工作目录、
-# _internal/ 是 onedir 包**内部**的目录：swap-package.ps1 用相对 StageDir 的路径读
-# `_internal\version.txt` 与 `_internal\app\web\static\app.js`，它们在仓库根下永远不存在。
-BUILD_OR_RUNTIME_ROOTS = ("dist/", "dist_new/", "dist_stage", "build/", "data/", "chroma_db/",
-                          "chroma_data/", "venv/", ".venv/", "node_modules/", "backend/static_dist/",
-                          "_internal/")
+# PowerShell 里 `Join-Path <根> '<字面量>'` 的形状：字面量是相对那个根的，不是相对仓库根。
+# 名字带 WITH_ARG 是有意的——下面 `_ps_joined_pointers` 那条 `_PS_JOIN` 要取的是**两组**
+# （根变量名 + 字面量），这里这条只要"整段抹掉"，两者共用一个名字会被后定义的那条覆盖。
+_PS_JOIN_WITH_ARG = re.compile(r"Join-Path\s+\$\{?\w+\}?\s+['\"][^'\"]+['\"]", re.I)
 
 
 def _tokens(text: str) -> list:
@@ -139,10 +156,17 @@ def _py_code_strings(path: Path) -> list:
 
 
 def _literals(path: Path) -> list:
-    """取"机器真要读的字符串"清单，不要整篇。"""
+    """取"机器真要读的字符串"清单，不要整篇。
+
+    PowerShell 那一支先把 `Join-Path $某根 '<字面量>'` 整段抹掉再取字面量：那段字面量
+    相对的是**那个根**，不是仓库根，按仓库根去判存在性就是把 `$StageDir\\_internal\\…`
+    这种包内路径当成仓库断链（旧表里那条 `_internal/` 就是在给这个形状打补丁）。
+    根能证明的拼接由 `_ps_joined_pointers` 单独收，那里只认从 `$PSScriptRoot` 算得出的根。
+    """
     if path.suffix == ".py":
         return _py_code_strings(path)
     body = _strip_ps_comments(path.read_text(encoding="utf-8"))
+    body = _PS_JOIN_WITH_ARG.sub(" ", body)
     return [m[0] or m[1] for m in re.findall(r"'([^']*)'|\"([^\"]*)\"", body)]
 
 
@@ -159,14 +183,13 @@ def _pointer_pairs() -> list:
     return pairs
 
 
-def _kept(pairs: list) -> list:
-    """去掉构建/运行时产物，剩下的就是"声称这里有个文件"的引用（按出处+路径去重）。"""
-    seen = set()
-    kept = []
+def _dedup(pairs: list) -> list:
+    """按出处+路径去重。这里**不再**过滤运行期资产：豁免的判断挪到 `.gitignore` 那
+    一份唯一来源上（见 `_is_deliberately_excluded`），这张表一旦手写就会和现实脱节——
+    它上一版的 `"data/"` 与 watchdog 抽出来的 token `data` 就是差一个斜杠而红了两条。"""
+    seen, kept = set(), []
     for origin, token in pairs:
         clean = token.replace("\\", "/")
-        if clean.startswith(BUILD_OR_RUNTIME_ROOTS):
-            continue
         key = (origin, clean)
         if key in seen:
             continue
@@ -176,7 +199,60 @@ def _kept(pairs: list) -> list:
 
 
 def _corpus() -> list:
-    return _kept(_pointer_pairs())
+    return _dedup(_pointer_pairs())
+
+
+# ------------------------------------------------------------------ 什么算"被有意排除"
+# 只问 git，不在这份文件里再抄一张"哪些目录是运行期资产"的表：那张表就是第二份真相，
+# 它会比 .gitignore 先腐烂（历史上正是它少写一个斜杠，让每条干净检出都必红两条）。
+def _git_check_ignore(probe: str):
+    """git check-ignore 对一条路径的回答：0=被排除，1=没被排除，其它=它没答上来（返回 None）。"""
+    try:
+        res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--", probe],
+                             capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):      # 没有 git / 超时 / 不是仓库
+        return None
+    if res.returncode == 0:
+        return True
+    if res.returncode == 1:
+        return False
+    return None
+
+
+# 拿一个不可能成为真文件的名字去探"这个位置**当作目录**时排不排"。
+# 为什么不是"给路径补一个尾斜杠再问一次"那种直觉写法：本仓 `.gitignore` 第 175 行是
+# 一个**裸 CR**（CRLF 文件里的空行），git 把它读成一枚空模式，于是
+# `git check-ignore -- '任何路径/'` 一律回"被排除"。实测：
+# `deploy/这一版根本不存在.ps1/` → rc=0，报的是 `.gitignore:175:`。
+# 那条写法会把"豁免"变成恒真——正是本修法要躲的那个偷懒方向，而且它绿得毫无痕迹。
+# 换成哨兵子路径就没有这个形状：`data/__probe__` 被 `data/` 命中，而
+# `不存在的东西/__probe__` 谁也不命中（哨兵名字里带 `__probe__`，不与任何真扩展名撞车）。
+_SENTINEL = "__gitignore_probe__"
+
+
+def _is_deliberately_excluded(rel: str):
+    """这个位置是 `.gitignore` 有意排除的东西吗？True / False；git 答不了就是 None。
+
+    True  ⇒ 检出里没有它是**设计如此**（现网包、暂存包、数据根、venv、构建戳、
+            本机才有的隧道 exe……），按"引用是否存在"判它就是把正常文案判红；
+    False ⇒ .gitignore 没这么说而文件又不在 ⇒ 真断链，机器照这句话去找会永远找不到，该红；
+    None  ⇒ 判不了。调用处一律按"不许绿"处理：一条静默放弃判断的锁比一条红的锁更糟，
+            它会让"没有断链"和"什么都没判"长得一模一样（本仓为这个形状付过钱，
+            见 test_request_size_caps 那条 glob 锁的空集静默）。
+
+    问两次，因为指针可能是目录也可能是文件：`git check-ignore data` 回"没排除"
+    （`data/` 那条模式要目录身份，而这个检出里根本没有 data/ 让 git 判断），
+    而 watchdog 从 `Join-Path $ProjectRoot 'data'` 抽出来的 token 正是这个不带斜杠的
+    `data`——本条原来那张手挑表漏的也正是这一个斜杠，于是每条干净检出必红两条。
+    """
+    trimmed = rel.rstrip("/")
+    for probe in (trimmed, f"{trimmed}/{_SENTINEL}"):
+        verdict = _git_check_ignore(probe)
+        if verdict is None:
+            return None
+        if verdict:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- 变量根拼出来的路径
@@ -277,12 +353,53 @@ def test_the_pointer_scanner_reads_enough_real_pointers():
     assert "tools/cloudflared.exe" in tokens, \
         "名单里没有 tools/cloudflared.exe：watchdog 的 Join-Path 那一类不再被扫了——" \
         "这一类正是本条的主战场，掉了就说明 _ps_bases/_ps_joined_pointers 坏了"
+    # `data` 这条不带斜杠的 token 是旧表漏掉的那一条（`Join-Path $ProjectRoot 'data'`）。
+    # 它现在由 .gitignore 判豁免，但**必须仍在名单里**：从名单里掉出去和判成断链一样糟，
+    # 前者是"这条引用不再有人看"，后者是本条要修的假红。
+    assert "data" in tokens, \
+        "名单里没有 watchdog 的 data 那一条：$ProjectRoot 拼出来的裸目录名不再被扫到了，" \
+        "说明 _ps_joined_pointers 坏了——旧表就是在这条上漏了一个斜杠才让 CI 必红"
+
+
+def test_the_exemption_engine_still_has_teeth():
+    """豁免引擎的**双向**正对照：它得认得出"被有意排除"，也得对一条编出来的路径说不。
+
+    本条存在的理由就是本修法最容易偷懒的那个方向：把"文件不在"一律判成"运行期资产，
+    不红"，全绿立刻到手，而真断链从此再也不会红。所以这里不只看绿的那半，还钉红的那半：
+    - 一条既不存在、又没被 .gitignore 写过的路径，必须得到 False（判 False 才有牙）；
+    - git 答不了（None）在这套判法里等于不许绿，所以这里也钉一次它不是 None。
+    两条运行期资产（`data`、`tools/cloudflared.exe`）在这里当已知锚点用：它们是不是
+    被有意排除，由 .gitignore 说了算，本条只是核对 git 真的这么答——不是另写一张表。
+    """
+    fake = "deploy/this_pointer_was_invented_for_this_test.ps1"
+    assert not (REPO_ROOT / fake).exists(), f"正对照用的那条假路径竟然真在：{fake}"
+    verdict = _is_deliberately_excluded(fake)
+    assert verdict is not None, "git check-ignore 答不了：这台机器上的判据退化成了恒真"
+    assert verdict is False, (
+        f"{fake} 既不存在也没被 .gitignore 排除，豁免引擎却说它是「运行期资产」——"
+        "这条锁从此对真断链免疫了，正是本修法要躲的那个偷懒方向")
+    for runtime_asset in ("data", "tools/cloudflared.exe"):
+        got = _is_deliberately_excluded(runtime_asset)
+        assert got is True, (
+            f"{runtime_asset} 是 .gitignore 有意排除的运行期资产，判据却回 {got!r}："
+            "哨兵子路径那一次探测坏了（`<路径>/__gitignore_probe__`），干净检出又要开始必红")
 
 
 @pytest.mark.parametrize("origin,token", _corpus())
 def test_every_machine_read_path_exists(origin, token):
-    """CI 正文与脚本字面量里出现的每个路径，仓库里必须真有它。"""
+    """CI 正文与脚本字面量里出现的每个路径，要么仓库里真有，要么 .gitignore 真说过不要它。"""
     target = REPO_ROOT / token
-    assert target.exists(), (
-        f"{origin} 里引用了 {token}，而仓库根下没有这个东西——"
-        "机器按这句话去找会永远找不到；改指向，别删内容")
+    if target.exists():
+        return
+    verdict = _is_deliberately_excluded(token)
+    if verdict is None:
+        pytest.fail(f"{origin} 里引用了 {token}，文件不在，而 git 拒绝回答它是否被有意排除"
+                    f"（不是仓库 / 没有 git / 超时）——判不了就**不许**当作没断链")
+    if verdict:
+        # 不是"放过"，是"这条本就不该在检出里"：读它的脚本只跑在装有那东西的机器上。
+        # skip 而不是 pass，为的是在计数行里看得见"有几条是按 .gitignore 豁免的"——
+        # 这个数字哪天悄悄涨起来，就该去读一眼 .gitignore 是不是被人改宽了。
+        pytest.skip(f"{token}：.gitignore 有意排除的运行期资产，检出里没有它是设计如此"
+                    f"（出处 {origin}）")
+    pytest.fail(f"{origin} 里引用了 {token}，而仓库根下没有这个东西，.gitignore 也没说它是"
+                "被有意排除的——机器按这句话去找会永远找不到；改指向，别删内容")
