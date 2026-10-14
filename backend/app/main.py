@@ -392,8 +392,8 @@ def release_latest(have: str = None):
     """手机上那张「发现版本更新」要问的全部：最新是哪版、比手上这版新吗、去哪儿下。
 
     免鉴权（在 `authz.PUBLIC_PATHS` 里点了名）：它发生在人还没登录的时候。免鉴权不等于
-    没有代价——它会替调用方读一次版本清单（过去是出一次网），所以那次读取带 10 分钟
-    缓存，与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
+    没有代价——它会替调用方读一次版本清单（过去是出一次网），所以那次读取带一个缓存期
+    （今天 30 秒），与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
 
     读不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
     """
@@ -406,7 +406,7 @@ def release_latest(have: str = None):
     return out
 
 
-# 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
+# 同步 def：与上面那条共用同一份快照（今天 30 秒一换），同样会读盘一次。
 @app.get("/v1/update/info")
 def update_info(request: Request):
     """壳「检查更新」的数据源：把自托管清单翻成壳认得的发布 JSON + 顶层 `apk_sha256`。

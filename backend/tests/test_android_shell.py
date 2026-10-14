@@ -171,7 +171,7 @@ def test_nothing_checks_for_an_update_unless_the_user_asks():
     那一次问的只是一个只读端点，它既不下载也不安装，也不碰下面这些 Java 符号；
     卡片上那颗「立即更新」仍然要人点，点下去走的仍然是这里唯一那个桥方法。
     换句话说：自动的只剩"提一句"，动手的仍然必须是点。缓存与出站的代价由
-    test_release_probe.py 那一边钉（10 分钟一次，与来多少请求无关）。
+    test_release_probe.py 那一边钉（一个缓存期一次，今天 30 秒，与来多少请求无关）。
 
     判据是"可数"而不是"看着像"：startUpdateCheck 只容许一个调用者，
     那个调用者（requestUpdateCheck）只容许两处引用，且每处都必须贴着它自己的用户动作判据。

@@ -171,12 +171,39 @@ def _is_self_hosted_url(url) -> bool:
     return parts.scheme == "https" and parts.hostname in SELF_HOST_DOMAINS
 
 
+def _log_state(key: str, message: str) -> None:
+    """状态变化才打的一条日志（同一条 key 措辞没变就不重复刷）。
+
+    P2：模块过去零日志，优先级陷阱（运行时清单压过种子 / 摘要与磁盘不符）没有任何
+    声音。判据是"措辞变了才打"，不是"每次调用都打"——同一状态在缓存期内会被反复算到，
+    但只该说一次；状态真变了（版本号换成另一个、摘要换成另一串）措辞随之变化，于是
+    又打一次。沿用本仓惯用的 print(..., flush=True)（EXE 是隐藏窗口起的，不打印就只剩
+    人猜是哪一层坏了），措辞照 web_router 里 `[site] ...` 那种：说明是哪一份、什么理由。
+    """
+    with _lock:
+        if _logged.get(key) == message:
+            return
+        _logged[key] = message
+    print(message, flush=True)
+
+
+def _log_state_clear(key: str) -> None:
+    """把某个状态标记成"已恢复"：下次同一处再出问题时要能再喊一次。"""
+    with _lock:
+        _logged.pop(key, None)
+
+
 def load_manifest():
     """按优先级取一份**已过形状关**的清单，返回 (manifest | None, 理由, 用了哪一份)。
 
     优先级：运行时文件存在就用它，否则回落到打包内的种子。**运行时文件存在但读不动
     或形状不对时不回落**——那正是"我读不出来"要如实说出来的一格，把它悄悄换回种子
     等于用一个旧版本冒充"最新"，是本仓反复防的那件事。
+
+    「运行时压过了种子」是一个状态变化点（P2）：两份都在时，若版本号不一致就有人喊一
+    声——"改了种子却忘了改 data/version.json"是这套优先级的固有陷阱，症状是新版本
+    静默发不出去，谁都不会发现。按措辞去重，所以同一对版本号只打一次、缓存期内的
+    重复读盘不刷屏。
     """
     runtime = runtime_manifest_path()
     if os.path.isfile(runtime):
@@ -186,6 +213,7 @@ def load_manifest():
         ok, why = _manifest_ok(data)
         if not ok:
             return None, f"运行时清单形状不对：{why}", runtime
+        _log_runtime_over_seed(data, runtime)
         return data, "", runtime
     seed = seed_manifest_path()
     if os.path.isfile(seed):
@@ -198,6 +226,29 @@ def load_manifest():
         return data, "", seed
     return None, ("运行时与打包内都没有版本清单"
                   "（data/version.json 与 app/web/site/version.json 都不在）"), ""
+
+
+def _log_runtime_over_seed(data: dict, runtime: str) -> None:
+    """运行时清单赢过种子时喊一声——只在两份的版本号**不一致**时喊（那才是陷阱）。
+
+    两份都在、版本号还一致 = 正常运行，不打（否则每次换包后先听到一句吓人的话）。
+    """
+    seed = seed_manifest_path()
+    if not os.path.isfile(seed):
+        return
+    seed_data, _why = _read_manifest_file(seed)
+    if not isinstance(seed_data, dict):
+        return
+    runtime_ver = normalize_version(data.get("version"))
+    seed_ver = normalize_version(seed_data.get("version"))
+    if not runtime_ver or not seed_ver or runtime_ver == seed_ver:
+        _log_state_clear("runtime-over-seed")
+        return
+    _log_state(
+        "runtime-over-seed",
+        f"[releases] 运行时清单压过了打包种子：正在服务的是 {runtime} 说的 "
+        f"{runtime_ver}，而种子 {seed} 说 {seed_ver}——两者不一致。若这是「改了种子忘了"
+        f"改运行时清单」，新版本会静默发不出去；想发 {seed_ver} 就改 {runtime}。")
 
 
 def _synthesize_release(manifest: dict) -> dict:
@@ -255,15 +306,26 @@ def _preferred_repo() -> str:
 
 USER_AGENT = "ai-assistant-release-probe"
 TIMEOUT_SECONDS = 5.0
-CACHE_SECONDS = 600
+# 快照缓存期。v0.34 起取数源是本地清单，这个窗口的意义从"省 GitHub 的 60 次/小时限流"
+# 变成"同一份清单不重复读盘 + 不重复判定那份 6.8 MB 的字节"。用户要求"改完 data/
+# version.json 就要（近）生效"，所以从 600 秒收到 30 秒：下一个人最多晚 30 秒看到新版。
+# 这一收不许放松两条纪律——「过期旧快照不许冒充最新」（AC-4）与免凭据端点的放大防线
+# 都还在原位，判据分别见 latest_release_manifest 与 test_route_auth_contract。
+# 放大面的定量（实测，2026-10 本机）：一次缓存未命中 = 读一次 ≤64KB 的清单 JSON +
+# 对盘上那份 APK 算一次 sha256（streaming 实测约 4.5~5 ms，文件 6.8 MB）。30 秒窗口把
+# 免凭据的人能借这台服务器跑的摘要计算压到"每 30 秒至多一次，与来多少请求无关"；
+# 摘要本身另按 (路径, mtime, size, ino) 记账缓存（apk_cache._digest），所以窗口内对同一
+# 份没变的字节反复判定并不重算哈希。
+CACHE_SECONDS = 30
 MAX_BYTES = 256 * 1024
 
-# v0.28.2「检查更新要转半天」的服务端那一半：缓存过点的头一个人替全网去 GitHub 跑一趟，
-# 实测那趟 2.1 秒起步、GitHub 慢时顶到 TIMEOUT_SECONDS×两个候选仓≈10 秒——正好逼近壳里
-# Updater 的 12 秒读超时。现在快照超过半个缓存期就**先交手里的货、后台补新货**（单飞），
-# 进程起来另有 warmer 先拉一次。收紧的只有"什么时候去拉"；「过期旧快照不许冒充最新」
-# （AC-4）由 _payload_at 那条判据原样守着，一条都没放松。
-# 限流账：匿名 GitHub 按 IP 60 次/小时，warmer 满打满算 12 次/小时，是承诺的零头。
+# v0.28.2「检查更新要转半天」的服务端那一半：缓存过点的头一个人替全网去取一趟新货。
+# 现在快照超过半个缓存期就**先交手里的货、后台补新货**（单飞），进程起来另有 warmer
+# 先读一次。收紧的只有"什么时候去读"；「过期旧快照不许冒充最新」（AC-4）由 _payload_at
+# 那条判据原样守着，一条都没放松。
+# 去取这一腿在 v0.34 起是本地读盘（不再出网），所以没有限流账可算；GitHub 那条链若被
+# 接回来，它的匿名额度是 IP 60 次/小时，而这套记账在 30 秒缓存期下最多 120 次/小时——
+# 到时那条链自己的预算要另外重新量，别照搬旧注释里的数。
 REFRESH_AHEAD_SECONDS = CACHE_SECONDS // 2
 
 # ---------- 官网那颗「安卓版」按钮要代取的字节 ----------
@@ -318,22 +380,28 @@ _payload = None                 # 上一次**成功**拉到的那份
 # 上一次成功那份来自哪个仓（发布页跳转与回落判断要跟着它走，而不是跟着配置走——
 # 配置可以被人改，手里这份货的出处不能事后被追认）。None = 这一世还没成功过。
 _repo_of_payload = None
-# monotonic 读数；None = 这一世还没试过。**这里不能用 0.0 当"该拉了"的哨兵**：
+# monotonic 读数；None = 这一世还没试过。**这里不能用 0.0 当"该读了"的哨兵**：
 # monotonic 是从开机算的，刚起来的机器上 now 本身就小于 CACHE_SECONDS，
-# 于是 `now - 0.0 >= 600` 为假——"该拉一次"被判成"缓存还新"，而 `_payload` 是空的。
-# 症状是每次重启后的头 10 分钟里那张卡片永远不弹，且一句错都不报。
-# （不是假想：CI 就是这么抓到的，runner 是一台刚开的虚拟机。）
+# 于是 `now - 0.0 >= 30` 为假——"该读一次"被判成"缓存还新"，而 `_payload` 是空的。
+# 症状是每次重启后的头 30 秒里那张卡片永远不弹，且一句错都不报。
+# （不是假想：CI 就是这么抓到的，runner 是一台刚开的虚拟机。窗口从 600 收到 30 只是把
+# 这头 30 秒缩短了，判据本身一个字没改。）
 _fetched_at = None
 # 最近一次**成功**的读数。和 `_fetched_at`（最近一次**尝试**）分开记，是为了让
-# "手里这份货超过 10 分钟了"能独立发问：失败已经把 `_fetched_at` 推到下一轮，
-# 若缓存期只认尝试时间，一份超过 TTL 的旧快照会在 GitHub 恢复前被一直当成最新供出去
+# "手里这份货超过一个缓存期了"能独立发问：失败已经把 `_fetched_at` 推到下一轮，
+# 若缓存期只认尝试时间，一份超过 TTL 的旧快照会在清单恢复前被一直当成最新供出去
 # ——那正是 AC-4「伪装最新」的样子。
 _payload_at = None
-# 后台补货的单飞闩：同一时刻最多一条腿在替全网跑 GitHub，
+# 后台补货的单飞闩：同一时刻最多一条腿在取新货，
 # 补货中的请求一律先拿手里的快照回去——这就是 AC-1 的全部机关。
 _refreshing = False
 # warmer 只许被 lifespan 起一条（幂等闩；测试进程不走 lifespan，天然不起线程）。
 _warmer_started = False
+# P2 状态变化日志的记账：key -> 上一次打过的措辞。这个模块过去一句日志都没有，于是
+# "仓库里改了种子却忘了改生产机的 data/version.json"会**静默**发不出去新版，谁都不会
+# 发现。下面两处（运行时清单压过种子 / 清单摘要与磁盘字节不符）按"变了才打"记，不按
+# 请求打——缓存期内的重复读盘绝不刷屏。
+_logged = {}
 
 
 def _numeric(segments):
@@ -460,17 +528,27 @@ def _fetch():
 
 
 def _fetch_manifest():
-    """自托管那一趟：读清单（含形状关）→ 验磁盘摘要 → 攒一份壳认得的快照。不抛。"""
+    """自托管那一趟：读清单（含形状关）→ 验磁盘摘要 → 攒一份壳认得的快照。不抛。
+
+    「清单摘要与磁盘字节不符」是第二个状态变化点（P2）：这一格一旦对不上，
+    `/v1/update/info` 与 `/site/android.apk` 会双双长期不可用，而过去它一句声都不出。
+    所以这里把"是哪一版、为什么不可用"原样打进日志（措辞变了才打，不刷屏）；恢复成功
+    时清掉标记，下次再坏还能再喊。`cached_file_state` 顺带把"对不上"与"不在盘上"分开，
+    日志里说得清是哪一种。
+    """
     manifest, why, _path = load_manifest()
     if manifest is None:
         return None, why
     from app.core import apk_cache                 # 局部导入：apk_cache 反向依赖本模块
     version = normalize_version(manifest["version"])
     sha = manifest["sha256"]
-    if not apk_cache.cached_file(version, sha):
-        have = apk_cache.path_for(version) or "路径不可用"
-        return None, (f"清单写的安装包摘要与本地盘上的字节对不上（{have}），"
-                      f"不把对不上号的字节端出去")
+    _ok, miss = apk_cache.cached_file_state(version, sha)
+    if not _ok:
+        reason = (f"清单写的安装包不可用：{miss}，不把对不上号的字节端出去")
+        _log_state("manifest-unusable",
+                   f"[releases] 版本 {version} 的包不可用（清单 {_path}）：{miss}")
+        return None, reason
+    _log_state_clear("manifest-unusable")
     return {
         "version": version,
         "url": manifest["url"],
@@ -572,7 +650,8 @@ def latest_release_manifest(origin: str = ""):
     if not snapshot:
         return None, reason or "还没有一次成功过的版本清单读取"
     if stale:
-        return None, (f"版本清单已超过 {CACHE_SECONDS // 60} 分钟没有一次成功的读取"
+        # 窗口从 600 收到 30 之后不能再拿 //60 算出"0 分钟"这种读不通的话：直接说秒。
+        return None, (f"版本清单已超过 {CACHE_SECONDS} 秒没有一次成功的读取"
                       f"（最近一次：{reason or '原因未知'}），不把旧快照冒充最新")
     raw = snapshot.get("raw")
     if not isinstance(raw, dict):
@@ -686,7 +765,7 @@ def _snapshot() -> tuple:
     """返回 (最新一次的版本快照 | None, 这次读取失败的理由, 快照是否已过缓存期)。
 
     缓存的**唯一**入口：卡片（probe）与官网代取（download_plan）都从这里读，
-    所以"十分钟内最多读一次清单"这条承诺只有一处实现，不会一边省、一边不省。
+    所以"一个缓存期内最多读一次清单"这条承诺只有一处实现，不会一边省、一边不省。
     重试节流看 `_fetched_at`（最近一次尝试），但**是否还新鲜**看 `_payload_at`
     （最近一次成功）：两者分开，旧货出不了「检查更新」这道门，见
     `latest_release_manifest` 的注释。
@@ -696,7 +775,9 @@ def _snapshot() -> tuple:
     过半个期但**没成功过**的旧货照样走 stale_attempt 的同步分支，新鲜度判据不动。
 
     v0.34 起 `_fetch` 读的是本地清单（不再出网），缓存窗口保留的意义从"省 GitHub
-    的 60 次/小时限流"变成"同一份清单不重复读盘 + 不重复算 9MB 摘要"；语义未变。
+    的 60 次/小时限流"变成"同一份清单不重复读盘 + 不重复判定那份 APK 的摘要"；语义
+    未变。窗口值 600→30 只是把"改完 data/version.json 多久生效"缩短，唯一入口这条
+    结构一个字没动（判据见 CACHE_SECONDS 的注释）。
     """
     global _payload, _fetched_at, _payload_at, _refreshing
     now = time.monotonic()
@@ -763,6 +844,8 @@ def reset_for_tests() -> None:
         _payload_at = None
         _repo_of_payload = None
         _refreshing = False
+        # 状态变化日志的记账一起清：新机器第一次出问题时要能再喊一次。
+        _logged.clear()
 
 
 def _host_ok(url: str):
@@ -831,8 +914,8 @@ def _open_asset():
 def fetch_asset(url: str):
     """替用户把包取回来，返回 (字节 | None, 理由)。这个函数不抛。
 
-    一次下载 = 一台机器替所有点按钮的人去 GitHub 跑一趟：出口只有这一个 IP，
-    所以上面那条 10 分钟缓存省的是元数据，这里省不掉的是字节。
+    一次下载 = 一台机器替所有点按钮的人去上游跑一趟：出口只有这一个 IP，
+    所以上面那条 30 秒缓存省的是元数据，这里省不掉的是字节。
     """
     try:
         with _open_asset() as client:

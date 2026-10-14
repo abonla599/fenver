@@ -349,7 +349,7 @@ def install_site(app: FastAPI) -> None:
         def served(name: str, data: bytes):
             return Response(content=data, media_type=APK_MEDIA_TYPE,
                             headers={"Content-Disposition": f'attachment; filename="{name}"',
-                                     # 代理的是"最新那一版"，而这份快照 10 分钟才换一次；
+                                     # 代理的是"最新那一版"，而这份快照 30 秒才换一次；
                                      # 缓存这条响应就等于让下一个人下到上一版。
                                      "Cache-Control": "no-cache",
                                      "X-Content-Type-Options": "nosniff"})

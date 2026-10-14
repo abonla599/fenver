@@ -24,9 +24,9 @@ BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 PUBLIC_PATHS = frozenset({"/v1/auth/register", "/v1/auth/login", "/v1/auth/reset",
                           # 公开信息，不含任何用户数据：手机上那张「发现版本更新」的卡片
                           # 要问"最新是哪一版"，而它发生在人还没登录的时候。
-                          # 免鉴权不等于没有代价——它会替调用方去拉一次 GitHub，所以那条
-                          # 出站请求带 10 分钟缓存（app/core/releases.py）：一小时内最多
-                          # 6 次，与来多少请求无关。
+                          # 免鉴权不等于没有代价——它会替调用方读一次版本清单，所以那条
+                          # 读取带一个缓存期（app/core/releases.py 的 CACHE_SECONDS，今天
+                          # 30 秒）：一小时里最多 120 次，与来多少请求无关。
                           "/v1/release/latest",
                           # 壳「检查更新」的透传端点：与上面那条共用同一份快照与同一套
                           # 缓存代价，公开的是本来就公开的发布元数据。它替代的是

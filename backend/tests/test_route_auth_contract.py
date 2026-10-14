@@ -241,9 +241,16 @@ def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     几种失败同一句话）与 auth 存储层（同形措辞与同形耗时）里。
 
     第四条 `/v1/release/latest` 不是身份入口，是"公开信息 + 会替调用方读一次版本清单"：
-    它的攻击面不是爆破而是**放大**（免凭据的人能借这台服务器反复读盘算摘要）。所以它的
-    防线是那条 10 分钟缓存，判据在 tests/test_release_probe.py
+    它的攻击面不是爆破而是**放大**（免凭据的人能借这台服务器反复读盘、判定那份安装包的
+    摘要）。所以它的防线是那条快照缓存（`releases.CACHE_SECONDS`，今天 30 秒——用户要求
+    "改完 data/version.json 即近生效"，从 600 收到 30），判据在 tests/test_release_probe.py
     （test_a_counted_read_shows_the_cache_holds）——加这一条之前请先看那条锁在不在。
+
+    **这一段推理不许因为数字变小而被删掉**，只是数字要跟着改成真实的、有界的一趟代价：
+    一次缓存未命中 = 读一次 ≤64KB 的清单 JSON + 对盘上那份 APK 算一次 sha256（本机实测
+    那份 6.8MB 的包约 4.5~5 ms）。30 秒窗口把这个代价压成"每 30 秒至多一次，与来多少
+    请求无关"；而且那份摘要本身另按 (路径, mtime, size, ino) 记账缓存
+    （apk_cache._digest），所以窗口内对没变过的字节反复判定并不重算哈希。
 
     第五条 `/v1/update/info` 与第四条同族同防线：同一份快照缓存、同样的放大面，
     区别只在拉不到时的表态（那条回 ok:false 让卡片**不弹**，这条回 502 因为点按钮的
