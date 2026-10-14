@@ -384,17 +384,18 @@ def health_check():
     return {"build": build_version(), **run()}
 
 
-# 同步 def：这条会替调用方去 GitHub 拉一次（最多 5 秒）。写成 async 就是把阻塞网络
-# 放回事件循环——524 那节课的第二遍，代价是所有人的流式回答一起卡住。
+# 同步 def：这条会替调用方读一次版本清单（历史上是会去 GitHub 拉一次，最多 5 秒）。
+# 写成 async 就是把阻塞 IO 放回事件循环——524 那节课的第二遍，代价是所有人的流式回答
+# 一起卡住。
 @app.get("/v1/release/latest")
 def release_latest(have: str = None):
     """手机上那张「发现版本更新」要问的全部：最新是哪版、比手上这版新吗、去哪儿下。
 
     免鉴权（在 `authz.PUBLIC_PATHS` 里点了名）：它发生在人还没登录的时候。免鉴权不等于
-    没有代价——它会替调用方出一次网，所以那条请求带 10 分钟缓存，一小时内最多 6 次，
-    与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
+    没有代价——它会替调用方读一次版本清单（过去是出一次网），所以那次读取带一个缓存期
+    （今天 30 秒），与来多少请求无关（判据与理由都在 `app/core/releases.py`）。
 
-    拉不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
+    读不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
     """
     from app.core import apk_cache, releases
     out = releases.probe(have)
@@ -405,28 +406,33 @@ def release_latest(have: str = None):
     return out
 
 
-# 同步 def：与上面那条共用同一份 10 分钟快照，同样可能朝 GitHub 走一趟。
+# 同步 def：与上面那条共用同一份快照（今天 30 秒一换），同样会读盘一次。
 @app.get("/v1/update/info")
 def update_info(request: Request):
-    """壳「检查更新」的数据源：原样的 GitHub 发布 JSON + 顶层 `apk_sha256`。
+    """壳「检查更新」的数据源：把自托管清单翻成壳认得的发布 JSON + 顶层 `apk_sha256`。
 
     为什么壳不自己问 GitHub 的发布接口：手机到 GitHub 的链路要过运营商、代理与各家
     ROM 的下载器，正是 2026-09-23 那次"迅雷劫持 → 残包 → 安装失败"的案发通道；
-    而手机到这台服务器是天天在用的链路。一台机器出网、全员共享缓存，代价与
-    `/v1/release/latest` 完全同构（判据在 tests/test_release_probe.py）。
+    而手机到这台服务器是天天在用的链路。2026-10 起更进一步：取数源换成一份我们自己
+    托管的清单（`data/version.json`，没有就回落打包内种子），连那一趟出网也没有了。
 
-    与那条卡片端点的分工：卡片要的是"要不要提一句"（拉不到就**不弹**，ok:false）；
-    这条要的是"人主动点了检查"，拉不到必须说出来——所以拉不到时是 502 带理由，
+    与那条卡片端点的分工：卡片要的是"要不要提一句"（读不到就**不弹**，ok:false）；
+    这条要的是"人主动点了检查"，读不到必须说出来——所以读不到时是 502 带理由，
     而不是一份能让壳误判"已是最新"的 200。三态纪律（读不出来 ≠ 已是最新）两头同款；
-    AC-4 的后半句「不伪装最新」在这一头还意味着：GitHub 恢复前，超过缓存期的旧快照
-    对这条端点等同于读不出来（判据在 `releases.latest_release_manifest`，
-    钉在 test_update_channel 的 stale 用例组）。
+    AC-4 的后半句「不伪装最新」在这一头还意味着：超过缓存期的旧快照对这条端点等同于
+    读不出来（判据在 `releases.latest_release_manifest`，钉在 test_update_channel 的
+    stale 用例组）。
 
-    搬仓以后这条还要多做一件小事：把**旧名**那枚资产的下载地址换成自家代取端点
-    （`releases.route_legacy_asset_to_self_host`）。0.23.x 及更早的壳把 GitHub 路径
-    白名单写死成旧仓，装进手机就改不动了；它们只认旧名，所以只要看见自家出口地址
-    照样能收这一版。来源取自请求自己的 Host 头——壳是照 `Prefs.baseUrl` 打到这台
-    机器的，同源判据比的正是那个主机，拼不出合格来源（本地 http、带端口）就不换。
+    返回形状与换源前**逐字一致**——壳装进手机就改不动，形状变了等于手里那批手机永远
+    收不到更新。合成与校验的判据都在 `releases._synthesize_release` 与 `_fetch_manifest`。
+
+    自托管特有的一格：清单里写的 `sha256` 必须与本地盘上那个包的字节对得上，对不上
+    按"读不出来"处理。仍然把**旧名**那枚资产的下载地址换到自家代取端点
+    （`releases._point_self_hosted_assets` / `alias_legacy_asset_to_self_host`）：
+    0.23.x 及更早的壳把 GitHub 路径白名单写死成旧仓，装进手机就改不动了；它们只认
+    旧名，所以只要看见自家出口地址照样能收这一版。来源取自请求自己的 Host 头——壳是
+    照 `Prefs.baseUrl` 打到这台机器的，同源判据比的正是那个主机，拼不出合格来源
+    （本地 http、带端口）就不换。
     """
     from fastapi.responses import JSONResponse
     from app.core import apk_cache, releases

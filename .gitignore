@@ -92,6 +92,11 @@ docs-internal/
 # （见上面 shell_jvm_tests.py 那段）。脚本纯标准库、只读一个 URL 与两个本地文件，
 # 不含任何凭据，也不写盘。
 !/tools/pre_tag_gate.py
+# 官网「更新日志」页的数据源生成器。与 pre_tag_gate 同一个理由：它必须进 CI 那次
+# checkout —— backend/tests/test_changelog_page.py 会用它重新渲染一遍，比对产物是否
+# 与 docs/releases/*.md 同步；脚本进不了仓库，那把锁就变成一句注释。纯标准库、只读
+# docs/releases/ 下的 md、只写 backend/app/web/site/changelog.json 这一个产物。
+!/tools/gen_changelog.py
 server.log
 tunnel.log
 PATH_backup_*.txt
