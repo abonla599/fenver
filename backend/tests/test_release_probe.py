@@ -1,27 +1,54 @@
-"""`/v1/release/latest` 与它背后那条出站请求。
+"""`/v1/release/latest` 与它背后那条取数源（v0.34 起是**自托管清单**）。
 
 这张卡片只有一个责任："确实有新版时提一句"。所以这里钉的全是它**不该**做的事：
-不该每次有人打开 App 就真去一趟 GitHub（缓存）、不该在读不到时说"你已是最新"
+不该每次有人打开 App 就真去读一遍清单（缓存）、不该在读不到时说"你已是最新"
 （三态）、不该让阻塞网络待在事件循环里（同步 def）、不该让一个能中间人的人
 替我们决定用户去下哪个 apk（系统证书库 + 资产名必须对上版本号）。
 
 版本比较在这里是第二份实现（第一份是壳里的 `ReleasePlan.compare`）。两份跨语言的
 实现一定漂，所以那张用例表由 Java 的单测与本文件**共用同一份判据**：从 Java 测试源码里
 把用例读出来，逐条喂给 Python 的那一份。
+
+GitHub 那条取数链（`_fetch_repo` / `fetch_asset`）仍是活代码（账号解封后可接回来），
+所以它的 TLS 与跳转白名单判据继续在这里钉着。
 """
+import hashlib
 import json
+import os
 import re
 import urllib.error
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core import releases
+from app.core import apk_cache, releases
 from app.main import app
 
 GOOD = {"tag_name": "v0.18", "html_url": "https://github.com/o/r/releases/tag/v0.18",
         "assets": [{"name": "ai-assistant-native-0.18.apk", "size": 98304,
                     "browser_download_url": "https://objects.example/ai-assistant-native-0.18.apk"}]}
+
+# ---------- 自托管清单夹具 ----------
+# 一份够真的"安装包"字节：摘要必须能被算出来，所以内容随便但不能是空串。
+PKG = b"PK\x03\x04" + b"probe-fixture-apk" * 64
+SHA = hashlib.sha256(PKG).hexdigest()
+VERSION = "0.33.1"
+NAME = f"fenver-{VERSION}.apk"
+
+
+def make_manifest(**over) -> dict:
+    """一份形状合格的清单；用例按需覆盖其中一格（用来演各种"读不出来"）。"""
+    data = {"version": VERSION, "apk_name": NAME, "sha256": SHA, "size": len(PKG),
+            "url": "https://ai.fenever.xyz/site/android.apk", "changelog": "v" + VERSION}
+    data.update(over)
+    return data
+
+
+def write_manifest(path, data) -> str:
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    with open(str(path), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    return str(path)
 
 
 class _FakeResponse:
@@ -60,102 +87,133 @@ class _Urlopen:
 
 
 @pytest.fixture(autouse=True)
-def cold_cache():
+def cold_cache(tmp_path, monkeypatch):
+    """每一用例一台"刚起来的机器"：缓存目录与清单都指进 tmp，进程内记账清零。
+
+    清单必须指走：不指走的话用例写的是 `data/version.json`——那正是生产机的运行时
+    清单，测试会把它读出来当真。APK 缓存同理（默认落在 <项目根>/data/apk）。
+    """
+    monkeypatch.setenv("APK_CACHE_DIR", str(tmp_path / "apk"))
+    runtime = tmp_path / "runtime" / "version.json"
+    seed = tmp_path / "seed" / "version.json"
+    monkeypatch.setattr(releases, "runtime_manifest_path", lambda: str(runtime))
+    monkeypatch.setattr(releases, "seed_manifest_path", lambda: str(seed))
+    apk_cache.reset_for_tests()
     releases.reset_for_tests()
-    yield
+    yield runtime, seed
+    apk_cache.reset_for_tests()
     releases.reset_for_tests()
+
+
+def prime(data=None, apk=True):
+    """把一台机器布置成"清单已就位、包也在盘上"的样子，返回清单路径。"""
+    path = releases.runtime_manifest_path()
+    write_manifest(path, data if data is not None else make_manifest())
+    if apk:
+        apk_cache.store(VERSION, PKG, (data or make_manifest())["sha256"])
+    return path
+
 
 
 # ---------- 三态：有 / 没有 / 不知道 ----------
 
-def test_it_says_update_exists_only_when_the_installed_one_is_older(monkeypatch):
-    fake = _Urlopen(GOOD, GOOD, GOOD)      # 三次 probe 各一次出站（每次都 reset_for_tests）
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
-
+def test_it_says_update_exists_only_when_the_installed_one_is_older(cold_cache):
+    prime()
     out = releases.probe(have="0.16")
-    assert out["ok"] and out["latest"] == "0.18" and out["has_update"] is True
-    assert out["size"] == 98304 and out["asset_name"] == "ai-assistant-native-0.18.apk"
+    assert out["ok"] and out["latest"] == VERSION and out["has_update"] is True
+    assert out["size"] == len(PKG) and out["asset_name"] == NAME
 
     releases.reset_for_tests()
-    same = releases.probe(have="v0.18")          # 带不带 v 是同一个版本
+    same = releases.probe(have="v" + VERSION)    # 带不带 v 是同一个版本
     assert same["has_update"] is False
 
     releases.reset_for_tests()
-    ahead = releases.probe(have="0.19")
+    ahead = releases.probe(have="0.34.0")
     assert ahead["has_update"] is False
 
 
-def test_not_being_able_to_read_is_not_reported_as_up_to_date(monkeypatch):
+def test_not_being_able_to_read_is_not_reported_as_up_to_date(cold_cache):
     """`ok:false` 与 `has_update:false` 必须分得开：前者是"我不知道"，后者才是"你已是最新"。
 
-    把这两件混成一件的界面会做出最坏的行为——GitHub 抽风的那天，所有人都会被告知
+    把这两件混成一件的界面会做出最坏的行为——清单读不到的那天，所有人都会被告知
     "你没有更新"，而这句话听起来完全可信。
     """
-    fake = _Urlopen(urllib.error.URLError("no route to host"))
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
-
-    out = releases.probe(have="0.16")
+    out = releases.probe(have="0.16")            # 清单文件还没写
     assert out["ok"] is False and out["has_update"] is None
-    assert "URLError" in out["reason"]
+    assert "清单" in out["reason"] or "version.json" in out["reason"], out["reason"]
 
 
-def test_a_response_without_a_version_is_a_failure_not_an_empty_one(monkeypatch):
-    fake = _Urlopen({"tag_name": "", "assets": []})
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+def test_a_manifest_without_a_useful_version_is_a_failure_not_an_empty_one(cold_cache):
+    prime(data=make_manifest(version=""), apk=False)
     out = releases.probe(have="0.16")
     assert out["ok"] is False and out["has_update"] is None, "读不到版本号却回了一份'最新是空'"
+    assert "version" in out["reason"], out["reason"]
 
 
-def test_asking_without_saying_what_is_installed_is_its_own_answer(monkeypatch):
-    fake = _Urlopen(GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+def test_asking_without_saying_what_is_installed_is_its_own_answer(cold_cache):
+    prime()
     out = releases.probe()
-    assert out["ok"] and out["latest"] == "0.18"
+    assert out["ok"] and out["latest"] == VERSION
     assert out["has_update"] is None and "哪版" in out["reason"]
 
 
-# ---------- 缓存与出站 ----------
+# ---------- 缓存与"出网"/读盘 ----------
 
-def test_twenty_opens_still_mean_one_trip_to_github(monkeypatch):
-    """免鉴权 + 会出网 = 必须自己挡住放大。10 分钟一拉，与来多少请求无关。"""
-    fake = _Urlopen(GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+def test_a_counted_read_shows_the_cache_holds(cold_cache, monkeypatch):
+    """免鉴权 + 会读盘（过去是会出网）= 必须自己挡住放大。一个缓存期一读，与来多少请求无关。
+
+    v0.34 起取数源是本地清单，"出网"变成"读盘 + 判定那份 APK 的摘要"。这里数的是
+    `_read_manifest_file` 的调用次数：同一份快照在缓存期内只许读一次。
+
+    缓存期今天由 `releases.CACHE_SECONDS` 决定（30 秒，用户要求"改完即近生效"），
+    这里不写死数字——写死的话调一次 TTL 就要改一处测试，很容易漏；真正被钉的是
+    "20 次问只读 1 次"这个行为。
+    """
+    prime()
+    calls = []
+    real = releases._read_manifest_file
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(releases, "_read_manifest_file", counting)
     for _ in range(20):
         releases.probe(have="0.16")
-    assert len(fake.calls) == 1, f"20 次问出了 {len(fake.calls)} 次出站，缓存没生效"
+    assert len(calls) == 1, f"20 次问出了 {len(calls)} 次读盘，缓存没生效"
 
 
-def test_a_failed_refresh_keeps_the_last_good_answer_but_retries_later(monkeypatch):
-    """GitHub 挂了这 10 分钟里，不再逐个请求去替它挡枪，而是继续用上一次的结果。"""
+def test_a_failed_refresh_keeps_the_last_good_answer_but_retries_later(cold_cache):
+    """清单这会儿读不到时，不再逐个请求去重读，而是继续用上一次的结果（并说清这次没读到）。"""
     import time
 
-    fake = _Urlopen(GOOD, urllib.error.URLError("boom"), GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
-
-    assert releases.probe(have="0.16")["latest"] == "0.18"
-    releases._fetched_at = time.monotonic() - releases.CACHE_SECONDS   # 假装缓存到期
+    prime()
+    assert releases.probe(have="0.16")["latest"] == VERSION
+    os.remove(releases.runtime_manifest_path())            # 清单被删/坏掉
+    releases._fetched_at = time.monotonic() - releases.CACHE_SECONDS     # 假装缓存到期
     stale = releases.probe(have="0.16")
-    assert stale["ok"] and stale["latest"] == "0.18", "读不到就清空，等于把用户已有的答案弄丢"
-    assert "URLError" in stale["reason"], "用了旧数据就该说清楚这次没读到"
-    releases._fetched_at = time.monotonic() - releases.CACHE_SECONDS
-    assert releases.probe(have="0.16")["latest"] == "0.18"
-    assert len(fake.calls) == 3
+    assert stale["ok"] and stale["latest"] == VERSION, "读不到就清空，等于把用户已有的答案弄丢"
+    assert "清单" in stale["reason"], "用了旧数据就该说清楚这次没读到"
 
 
-def test_a_machine_that_just_booted_still_probes(monkeypatch):
-    """刚开机的机器上 monotonic 只有几秒——缓存哨兵不能拿 0.0 当"该拉了"。
+def test_a_machine_that_just_booted_still_probes(cold_cache, monkeypatch):
+    """刚开机的机器上 monotonic 只有几秒——缓存哨兵不能拿 0.0 当"该读了"。
 
     这不是假想出来的边界，是 CI 抓的（runner 是一台刚开的虚拟机，monotonic 远小于
-    CACHE_SECONDS）：`now - 0.0 >= 600` 在那台机器上为假，于是"从没拉过"被判成
-    "缓存还新"，而 `_payload` 是空的。九条用例当场全红，而线上对应的症状是
-    **每次重启后的头 10 分钟里那张卡片永远不弹**——不弹、不报错、没人知道。
+    CACHE_SECONDS）：`now - 0.0 >= 30` 在那台机器上为假，于是"从没读过"被判成
+    "缓存还新"，而 `_payload` 是空的。线上对应的症状是**每次重启后的头 30 秒里那张
+    卡片永远不弹**——不弹、不报错、没人知道。（窗口从 600 收到 30 只是把这段缩短，
+    判据本身不变。）
     """
-    fake = _Urlopen(GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    prime()
+    reads = []
+    real = releases._read_manifest_file
+    monkeypatch.setattr(releases, "_read_manifest_file",
+                        lambda p: (reads.append(p), real(p))[1])
     monkeypatch.setattr(releases.time, "monotonic", lambda: 5.0)        # 开机 5 秒
 
     out = releases.probe(have="0.16")
-    assert len(fake.calls) == 1, "刚起来的机器一次都不去拉：那这 10 分钟里没人能看到卡片"
+    assert len(reads) == 1, "刚起来的机器一次都不去读：那这 30 秒里没人能看到卡片"
     assert out["ok"] and out["has_update"] is True, out
 
 
@@ -175,19 +233,86 @@ def test_a_fresh_process_with_a_small_clock_probes():
         "import app.core.releases as r\n"
         "r.time.monotonic = lambda: 5.0\n"                 # 一台刚开的机器
         "r._fetch = lambda: ({'version': '0.18', 'url': 'u', 'asset_name': 'a',\n"
-        "                     'asset_url': 'd', 'size': 1}, '')\n"
+        "                     'asset_url': 'd', 'size': 1, 'sha256': 'x',\n"
+        "                     'raw': {'tag_name': 'v0.18', 'assets': []}}, '')\n"
         "print('PROBED' if r.probe(have='0.16')['ok'] else 'SILENT')\n"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          cwd=str(backend), timeout=120)
-    assert "PROBED" in out.stdout, f"新进程 + 小钟 = 不去拉：{out.stdout}{out.stderr}"
+    assert "PROBED" in out.stdout, f"新进程 + 小钟 = 不去读：{out.stdout}{out.stderr}"
 
 
-def test_the_url_we_hand_back_is_fetched_over_the_system_trust_store(monkeypatch):
-    """回来的 url 是要点给人去下载/安装的：能被中间人改掉，就等于能推任意安装包。
+# ---------- P2：状态变化必须有人喊（优先级陷阱与摘要不符） ----------
 
-    所以这条请求必须走 `core/tls.py` 那份系统证书库上下文。写成"验不过就退回不验"
-    是这个仓库明确拒绝过的那种修法（524 那次同一节课）。
+def test_a_runtime_manifest_overriding_a_different_seed_says_so(capsys, cold_cache):
+    """运行时清单压过了**版本号不同**的种子时，必须响亮地说一声，且同一状态只说一次。
+
+    这是这套优先级的固有陷阱：有人在仓库里改了种子却忘了改生产机的 data/version.json，
+    新版本会**静默**发不出去，谁都不会发现——所以这一格必须有人喊。按"措辞变了才打"，
+    同一状态再问不刷屏。
+    """
+    runtime, seed = cold_cache
+    write_manifest(seed, make_manifest(version="0.34.0", apk_name="fenver-0.34.0.apk"))
+    write_manifest(runtime, make_manifest())                       # 运行时仍是 0.33.1
+    data, why, used = releases.load_manifest()
+    assert why == "" and data["version"] == VERSION
+    assert used == releases.runtime_manifest_path()
+    out = capsys.readouterr().out
+    assert "压过了打包种子" in out, out
+    assert VERSION in out and "0.34.0" in out, out
+
+    releases.load_manifest()                                       # 同一状态：不该再刷
+    assert "压过了打包种子" not in capsys.readouterr().out
+
+
+def test_runtime_and_seed_agreeing_in_version_stay_quiet(capsys, cold_cache):
+    """两份都在、版本号一致 = 正常运行，不喊——否则每次换包都先听到一句吓人的话。"""
+    runtime, seed = cold_cache
+    write_manifest(seed, make_manifest())
+    write_manifest(runtime, make_manifest())
+    releases.load_manifest()
+    assert "压过了打包种子" not in capsys.readouterr().out
+
+
+def test_a_manifest_digest_mismatch_gets_logged_and_clears_on_recovery(capsys, cold_cache):
+    """「清单摘要与磁盘字节不符」也要有人喊；恢复之后标记清掉，下次再坏还能再喊。
+
+    这一格对不上时 `/v1/update/info` 与 `/site/android.apk` 双双长期不可用，而过去
+    整个模块一句日志都没有——正是 P2 要堵的那格。第 4 步刻意**不** reset（reset 会把
+    标记一起清掉），改用时间旅行逼出一次同步重读，这样"恢复时清了标记"才真的被测到。
+    """
+    import time
+
+    runtime, _seed = cold_cache
+    apk_cache.store(VERSION, PKG, SHA)
+    write_manifest(runtime, make_manifest(sha256="b" * 64))        # 盘上真、清单假
+    releases.reset_for_tests()
+    assert releases.download_plan()[0] is None
+    out = capsys.readouterr().out
+    assert "[releases]" in out and VERSION in out and "不可用" in out, out
+
+    # 恢复：清单改回正确摘要、把包重新放回盘上（上一趟对不上时那份已被隔离保留）。
+    write_manifest(runtime, make_manifest())
+    apk_cache.store(VERSION, PKG, SHA)
+    releases.reset_for_tests()
+    assert releases.download_plan()[0] is not None
+    capsys.readouterr()
+
+    # 再坏一次（这次是包不在盘上）却**不** reset：标记若没在恢复时清掉，就不会再喊。
+    skew = time.monotonic() - releases.CACHE_SECONDS - 1
+    releases._fetched_at = skew
+    releases._payload_at = skew
+    os.remove(apk_cache.path_for(VERSION))
+    assert releases.download_plan()[0] is None
+    assert "不可用" in capsys.readouterr().out
+
+
+def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypatch):
+    """GitHub 那条取数链（留着可复用的活代码）回来的是要点给人去下载/安装的地址：
+    能被中间人改掉，就等于能推任意安装包。所以那条请求必须走 `core/tls.py` 那份系统
+    证书库上下文。写成"验不过就退回不验"是这个仓库明确拒绝过的那种修法（524 那次）。
+
+    v0.34 起默认取数源不再出网，所以这条用例直接打 `_fetch_repo`（那条链本身没删）。
     """
     fake = _Urlopen(GOOD)
     monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
@@ -198,7 +323,8 @@ def test_the_url_we_hand_back_is_fetched_over_the_system_trust_store(monkeypatch
         return object()
 
     monkeypatch.setattr(releases, "system_ssl_context", fake_context)
-    releases.probe(have="0.16")
+    payload, why = releases._fetch_repo("o/r")
+    assert why == "" and payload and payload["version"] == "0.18"
     assert seen.get("called"), "没走系统证书库"
     assert fake.calls[0]["context"] is not None, "urlopen 没收到 context"
     assert fake.calls[0]["timeout"] == releases.TIMEOUT_SECONDS, "没有超时的出站请求会拖死线程池"
@@ -218,27 +344,26 @@ def test_the_github_host_is_written_in_exactly_one_place():
     assert hits == ["releases.py"], f"GitHub 地址出现在多处：{hits}"
 
 
-def test_the_asset_must_be_named_after_the_version(monkeypatch):
-    """挂着别的 apk 不算：一次发布可能同时有 mapping.txt、别的平台的产物或误传的旧包。"""
-    payload = {"tag_name": "v0.18", "html_url": "u",
-               "assets": [{"name": "ai-assistant-native-0.17.apk", "size": 1,
-                           "browser_download_url": "https://objects.example/old.apk"}]}
-    fake = _Urlopen(payload)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+def test_a_manifest_naming_a_package_for_another_version_is_not_taken(cold_cache):
+    """清单写的包名必须就是这一版那一个（`fenver-<version>.apk`）：对不上就是"读不出来"。
+
+    一次发布可能挂着 mapping.txt、别的平台的产物或误传的旧包——这条形状锁顺带保证
+    "这一版可安装的那一个"只有一个答案，也防住了把陌生人的手机指到别的文件上。
+    """
+    prime(data=make_manifest(apk_name="fenver-0.17.apk"), apk=False)
     out = releases.probe(have="0.16")
-    assert out["ok"] and out["asset_name"] == "", "把名字对不上的包当成这一版可安装的那一个"
-    assert out["has_update"] is True, "发布本身还在，卡片仍该提一句（去向是发布页不是那个包）"
+    assert out["ok"] is False and out["has_update"] is None, "包名与版本对不上却当成有货"
+    assert "apk_name" in out["reason"], out["reason"]
 
 
 # ---------- 路由 ----------
 
-def test_the_endpoint_is_public_read_only_and_answers_200(monkeypatch):
+def test_the_endpoint_is_public_read_only_and_answers_200(cold_cache):
     """没登录也要答：这张卡片出现在人还没输口令的时候。"""
     from app.core.authz import PUBLIC_PATHS
 
     assert "/v1/release/latest" in PUBLIC_PATHS
-    fake = _Urlopen(GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    prime()
     res = TestClient(app).get("/v1/release/latest", params={"have": "0.16"})
     assert res.status_code == 200, res.text
     assert res.json()["has_update"] is True
@@ -339,12 +464,10 @@ def test_download_plan_refuses_without_raising(monkeypatch, broken, why):
     assert reason, f"{why}，但没给出理由（调用方就没法解释为什么退回 GitHub 页面）"
 
 
-def test_download_plan_with_no_snapshot_says_so(monkeypatch):
-    _prime(monkeypatch, None)
-    monkeypatch.setattr(releases, "_fetch", lambda: (None, "拉取发布页失败：Simulate"))
+def test_download_plan_with_no_snapshot_says_so(cold_cache):
+    """没有清单（这台机器上一份都读不到）时，(None, 理由)——调用方据此退回官网。"""
     plan, reason = releases.download_plan()
-    plan2, reason2 = releases.download_plan()
-    assert plan is None and "发布页" in reason2, reason2
+    assert plan is None and "清单" in reason, reason
 
 
 def test_the_asset_is_fetched_over_the_system_trust_anchor(monkeypatch):

@@ -42,8 +42,12 @@ WORKFLOWS = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
 OPS = sorted(list((REPO_ROOT / "deploy").glob("*.ps1")) + list((REPO_ROOT / "tools").glob("*.py")))
 
 # 路径形状的token：至少一个分隔符 + 白名单扩展名（取舍见上面模块 docstring）。
+# 扩展名右边界 `(?![A-Za-z0-9])` 是 2026-10-15 合并自托管线时补的尺子洞：`js` 排在
+# `json` 前面而 finditer 允许半截匹配，`backend/app/web/site/changelog.json` 会被
+# 拦腰切成 `…changelog.js`——一个从未存在过的形状，把真在的指针判成红引用。
+# 收紧右边界只会让 token 更接近"整词扩展名"的本意，不会放过任何真断链。
 PATH_TOKEN = re.compile(
-    r"[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+\.(?:py|md|ya?ml|ps1|gradle|kt|java|js|json|txt|spec|sh|html|css)")
+    r"[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+\.(?:py|md|ya?ml|ps1|gradle|kt|java|js|json|txt|spec|sh|html|css)(?![A-Za-z0-9])")
 
 # 带这些字符的 token 不是"这里有个待打开的文件"：模板、变量、通配。
 PLACEHOLDER = ("$", "{", "}", "<", ">", "*", "?", "~", "%")

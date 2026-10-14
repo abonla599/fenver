@@ -306,10 +306,15 @@ class _Resp:
         return False
 
 
-def test_the_probe_asks_the_configured_repo_first_and_legacy_falls_behind(
+def test_the_dormant_github_chain_still_asks_the_configured_repo_first(
         isolated_config, monkeypatch):
-    """T1.4 的更新链承诺：默认问新仓（fenver），新仓没发版时旧仓兜底——
-    v0.23.x 的老用户不会因为改名收不到更新。"""
+    """T1.4 的更新链承诺（**解封后切回 GitHub 时仍成立**）：默认问新仓（fenver），
+    新仓没发版时旧仓兜底——v0.23.x 的老用户不会因为改名收不到更新。
+
+    v0.34 起这条链不再是默认取数源（`abonla599` 账号被停用，它恒 404；默认换成自托管
+    清单），但代码一字未删。所以判据直接打 `releases._fetch_github`——它保证"哪天切
+    回去还是对的"，而不是在 `probe` 上假装它还在跑。
+    """
     from app.core import releases
 
     good = {"tag_name": "v0.23.15",
@@ -326,15 +331,22 @@ def test_the_probe_asks_the_configured_repo_first_and_legacy_falls_behind(
 
     releases.reset_for_tests()
     monkeypatch.setattr(releases.urllib.request, "urlopen", fake_urlopen)
-    out = releases.probe(have="0.20")
-    assert out["ok"] is True and out["latest"] == "0.23.15", "旧仓兜底没生效"
+    payload, why = releases._fetch_github()
+    assert why == "" and payload and payload["version"] == "0.23.15", "旧仓兜底没生效"
     assert "abonla599/fenver" in requested[0], "第一趟问的不是配置里的新仓"
     assert "abonla599/ai-assistant" in requested[1]
-    # 发布页跳转跟着"这份货来自哪个仓"走，而不是跟着配置走——配置可以被人改，
-    # 手里快照的出处不能事后追认。
-    assert releases.releases_page() == \
+    # GitHub 发布页那条路由（这条链的退路）仍在，只是不再当官网按钮的退路。
+    assert releases.releases_page_for("abonla599/ai-assistant") == \
         "https://github.com/abonla599/ai-assistant/releases/latest"
     releases.reset_for_tests()
+
+
+def test_the_fallback_target_is_our_own_site_not_github():
+    """拿不到包时的退路是**自家官网**——GitHub 那条链断了就不该再当退路（它会 404）。"""
+    from app.core import releases
+
+    assert releases.releases_page() == releases.SITE_URL
+    assert "github.com" not in releases.releases_page()
 
 
 def test_config_is_listed_in_the_data_locations_table():

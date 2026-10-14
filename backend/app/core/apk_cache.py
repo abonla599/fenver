@@ -13,9 +13,16 @@
 唯一凭据。正文没有这行的发布（不是我们流水线的产物）不进缓存——宁可照旧走
 内存接力，也不让无法自证的字节住在磁盘上端给陌生人。
 
-为什么每次读都重算摘要：一次 9 MB 哈希是十几毫秒的量级，比一趟 GitHub 往返便宜
-两个数量级；它挡的是掉电截断、有人手改、磁盘位翻转——对一条"把字节流交给别人
-手机去安装"的通道，这点偏执是原价。
+摘要什么时候算、对不上会怎样：认不出的字节绝不许端给任何人——它挡的是掉电截断、
+有人手改、磁盘位翻转，对一条"把字节流交给别人手机去安装"的通道，这点偏执是原价。
+但"认不出就删掉"那条纪律赖以成立的前提在 v0.34 不成立了：它原本的理由是"字节的原产
+在 GitHub，随时能再取"，而 2026-10 `abonla599` 账号被停用之后，盘上这一份就是**唯一
+一份**（不可再生）。所以摘要不符时改成**隔离保留**（改名到 `*.rejected-<时间戳>`，
+见 `_quarantine`）——既不销毁唯一样本，也不让它被端出去。
+摘要计算本身按 `(路径, mtime, size, ino)` 记账缓存（见 `_digest`）：清单 TTL 从 10 分钟
+收到约 30 秒（见 releases.CACHE_SECONDS）之后，同一份字节在一分钟内会被问好几次，
+缓存把"重复读盘"与"重复哈希"分开了；字节真被换掉时（store 的原子 rename 会同时换掉
+ino 与 mtime）键必然改变，缓存不会把旧摘要借给新字节。
 
 预取（`prefetch`）：壳每次「检查更新」打到 `/v1/update/info` 时顺手让服务端看一眼
 "最新那版在不在盘上"，不在就后台补一趟。用户在手机上看到"发现新版本"的那一刻，
@@ -26,6 +33,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 
 from app.core import releases
 from app.core.paths import data_root
@@ -41,6 +49,12 @@ _WARMED_CAP = 32
 _warmed = set()
 _warm_lock = threading.Lock()
 _warm_busy = threading.Semaphore(1)
+
+# 摘要缓存：键 (路径, mtime_ns, size, ino)，值 sha256。封顶很小——正常只有"最新那一版"
+# 一个条目，多出来的多半是改名/替换留下的旧 inode，退谁无所谓（被退的下次重算一遍）。
+_DIGEST_CAP = 16
+_DIGEST_CACHE = {}
+_DIGEST_LOCK = threading.Lock()
 
 
 def cache_dir() -> str:
@@ -63,7 +77,23 @@ def path_for(version: str) -> str:
 
 
 def _digest(path: str):
-    """流式算文件的 sha256；读不动（被删/截断/权限）返回 (空串, 理由)。"""
+    """流式算文件的 sha256；读不动（被删/截断/权限）返回 (空串, 理由)。
+
+    结果按 `(路径, mtime_ns, size, ino)` 缓存。理由：清单 TTL 从 10 分钟收到约 30 秒
+    之后，同一份没变过的字节在一分钟里会被问好几次（快照层一次、download_plan 一次、
+    预取一次），而那 6.8 MB 的哈希实测约 4.5~5 ms——不缓存就是拿 CPU 换时间。键里带着
+    ino 与 mtime，所以任何**真**改动（store 的原子 rename 换掉整个 inode、掉电截断改掉
+    size）都必然换一个键；缓存的是"某个 inode 的摘要"，不是"某个路径的摘要"。
+    """
+    try:
+        before = os.stat(path)
+    except OSError as e:
+        return "", f"读缓存文件失败：{type(e).__name__}"
+    key = (path, before.st_mtime_ns, before.st_size, before.st_ino)
+    with _DIGEST_LOCK:
+        hit = _DIGEST_CACHE.get(key)
+    if hit is not None:
+        return hit, ""
     sha = hashlib.sha256()
     try:
         with open(path, "rb") as fh:
@@ -74,32 +104,85 @@ def _digest(path: str):
                 sha.update(chunk)
     except OSError as e:
         return "", f"读缓存文件失败：{type(e).__name__}"
-    return sha.hexdigest(), ""
+    digest = sha.hexdigest()
+    try:
+        after = os.stat(path)
+    except OSError:                      # 读着读着文件被换了/删了：不落缓存，下次再说
+        return digest, ""
+    if (after.st_mtime_ns, after.st_size, after.st_ino) == key[1:]:
+        with _DIGEST_LOCK:
+            _DIGEST_CACHE[key] = digest
+            while len(_DIGEST_CACHE) > _DIGEST_CAP:
+                _DIGEST_CACHE.pop(next(iter(_DIGEST_CACHE)))
+    return digest, ""
+
+
+def cached_file_state(version: str, sha256: str):
+    """这一版的磁盘判定 + 一句理由，返回 (可用路径 | "", 理由)。
+
+    `cached_file` 是它的薄壳（只要路径）。分出这一层是为了让上层（releases）能把
+    "为什么没有可用缓存"原样打进日志——P2 那条纪律要求"清单摘要与磁盘字节不符"这件事
+    有人喊，而只有这里知道到底是"不符"还是"不在盘上"。
+    """
+    path = path_for(version)
+    if not path:
+        return "", f"版本号形状不认识，拼不出磁盘路径：{version!r}"
+    if not (sha256 or ""):
+        return "", "这一版没有发布校验值，盘上的字节没有自证能力"
+    if not os.path.isfile(path):
+        return "", f"盘上没有这一版的字节（{path}）"
+    actual, why = _digest(path)
+    if why:
+        return "", f"{why}（{path}）"
+    if actual != sha256:
+        _quarantine(path, f"摘要与清单校验值不符（盘上 {actual[:8]}…≠清单 {sha256[:8]}…）")
+        return "", (f"清单摘要与盘上字节不符（盘上 {actual[:8]}…≠清单 {sha256[:8]}…，"
+                    f"那串字节已隔离保留、未删除）")
+    return path, ""
 
 
 def cached_file(version: str, sha256: str) -> str:
-    """这一版在盘上且摘要对得上时返回路径；否则 None（顺手清掉对不上的残骸）。
+    """这一版在盘上且摘要对得上时返回路径；否则返回空串（对不上号的字节会被隔离）。
 
     `sha256` 为空串（那一版发布正文没带校验值）时**永远算没缓存**：不是读不到，
     是这份字节没有自证能力，代管纪律不允许它端出去。
     """
-    path = path_for(version)
-    if not path or not (sha256 or ""):
-        return ""
-    if not os.path.isfile(path):
-        return ""
-    actual, _why = _digest(path)
-    if actual != sha256:
-        _remove_quietly(path, f"摘要与发布校验值不符（{actual[:8]}…≠{sha256[:8]}…）")
-        return ""
-    return path
+    return cached_file_state(version, sha256)[0]
+
+
+def _quarantine(path: str, why: str) -> str:
+    """把一份不可信的缓存改名到一个不会再被命中的名字下，**保住那串字节**。
+
+    为什么是"改名"而不是"删掉"（v0.34 修订）：这条纪律原本的理由是"字节的原产在
+    GitHub，随时能再取"——2026-10 `abonla599` 账号被停用之后这个前提不成立了，盘上
+    这一份就是唯一一份（不可再生）。摘要不符时删掉它 = 一次误判（清单里的 `sha256`
+    手滑写错、包被替换/截断）即永久丢包，`/site/android.apk` 与 `/v1/update/info`
+    双双长期不可用，只能靠人工回填。所以改成**绝不销毁唯一副本**；但纪律的意图一个
+    字不改——**认不出的字节绝不许端给任何人**，改名之后它既不是 `path_for` 会命中的
+    名字（`cached_file` 只认 `<版本>.apk`），也不以 `.apk` 结尾，所以 `store` 的
+    "只留最新一版"那一趟也不会顺手把它清掉。它安静躺在那里等人工处置（改名带时间戳，
+    一眼看得出是哪次事件留下的）。
+
+    改名失败（权限/被占用）时**什么都不做**：文件留在原地，下一次 `cached_file` 照样
+    因摘要不符而拒服务——宁可每次多算一次摘要，也不冒"没挪成还顺手删了"的风险。
+    """
+    dest = f"{path}.rejected-{int(time.time())}"
+    try:
+        os.replace(path, dest)
+    except OSError as e:
+        print(f"[apk-cache] 摘要不符但隔离失败，字节留在原地（仍不出盘）："
+              f"{os.path.basename(path)}（{why}；{type(e).__name__}）", flush=True)
+        return path
+    print(f"[apk-cache] 摘要不符，已隔离保留、不再端出去：{os.path.basename(dest)}"
+          f"（{why}）", flush=True)
+    return dest
 
 
 def _remove_quietly(path: str, why: str) -> None:
-    """删一个已经不可信（或不再需要）的缓存文件；删不动只打日志。
+    """删一个已经不再需要（被顶掉的旧版 / 写失败留下的临时文件）的缓存文件。
 
-    为什么要删：留在盘上的是"下一版对不上号也照样躺在那"的垃圾，而它的存在
-    没有任何恢复价值——字节的原产在 GitHub，随时能再取。
+    它只处理**可再生的**东西：临时文件与"已被新版顶掉"的旧版。摘要不符的那一份走
+    `_quarantine`（改名保留），绝不走这里——那串字节是不可再生的唯一副本。
     """
     try:
         os.remove(path)
@@ -197,6 +280,8 @@ def _warm(plan: dict) -> None:
 
 
 def reset_for_tests() -> None:
-    """清掉进程内的预取记账（测试用它等价于"换一台刚起来的机器"）。"""
+    """清掉进程内的预取记账与摘要缓存（测试用它等价于"换一台刚起来的机器"）。"""
     with _warm_lock:
         _warmed.clear()
+    with _DIGEST_LOCK:
+        _DIGEST_CACHE.clear()

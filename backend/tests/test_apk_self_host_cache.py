@@ -5,12 +5,18 @@
 实时搬字节。这一档加在闸的最前面——盘上有验过发布校验值的字节就直接端出去。
 
 锁的形状按"改坏哪一处红哪一条"写：
-* 准入：只有对得上 Release 正文 `APK-SHA256` 的字节才许落盘/出盘；
+* 准入：只有对得上清单校验值的字节才许落盘/出盘；对不上的字节**隔离保留、绝不出盘**
+  （v0.34 起是改名到 `*.rejected-*` 而不是删除——GitHub 账号停用后盘上那份不可再生，
+  判据见 apk_cache._quarantine）；
 * 原子：tmp+rename，读者永远看不到半截包；只留最新一版；
 * 命中即不出网：盘上有货时 fetch_asset 一次都不许被调；
 * 预取：同一版本只补一趟、失败可再试、全局同时最多一趟、不阻塞响应。
+
+v0.34 起取数源是**自托管清单**（不再出网）：本文件末尾那一节把那一条链真跑一遍——
+清单在盘上、包也在盘上，`/site/android.apk` 一个字节都不许朝外跑。
 """
 import hashlib
+import json
 import os
 import threading
 import time
@@ -62,14 +68,81 @@ def test_bytes_without_a_publish_digest_never_enter_the_cache():
     assert apk_cache.cached_file(_VERSION, "") == "", "没有凭据的字节不许被当成有缓存"
 
 
-def test_a_corrupted_cache_file_is_deleted_not_served():
-    """掉电截断/被人手改：摘要对不上就当场作废删掉，绝不"差不多就先端着"。"""
+def test_a_corrupted_cache_file_is_quarantined_not_served_nor_destroyed():
+    """掉电截断/被人手改：摘要对不上就当场停止服务那串字节，但**绝不销毁唯一副本**。
+
+    v0.34 修订：这条纪律原本的理由是"字节的原产在 GitHub，随时能再取"，而 2026-10
+    `abonla599` 账号被停用之后那个前提不成立了——盘上这一份是不可再生的唯一一份。
+    一次误判（清单里的 sha256 写错、包被替换/截断）若顺手删了它，`/site/android.apk`
+    与 `/v1/update/info` 双双长期不可用，只能人工回填。所以改成改名隔离到
+    `*.rejected-<时间戳>`：既保住那串字节（可恢复），又让它不再被端出去。
+
+    这**不是**放宽：纪律的意图一个字没改——认不出的字节绝不许端给任何人。放宽的只是
+    "怎么处置这串字节"（保留而不是销毁），而"端出去"这条线寸步未动。
+    """
     assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
     path = apk_cache.cached_file(_VERSION, _SHA)
     with open(path, "r+b") as fh:
         fh.write(b"corrupted")
-    assert apk_cache.cached_file(_VERSION, _SHA) == ""
-    assert not os.path.exists(path), "对不上号的残骸该被清走，而不是躺在盘上"
+    assert apk_cache.cached_file(_VERSION, _SHA) == "", "对不上号的字节不许被端出去"
+    # 原路径必须不再命中：否则每趟都要重算摘要，且迟早被 store 的"只留最新"顺手清掉。
+    assert not os.path.exists(path), "隔离后原路径不该还在（那它还会被反复命中）"
+    directory = os.path.dirname(path)
+    quarantined = [f for f in os.listdir(directory) if ".rejected-" in f]
+    assert len(quarantined) == 1, f"唯一副本没被留下：{os.listdir(directory)}"
+    kept = os.path.join(directory, quarantined[0])
+    with open(kept, "rb") as fh:
+        assert fh.read().startswith(b"corrupted"), "留下的必须是那串对不上的原字节（可恢复性）"
+
+
+def test_a_quarantined_copy_survives_the_next_version_swap():
+    """隔离文件不以 `.apk` 结尾，所以 store 的"只留最新一版"那一趟不会顺手把它删掉。
+
+    若隔离名以 `.apk` 结尾（例如 `x.bad.apk`），下一次落盘新版时的清理循环会把这份
+    唯一副本一起清掉——那就等于换个地方又丢了一次。这条把命名约束钉死。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    path = apk_cache.cached_file(_VERSION, _SHA)
+    with open(path, "r+b") as fh:
+        fh.write(b"corrupted")
+    assert apk_cache.cached_file(_VERSION, _SHA) == ""      # 触发隔离
+    directory = os.path.dirname(path)
+    quarantined = [f for f in os.listdir(directory) if ".rejected-" in f]
+    assert len(quarantined) == 1, os.listdir(directory)
+
+    other = b"PK\x03\x04" + os.urandom(1024)
+    assert apk_cache.store("0.34.0", other, hashlib.sha256(other).hexdigest())[0]
+    assert quarantined[0] in os.listdir(directory), \
+        "换版时把隔离保留的唯一副本一起清掉了"
+
+
+def test_the_digest_of_unchanged_bytes_is_computed_once(monkeypatch):
+    """摘要按 (路径, mtime, size, ino) 缓存：同一次窗口内同一份字节只许哈希一次。
+
+    P3 把清单 TTL 从 600 秒收到 30 秒之后，同一分钟内快照层、download_plan、预取会各
+    问一次判定；没有这层缓存就是拿 CPU 换时间（本机实测那份 6.8 MB 的哈希约 4.5~5 ms
+    一次）。这条同时钉住"缓存键必须跟着字节走"：只动 mtime 就得重算，绝不把旧摘要
+    借给新字节。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    path = apk_cache.path_for(_VERSION)
+    counts = {"n": 0}
+    real = hashlib.sha256
+
+    def counting(data=b""):
+        counts["n"] += 1
+        return real(data)
+
+    monkeypatch.setattr(apk_cache.hashlib, "sha256", counting)
+    for _ in range(5):
+        assert apk_cache.cached_file(_VERSION, _SHA)
+    assert counts["n"] == 1, f"5 次判定算了 {counts['n']} 次摘要，缓存没生效"
+
+    # 字节没变但 mtime 动了（等价于有人原地重写过同一份内容）：键变 → 必须重算。
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+    assert apk_cache.cached_file(_VERSION, _SHA)
+    assert counts["n"] == 2, "mtime 变了却不重算：旧摘要会借给新字节"
 
 
 def test_only_the_newest_version_stays_on_disk():
@@ -241,3 +314,76 @@ def test_download_plan_carries_the_publish_digest(monkeypatch):
     monkeypatch.setattr(releases, "_fetched_at", time.monotonic() + 10_000)
     plan, why = releases.download_plan()
     assert why == "" and plan["sha256"] == _SHA
+
+
+# ---------- v0.34：自托管清单这一条链真跑一遍（纯本地、零出网） ----------
+# 与上面那些"把 download_plan 打桩"的用例不同，这一节让**真的** _fetch/download_plan
+# 跑：清单在盘上、包也在盘上，整条链一个字节都不许朝外跑（GitHub 已不可用，
+# 这条链必须能自证）。
+
+def _manifest(version=_VERSION, sha=_SHA, size=None, url=None, name=None):
+    return {"version": version, "apk_name": name or f"fenver-{version}.apk",
+            "sha256": sha, "size": len(_PKG) if size is None else size,
+            "url": url or "https://ai.fenever.xyz/site/android.apk",
+            "changelog": "v" + version}
+
+
+def _write_manifest(path, data):
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    with open(str(path), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    return str(path)
+
+
+@pytest.fixture
+def hosted(tmp_path, monkeypatch):
+    """把清单也指进 tmp：运行时清单是这台机器唯一的版本宣告。"""
+    runtime = tmp_path / "runtime" / "version.json"
+    monkeypatch.setattr(releases, "runtime_manifest_path", lambda: str(runtime))
+    monkeypatch.setattr(releases, "seed_manifest_path", lambda: str(tmp_path / "seed.json"))
+    return runtime
+
+
+def test_self_hosted_manifest_needs_no_network_at_all(monkeypatch, hosted):
+    """清单 + 盘上那份包就够：/site/android.apk 命中磁盘，一次都不朝外跑。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest())
+
+    def no_trip(url):
+        raise AssertionError("自托管清单命中了磁盘还朝外跑")
+    monkeypatch.setattr(releases, "fetch_asset", no_trip)
+
+    c = peer_client(("203.0.113.31", 3131))
+    res = c.get("/site/android.apk")
+    assert res.status_code == 200 and res.content == _PKG
+    assert _NAME in res.headers["content-disposition"]
+
+
+def test_a_manifest_whose_digest_disagrees_with_disk_is_refused(hosted):
+    """清单写的摘要与盘上那份字节不一致：当作没有货——退回官网，绝不端错字节。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest(sha="a" * 64))
+
+    plan, why = releases.download_plan()
+    assert plan is None and ("对不上" in why or "摘要" in why), why
+
+    res = peer_client(("203.0.113.32", 3232)).get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307)
+    assert res.headers["location"] == releases.releases_page()
+
+
+def test_prefetch_is_a_noop_when_the_self_hosted_package_is_already_on_disk(monkeypatch, hosted):
+    """预取不该为空转：盘上已有且摘要对得上，连后台线程都不许起。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest())
+    monkeypatch.setattr(releases, "fetch_asset", lambda u: pytest.fail("盘上有货不该出网"))
+    apk_cache.prefetch()
+    time.sleep(0.05)
+    assert not [t for t in threading.enumerate() if t.name.startswith("apk-prefetch")]
+
+
+def test_no_runtime_manifest_means_no_plan(hosted):
+    """运行时清单不在、种子里也没有：download_plan 回 (None, 理由)，端点据此退回官网。"""
+    plan, why = releases.download_plan()
+    assert plan is None and why
+

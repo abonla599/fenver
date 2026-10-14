@@ -169,7 +169,7 @@ def test_the_android_button_downloads_through_our_own_endpoint():
 
     页面里不许留任何带版本号的资产名：下一次发版它就腐烂（这条判据从原来那条
     "指向 releases/latest" 的锁继承下来，换了方向但换了理由——现在指向的是我们自己的
-    代理端点，版本号那件事全部留在服务端那份 10 分钟缓存里判断）。
+    代理端点，版本号那件事全部留在服务端那份快照缓存里判断，今天 30 秒一换）。
     """
     page = _page()
     button = re.search(r'<a[^>]*class="btn[^"]*"[^>]*href="([^"]+)"[^>]*>\s*安卓版', page)
