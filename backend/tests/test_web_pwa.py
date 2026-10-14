@@ -19,6 +19,15 @@ client = TestClient(app)
 STATIC = Path(STATIC_DIR)
 JS_FILES = ("api.js", "app.js", "markdown.js", "sw.js")
 
+# 「检查更新」那颗退路的两个去向，都是**同源相对路径**：与官网「安卓版」那颗同一个口径
+# （tests/test_website.py::test_the_android_button_downloads_through_our_own_endpoint），
+# 端点本身的判据在 core/releases.py::SELF_APK_PATH。本文件两把更新链锁共用这两个权威串，
+# 各写一份字面量就会在下一次改动里各说各话。
+# 为什么不是 github.com 的发布页：`abonla599` 停用之后那条恒 404，而"送去一个 404
+# 比不放链接更糟"——全仓那把死链扫描锁见 tests/test_changelog_page.py。
+APK_EXIT = "/site/android.apk"
+CHANGELOG_PAGE = "/changelog"
+
 
 def test_app_serves_html_shell():
     res = client.get("/app/")
@@ -2049,19 +2058,31 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     ① 行被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
     ② 无条件走原生那条（不看 caps.update）——旧壳的桥里没有 checkUpdate 这个方法，
        点一下什么也不发生，页面连一句错都不显示，而它看起来和新壳上一模一样；
-    ③ 把下载页地址搬回 app.js ——那是 test_frontend_uses_relative_api_paths_only
-       要拦的形状（那里拦的是绝对 URL，本条只负责"退路还得在"）。
+    ③ 那颗 <a> 的去向又写成站外的发布页——v0.34 摘掉的就是它（`abonla599` 停用后那条
+       地址恒 404，把人送去 404 比不放链接更糟）。本条判它必须是自家那个"替访问者把
+       这一版包取回来"的同源端点；全仓范围的扫描锁在
+       tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web。
     """
     html = _html()
     assert 'id="rowUpdate"' in html, "设置 → 关于 里那行「检查更新」没了"
     assert 'id="rowUpdateLink"' in html, "旧壳那条退路（去下载页）没了"
-    assert 'href="https://github.com/abonla599/fenver/releases/latest"' in html,         "退路指向的不是 releases/latest，写死文件名的链接下一次发版就腐烂"
+    # 退路的去向必须是同源相对路径的自家代取端点。判"端点"而不判"某个具体文件"：
+    # 写死资产名的链接下一次发版就腐烂，这条理由从原来那把钉 releases/latest 的锁继承下来，
+    # 换了方向没换理由。
+    row_tag = _tag_of(html, "rowUpdateLink")
+    assert f'href="{APK_EXIT}"' in row_tag, f"旧壳那颗退路不再指向自家代取端点 {APK_EXIT}：{row_tag}"
+    assert "github.com" not in row_tag, f"那颗 <a> 又挂回 github.com 了：{row_tag}"
     for ident in ("rowUpdate", "rowUpdateLink"):
         assert f'class="set-row hidden" id="{ident}"' in html,             f"#{ident} 默认必须是藏起来的：没有壳（手机浏览器）时这一行没有能办的事"
 
     js = _js("app.js", "shell.js")
     assert "rowUpdateLink" in js and "updateLinkVal" in js, "那一行只写了 markup，没有代码在管它"
     assert "checkUpdate" in js, "新壳那条路断了"
+    # 两个去向各是什么，也在 JS 里钉一次：只判"有个三元分流"而不管两个常量指向哪儿，
+    # 把 APK_EXIT_PATH 改成 'https://example.invalid/x' 照样绿。
+    assert f'const APK_EXIT_PATH = "{APK_EXIT}"' in js, f"APK_EXIT_PATH 不再是 {APK_EXIT}"
+    assert f'const CHANGELOG_PATH = "{CHANGELOG_PAGE}"' in js, \
+        f"CHANGELOG_PATH 不再是 {CHANGELOG_PAGE}"
 
     body = js[js.index("function renderAboutRows()"):]
     # 判"有没有参与判断"，不判"这个标识符在不在"：只查 caps.update 出现过一次的锁，
@@ -2072,13 +2093,20 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     # 2026-09-21 他把这一行点名要放在「版本」旁边，包括手机浏览器里。于是"藏掉"不再是
     # 答案，但这条锁要防的两件事一件都没松：① 不许有死按钮——没有桥就不许露那颗
     # button，只能露会真的跳走的 <a>；② 不许让人以为网页能自己更新——所以链接那一颗
-    # 的文字必须写明"去下载页"。
+    # 的文字与去向都得写明"点下去到底拿到什么"。
     assert "native ? btn : link" in shown[0], (
         "分流不再是「有桥才给 button」，旧壳与浏览器上就会出现点了没反应的死按钮："
         + shown[0].strip())
-    assert "去下载页" in body, (
-        "浏览器里那颗必须写明是去下载页：只写「检查更新」会被读成"
-        "“这个页面能自己更新”，而界面本来就是每次从服务器现加载的那一版")
+    # 那颗 <a> 的去向与那句说明都由"这台机器上有没有壳"决定，不是恒给一个包：
+    # 老壳唯一还有字节的出口是代取端点，纯浏览器没有可安装的包、只有更新日志是实话。
+    # 判整句形状而不是判标识符在场——`SHELL.present || true` 那种写法两个标识符都在。
+    handed = [x for x in body.splitlines() if "link.href =" in x]
+    assert handed, "那颗 <a> 的去向不再由代码决定：纯浏览器也会被指去做一次 APK 下载"
+    assert "? APK_EXIT_PATH : CHANGELOG_PATH" in handed[0], (
+        "去向的分流不再是「有壳才给包，没壳给日志」：" + handed[0].strip())
+    assert "去下载页" in body and "看更新日志" in body, (
+        "那颗的文字不再分两档（壳在=去下载页、浏览器=看更新日志）：只写「检查更新」会被"
+        "读成“这个页面能自己更新”，而浏览器那一档根本没有包可下")
 
 
 def test_the_update_row_sits_right_under_the_version_row():
@@ -2226,8 +2254,10 @@ def test_the_update_sheet_is_there_quietly_and_says_nothing_of_its_own():
     assert block.count(">立即更新<") == 2, (
         "「立即更新」不是恰好两颗（button 与 a 各一颗，同一时刻只露一颗）："
         f"实际 {block.count('>立即更新<')} 颗")
-    assert block.count('href="https://github.com/abonla599/fenver/releases/latest"') == 1, (
-        "卡片里那颗链接指的不是 releases/latest，或不只一处：写死文件名的下一次发版就腐烂")
+    assert block.count(f'href="{APK_EXIT}"') == 1, (
+        f"卡片里那颗链接不是恰好一处指向自家代取端点 {APK_EXIT}：要么又指回站外的发布页，"
+        "要么换成了写死资产名的形状（下一次发版就腐烂）")
+    assert "github.com" not in block, "「发现版本更新」卡片里又出现 github.com 的去向了"
 
 
 def test_the_card_offers_the_same_one_way_out_as_the_settings_row():
