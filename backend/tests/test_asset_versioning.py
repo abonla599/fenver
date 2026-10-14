@@ -17,7 +17,10 @@ client = TestClient(app)
 STAMPED = (".css", ".js", ".png", ".jpg", ".jpeg", ".svg", ".webmanifest")
 # 不盖章的本地文件：HTML 是被盖章那一批的出处（它自己只许缓存 30 秒），APK 是动态代取的，
 # .md 是随包带出去的第三方许可说明（`static/NOTICE.md`），没有任何页面引用它。
-UNSTAMPED_OK = (".html", ".apk", ".md")
+# .json 是随包带出的**数据**（官网更新日志 changelog.json 与自托管清单 version.json）：
+# 它们由页面按裸地址取，不参与"资源水印"那一套——改一次内容就该立刻被看到，
+# 所以走的是 RevalidatingStaticFiles 的 no-cache 分支，而不是编进 URL 的 ?v=。
+UNSTAMPED_OK = (".html", ".apk", ".md", ".json")
 
 PAGES = ("/app/", "/admin/", "/")
 

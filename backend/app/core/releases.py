@@ -1,21 +1,37 @@
-"""发布页探针：网页上那张「发现版本更新」卡片的数据来源。
+"""发布信息探针：网页上那张「发现版本更新」卡片与壳「检查更新」的数据来源。
 
-为什么在服务端拉 GitHub，而不是让页面自己 fetch：
+## v0.34：取数源从 GitHub 换成**自托管清单**
 
-1. 前端有一条硬锁不许出现绝对 URL（同源纪律），把 `api.github.com` 写进 app.js 就是破它；
-2. 大陆直连 GitHub 时好时坏，让**一台机器**去扛比每台手机各自扛好；
-3. 一次拉取全员共享（缓存 10 分钟），不吃 GitHub 匿名 API 按 IP 的 60 次/小时限流。
+2026-10 起 `abonla599` 这个 GitHub 账号被停用：`api.github.com` 对这个仓恒回 404，
+手机壳「检查更新」因此恒回 502，官网「安卓版」按钮也拿不到下载地址。于是更新通道
+被整条脱开 GitHub，改读一份**我们自己托管**的清单：
 
-代价说清楚：服务端多一条出站依赖。GitHub 挂了就是**不弹**——不弹"已是最新"，
-也不在界面上转圈报错，因为这张卡片唯一的责任是"确实有新版时提一句"。
+* 运行时清单：`<项目根>/data/version.json`（可变、随发版手改，不需要重建/重启服务）；
+* 打包内种子：`app/web/site/version.json`（随 EXE 一起打进去，`run_backend.spec` 收了
+  `backend/app/web/site`）。**运行时文件存在就用它，否则回落到种子**——两者形状相同。
 
-一条与安全有关的取舍：回来的 `url` 会被点给系统去下载/安装，所以这条请求走
-`core/tls.py` 那一份**系统证书库**的上下文，而不是 `ssl` 的默认证书包——本机装了
-带 HTTPS 扫描的杀软时，默认包会验不过（524 那次的同源根因），而"验不过就退回不验"
-等于把发布地址交给一个能中间人的人。验不过就报错、就不弹。
+清单的形状（见 `_manifest_ok`）：`version` / `apk_name`（`fenver-<version>.apk`）/
+`sha256`（64 位小写十六进制）/ `size` / `url`（自托管下载地址，域必须是 ai 或 www
+的 fenever.xyz）/ `changelog`（更新日志锚点，可空）。
+
+GitHub 那条链没有删（`_API_HOST` / `candidate_repos` / `_fetch_repo` / `fetch_asset`
+都还在），但**不再作为默认路径**：解封之后可以再把它接回来，接口形状不用动。
+
+## 为什么出网这件事值得单独收一层
+
+手机直连 GitHub 的链路要过运营商、代理与各家 ROM 的下载器（2026-09-23 那次"迅雷
+劫持 → 残包 → 安装失败"的案发通道）。所以问与取都收在这台服务器上：一台机器出网、
+全员共享缓存。换成本地清单以后连这一趟出网也没有了。
+
+一条与安全有关的取舍（GitHub 路径仍在时适用）：回来的 `url` 会被点给系统去下载/
+安装，所以那条请求走 `core/tls.py` 那一份**系统证书库**的上下文，而不是 `ssl` 的
+默认证书包——本机装了带 HTTPS 扫描的杀软时，默认包会验不过（524 那次的同源根因），
+而"验不过就退回不验"等于把发布地址交给一个能中间人的人。验不过就报错、就不弹。
 """
 import json
+import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -23,6 +39,7 @@ import urllib.request
 
 import httpx
 
+from app.core.paths import data_root
 from app.core.tls import system_ssl_context
 
 # 全后端的 GitHub 地址只写在这一处（`api.` 那条由 test_release_probe.py 数着）：
@@ -33,6 +50,23 @@ from app.core.tls import system_ssl_context
 LEGACY_REPO = "abonla599/ai-assistant"
 _API_HOST = "https://api.github.com/repos/"
 _PAGE_HOST = "https://github.com/"
+
+# ---------- 自托管清单（v0.34：更新通道的唯一真相源） ----------
+# 官网首页与更新日志页所在的那台机器。清单里的下载地址只许落在这两个域上，别的一律
+# 判死——它是"这份清单是我们发布的"最粗也最硬的一层判据（域写错了就该报错，而不是
+# 把陌生人的手机指到别人家去）。
+SELF_HOST_DOMAINS = frozenset({"ai.fenever.xyz", "www.fenever.xyz"})
+# 失败回退目标：拿不到包时把人送回**我们自己的官网**（首页有「安卓版」那颗按钮）。
+# 2026-10 前这里指 GitHub 发布页，账号被停用后那条链接已失效。
+SITE_URL = "https://ai.fenever.xyz/"
+# 清单里那串摘要的形状：与发布流水线写在 Release 正文里的那一行、与壳里对账的那一处
+# 逐字相同（64 位小写十六进制）。大小写敏感：需要"再加工一下才像真的"的值不算数。
+_MANIFEST_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# 清单里的版本号：只认"数字.数字…"（compare() 认的形状），带 v 或不带都行。
+_VERSION_SHAPE_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+# 运行时清单的环境变量口子：与 apk_cache 的 APK_CACHE_DIR 同一套"指得走"的纪律，
+# 测试与多机部署都靠它把清单挪出生产目录。
+MANIFEST_ENV_VAR = "RELEASE_MANIFEST_PATH"
 
 
 def candidate_repos() -> list:
@@ -51,11 +85,169 @@ def releases_page_for(repo: str) -> str:
 
 
 def releases_page() -> str:
-    """给用户看的那条发布页：跟最新一次成功读取的仓库走，读不到就用配置首选仓。"""
-    return releases_page_for(_preferred_repo())
+    """拿不到字节时给用户看的那条退路：我们自己的官网（首页有「安卓版」按钮）。
+
+    2026-10 前这条路指向 GitHub 发布页；账号被停用后那条链接已是 404，于是改指官网。
+    与它成对的 `releases_page_for(repo)`（GitHub 那条）留着，解封后可直接接回来。
+    """
+    return SITE_URL
+
+
+def runtime_manifest_path() -> str:
+    """运行时清单的落点：$RELEASE_MANIFEST_PATH > <项目根>/data/version.json。
+
+    挂在 data/ 那棵树下与其余可变运行时数据同宗（判据见 core/paths.py 的模块注释）：
+    PyInstaller 重建只换 dist/run_backend/，数据根不跟着蒸发。**发新版只改这一份**，
+    不需要重建 EXE、也不需要重启服务。
+    """
+    override = os.getenv(MANIFEST_ENV_VAR, "").strip()
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(data_root(), "data", "version.json")
+
+
+def seed_manifest_path() -> str:
+    """打包内种子的落点：随 EXE 一起打进去的那份（`run_backend.spec` 收了 site/）。
+
+    运行时那份不存在时用它兜底：一台刚换包、还没人动过 data/ 的机器，靠种子也能立刻
+    答出"最新是哪一版"。
+    """
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        return os.path.join(base, "app", "web", "site", "version.json")
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(here, "..", "web", "site", "version.json"))
+
+
+def _read_manifest_file(path: str):
+    """读一份清单 JSON；读不动/不是合法 JSON/不是对象 一律回 (None, 理由)。不抛。"""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(64 * 1024)
+    except OSError as e:
+        return None, f"读不动（{type(e).__name__}）"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None, "不是合法 JSON"
+    if not isinstance(data, dict):
+        return None, "顶层不是一个对象"
+    return data, ""
+
+
+def _manifest_ok(data: dict):
+    """形状关：清单里每一格都能被下游原样拿去用，或明确判死。返回 (可以, 理由)。
+
+    这不是宽容解析：清单是"我们自己发布的"唯一宣告，任何一格对不上都宁可报错——
+    把一个拼错的版本号或摘要端给手机，表现不是报错，是"检查更新失败"或"装不上"，
+    而且每一环都"正常工作"。
+    """
+    version = normalize_version(data.get("version"))
+    if not version or not _VERSION_SHAPE_RE.match(version):
+        return False, f"version 不是一个版本号：{data.get('version')!r}"
+    want_name = asset_names(version)[0]                 # fenver-<version>.apk
+    if data.get("apk_name") != want_name:
+        return False, f"apk_name 与 version 对不上：{data.get('apk_name')!r}（应为 {want_name!r}）"
+    sha = data.get("sha256")
+    if not isinstance(sha, str) or not _MANIFEST_SHA_RE.match(sha):
+        return False, "sha256 不是 64 位小写十六进制"
+    size = data.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > APK_MAX_BYTES:
+        return False, f"size 不像一个 APK：{size!r}"
+    url = data.get("url")
+    if not isinstance(url, str) or not _is_self_hosted_url(url):
+        return False, f"url 不是我们自家域名上的 https 地址：{url!r}"
+    changelog = data.get("changelog", "")
+    if changelog and not isinstance(changelog, str):
+        return False, "changelog 若是存在就必须是字符串（更新日志锚点）"
+    return True, ""
+
+
+def _is_self_hosted_url(url) -> bool:
+    """这个地址是不是我们自家域名上的 https 出口。"""
+    if not isinstance(url, str) or not url:
+        return False
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and parts.hostname in SELF_HOST_DOMAINS
+
+
+def load_manifest():
+    """按优先级取一份**已过形状关**的清单，返回 (manifest | None, 理由, 用了哪一份)。
+
+    优先级：运行时文件存在就用它，否则回落到打包内的种子。**运行时文件存在但读不动
+    或形状不对时不回落**——那正是"我读不出来"要如实说出来的一格，把它悄悄换回种子
+    等于用一个旧版本冒充"最新"，是本仓反复防的那件事。
+    """
+    runtime = runtime_manifest_path()
+    if os.path.isfile(runtime):
+        data, why = _read_manifest_file(runtime)
+        if data is None:
+            return None, f"运行时清单读不出来：{why}", runtime
+        ok, why = _manifest_ok(data)
+        if not ok:
+            return None, f"运行时清单形状不对：{why}", runtime
+        return data, "", runtime
+    seed = seed_manifest_path()
+    if os.path.isfile(seed):
+        data, why = _read_manifest_file(seed)
+        if data is None:
+            return None, f"打包内清单读不出来：{why}", seed
+        ok, why = _manifest_ok(data)
+        if not ok:
+            return None, f"打包内清单形状不对：{why}", seed
+        return data, "", seed
+    return None, ("运行时与打包内都没有版本清单"
+                  "（data/version.json 与 app/web/site/version.json 都不在）"), ""
+
+
+def _synthesize_release(manifest: dict) -> dict:
+    """把一份清单翻成壳认得的**发布 JSON 形状**（壳的判断题一个字都不用改）。
+
+    `/v1/update/info` 的返回形状必须与换源前逐字一致，这是手里那批手机能**零发版**
+    恢复更新的唯一原因。壳 `ReleasePlan.decide` / `pickAsset` 真正读的字段就这几个
+    （判据见 android-native 那份 ReleasePlan.java）：顶层 `tag_name`、`assets[]` 里每项
+    的 `name`/`size`/`browser_download_url`、顶层 `apk_sha256`；`draft`/`prerelease`
+    只有为真才拦，所以我们**不放**这两格。
+    """
+    version = normalize_version(manifest["version"])
+    return {
+        "tag_name": "v" + version,
+        "assets": [{
+            "name": manifest["apk_name"],
+            "size": int(manifest["size"]),
+            "content_type": "application/vnd.android.package-archive",
+            "browser_download_url": manifest["url"],
+        }],
+        "apk_sha256": manifest["sha256"],
+    }
+
+
+def _point_self_hosted_assets(manifest: dict, origin: str) -> int:
+    """把清单里那枚自家下载地址换成**这次请求来源**对应的那一份；返回改了几枚。
+
+    壳的那条同源判据比的是"地址主机 == 它自己配置的主机"：清单里写死的域（ai 或 www）
+    一旦和这台手机配置的那个不一致，同一个地址会被它自己判成不可信。所以地址跟着请求
+    的 Host 走（与 `alias_legacy_asset_to_self_host` 同一招）。来源不合格（本地 http）
+    时一个字节都不动——把一个它不信的地址换上去比不改更糟。
+    """
+    url = self_hosted_apk_url(origin)
+    if not url:
+        return 0
+    changed = 0
+    for asset in manifest.get("assets") or []:
+        if isinstance(asset, dict) and _is_self_hosted_url(asset.get("browser_download_url")):
+            asset["browser_download_url"] = url
+            changed += 1
+    return changed
 
 
 def _preferred_repo() -> str:
+    """最近一次成功读取来自哪个仓；没读过就用配置首选仓。
+
+    只在 **GitHub 那条链**（`_fetch_github` / `_fetch_repo`）上有意义：自托管清单没有
+    "货从哪个仓来"这件事。留着是为了切回 GitHub 时 `releases_page_for` 那条"发布页跟着
+    手里这份货的出处走"的承诺不丢。
+    """
     with _lock:
         repo = _repo_of_payload or ""
     return repo or candidate_repos()[0]
@@ -229,10 +421,16 @@ def _fetch_repo(repo: str):
     }, ""
 
 
-def _fetch():
-    """按候选仓顺序各拉一次，第一个成功的赢——新仓还没发版时旧仓兜底，
-    v0.23.x 老用户的更新链不因改名而断。全失败时理由取首选仓那次：排查的人
-    会先去配置里的仓看发布页，报错方向要和他的动线一致。"""
+def _fetch_github():
+    """GitHub 那条链（**留着可复用**）：按候选仓顺序各拉一次，第一个成功的赢。
+
+    新仓还没发版时旧仓兜底，v0.23.x 老用户的更新链不因改名而断。全失败时理由取首选仓
+    那次——排查的人会先去配置里的仓看发布页，报错方向要和他的动线一致。
+
+    v0.34 起它不再是默认取数源（账号被停用，这条链恒 404），但它是完整的、可用的一整条
+    路：解封之后把 `_fetch` 里那一行换成 `return _fetch_github()` 就接回来了，接口形状
+    一个字都不用动。
+    """
     repos = candidate_repos()
     first_reason = ""
     for repo in repos:
@@ -245,6 +443,48 @@ def _fetch():
         if not first_reason:
             first_reason = f"{why}（{repo}）" if len(repos) > 1 else why
     return None, first_reason
+
+
+def _fetch():
+    """读一次**自托管清单**，验形状、验磁盘摘要，攒成一份快照。这个函数**不抛**。
+
+    这就是"取数源"那一格：v0.34 起从 GitHub 换成本地清单（账号被停用，见模块注释）。
+    要换回 GitHub，把下面这一行改成 `return _fetch_github()` 即可——GitHub 那条链
+    （`_fetch_github` / `_fetch_repo`）一字未删。
+
+    自托管特有的一格判据在 `_fetch_manifest` 里：清单里写的 `sha256` 必须与**磁盘上
+    那个安装包**的真实摘要一致。不一致按"读不出来"处理——症状是 502 带理由，而不是把
+    一串对不上号的字节端出去。用的仍是 apk_cache 的同一条准入纪律。
+    """
+    return _fetch_manifest()
+
+
+def _fetch_manifest():
+    """自托管那一趟：读清单（含形状关）→ 验磁盘摘要 → 攒一份壳认得的快照。不抛。"""
+    manifest, why, _path = load_manifest()
+    if manifest is None:
+        return None, why
+    from app.core import apk_cache                 # 局部导入：apk_cache 反向依赖本模块
+    version = normalize_version(manifest["version"])
+    sha = manifest["sha256"]
+    if not apk_cache.cached_file(version, sha):
+        have = apk_cache.path_for(version) or "路径不可用"
+        return None, (f"清单写的安装包摘要与本地盘上的字节对不上（{have}），"
+                      f"不把对不上号的字节端出去")
+    return {
+        "version": version,
+        "url": manifest["url"],
+        "asset_name": manifest["apk_name"],
+        "asset_url": manifest["url"],
+        "size": int(manifest["size"]),
+        # 快照层顺手存下摘要，让 `download_plan` 能把它交给磁盘缓存（apk_cache）——
+        # 只有对得上这串摘要的字节才许落盘/出盘，判据见 apk_cache 的模块注释。
+        "sha256": sha,
+        # 原样的**给壳看的**发布 JSON。壳的「检查更新」走 /v1/update/info 透传它——
+        # 判断逻辑（三态、资产名、URL 白名单）整个活在壳里且被 JVM 台架钉着，服务端
+        # 只做"把清单翻成那个形状"这一段，不另起一份判断的第二真相。
+        "raw": _synthesize_release(manifest),
+    }, ""
 
 
 def _refresh_now():
@@ -309,11 +549,15 @@ def apk_sha256(body_text) -> str:
 
 
 def latest_release_manifest(origin: str = ""):
-    """壳「检查更新」要的那份 JSON：原样透传 + 顶层多一枚 `apk_sha256`。
+    """壳「检查更新」要的那份 JSON：把自托管清单翻成壳认得的形状 + 顶层 `apk_sha256`。
 
-    返回 (dict, reason)。拉不到时 (None, 理由)——调用方必须把这句理由原样带给人，
+    返回 (dict, reason)。读不出来时 (None, 理由)——调用方必须把这句理由原样带给人，
     而不是回一份"看起来没有更新"的空 JSON：那条三态纪律（读不出来 ≠ 已是最新）
     从壳里一路管到服务端这一层。
+
+    换源没有放宽任何一条纪律：形状由 `_synthesize_release` 钉住（壳真读的字段一个不
+    少），`apk_sha256` 只认 `_fetch` 验过磁盘字节的那一串摘要，过期旧快照照样算"读不
+    出来"。`origin` 与 `repo` 见下。
 
     超过一个缓存期都没再成功过的旧快照同样算"拉不到"：手动点「检查更新」问的就是
     "现在有没有新版"，把 GitHub 断供前攒下的旧货当最新发出去，恰恰是把"我读不到"
@@ -326,16 +570,23 @@ def latest_release_manifest(origin: str = ""):
     """
     snapshot, reason, stale = _snapshot()
     if not snapshot:
-        return None, reason or "还没有一次成功过的发布页读取"
+        return None, reason or "还没有一次成功过的版本清单读取"
     if stale:
-        return None, (f"发布信息已超过 {CACHE_SECONDS // 60} 分钟没有一次成功的读取"
+        return None, (f"版本清单已超过 {CACHE_SECONDS // 60} 分钟没有一次成功的读取"
                       f"（最近一次：{reason or '原因未知'}），不把旧快照冒充最新")
     raw = snapshot.get("raw")
     if not isinstance(raw, dict):
-        return None, "发布快照里没有原样 JSON（内部状态坏了）"
+        return None, "版本快照里没有原样 JSON（内部状态坏了）"
     manifest = dict(raw)
-    manifest["apk_sha256"] = apk_sha256(raw.get("body"))
-    alias_legacy_asset_to_self_host(manifest, origin, _preferred_repo())
+    # assets 是共享缓存里的那份：每个请求拿一份自己的拷贝再改地址。原地改会把换过的
+    # 地址带给下一个调用方（官网按钮与 download_plan 要的是清单里那一条）。
+    manifest["assets"] = [dict(a) if isinstance(a, dict) else a
+                          for a in (raw.get("assets") or [])]
+    # 摘要只认清单里那一格（经 _fetch 验过磁盘字节），不是从 JSON 顶层或正文里"顺手读"的。
+    manifest["apk_sha256"] = str(snapshot.get("sha256") or "")
+    _point_self_hosted_assets(manifest, origin)
+    # 老壳那枚旧名条目：来源合格时补上（自托管清单里从来只有新名一枚）。
+    alias_legacy_asset_to_self_host(manifest, origin, "")
     return manifest, ""
 
 
@@ -432,10 +683,10 @@ def alias_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> i
 
 
 def _snapshot() -> tuple:
-    """返回 (最新一次的发布快照 | None, 这次读取失败的理由, 快照是否已过缓存期)。
+    """返回 (最新一次的版本快照 | None, 这次读取失败的理由, 快照是否已过缓存期)。
 
     缓存的**唯一**入口：卡片（probe）与官网代取（download_plan）都从这里读，
-    所以"10 分钟内最多问 GitHub 一次"这条承诺只有一处实现，不会一边省、一边不省。
+    所以"十分钟内最多读一次清单"这条承诺只有一处实现，不会一边省、一边不省。
     重试节流看 `_fetched_at`（最近一次尝试），但**是否还新鲜**看 `_payload_at`
     （最近一次成功）：两者分开，旧货出不了「检查更新」这道门，见
     `latest_release_manifest` 的注释。
@@ -443,6 +694,9 @@ def _snapshot() -> tuple:
     v0.28.2 起多一档"过半补货"：手里有货、尝试时间过半个缓存期但还没过期——
     立刻把手里的货交出去（AC-1：提问的人不等网络），后台单飞补一次新货。
     过半个期但**没成功过**的旧货照样走 stale_attempt 的同步分支，新鲜度判据不动。
+
+    v0.34 起 `_fetch` 读的是本地清单（不再出网），缓存窗口保留的意义从"省 GitHub
+    的 60 次/小时限流"变成"同一份清单不重复读盘 + 不重复算 9MB 摘要"；语义未变。
     """
     global _payload, _fetched_at, _payload_at, _refreshing
     now = time.monotonic()
@@ -484,7 +738,7 @@ def probe(have: str = None) -> dict:
            "size": (snapshot or {}).get("size", 0),
            "have": normalize_version(have), "has_update": None, "reason": reason}
     if not snapshot:
-        out["reason"] = reason or "还没有一次成功过的发布页读取"
+        out["reason"] = reason or "还没有一次成功过的版本清单读取"
         return out
     if not out["have"]:
         out["reason"] = "没告诉我现在装的是哪版，无法判断有没有更新"
@@ -535,10 +789,11 @@ def download_plan():
     """
     snapshot, reason, _stale = _snapshot()
     if not snapshot:
-        return None, reason or "还没有一次成功过的发布页读取"
+        return None, reason or "还没有一次成功过的版本清单读取"
     version = snapshot.get("version") or ""
     name = snapshot.get("asset_name") or ""
     url = snapshot.get("asset_url") or ""
+    sha256 = str(snapshot.get("sha256") or "")
     try:
         size = int(snapshot.get("size") or 0)
     except (TypeError, ValueError):
@@ -549,13 +804,22 @@ def download_plan():
         return None, f"资产名与版本号对不上：{name!r} vs {version!r}"
     if not size or size > APK_MAX_BYTES:
         return None, f"这个包的大小不像一个 APK：{size}"
-    ok, why = _host_ok(url)
-    if not ok:
-        return None, why
+    if _is_self_hosted_url(url):
+        # 自托管：字节只住在本地盘上（清单里的地址就是这颗按钮自己的出口）。盘上没有、
+        # 或摘要对不上，就没有"可端给陌生人"的字节——退回官网，而不是回一个空文件。
+        # 判据与快照层同一套（apk_cache 的准入纪律），这里再验一次是为了兜住
+        # "快照攒下之后盘上那份被换掉了"这一段。
+        from app.core import apk_cache
+        if not apk_cache.cached_file(version, sha256):
+            return None, "自托管的安装包不在本地盘上（或与清单摘要不符），没有可端出去的字节"
+    else:
+        ok, why = _host_ok(url)
+        if not ok:
+            return None, why
     return {"url": url, "name": name, "size": size, "version": version,
             # 给磁盘缓存的准入凭据（apk_cache 只认对得上这串摘要的字节）；
             # 旧版发布没有它就是空串——那一版永远不进缓存，照旧走实时代取。
-            "sha256": str(snapshot.get("sha256") or "")}, ""
+            "sha256": sha256}, ""
 
 
 def _open_asset():
