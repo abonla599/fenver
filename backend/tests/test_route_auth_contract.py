@@ -82,10 +82,13 @@ EXEMPT_PATHS = {"/", "/health"}
 # 这种改动不可能悄悄发生。页面本身是 `GET /`,已在 EXEMPT_PATHS 里。
 # 为什么不干脆挂 Mount("/")：它的 .path 是空串,且会抢走 redirect_slashes,
 # 把 /health/、/docs/ 变成 404 —— 详见 backend/app/web/web_router.py:install_site。
-# /site/android.apk：官网那颗「安卓版」按钮的代取端点。公开的正是发布在 GitHub 上的
-# 同一个文件，不含任何用户数据；它贵的是"要朝 GitHub 搬一百来 KB"，所以那条出站
-# 走的是 releases 那一份缓存 + 主机白名单（判据见 tests/test_release_probe.py）。
-SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin", "/site", "/site/android.apk"}
+# /site/android.apk：官网那颗「安卓版」按钮的代取端点。公开的正是我们自己托管的同一个
+# 安装包，不含任何用户数据；它贵的是"要端出一份 9MB 字节"，所以那条出口走的是
+# releases 的清单 + 本地磁盘缓存 + 一张按来源限频的账（判据见 tests/test_apk_self_host_cache.py）。
+# /changelog：官网「更新日志」页。和 `GET /` 一模一样的公开壳（一页不含任何用户数据的
+# 静态页 + 同目录那份随包发布的 changelog.json），判据见 tests/test_changelog_page.py。
+SYSTEM_PATHS = EXEMPT_PATHS | {"/app", "/admin", "/site", "/site/android.apk",
+                               "/changelog"}
 
 
 def _is_v1(path: str) -> bool:
@@ -237,10 +240,10 @@ def test_public_allowlist_is_exactly_the_bootstrap_endpoints():
     "不许悄悄多一条"；这三条自己的防线不在这里，在 auth_router（真实 IP 限流、
     几种失败同一句话）与 auth 存储层（同形措辞与同形耗时）里。
 
-    第四条 `/v1/release/latest` 不是身份入口，是"公开信息 + 会替调用方出一次网"：
-    它的攻击面不是爆破而是**放大**（免凭据的人能借这台服务器去敲 GitHub）。所以它的
+    第四条 `/v1/release/latest` 不是身份入口，是"公开信息 + 会替调用方读一次版本清单"：
+    它的攻击面不是爆破而是**放大**（免凭据的人能借这台服务器反复读盘算摘要）。所以它的
     防线是那条 10 分钟缓存，判据在 tests/test_release_probe.py
-    （test_twenty_opens_still_mean_one_trip_to_github）——加这一条之前请先看那两条锁在不在。
+    （test_a_counted_read_shows_the_cache_holds）——加这一条之前请先看那条锁在不在。
 
     第五条 `/v1/update/info` 与第四条同族同防线：同一份快照缓存、同样的放大面，
     区别只在拉不到时的表态（那条回 ok:false 让卡片**不弹**，这条回 502 因为点按钮的

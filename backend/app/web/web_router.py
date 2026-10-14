@@ -305,6 +305,16 @@ def install_site(app: FastAPI) -> None:
         # 和 /app、/admin 的 HTML 同一个出口：先盖水印再出门，且这一页自己不缓存。
         return rewritten_html(FileResponse(os.path.join(SITE_DIR, "index.html")), asset_token())
 
+    # 更新日志页：与首页同一套页面口径（rewritten_html + asset_token），缓存头也就与
+    # /、/app/ 一致（见 rewritten_html 里 PAGE_CACHE 那条）。页面自己去读同目录下那份
+    # changelog.json（由 tools/gen_changelog.py 从 docs/releases/*.md 渲染、随包发布，
+    # 因为 docs/ 不进 EXE）。
+    # 这条同样必须注册在 /site 那个 Mount **之前**：Mount 按前缀匹配，排在后面的精确
+    # 路由永远轮不到——症状不是报错，是"点了更新日志 404"。
+    @app.get("/changelog", include_in_schema=False)
+    async def site_changelog():
+        return rewritten_html(FileResponse(os.path.join(SITE_DIR, "changelog.html")), asset_token())
+
     # 这条必须注册在 /site 那个 Mount **之前**：Mount 是按前缀匹配的，排在后面的
     # 精确路由永远轮不到——症状不是报错，是"点了安卓版 404"。
     @app.get("/site/android.apk", include_in_schema=False)

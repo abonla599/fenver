@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>更新日志 · Fenver</title>
+<meta name="description" content="Fenver 每一版改了什么、优化了什么、新增了什么。数据来自仓库里 docs/releases 的发版说明。">
+<meta name="theme-color" content="#0b0e15">
+<link rel="stylesheet" href="/site/site.css">
+<script>
+/* 与首页同一招：首屏之前把主题定下来，等 site.js 再读 localStorage 会先闪一下深色。 */
+(function () {
+  try {
+    var saved = localStorage.getItem("site-theme");
+    if (saved !== "dark" && saved !== "light") {
+      saved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", saved);
+  } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
+})();
+</script>
+</head>
+<body>
+
+<a class="skip" href="#log">跳到正文</a>
+
+<nav class="topbar" aria-label="页面导航">
+  <span class="brand">Fenver</span>
+  <ul class="navlinks">
+    <li><a href="/">回到首页</a></li>
+    <li><a href="/changelog" aria-current="true">更新日志</a></li>
+  </ul>
+  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到浅色">
+    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+</nav>
+
+<header class="hero">
+  <h1>更新日志</h1>
+  <p class="lede">每一版改了什么、优化了什么、新增了什么。内容直接来自每次发版写下的说明，与随机附带的说明同源。</p>
+  <p class="cta">
+    <a class="btn primary" href="/site/android.apk" download>下载安卓版</a>
+  </p>
+</header>
+
+<main id="log">
+  <p class="note" id="logHint" role="status">正在载入更新日志…</p>
+  <div id="logList"></div>
+</main>
+
+<footer>
+  <p><a href="/">Fenver 首页</a>
+     <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  <p class="note" id="copyHint" role="status"></p>
+</footer>
+
+<script src="/site/site.js" defer></script>
+<script>
+/* 更新日志的数据源是同目录下那份 changelog.json（由 tools/gen_changelog.py 从
+   docs/releases/*.md 渲染、随包发布）。整页用 DOM API 组装、文本一律走 textContent：
+   发版说明里什么都可能写，绝不能让一段文字变成能跑的标记。 */
+(function () {
+  "use strict";
+  var list = document.getElementById("logList");
+  var hint = document.getElementById("logHint");
+  if (!list) return;
+
+  function inline(text) {
+    /* 极小的行内标记：**粗体** 与 `代码`。其余原样当文本——这里不解析链接，
+       免得把发版说明里一个失效地址变成页面上一颗可点的按钮。 */
+    var box = document.createElement("span");
+    var parts = String(text).split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+    parts.forEach(function (part) {
+      if (!part) return;
+      if (part.length > 4 && part.slice(0, 2) === "**" && part.slice(-2) === "**") {
+        var b = document.createElement("strong");
+        b.textContent = part.slice(2, -2);
+        box.appendChild(b);
+      } else if (part.length > 2 && part[0] === "`" && part.slice(-1) === "`") {
+        var c = document.createElement("code");
+        c.textContent = part.slice(1, -1);
+        box.appendChild(c);
+      } else {
+        box.appendChild(document.createTextNode(part));
+      }
+    });
+    return box;
+  }
+
+  function render(data) {
+    var releases = (data && data.releases) || [];
+    if (!releases.length) {
+      hint.textContent = "这份包里的更新日志是空的。";
+      return;
+    }
+    hint.textContent = "共 " + releases.length + " 个版本，最新的在最上面。";
+    releases.forEach(function (rel) {
+      var article = document.createElement("article");
+      article.className = "release";
+      article.id = "v" + rel.version;
+
+      var h2 = document.createElement("h2");
+      h2.textContent = rel.title || ("v" + rel.version);
+      article.appendChild(h2);
+
+      if (rel.intro) {
+        var p = document.createElement("p");
+        p.className = "note";
+        p.appendChild(inline(rel.intro));
+        article.appendChild(p);
+      }
+      (rel.sections || []).forEach(function (sec) {
+        var h3 = document.createElement("h3");
+        h3.textContent = sec.heading;
+        article.appendChild(h3);
+        var ul = document.createElement("ul");
+        (sec.items || []).forEach(function (item) {
+          var li = document.createElement("li");
+          li.appendChild(inline(item));
+          ul.appendChild(li);
+        });
+        article.appendChild(ul);
+      });
+      list.appendChild(article);
+    });
+    /* 深链：清单里那一格 changelog 锚点（形如 #v 加版本号）落到对应那一段 */
+    var id = decodeURIComponent((location.hash || "").replace(/^#/, ""));
+    if (id) {
+      var target = document.getElementById(id);
+      if (target && target.scrollIntoView) target.scrollIntoView();
+    }
+  }
+
+  fetch("/site/changelog.json", { cache: "no-cache" })
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(render)
+    .catch(function () {
+      hint.textContent = "更新日志这会儿取不到，稍后刷新重试。";
+    });
+})();
+</script>
+
+</body>
+</html>

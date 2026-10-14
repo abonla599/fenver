@@ -5,12 +5,16 @@
 实时搬字节。这一档加在闸的最前面——盘上有验过发布校验值的字节就直接端出去。
 
 锁的形状按"改坏哪一处红哪一条"写：
-* 准入：只有对得上 Release 正文 `APK-SHA256` 的字节才许落盘/出盘；
+* 准入：只有对得上清单校验值的字节才许落盘/出盘；
 * 原子：tmp+rename，读者永远看不到半截包；只留最新一版；
 * 命中即不出网：盘上有货时 fetch_asset 一次都不许被调；
 * 预取：同一版本只补一趟、失败可再试、全局同时最多一趟、不阻塞响应。
+
+v0.34 起取数源是**自托管清单**（不再出网）：本文件末尾那一节把那一条链真跑一遍——
+清单在盘上、包也在盘上，`/site/android.apk` 一个字节都不许朝外跑。
 """
 import hashlib
+import json
 import os
 import threading
 import time
@@ -241,3 +245,76 @@ def test_download_plan_carries_the_publish_digest(monkeypatch):
     monkeypatch.setattr(releases, "_fetched_at", time.monotonic() + 10_000)
     plan, why = releases.download_plan()
     assert why == "" and plan["sha256"] == _SHA
+
+
+# ---------- v0.34：自托管清单这一条链真跑一遍（纯本地、零出网） ----------
+# 与上面那些"把 download_plan 打桩"的用例不同，这一节让**真的** _fetch/download_plan
+# 跑：清单在盘上、包也在盘上，整条链一个字节都不许朝外跑（GitHub 已不可用，
+# 这条链必须能自证）。
+
+def _manifest(version=_VERSION, sha=_SHA, size=None, url=None, name=None):
+    return {"version": version, "apk_name": name or f"fenver-{version}.apk",
+            "sha256": sha, "size": len(_PKG) if size is None else size,
+            "url": url or "https://ai.fenever.xyz/site/android.apk",
+            "changelog": "v" + version}
+
+
+def _write_manifest(path, data):
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    with open(str(path), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, ensure_ascii=False)
+    return str(path)
+
+
+@pytest.fixture
+def hosted(tmp_path, monkeypatch):
+    """把清单也指进 tmp：运行时清单是这台机器唯一的版本宣告。"""
+    runtime = tmp_path / "runtime" / "version.json"
+    monkeypatch.setattr(releases, "runtime_manifest_path", lambda: str(runtime))
+    monkeypatch.setattr(releases, "seed_manifest_path", lambda: str(tmp_path / "seed.json"))
+    return runtime
+
+
+def test_self_hosted_manifest_needs_no_network_at_all(monkeypatch, hosted):
+    """清单 + 盘上那份包就够：/site/android.apk 命中磁盘，一次都不朝外跑。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest())
+
+    def no_trip(url):
+        raise AssertionError("自托管清单命中了磁盘还朝外跑")
+    monkeypatch.setattr(releases, "fetch_asset", no_trip)
+
+    c = peer_client(("203.0.113.31", 3131))
+    res = c.get("/site/android.apk")
+    assert res.status_code == 200 and res.content == _PKG
+    assert _NAME in res.headers["content-disposition"]
+
+
+def test_a_manifest_whose_digest_disagrees_with_disk_is_refused(hosted):
+    """清单写的摘要与盘上那份字节不一致：当作没有货——退回官网，绝不端错字节。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest(sha="a" * 64))
+
+    plan, why = releases.download_plan()
+    assert plan is None and ("对不上" in why or "摘要" in why), why
+
+    res = peer_client(("203.0.113.32", 3232)).get("/site/android.apk", follow_redirects=False)
+    assert res.status_code in (302, 307)
+    assert res.headers["location"] == releases.releases_page()
+
+
+def test_prefetch_is_a_noop_when_the_self_hosted_package_is_already_on_disk(monkeypatch, hosted):
+    """预取不该为空转：盘上已有且摘要对得上，连后台线程都不许起。"""
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    _write_manifest(hosted, _manifest())
+    monkeypatch.setattr(releases, "fetch_asset", lambda u: pytest.fail("盘上有货不该出网"))
+    apk_cache.prefetch()
+    time.sleep(0.05)
+    assert not [t for t in threading.enumerate() if t.name.startswith("apk-prefetch")]
+
+
+def test_no_runtime_manifest_means_no_plan(hosted):
+    """运行时清单不在、种子里也没有：download_plan 回 (None, 理由)，端点据此退回官网。"""
+    plan, why = releases.download_plan()
+    assert plan is None and why
+
