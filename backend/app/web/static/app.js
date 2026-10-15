@@ -1,4 +1,9 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.34.1：本版只换服务端（?v= 资源水印只接受纯数字；发给手机的安装包
+ * 地址只许落在自家两个域上），前端代码一字未改。这一行的存在就是为了给
+ * deploy\swap-package.ps1 的 -Marker 一个**真判据**——"只改后端"那一版的 app.js 与上一版
+ * 逐字节相同，合法 marker 根本不存在，挑一个两边都有的串会让 ACCEPT 变成空转验收。
+ * 下次发版若前端真改了内容，这行可以删；若又是只换后端，把这行改成新的版本号。 */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
