@@ -74,12 +74,24 @@ class RoundGuard:
     def check(self, tool_name: str, args: dict) -> Optional[str]:
         """执行前检查。返回 None = 放行；返回字符串 = 熔断原因（给模型看的文案）。
 
-        检查顺序：成本上限 → 重复检测 → 失败退避。任一条触发即熔断该工具。
+        检查顺序：总额熔断（__all__）→ 单工具熔断 → 成本上限 → 重复检测 → 失败退避。
+        任一条触发即拒，返回的理由就是要回填给模型的那句话。
         """
         norm = _normalize_args(args)
         key = (tool_name, norm)
 
         with self._lock:
+            # token 总额熔断：排在最前面，因为它的意思就是"本轮所有工具都不许再跑"。
+            # 这一条此前是空写的：record_tokens() 只往 _fused_tools 里塞了一个 "__all__"
+            # 键，而 check() 只查 `self._fused_tools[tool_name]`，从来没人读过 "__all__"
+            # （is_all_fused() 全仓零调用点）——于是"上限跳了、请基于已有结果回答"
+            # 这句文案发得出去，工具却一个都没停。四个调用点（pipeline / streaming /
+            # react_agent / task_agent）拿到非 None 的处理方式都是回填理由并 continue，
+            # 所以修在这里就够了，四处都不用动。
+            fused_all = self._fused_all_reason()
+            if fused_all is not None:
+                return fused_all
+
             # 已被熔断的工具直接拒绝
             if tool_name in self._fused_tools:
                 return self._fused_tools[tool_name]
@@ -131,7 +143,21 @@ class RoundGuard:
                                         "fails": fails})
 
     def record_tokens(self, tokens: int) -> None:
-        """追加 token 计数（来自上游 usage）。超限时熔断所有工具。"""
+        """追加 token 计数（来自上游 usage）。超限时熔断所有工具。
+
+        总额熔断刻意**只**在 check() 这一道门口生效，不去改 clip_output() 和
+        record_outcome()（这不是遗漏，是这一轮划的边界）：
+
+        * clip_output() 管的是"已经跑完的工具，它的输出占多少字"。熔断跳的那一轮
+          往往正是刚跑完一个大结果的那一轮，把那份输出换成一句"预算已用尽"式的说明，
+          等于把理由里"请基于已有结果直接回答用户"要它依据的那些**结果本身**销毁掉——
+          拦住了下一步，却把上一步喂给模型的饭撤了。
+        * record_outcome() 是记账的一侧（轮次、连续失败、token 都在这儿累）。让它在
+          熔断后不再累加，token 计数就停摆、上限再也跳不出来，账本上的 guard_events
+          也会少记——熔断的"次数"证据从此不可查。
+        * 事件的类型集合没有扩：现有四类（cost_cap_rounds / duplicate / fail_backoff /
+          cost_cap_tokens）的读侧形状没准备好接新 kind，加一种就是让面板与账本猜。
+        """
         with self._lock:
             self._total_tokens += tokens
             if self._total_tokens >= self.max_tokens:
@@ -142,10 +168,24 @@ class RoundGuard:
                 self.events.append({"type": "cost_cap_tokens",
                                     "tokens": self._total_tokens})
 
+    def _fused_all_reason(self):
+        """总额熔断的理由（没触发则 None）。**调用方必须已经持有 self._lock**。
+
+        为什么不做成"公开方法里自己加锁"：`threading.Lock` 不可重入，check() 已经在
+        锁内，再调一个会自我加锁的方法就是当场自锁死（整条回复挂在第一个超限的轮次上，
+        红都红不出来，是纯死锁）。所以锁的归属写在这一行：这里只做一次字典取值，
+        加不加锁由调用方决定，全模块对 "__all__ 算不算熔断" 就这一个判据。
+        """
+        return self._fused_tools.get("__all__")
+
     def is_all_fused(self) -> bool:
-        """是否所有工具都被熔断（token 上限触发）。"""
+        """是否所有工具都被熔断（token 上限触发）。
+
+        v0.34.2 起这个方法不再是摆设：check() 走的是同一个 _fused_all_reason()，
+        两边不可能漂移。它自己留给外部的用途（面板/提前收尾）仍然没有调用点。
+        """
         with self._lock:
-            return "__all__" in self._fused_tools
+            return self._fused_all_reason() is not None
 
     @property
     def tool_rounds(self) -> int:
