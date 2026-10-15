@@ -12,6 +12,25 @@ Usage (dry run first - it is safe to run while production serves users):
   powershell -NoProfile -ExecutionPolicy Bypass -File deploy\swap-package.ps1 -ExpectedVersion v0.29.1 -Marker msg-trace -DryRun
   # once the dry run prints DRYRUN ok, rerun the same line without -DryRun.
 
+-Marker must DISCRIMINATE, and since v0.34.2 the precheck proves that on BOTH
+sides: the staged app.js must contain it AND the installed app.js must not.
+Counting only the staging side was not a check, it was a ritual - twice in
+production a backend-only swap passed with a string that lived on both sides
+(/changelog: 2 hits staging, 2 hits live), so "the marker answers" proved only
+that nothing had changed. A vacuous green is worse than no gate: it tells the
+operator the acceptance ran.
+For a backend-only release NO discriminating marker exists unless that release
+itself introduced one in app.js. That is a fact about the release, not about
+this script, and the precheck now says so out loud instead of letting it slide.
+
+The one legitimate case with no forward marker is moving BACKWARD to an older
+package: -Rollback. It is not reachable by accident - it requires
+-RollbackEvidence (a non-empty one-line reason, printed verbatim so the swap
+record carries the human claim) and it inverts both gates: the marker must then
+name the build being RETIRED, so it must be present in the CURRENTLY INSTALLED
+app.js and absent from the package coming in, and after the swap the served
+app.js must stop answering it.
+
 Exit shape: 0 on SWAP-DONE; non-zero either with production UNTOUCHED (the
 abort happens before anything was moved and this script puts things back) or
 with an explicit ROLLBACK recipe printing the real backup path (any failure
@@ -19,7 +38,8 @@ after the live directory was moved aside - an auto-rollback there can turn one
 half-swap into two).
 
 Progress lines are one-token machine-parsable (PRECHECK / DISABLED / STOPPED /
-BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / BUDGET / SWAP-DONE) so a future
+BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / BUDGET / SWAP-DONE, plus
+ROLLBACK-MODE when -Rollback was used) so a future
 automation can watch a swap without reading prose.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
@@ -39,7 +59,9 @@ param(
     [string] $ExpectedVersion = '',
 
     # a string only the NEW release's app.js contains (e.g. msg-trace);
-    # acceptance is "the new code is what is served", not "something answers"
+    # acceptance is "the new code is what is served", not "something answers".
+    # The precheck now rejects a string the INSTALLED package already contains,
+    # because then the acceptance below cannot tell the two packages apart.
     [string] $Marker = '',
 
     # staged build from pyinstaller --distpath dist_new (NEVER build straight
@@ -61,7 +83,19 @@ param(
     [switch] $KeepBackendBudget,
 
     # run every precheck and print the plan; touches no process and no file
-    [switch] $DryRun
+    [switch] $DryRun,
+
+    # backward swap: put an OLDER package back into the live slot. With this
+    # switch -Marker names the build being RETIRED instead of the build coming
+    # in, so both marker gates flip (see the header). It does nothing on its
+    # own without -RollbackEvidence, and it never relaxes the stage-version or
+    # contamination gates - those are about the package, not about direction.
+    [switch] $Rollback,
+
+    # one line, non-empty, required by -Rollback: why a backward swap is
+    # intended here (incident id, spent budget, bad build). Printed verbatim so
+    # the swap record carries the human claim next to the machine verdict.
+    [string] $RollbackEvidence = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -100,9 +134,17 @@ if (-not $StageDir) { $StageDir = Join-Path $ProjectRoot 'dist_new\run_backend' 
 $StageDir = ConvertTo-AbsolutePath -Value $StageDir
 if (-not $ExpectedVersion) { throw '-ExpectedVersion required, e.g. v0.29.1' }
 if (-not $Marker) { throw '-Marker required: a string only the NEW app.js contains, e.g. msg-trace' }
+if ($Rollback -and -not $RollbackEvidence.Trim()) {
+    throw '-Rollback requires -RollbackEvidence "<one line: why an older package goes live now>" - backward swaps are rare enough that the reason must be stated, not implied'
+}
+if ($Rollback) {
+    Write-Output ('ROLLBACK-MODE marker-identifies=build-being-retired stage-must-NOT-contain=' + $Marker + ' live-must-contain=' + $Marker)
+    Write-Output ('ROLLBACK-MODE evidence=' + $RollbackEvidence.Trim())
+}
 
 $Live       = Join-Path $ProjectRoot 'dist\run_backend'
 $LiveExe    = Join-Path $Live 'run_backend.exe'
+$LiveAppJs  = Join-Path $Live '_internal\app\web\static\app.js'
 $StageExe   = Join-Path $StageDir 'run_backend.exe'
 $StageAppJs = Join-Path $StageDir '_internal\app\web\static\app.js'
 $StageStamp = Join-Path $StageDir '_internal\version.txt'
@@ -285,13 +327,43 @@ if (-not (Test-Path -LiteralPath $StageExe)) {
     Add-Fail ('PRECHECK fail stage-exe=missing path=' + $StageExe)
 }
 
+# THE MARKER MUST DISCRIMINATE, and "discriminate" is a claim about TWO
+# packages, so both sides are counted here with one ruler: matching LINES via
+# Select-String -SimpleMatch, the same shape the served-app.js acceptance uses
+# after the swap. Counting only the staged side was the bug - for a
+# backend-only release the frontend is byte-identical, so every candidate
+# string sits on both sides and "marker found in staging" then proves only that
+# the operator typed something that exists. Two production swaps were accepted
+# that way on /changelog (2 hits staging, 2 hits live): a vacuous green, which
+# is worse than no gate because it reports the acceptance as having run.
 $stageMarkerLines = 0
+$liveMarkerLines  = 0
+$liveAppJsPresent = $false
 if (-not (Test-Path -LiteralPath $StageAppJs)) {
     Add-Fail ('PRECHECK fail stage-appjs=missing path=' + $StageAppJs)
 } else {
     $stageMarkerLines = @(Select-String -LiteralPath $StageAppJs -Pattern $Marker -SimpleMatch).Count
+}
+if (-not (Test-Path -LiteralPath $LiveAppJs)) {
+    Add-Fail ('PRECHECK fail live-appjs=missing path=' + $LiveAppJs + ' marker=' + $Marker)
+} else {
+    $liveAppJsPresent = $true
+    $liveMarkerLines = @(Select-String -LiteralPath $LiveAppJs -Pattern $Marker -SimpleMatch).Count
+}
+if ($Rollback) {
+    # backward swap: -Marker names the build being RETIRED, so the proof flips.
+    if ($liveAppJsPresent -and $liveMarkerLines -lt 1) {
+        Add-Fail ('PRECHECK fail rollback-live-appjs-marker=absent count=' + $liveMarkerLines + ' expected>=1 marker=' + $Marker + ' - in -Rollback the marker must be a string the package you are LEAVING answers, i.e. the build being retired; name that one, or drop -Rollback')
+    }
+    if ($stageMarkerLines -ge 1) {
+        Add-Fail ('PRECHECK fail rollback-stage-appjs-marker=present count=' + $stageMarkerLines + ' expected=0 marker=' + $Marker + ' - the incoming package already carries it, so even a backward swap could not tell the two packages apart')
+    }
+} else {
     if ($stageMarkerLines -lt 1) {
         Add-Fail ('PRECHECK fail stage-appjs-marker=absent expected=' + $Marker)
+    }
+    if ($liveAppJsPresent -and $liveMarkerLines -ge 1) {
+        Add-Fail ('PRECHECK fail live-appjs-marker=present count=' + $liveMarkerLines + ' expected=0 marker=' + $Marker + ' - this marker does not discriminate, it is already in the installed package so the swap would prove nothing; pick a string only the new app.js contains (a backend-only release has no such string unless this release itself added a marker line in app.js), or -Rollback with -RollbackEvidence when moving backward is the intent')
     }
 }
 
@@ -340,7 +412,7 @@ if ($script:failures.Count -gt 0) {
     throw ('pre-flight failed (' + $script:failures.Count +
            ' problems) - nothing was stopped, production is untouched')
 }
-Write-Output ('PRECHECK ok stage-version=' + $stageVersion + ' marker-lines=' + $stageMarkerLines)
+Write-Output ('PRECHECK ok stage-version=' + $stageVersion + ' marker-lines=' + $stageMarkerLines + ' live-marker-lines=' + $liveMarkerLines + ' live-appjs=' + $(if ($liveAppJsPresent) { 'present' } else { 'missing' }) + ' marker-mode=' + $(if ($Rollback) { 'rollback' } else { 'forward' }))
 
 # --------------------------------- step 1: find the watchdog task and its state
 # Located by ACTION (wscript.exe + watchdog-hidden.vbs), NOT by name: the task
@@ -364,7 +436,10 @@ if ($DryRun) {
     Write-Output ('DRYRUN would-backup ' + $Live + ' -> ' + $Backup)
     Write-Output ('DRYRUN would-swap-in ' + $StageDir + ' -> ' + $Live)
     Write-Output ('DRYRUN would-start ' + $LiveExe)
-    Write-Output ('DRYRUN would-accept health-build=' + $ExpectedVersion + ' appjs-marker=' + $Marker)
+    # the same two-sided gate the real run had to pass to get here, printed so a
+    # dry run is a rehearsal of the verdict and not only of the file moves
+    Write-Output ('DRYRUN marker-gate mode=' + $(if ($Rollback) { 'rollback' } else { 'forward' }) + ' stage-lines=' + $stageMarkerLines + ' live-lines=' + $liveMarkerLines + ' live-appjs=' + $(if ($liveAppJsPresent) { 'present' } else { 'missing' }))
+    Write-Output ('DRYRUN would-accept health-build=' + $ExpectedVersion + ' appjs-marker=' + $Marker + ' expect=' + $(if ($Rollback) { 'absent' } else { 'present' }))
     Write-Output 'DRYRUN ok (no process was stopped, no file was moved)'
     exit 0
 }
@@ -510,10 +585,21 @@ try {
     Stop-AfterFailure 'accept-fetch' ('could not fetch /app/app.js: ' + $_.Exception.Message)
 }
 $markerLines = @(($js.Content -split "`n") | Where-Object { $_ -like ('*' + $Marker + '*') }).Count
-if ($markerLines -lt 1) {
-    Stop-AfterFailure 'accept-marker' ('served app.js contains no ' + $Marker + ' - still running the old package')
+if ($Rollback) {
+    # backward swap: -Marker named the build being RETIRED, so after a rollback
+    # that string must be GONE from what is served. The precheck proved the two
+    # packages differ on it, so "absent now" really does mean "the older
+    # package answers" - the same positive proof, read from the other side.
+    if ($markerLines -ge 1) {
+        Stop-AfterFailure 'accept-marker-rollback' ('served app.js still carries ' + $Marker + ' lines=' + $markerLines + ' - the build being retired is still the build being served')
+    }
+    Write-Output ('ACCEPT marker-lines=' + $markerLines + ' mode=rollback expect=absent')
+} else {
+    if ($markerLines -lt 1) {
+        Stop-AfterFailure 'accept-marker' ('served app.js contains no ' + $Marker + ' - still running the old package')
+    }
+    Write-Output ('ACCEPT marker-lines=' + $markerLines + ' mode=forward expect=present')
 }
-Write-Output ('ACCEPT marker-lines=' + $markerLines)
 
 # --------------------------------- step 8: watchdog back ON - only now, AFTER the
 # health and marker assertions above. Enabling it earlier would let it "protect"
