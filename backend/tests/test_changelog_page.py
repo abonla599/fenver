@@ -23,6 +23,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import app
+# 版本号比较只有一个尺子：`app.core.releases.compare()`（与壳里 ReleasePlan.compare 同一
+# 套规则，另有跨语言锁钉着它）。本文件那把"日志不得落后于 versionName"的锁必须用它，
+# 不能在这里自己拆点分段、更不能比字符串——判据见 _version_order 的注释。
+from app.core.releases import compare, normalize_version
 # 死链扫描要先把注释剥掉才判：留在 `/* 曾经指向 github.com/… */` 里的一句话不是可点的链，
 # 而"把链接挪进注释"恰是让扫描锁静默失效的那条路。尺子复用 test_web_pwa 那两把（本文件
 # 与它同属 Web 面，再抄一份剥注释的实现就是第二份真相，它会比原件先腐烂）。
@@ -123,14 +127,91 @@ def test_the_artifact_carries_every_release_newest_first():
             assert sec["heading"] and sec["items"], sec
 
 
+def _version_order(newest_entry: str, version_name: str) -> int:
+    """日志最新一条相对 versionName 的位置：负数=日志落后，0=齐平，正数=日志领先。
+
+    比较只走本仓那**一个**比较器 `app.core.releases.compare()`（与壳里
+    `ReleasePlan.compare` 同一套规则，跨语言不漂移的判据在 test_release_probe.py），
+    `normalize_version` 先把可能的 `v` 前缀剥掉。**不许换成字符串序**：
+    `"0.34.10" >= "0.34.9"` 按字符串是假的，按版本序是真的——补丁位进十那天，
+    字符串序会把一份并不落后的日志判成落后（而它另一头的错更危险：把真落后的日志
+    判成领先，见下面那条用例里 0.34.9 vs 0.34.10 那两组）。
+    """
+    return compare(normalize_version(newest_entry), normalize_version(version_name))
+
+
+def _changelog_is_not_behind(newest_entry: str, version_name: str) -> bool:
+    """这条锁的判据本体：日志最新一条**不落后于** versionName（允许领先）。"""
+    return _version_order(newest_entry, version_name) >= 0
+
+
 def test_the_current_version_is_the_newest_entry():
-    """最新那条必须就是本仓当前 versionName 那一版——日志不能落后于代码。"""
+    """更新日志的最新一条不得**落后于** build.gradle 的 `versionName`；领先是合法的。
+
+    这条锁防的是一件事：**发版说明漏写**（日志落后于代码）。它防的不是"两个部署物
+    版本号必须相等"——现网本来就有两个各自独立部署的东西（PyInstaller 服务端整包 +
+    APK），谁先走一步是常态而不是事故（历史上壳 0.27.x / 服务端 0.25.0 就分歧过）。
+
+    v0.34.1 就是那个常态的一个具体实例：那一版只换服务端（`?v=` 反射、下载地址域
+    白名单两个修复都在后端），APK 仍是 0.34.0，所以日志领先壳一位。而
+    `tools/pre_tag_gate.py` 要求每个 tag 都带 `docs/releases/<tag>.md`——服务端单独
+    发版**必须**多出一条日志，写死相等等于把这条发版路径堵在闸门口。
+
+    所以这里从 `==` 放松到"不得落后"，放松的只有相等这一半：
+    **日志落后于代码仍然当场红**，那一半由下面那条用例单独钉着，别把它读成"这条锁
+    已经没人管了、可以顺手删"。
+    """
     import re
     gradle = (REPO_ROOT / "android-native" / "app" / "build.gradle").read_text(encoding="utf-8")
     m = re.search(r'^\s*versionName\s+"([^"]+)"', gradle, re.M)
     assert m, "读不到 versionName"
     newest = json.loads(ARTIFACT.read_text(encoding="utf-8"))["releases"][0]["version"]
-    assert newest == m.group(1), f"日志最新是 v{newest}，代码已经是 v{m.group(1)}"
+    assert _changelog_is_not_behind(newest, m.group(1)), (
+        f"更新日志落后于代码：日志最新是 v{newest}，而 versionName 已经是 "
+        f"v{m.group(1)}——本版说明没写（补 docs/releases/v{m.group(1)}.md），"
+        "或写了没重新生成产物（跑一次 python tools/gen_changelog.py）")
+
+
+def test_the_lock_still_bites_when_the_changelog_falls_behind():
+    """把上面那条锁的**后半截判据**单独钉死：落后必须判死，而且判据真的是版本序。
+
+    上一条从 `==` 改成"不得落后"之后，这条锁剩下的牙就只咬"日志落后于代码"那一半。
+    一半判据若没有自己的用例，改天的人会以为整条锁已经是装饰品而把它删掉——所以这里
+    钉的是判据本体（`_changelog_is_not_behind`，它只做一件事：把比较交给
+    `releases.compare()`），四组数位各断言一个明确的**判定结果**，不是调一遍看看：
+
+    * `0.34.1` 对 `0.34.0` —— 允许。服务端单独发版（v0.34.1 现网形状）不许红。
+    * `0.34.0` 对 `0.34.0` —— 允许。这是改成 `>=` 之后唯一仍被允许的相等形状。
+    * `0.34.0` 对 `0.34.1` —— **必须判死**。日志落后 = 本版说明漏写，原意图就在这儿。
+    * `0.34.9` 对 `0.34.10` —— **必须判死**；`0.34.10` 对 `0.34.9` —— 必须允许。
+      这两组是专门拿来证明"判据不是字符串序"的，因为这两组上两种序**恰好相反**
+      （实测：`"0.34.10" >= "0.34.9"` 按字符串是 **假**，`"0.34.9" >= "0.34.10"` 按
+      字符串是 **真**）：字符串序会把前一组的合法日志误判成落后去拦服务端单独发版，
+      更会把后一组**真落后的日志判成合法**——锁静默失效且不报错，正是本仓反复防的
+      那一类。补丁位进十之前，这两组就是这条锁"用的是版本序"唯一的牙印。
+    """
+    allowed = [("0.34.1", "0.34.0"),    # 服务端领先 APK 一位：v0.34.1 的现网形状
+               ("0.34.0", "0.34.0"),    # 齐平：两个部署物同版
+               ("0.34.10", "0.34.9")]   # 两位数补丁位领先，且字符串序会说"不领先"
+    must_die = [("0.34.0", "0.34.1"),   # 落后一位：发版说明漏写
+                ("0.34.9", "0.34.10")]  # 落后一位，但字符串序会说"没落后"
+
+    for newest, ver in allowed:
+        assert _changelog_is_not_behind(newest, ver), \
+            f"日志 {newest} 不比 versionName {ver} 旧，这条锁却判了死——误伤会把" \
+            "服务端单独发版堵死"
+        assert _version_order(newest, ver) >= 0, (newest, ver)
+
+    for newest, ver in must_die:
+        assert not _changelog_is_not_behind(newest, ver), \
+            f"日志 {newest} 落后于 versionName {ver} 却没被判死——这条锁已经咬不到" \
+            "『发版说明漏写』了（多半是有人把版本序换成了字符串序）"
+        assert _version_order(newest, ver) < 0, (newest, ver)
+
+    # 牙印本身也要有出处：判据必须真的是 releases.compare()，不是抄了个大概。
+    assert _version_order("0.34.10", "0.34.9") == compare("0.34.10", "0.34.9") > 0
+    assert "0.34.10" < "0.34.9", "上面那两组的前提没了：字符串序恰好等价于版本序，" \
+        "这条用例就不再证明任何事——等它重新有区别时把这条一起改掉"
 
 
 # ---------- 2. 页面契约 ----------
