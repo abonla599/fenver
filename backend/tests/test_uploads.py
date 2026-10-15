@@ -1,6 +1,7 @@
 """附件上传与注入测试。"""
 import io
 import json
+import os
 import re
 import struct
 import sys
@@ -437,3 +438,369 @@ def test_broken_index_is_quarantined_not_overwritten(tmp_path, broken, desc):
         f"{desc}：备份必须活过一次 save()"
     fresh = json.loads((d / "index.json").read_text(encoding="utf-8"))
     assert [r["owner"] for r in fresh.values()] == ["u_new"]
+
+
+# ---------- v0.34.2：索引里的 path 是外部输入，四个消费点共用一道闸 ----------
+# `index.json` 是从磁盘读回来的，`record["path"]` 从 _load() 那一步起就不再是
+# 我们写下去的那个值。此前它被四处裸用：get() 拿它 isfile、read_text() 拿它 open
+# 并把内容拼进 prompt、data_uri() 拿它 open+base64 送给模型、delete() 拿它
+# os.remove。于是"索引被手改过/损坏/被另一个写入者动过"一条 `path` 值就分别等于
+# 任意文件读、任意文件读出去、任意删除。
+# 判据：realpath 规范化之后必须落在 self.dir 之内，用 commonpath 而不是字符串
+# 前缀——前缀匹配会把 `<父>/uploads_evil/x.txt` 判成在 `<父>/uploads` 里面
+# （"uploads" 正是它的字符串前缀），而那恰好是这道闸门唯一要挡的那一种。
+# 违规口径是"这条记录当作不存在"：get→None、read_text→""、data_uri→None、
+# delete→False 且磁盘上一个字节都不动。
+#
+# 下面所有用例都在 tmp_path 里造那个"目录外的文件"，绝不指向仓库真实的 .env 或
+# 任何真实数据文件——这条纪律是硬性的：用例一旦指向真文件，它就成了"能删生产"的
+# 一份说明书。
+
+_ABSENT = object()   # "path 字段整个不存在"这一形态，与 path=None 要分开演
+
+
+def _manual_index(up: Path, record: dict) -> None:
+    """把手工记录写成 index.json（重建 store 走真实读盘那条路，不只是内存塞一条）。"""
+    (up / "index.json").write_text(
+        json.dumps({record["id"]: record}, ensure_ascii=False), encoding="utf-8")
+
+
+def _record(path_value=_ABSENT, kind="text", **over):
+    rec = {"id": "a" * 16, "name": "账单.txt", "kind": kind, "mime": "text/plain",
+           "size": 12, "path": path_value, "owner": "u_1",
+           "created_at": "2026-10-17T00:00:00"}
+    rec.update(over)
+    if rec.get("path", None) is _ABSENT:
+        del rec["path"]
+    return rec
+
+
+# 分两组，是因为它们钉的东西不一样，混在一处会被读成"八条独立的锁"：
+#
+# A 组「指向目录外一份**真的存在**的文件」——这组才是漏洞本体。判据是双向的：
+#   闸门在时读不到、闸门拆掉后**读得到**（下面那条用例的注释写了拆哪一行）。
+#   注意 `..` 的层数必须让目标真的存在：写成 up/../../secret.txt 会指到 tmp 之外
+#   一个不存在的文件，那样旧写法（裸 isfile）也返回 False、用例就绿得什么都没测。
+#
+# B 组「形状就不对」（空串 / None / 不是字符串 / 字段缺失 / 目录本身）——
+#   这组里有些形态旧代码也会"碰巧"拒（isfile("") 与 isfile(dir) 都是 False），
+#   所以它们不许只靠四条出口断言交差：每条都另外直接断一次
+#   `_resolve_within_dir(record) == ""`，把"闸门自己判了它"钉住。
+OUTSIDE_CASE_IDS = (
+    "A 隔壁目录（startswith 会放行的那一条）",
+    "A 父目录里的文件",
+    "A 用 .. 从目录里走回上层",
+    "A 父目录文件的绝对+相对混写",
+    "B 上传目录本身",
+    "B 空串",
+    "B None",
+    "B 不是字符串",
+    "B path 字段整个缺失",
+)
+
+
+def _outside_case_value(which: str, up: Path):
+    """按用例名在 tmp_path 里造出那份"目录外的真文件"，并返回要写进索引的 path 值。
+
+    刻意不在模块顶层/装饰器里造：那样 import 这个文件就会在当前工作目录下
+    mkdir 出 uploads_evil/ 与 secret.txt——本仓库的目录同时是生产机。
+    """
+    sibling = up.parent / "uploads_evil"
+    parent_file = up.parent / "secret.txt"
+    if which.startswith("A"):
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "s.txt").write_text("隔壁目录的正文", encoding="utf-8")
+        parent_file.write_text("别人的账单正文", encoding="utf-8")
+    if which.endswith("那一条）"):                  # 隔壁目录
+        return str(sibling / "s.txt")
+    if which == "A 父目录里的文件":
+        return str(parent_file)
+    if which == "A 用 .. 从目录里走回上层":
+        return str(up / ".." / "secret.txt")        # 一层 .. 才真的指到上面那份
+    if which == "A 父目录文件的绝对+相对混写":
+        return str(up) + os.sep + os.pardir + os.sep + "secret.txt"
+    if which == "B 上传目录本身":
+        return str(up)
+    if which == "B 空串":
+        return ""
+    if which == "B None":
+        return None
+    if which == "B 不是字符串":
+        return 12345
+    return _ABSENT                                   # B path 字段整个缺失
+
+
+@pytest.mark.parametrize("which", OUTSIDE_CASE_IDS)
+def test_outside_dir_path_refuses_read_preview_datauri_and_delete(tmp_path, which):
+    """越界 path 的四条出口全部按"没有这个附件"处理，外面那份文件不许被动。
+
+    这里刻意重建一次 store 而不是只往内存里塞记录：现网"索引被人改过"走的就是
+    从 index.json 读回来这条路。
+
+    负向锁（A 组）：把 get() 里 `path = self._resolve_within_dir(record)` 那两行换回
+    `if not os.path.isfile(record["path"])`，四条 A 参数全红（内容读得出去了）。
+    负向锁（B 组，也是全部九条）：把 _resolve_within_dir 改成 `return record.get("path")`
+    ——下面那次直接断言立刻红，B 组再也不会"旧写法碰巧也拒"糊过去。
+    """
+    from app.core.uploads import UploadStore
+
+    up = tmp_path / "uploads"
+    up.mkdir()
+    rec = _record(_outside_case_value(which, up))
+    _manual_index(up, rec)
+
+    store = UploadStore(directory=str(up))
+    # 这一行是"闸门自己判了它"，不是"文件恰好不存在"——A/B 两组都必须过。
+    assert store._resolve_within_dir(store._index.get(rec["id"])) == "", \
+        f"{which}：闸门没有把它判成越界"
+
+    assert store.get(rec["id"], owner="u_1") is None, f"{which}：越界记录必须当成不存在"
+    assert store.read_text(rec["id"], owner="u_1", max_chars=400) == "", \
+        f"{which}：预览把目录外的正文读出去了"
+    assert store.data_uri(rec["id"], owner="u_1") is None, f"{which}：data_uri 读出去了"
+    assert store.delete(rec["id"], owner="u_1") is False, f"{which}：越界不该报删除成功"
+
+    # 真正的判据：别人家那两份文件都还在原地、内容未变（只有 A 组会造它们）。
+    if which.startswith("A"):
+        assert (tmp_path / "secret.txt").read_text(encoding="utf-8") == "别人的账单正文", \
+            f"{which}：目录外的文件被读走或被删了"
+        assert (tmp_path / "uploads_evil" / "s.txt").read_text(
+            encoding="utf-8") == "隔壁目录的正文", f"{which}：uploads_evil 那份被动过"
+    assert [p.name for p in up.iterdir()] == ["index.json"], \
+        "越界处置不该在上传目录里留下新文件"
+
+
+@pytest.mark.parametrize("kind,mime", [("text", "text/plain"), ("image", "image/png")])
+def test_outside_path_refused_for_both_text_and_image_exits(tmp_path, kind, mime):
+    """两类附件各有自己的出口（read_text / data_uri），两条都要单独拒。
+
+    只给一条加闸是这类改动最常见的漏法：图片那条把整份文件 base64 送进上游请求。
+
+    负向锁：删掉 data_uri 里那次 `_resolve_within_dir`，kind=image 那条红。
+    """
+    from app.core.uploads import UploadStore
+
+    up = tmp_path / "uploads"
+    up.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("不该被读到的内容", encoding="utf-8")
+    rec = _record(str(outside), kind=kind, mime=mime)
+    _manual_index(up, rec)
+
+    store = UploadStore(directory=str(up))
+    assert store.read_text(rec["id"], owner="u_1") == ""
+    assert store.data_uri(rec["id"], owner="u_1") is None
+    assert outside.read_text(encoding="utf-8") == "不该被读到的内容", "内容被动过"
+
+
+def test_outside_dir_record_is_left_in_index_as_evidence(tmp_path):
+    """越界那条 delete 返回 False 之后，索引条目必须**还在**。
+
+    悄悄 pop 掉等于把"有人改过索引"的证据擦了，而下一个人就查不到是谁改的。
+    这一条钉的就是那个选择。
+
+    负向锁：把 delete() 越界分支改成先 pop 再 return False，本条红（条目不见了）。
+    """
+    from app.core.uploads import UploadStore
+
+    up = tmp_path / "uploads"
+    up.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("还在原地", encoding="utf-8")
+    rec = _record(str(victim))
+    _manual_index(up, rec)
+
+    store = UploadStore(directory=str(up))
+    assert store.delete(rec["id"], owner="u_1") is False
+    assert victim.exists(), "越界的 path 不该被删"
+    assert rec["id"] in store._index, "越界记录要留在索引里等人工处置"
+    on_disk = json.loads((up / "index.json").read_text(encoding="utf-8"))
+    assert rec["id"] in on_disk, "不该写回一份「已经把可疑条目删掉」的索引"
+
+
+def test_legit_path_inside_dir_still_reads_previews_and_deletes(tmp_path):
+    """正向对照：闸门不许把正常附件一起拦掉，否则"绿"只是因为什么都拒。
+
+    负向锁：把 _within_dir 改成无条件返回 None，本条红。
+    """
+    from app.core.uploads import UploadStore
+
+    up = tmp_path / "uploads"
+    store = UploadStore(directory=str(up))
+    pub = store.save("合同.txt", "甲方与乙方".encode("utf-8"), "text/plain", owner="u_1")
+
+    assert store.get(pub["id"], owner="u_1") is not None, "合法附件被误拒"
+    assert "甲方与乙方" in store.read_text(pub["id"], owner="u_1")
+    assert "甲方" in pub["preview"], "预览这条出口也得照常工作（它走的是同一道闸）"
+    assert store.delete(pub["id"], owner="u_1") is True
+    left = [p.name for p in up.iterdir() if p.name != "index.json"]
+    assert left == [], f"删除后目录里该清空，还剩 {left}"
+
+
+def test_public_response_shape_is_unchanged(tmp_path):
+    """public() 的对外形状一个键都不许多、一个键都不许少（客户端依赖它）。
+
+    收紧落点判据这一轮不该顺手把 path 或"是否越界"这类内部信息透出界面去。
+
+    负向锁：在 public() 里回一个 `"safe": ...` 或把 path 加进出参，本条红。
+    """
+    from app.core.uploads import UploadStore
+
+    store = UploadStore(directory=str(tmp_path / "uploads"))
+    text_shape = store.save("笔记.txt", "正文".encode("utf-8"), "text/plain", owner="u_1")
+    assert set(text_shape) == {"id", "name", "kind", "mime", "size", "created_at",
+                               "preview"}
+    img_shape = store.save("截图.png", FAKE_PNG, "image/png", owner="u_1")
+    assert set(img_shape) == {"id", "name", "kind", "mime", "size", "created_at"}
+    for shape in (text_shape, img_shape):
+        assert "path" not in shape and str(tmp_path / "uploads") not in str(shape), \
+            "落盘路径不许出现在对外响应里"
+
+
+# ---------- 写侧：客户端的文件名不许决定落点 ----------
+
+# detect_kind 认下的扩展名全集，落盘时一个都不许被改动（改了就是把图片存成无后缀文件）。
+# 在测试函数里现取，不在模块顶层抄一份名字：抄的那份迟早和 uploads.py 对不上。
+# 这些形状都不许拼进落盘名：要么被 detect_kind 当场拒，要么被洗成"没有扩展名"。
+ODD_EXTS = {
+    "带正斜杠": "notes.txt/../../evil",
+    "带反斜杠": "notes.txt\\..\\evil",
+    "全角扩展名": "照片.ＰＮＧ",
+    "超长扩展名": "report." + ("a" * 80),
+    "带控制字符": "weird.\x00txt",
+    "只有点": "notes.",
+    "点开头无扩展": ".notes",
+    "带盘符": "C:\\x.txt",
+    "换行": "notes\n.txt",
+}
+
+
+def test_store_ext_keeps_every_legit_extension():
+    """白名单内的扩展名逐个验：`_store_ext` 一个都不许改。
+
+    存在的理由：如果只测"怪形状被洗掉"，把白名单写成空集也能绿——那时每个附件
+    都落成无扩展名的文件，图片那条链（按后缀推 mime）就静默歪了。
+
+    负向锁：把 `return ext if ext in STORE_EXTS else ""` 里的 STORE_EXTS 换成
+    空集，本条红。
+    """
+    from app.core.uploads import DOC_EXTS, IMAGE_EXTS, STORE_EXTS, TEXT_EXTS, _store_ext
+
+    legit = sorted(TEXT_EXTS | IMAGE_EXTS | DOC_EXTS)
+    assert legit == sorted(STORE_EXTS), "STORE_EXTS 与三类之和不一致，白名单漂了"
+    for ext in legit:
+        assert _store_ext("报告" + ext) == ext, f"合法扩展名被改动：{ext}"
+        assert _store_ext("a/b" + ext) == ext, f"带目录前缀时改动：{ext}"
+    # 大写必须规范化成小写（.PNG 存成 .png 是既有行为，不许退）
+    assert _store_ext("X.PNG") == ".png"
+    # 文档转文本那一步直接赋 ".txt"，它必须在白名单里，否则 doc 上传会落成怪名字
+    assert ".txt" in STORE_EXTS
+
+
+def test_store_ext_normalises_odd_shapes_to_no_extension():
+    """怪形状一律洗成 ""（而不是原样拼进路径），且绝不含分隔符。
+
+    负向锁：把 _store_ext 换成裸 `os.path.splitext(...)[1].lower()`，
+    带分隔符/超长/控制字符那几条会拿到非空值而红。
+    """
+    from app.core.uploads import STORE_EXTS, _store_ext
+
+    for desc, name in ODD_EXTS.items():
+        got = _store_ext(name)
+        assert "/" not in got and "\\" not in got, f"{desc}：洗出来的值还带分隔符 {got!r}"
+        assert "\x00" not in got and "\n" not in got, f"{desc}：洗出控制字符 {got!r}"
+        assert len(got) <= len(".markdown"), f"{desc}：扩展名过长 {got!r}"
+        assert got == "" or got in STORE_EXTS, f"{desc}：洗出来的值不在白名单 {got!r}"
+
+
+@pytest.mark.parametrize("name", [
+    "../../etc/passwd.txt", "a/../../b.txt", "..\\..\\notes.txt",
+    "子目录/x.txt", "空格 名.txt"])
+def test_separators_in_filename_still_store_inside_dir(tmp_path, name):
+    """文件名里带 .. 或分隔符，落点仍然必须在上传目录**里面**。
+
+    判据不是"save 没炸"，而是目录里正好多出一个文件、且它 resolve 之后还在目录内、
+    并且目录之外（含 tmp_path 的上一级）没有凭空多出任何东西。
+
+    负向锁：把 save() 里 `ext = _store_ext(filename)` 换回裸 splitext 并删掉落点
+    那一次 `_within_dir` 检查，带分隔符那几条会在目录外落下文件而红。
+    """
+    from app.core.uploads import UploadStore
+
+    up = tmp_path / "uploads"
+    store = UploadStore(directory=str(up))
+    pub = store.save(name, "正文".encode("utf-8"), "text/plain", owner="u_1")
+
+    stored = store._index[pub["id"]]["path"]
+    real_up = Path(os.path.realpath(up))
+    real_stored = Path(os.path.realpath(stored))
+    assert real_stored.is_relative_to(real_up), f"落点跑到目录外：{stored}"
+    assert os.path.isfile(stored), "文件应当真的存在"
+    files = [p for p in up.iterdir() if p.name != "index.json"]
+    assert len(files) == 1, f"上传目录里应当只有一份附件，拿到 {[p.name for p in files]}"
+    # 落盘名由 uuid 主导：客户端那串一个字都不进文件名
+    assert pub["id"] in files[0].name
+    assert ".." not in files[0].name and os.sep not in files[0].name
+    assert not (tmp_path / "etc").exists(), "在 tmp_path 之上造出了目录"
+
+
+def test_within_dir_primitive_rejects_the_prefix_trap(tmp_path):
+    """直接钉"为什么不是 startswith"：隔壁的 uploads_evil 必须判为目录外。
+
+    这是整道闸门唯一一种"看起来在里面"的形态，也是本项目最容易写错的一处
+    （`str(path).startswith(dir)` 读起来完全正确，错得完全不显眼）。
+
+    负向锁：把 _within_dir 里的 commonpath 换成 `real_item.startswith(real_base)`，
+    本条立刻红（uploads_evil 被判成在里面）。
+    """
+    from app.core.uploads import _within_dir
+
+    up = tmp_path / "uploads"
+    up.mkdir()
+    (tmp_path / "uploads_evil").mkdir()
+    inside = up / "a.txt"
+    inside.write_text("x", encoding="utf-8")
+    trap = tmp_path / "uploads_evil" / "b.txt"
+    trap.write_text("x", encoding="utf-8")
+
+    assert _within_dir(str(up), str(inside)) is not None, "合法路径被误拒"
+    assert _within_dir(str(up), str(trap)) is None, "前缀陷阱被放行（startswith 之错）"
+    assert _within_dir(str(up), str(tmp_path / "secret.txt")) is None
+    assert _within_dir(str(up), str(up / ".." / "secret.txt")) is None
+    # 一个绝对一个相对 / 不同盘符：commonpath 抛 ValueError，要收成 None 而不是炸出来
+    assert _within_dir(str(up), "Z:\\somewhere\\x.txt") is None
+    assert _within_dir(str(up), "relative/x.txt") is None
+    assert _within_dir(str(up), "") is None
+    assert _within_dir(str(up), None) is None
+    # 目录自己不算"目录里的附件"：没有这一条时闸门会放行它，全靠调用方那句
+    # isfile(dir) 恰好 False 兜住——判据不能寄存别人的返回值。
+    assert _within_dir(str(up), str(up)) is None, "上传目录自身应当判为不可用"
+
+
+def test_within_dir_accepts_the_same_file_written_two_ways(tmp_path):
+    """同一个文件的多种写法（多余的一个 `.`、join 出来的、Windows 换大小写）不许被误拒。
+
+    这一条守的是别把闸门写成"什么都拒"的假安全：误拒的代价是用户的附件凭空消失，
+    那正是 v0.33 读路径刻意不复验的理由（见 providers._validate 的注释）。
+
+    负向锁：把 normcase 换成无条件 `.lower()`，POSIX 那半红（含大写的真路径被洗掉）；
+    把 normcase 整个删掉，Windows 那半红（大小写不同的同一文件被判成目录外）。
+    """
+    from app.core.uploads import _within_dir
+
+    up = tmp_path / "uploads"
+    up.mkdir()
+    inside = up / "a.txt"
+    inside.write_text("x", encoding="utf-8")
+
+    assert _within_dir(str(up), str(up / "." / "a.txt")) is not None
+    assert _within_dir(str(up), os.path.join(str(up), "a.txt")) is not None
+    if os.path.normcase("A") == "a":            # Windows：路径大小写不敏感
+        assert _within_dir(str(up).upper(), str(inside)) is not None, \
+            "目录名换大小写就把真附件判成外面"
+        assert _within_dir(str(up), str(inside).upper()) is not None, \
+            "同一文件换大小写就被误判成目录外"
+    else:                                       # POSIX：normcase 必须是恒等
+        assert os.path.normcase(str(inside)) == str(inside), \
+            "POSIX 上把路径洗成小写会误拒含大写的真附件"
+
