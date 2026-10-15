@@ -197,3 +197,124 @@ def test_stamp_assets_is_idempotent_and_leaves_the_worker_alone():
     assert twice == once, f"重复盖章会叠出第二个查询：{twice!r}"
     assert 'href="/app/sw.js"' in twice, "sw.js 的地址被动了"
     assert 'href="#top"' in twice, "锚点被当成资源盖了章"
+
+
+# ---------- 6. `?v=` 是来客可控的输入，而它会被拼进 JS 字面量：只认服务端自己那一枚 ----------
+# 这一节防的不是"今天有人打线上"，而是"下一版又写回一个不校验的 token"：水印那一条
+# 占位符（`__ASSET_TOKEN__`）落在 `static/index.html:753` 的 `window.__ASSETS__ = "…"`
+# 与 `static/sw.js:9` 的 `const V = "…"`，两处都是**字符串字面量内部**，所以查询串里任何
+# 一个引号都是一次逃逸。写 `rewritten_html` 的人当时只想"带水印的 URL 走 immutable"，
+# 没说出口的假设是"那个值是我们自己生成的"。判据与理由见 web_router._query_token。
+
+# 三个页面 + worker：占位符只住在 /app 那两份里，`/admin/` 与 `/` 是前瞻性的锁
+# （今天它们不含 `__ASSET_TOKEN__`，哪天接上查询参数就必须立刻被这节点名）。
+WATERMARKED = ("/app/", "/app/sw.js")
+ALL_PAGES = PAGES + ("/app/sw.js",)
+
+# 每一个 payload 里都埋着同一个纯字母记号 `MARKER`。原因是真话：查询串经过 httpx 的
+# URL 编码才送到 ASGI，引号变成 %22、尖括号变成 %3C/%3E，于是"断言那一串原文没出现"
+# 会是一条永远为真的空断言（假绿）。字母记号被反射时一定原样出现在响应体里，所以
+# `MARKER not in body` 是一条会红的断言。这节一共三条判据，指向同一件事：
+# 记号不出现、发出的字节与不带 `?v=` 时逐字相同、页面/worker 自报的水印仍是服务端那一枚。
+MARKER = "zzinjectedzz"
+INJECTION_SHAPES = (
+    'A"B',                                    # 用户在线上证过的那一条：一个引号截断字面量
+    '1";alert(1);//',
+    "1</script><script>alert(1)</script>",
+    "1" + chr(10) + "2" + chr(13),             # CR/LF：响应头注入的另一半原料
+    "%22evil%22",                             # 已经百分号编码过的形状
+    "",                                       # 空值：本来就该走"没带"那一档
+)
+INJECTIONS = [MARKER + shape for shape in INJECTION_SHAPES]
+
+
+def _js_watermarks(body: str):
+    """响应里那几处"自报构建号"的 JS 字面量取值（可能一处都没有）。"""
+    return re.findall(r'(?:window[.]__ASSETS__|const V) = "([^"]*)"', body)
+
+
+def test_query_token_accepts_only_the_shape_the_server_itself_emits():
+    """`_query_token` 自己：纯数字才放行，其余一律算"没有带"。
+
+    这一条是**绕过 httpx 直接喂原始字节**的：查询串在 scope 里就是没解码的字节，
+    真实来客递进来的正是这种形状（引号、`</script>`、CR/LF、百分号、非 ASCII 数字），
+    而经过 HTTP 客户端的 URL 编码之后再断言"原文没出现"会绿得没有意义。
+    """
+    good = web_router.asset_token()
+    assert re.fullmatch(r"[0-9]+", good), f"服务端自己那枚水印就不是纯数字了：{good!r}"
+
+    def scope(raw: bytes):
+        return {"query_string": raw}
+
+    assert web_router._query_token(scope(b"v=" + good.encode())) == good
+    assert web_router._query_token(scope(b"lang=zh&v=" + good.encode())) == good
+
+    bad = [b'v=A"B', b'v=1";alert(1);//', b"v=1</script><script>alert(1)</script>",
+           b"v=1" + bytes([10]) + b"2", b"v=1" + bytes([13]) + b"2", b"v=evilmark",
+           b"v=", b"v=" + bytes([0xd9, 0xa1]),        # U+0661 阿拉伯-印度数字：\d 会认，[0-9] 不认
+           b"v=%31", b"v=1%22X", b"v=1 2", b"v=-1", b"v=+1", b"v=1.5", b"v=1e3",
+           b"v=1\x002", b"v=1'--", b"v=1 onerror=alert(1)"]
+    for raw in bad:
+        got = web_router._query_token(scope(raw))
+        assert got == "", f"这一串原始查询参数被当成水印放行了：{raw!r} -> {got!r}"
+
+
+def test_a_bogus_v_query_changes_nothing_the_server_sends_out():
+    """`/app/`、`/admin/`、`/`、`/app/sw.js`：带着注入形状的 `?v=` 进来，发出去的字节一字不动。
+
+    反面形状（这一节存在的全部理由）：`/app/?v=A"B` 让页面里出现
+    `window.__ASSETS__ = "A"B";` —— 一次查询参数反射，落在别人浏览器的 JS 里。
+    `/admin/` 与 `/` 今天不含那处占位符，所以那两页是前瞻性的锁：形状一旦接上查询参数，
+    这里当场点名（`body == clean` 那条不依赖占位符是否存在）。
+    """
+    for page in ALL_PAGES:
+        clean = client.get(page).text
+        assert "__ASSET_TOKEN__" not in clean, f"{page} 的占位符没被替换：这条判据是空转的"
+        for payload in INJECTIONS:
+            res = client.get(page, params={"v": payload})
+            assert res.status_code == 200, f"{page}?v={payload!r} 回 {res.status_code}"
+            body = res.text
+            assert body == clean, \
+                f"{page} 对 ?v={payload!r} 发了与不带查询参数时不同的字节：来客可控的输入进了响应体"
+            assert MARKER not in body, f"{page} 把注入记号 {MARKER!r} 原样发了出去"
+            assert "__ASSET_TOKEN__" not in body, f"{page} 漏替换占位符"
+            for value in _js_watermarks(body):
+                assert re.fullmatch(r"[0-9]+", value), \
+                    f"{page} 的构建号字面量里出现了 {value!r}：它可以夹带引号与标签"
+
+
+def test_the_watermark_the_page_carries_is_still_the_servers_own(monkeypatch):
+    """不合格的那一枚被拒之后，页面与 worker 必须回落到**服务端那一份**，不是空串。
+
+    回落成空串也算"没被注入"，但它让 `window.__ASSETS__` 变成 `""`：`app.js` 的
+    `staleBuild` 对账从此问不到东西，人正好落进"旧 HTML 配新 JS"那一档（缺元素、点了
+    没反应）。所以这里钉的是"仍然带着当下水印"，而不是"没带别的东西"。
+    """
+    token = web_router.asset_token()
+    for page in WATERMARKED:
+        clean = client.get(page).text
+        assert _js_watermarks(clean) == [token], \
+            f"{page} 的自报构建号读出来不是恰好一处：{clean[:120]!r}（这节就空转了）"
+        for payload in INJECTIONS:
+            body = client.get(page, params={"v": payload}).text
+            assert _js_watermarks(body) == [token], \
+                f"{page}?v={payload!r} 的构建号不再是服务端那一枚"
+
+    # 换一版水印之后仍然如此：判据不能只在"当前这一枚"上成立（那是恰好等于常量）。
+    monkeypatch.setattr(web_router, "_TOKEN", "20990101010101")
+    for page in WATERMARKED:
+        for payload in INJECTIONS:
+            assert _js_watermarks(client.get(page, params={"v": payload}).text) == ["20990101010101"]
+
+
+def test_a_rejected_v_query_buys_no_long_cache():
+    """不合格 = 当"没带水印"：进不了 HTML，也换不来一年 immutable。
+
+    这条钉的是回落的方向：`_query_token` 判不合格回空串，而缓存那一档比的是
+    "这串等不等于当下水印"，所以不认识的 `?v=` 一律 no-cache。哪天有人想"任何带 ?v= 的
+    地址都敢给一年 immutable"（那正是 2026-09-17 那次改版没生效的复现形状），这条会红。
+    """
+    for path in ("/app/app.js", "/admin/admin.css", "/site/site.css"):
+        res = client.get(path, params={"v": MARKER})
+        assert res.headers["cache-control"] == "no-cache", \
+            f"{path} 对不合格的 ?v= 给了 {res.headers['cache-control']!r}"

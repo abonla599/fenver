@@ -403,3 +403,39 @@ def test_every_machine_read_path_exists(origin, token):
                     f"（出处 {origin}）")
     pytest.fail(f"{origin} 里引用了 {token}，而仓库根下没有这个东西，.gitignore 也没说它是"
                 "被有意排除的——机器按这句话去找会永远找不到；改指向，别删内容")
+
+
+# ---------------------------------------------------------------- 豁免名单自己也要有牙
+# 上面那两条验的是"引用还在不在"。这一条验的是名单的另一半：`.gitignore` 里那条
+# `android-native/.gradle/` 必须**真在、并且真是被它盖住的**。
+def test_the_gradle_project_cache_is_ignored_by_a_rule_that_actually_exists():
+    """Gradle 的项目本地缓存必须由一条真规则盖住，不能被一枚空模式"看起来盖住"。
+
+    为什么值得单独钉一条（2026-10-08 安全收口）：`android-native/.gradle/` 里住的是
+    checksums/、fileHashes/*.bin、executionHistory.bin——一次 `git add -A` 就把这台机器
+    的二进制哈希库推进**公开**仓库，而且它每构建一遍就换一遍，"工作区干净"那条发版门禁
+    判据从此恒假。它此前看着像"早就被忽略了"，而那是本文件上面 `_SENTINEL` 那段记下的
+    同一枚假阳性：带尾斜杠的问法对**任何东西**都回"被排除"（命中的是 .gitignore 里一个
+    空行的裸 CR，git 读成一枚空模式）。所以这里的问法是目录里的一个具体文件：
+
+    * 不带斜杠问目录名本身（`android-native/.gradle`）在干净检出里会回"未被忽略"——那条
+      模式要目录身份，而 CI 机器上没有那个目录；拿它当判据的锁会在 CI 上必红；
+    * 问里面的具体文件不需要目录身份，本机与 CI 答得一样。
+
+    两条都验：判据回 True，并且 `check-ignore -v` 指出的**模式**就是那一行本身——只看
+    返回值不够，因为报告行里本来就带着被问的那个路径，光 `"android-native/.gradle/" in 报告`
+    会被路径那一半蒙过去。
+    """
+    probe = "android-native/.gradle/fileHashes/fileHashes.bin"
+    assert _is_deliberately_excluded(probe) is True, (
+        f"{probe} 没被 .gitignore 排除：那枚 Gradle 项目本地缓存又在 `git add -A` 的射程里了")
+
+    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-v", "--", probe],
+                         capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    assert res.returncode == 0 and report, f"git 对 {probe} 没答上来：rc={res.returncode}"
+    rule_part, _, path_part = report.partition(chr(9))
+    assert path_part.endswith(probe), f"报告行认不出被问的是哪条路径：{report!r}"
+    assert rule_part.endswith(":android-native/.gradle/"), (
+        f"{probe} 命中的不是那条规则本身，而是 {rule_part!r}——"
+        "空模式（一枚裸 CR 的空行）也算命中，而那正是这条锁要挡的假阳性")

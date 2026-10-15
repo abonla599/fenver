@@ -302,10 +302,74 @@ def test_an_origin_the_shell_would_not_trust_leaves_the_manifest_url_alone(clien
     ("https://ai.fenever.xyz/", "https://ai.fenever.xyz/site/android.apk"),
     ("", ""), ("http://ai.fenever.xyz", ""), ("https://ai.fenever.xyz:8443", ""),
     ("https://ai.fenever.xyz/extra", ""), ("https://user@ai.fenever.xyz", ""),
+    # 形状合格、却根本不是我们的域：这一组是 2026-10-08 安全收口补的那一层（判据见
+    # self_hosted_apk_url）。形状取自壳那边 ReleasePlanTest 的
+    # everyDetourFromTheExactSameOriginPathIsRefused——两端认的"别家"必须是同一批。
+    ("https://evil.example", ""), ("https://evil.example/", ""),
+    ("https://ai.fenever.xyz.eil.com", ""), ("https://eil.com/site/android.apk", ""),
+    ("https://fenever.xyz", ""), ("https://www.evil.example", ""),
+    ("https://ai.feverov.xyz", ""), ("https://testserver", ""),
 ])
 def test_the_self_hosted_origin_is_accepted_only_in_the_shape_the_shell_trusts(origin, expect):
-    """自家出口地址的合格线：https + 纯主机 + 那一条固定路径，别的形状一律拼不出。"""
+    """自家出口地址的合格线：https + 纯主机 + **自家那两个域** + 那一条固定路径。
+
+    域这一层原先只在清单校验那条路上生效（`_manifest_ok` → `_is_self_hosted_url`），
+    换地址这条路上没有——而这条路的输入是请求自己的 Host 头。少这一句，一个
+    `Host: evil.example` 就能把发给手机的下载地址换成别人家的 https 主机。
+    """
     assert releases.self_hosted_apk_url(origin) == expect
+
+
+def test_a_qualified_origin_never_lands_outside_the_self_hosted_domains():
+    """换出去的地址只有两种可能：空串（什么都不换），或落在 `SELF_HOST_DOMAINS` 上。
+
+    这条不写死任何域名：判据直接取那个集合本身。抄一份清单进测试，将来加第三个自家域时
+    这把锁会跟着漂——"实现与测试各一份真相"正是本仓反复在防的事。
+    """
+    origins = ["https://ai.fenever.xyz", "https://www.fenever.xyz", "https://evil.example",
+               "https://evil.example/", "https://ai.fenever.xyz.eil.com", "https://fenever.xyz",
+               "https://ai.fenever.xyz:8443", "https://user@ai.fenever.xyz",
+               "http://localhost:8000", "https://localhost", "", "not a url"]
+    for origin in origins:
+        url = releases.self_hosted_apk_url(origin)
+        assert url == "" or releases._is_self_hosted_url(url), \
+            f"{origin!r} 换出去一个不在 SELF_HOST_DOMAINS 上的地址：{url!r}"
+
+
+def test_a_foreign_host_header_cannot_move_the_download_address_off_our_own_domains(client, enforced):
+    """`Host: evil.example` 打 `/v1/update/info`：端给手机的地址仍只能是清单里那一条自家的。
+
+    端到端那一半（上面两条只验函数）。`main._self_origin` 取的是 Host 头 +
+    X-Forwarded-Proto，两个都由来客说了算，而 `_point_self_hosted_assets` 照着它把清单里
+    那条自家地址改掉——所以判据是"改完仍然只可能是自家域"，并且不合格来源一个字节不动
+    （保持 SELF_URL）。
+    """
+    prime()
+    for host in ("evil.example", "evil.example:443", "ai.fenever.xyz.eil.com",
+                 "fenever.xyz", "www.evil.example", "testserver"):
+        body = client.get("/v1/update/info", headers={"host": host}).json()
+        assert body["assets"], host
+        for asset in body["assets"]:
+            got = asset["browser_download_url"]
+            assert releases._is_self_hosted_url(got), f"{host} 把地址指到了别家：{got}"
+            assert got == SELF_URL, f"{host} 换掉了清单里那条自家地址：{got}"
+
+
+def test_the_two_self_hosted_domains_still_get_their_origin_specific_url(client, enforced):
+    """反向不许漂：自家两个域各自来时照旧换成同源的那一枚（保护的是老壳的同源判据）。
+
+    补白名单最容易顺手干坏事的地方就在这儿——把 www 或大小写写法一起判死，症状不是报错，
+    是那批把服务器配成 www.fenever.xyz 的手机从此收不到这一版。域名的 DNS 大小写不敏感，
+    而壳那条同源判据比的是字面相等，所以这里按小写形比对、把来客写的大小写原样还回去。
+    """
+    prime()
+    for host in ("ai.fenever.xyz", "www.fenever.xyz", "WWW.FENEVER.XYZ"):
+        body = client.get("/v1/update/info", headers={"host": host}).json()
+        assert body["assets"], host
+        for asset in body["assets"]:
+            assert asset["browser_download_url"].lower() == \
+                "https://" + host.lower() + releases.SELF_APK_PATH, \
+                f"{host} 的来源没被换成同源地址：{asset['browser_download_url']}"
 
 
 def test_the_self_hosted_apk_path_is_the_same_string_in_the_server_the_route_and_the_client():

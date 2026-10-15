@@ -677,12 +677,26 @@ SELF_APK_PATH = "/site/android.apk"
 
 
 def self_hosted_apk_url(origin: str) -> str:
-    """把调用方的来源拼成自家出口地址；来源不合格时返回空串（＝不换）。
+    """把调用方的来源拼成自家出口地址；来源不合格时返回空串（＝什么都不换）。
 
-    合格线照抄壳的判据，因为这条 URL 最终是过壳的闸的：必须 https、主机里不许带端口
-    或 userinfo。本地开发用 http://localhost:8000 时这里必然回空串——那正是想要的：
-    老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的 GitHub 地址换成
-    一条用不了的。
+    合格线有两层，缺任何一层都算不上"这是我们发布的地址"：
+
+    1. **形状**照抄壳的判据，因为这条 URL 最终是过壳的闸的：必须 https、主机里不许带
+       端口、userinfo 或第二段路径。本地开发用 http://localhost:8000 时这里必然回空串
+       ——那正是想要的：老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的
+       GitHub 地址换成一条用不了的。
+    2. **域**必须在 `SELF_HOST_DOMAINS` 里（见本文件 :55 那段注释：「清单里的下载地址
+       只许落在这两个域上，别的一律判死」）。这一层以前只在清单校验
+       （`_is_self_hosted_url` ← `_manifest_ok`）那条路上生效，换地址这条路上漏了——
+       而这条路的输入是**请求自己的 Host 头**（`main._self_origin` 取 Host + X-Forwarded-Proto，
+       两者都由客户端说了算）。少了这层，一个 `Host: evil.example` 就能把发给手机的
+       下载地址从自家出口改成任意 https 主机，而那份 JSON 其余部分（版本号、摘要）
+       看着全是我们签的。这不是新增限制，是把已经写死的意图补到实现上。
+
+    比对走 `_is_self_hosted_url`（同一个文件里的那一个判据，不抄第二份），所以两条路
+    对"自家域"的定义只有一份；它内部按 `urlsplit().hostname` 取值，主机名大小写不敏感
+    这一条顺带也照顾到了（DNS 比对按小写形），而拼出去的地址保持来客写的那一个大小写
+    ——壳那条同源判据比的是字面相等，把它自己写的主机原样还回去才最不容易出岔子。
     """
     value = (origin or "").strip()
     if not value.startswith("https://"):
@@ -690,7 +704,8 @@ def self_hosted_apk_url(origin: str) -> str:
     host = value[len("https://"):].strip("/")
     if not host or "/" in host or ":" in host or "@" in host:
         return ""
-    return "https://" + host + SELF_APK_PATH
+    url = "https://" + host + SELF_APK_PATH
+    return url if _is_self_hosted_url(url) else ""
 
 
 def alias_legacy_asset_to_self_host(manifest: dict, origin: str, repo: str) -> int:
