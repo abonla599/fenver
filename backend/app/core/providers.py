@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 import uuid
 from urllib.parse import urlparse
@@ -145,6 +146,19 @@ _PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
 ALLOW_LOCALHOST_BASE_URL = False
 
 
+def _resolve_addresses(host: str) -> list:
+    """主机名 → 地址字面量列表（去重、稳定排序）。
+
+    单独拎成一个模块级函数，唯一目的就是当**注入点**：测试用 monkeypatch 换成
+    固定答案，于是整套测试一次都不真的走 DNS（这台机器同时是生产机，真解析既慢、
+    又随网络与 hosts 文件变，红起来查不出是产品坏了还是机器没网）；生产走真
+    `socket.getaddrinfo`。判据本身不在这个函数里——它只负责"问到什么"，
+    对不对由 `_base_url_reject_reason` 判，这样两侧各自也只有一处口径。
+    """
+    infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    return sorted({info[4][0] for info in infos})
+
+
 def _base_url_reject_reason(base_url: str) -> str:
     """这个 base_url 能不能让服务端替它出网。返回 "" = 放行，否则返回拒的理由。
 
@@ -152,10 +166,18 @@ def _base_url_reject_reason(base_url: str) -> str:
     * 解析不出主机名——`http:///v1`、`http://:80/v1` 这类空壳；
     * 主机名是本机——回环（127.0.0.0/8、::1）、全零（0.0.0.0、::）或 localhost
       这个名字：受 ALLOW_LOCALHOST_BASE_URL 管，默认拒；
-    * 主机名是 IP 且落在下面任何一段私有/链路本地网段里：无论如何都拒。
+    * 主机名是 IP 且落在下面任何一段私有/链路本地网段里：无论如何都拒；
+    * 主机名是域名：**解析之后**任一地址落在上述任一类里也拒。这一条是 v0.34.2
+      补的——此前域名只看名字本身，于是一条指着 127.0.0.1 或 169.254.169.254 的
+      A 记录能直接过关；解析失败同样拒（fail closed），因为一个连服务端都解析
+      不出来的名字，放行它等于让下一次连接去猜它指向哪儿。
 
-    只管"这一串地址本身"。DNS 把一个公网名字解析到内网 IP（rebinding）不在这一层，
-    真要挡它得在连接时钉住解析结果，那是另一处改法，不该混进配置校验里假装覆盖了。
+    还有一件事这一层**没有**关掉，别把它当成已覆盖：闸门只在配置写入时跑一次
+    （唯一调用点是 `ProviderStore._validate`），而真正出站在 `build_client` 里由
+    httpx/OpenAI SDK 重新解析一次主机名。写入时验过的那个 IP 和连接时用的那个 IP
+    之间隔着一次重新解析，这就是 DNS rebinding / TOCTOU 窗口。要真关掉它，得把
+    "已校验的 IP"钉进连接层（自定 transport 按 IP 连、Host/SNI 另给），那是改动
+    整条客户端路径的另一件事，不该混在配置校验里顺手做一半。
     """
     try:
         host = urlparse(base_url).hostname
@@ -192,6 +214,48 @@ def _base_url_reject_reason(base_url: str) -> str:
             return ""
         return ("base_url 指向 localhost，服务端不做本机请求；"
                 "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+
+    # ---------- 其余域名：解析之后再判一次形状 ----------
+    # 上面 return "" 就是这道闸门的缺口：一个公网样子的好名字，A 记录改成
+    # 127.0.0.1 或 169.254.169.254 照样过关，随后服务端替它出网。
+    # 解析失败一律拒（fail closed）；多个地址里只要有一个踩线就拒——闸门要的是
+    # "这一个名字可能被指到哪儿"的全称判据，不是"第一个答案看起来对不对"。
+    try:
+        addresses = _resolve_addresses(lowered)
+    except Exception as e:
+        return (f"base_url 的主机名 {host} 解析失败（{type(e).__name__}: {str(e)[:80]}），"
+                "服务端不放行解析不出来的地址")
+    if not addresses:
+        return f"base_url 的主机名 {host} 解析结果为空，服务端不放行"
+
+    for literal in addresses:
+        try:
+            addr = ipaddress.ip_address(literal)
+        except ValueError:
+            return (f"base_url 的主机名 {host} 解析出无法识别的地址 {literal}，"
+                    "服务端不放行")
+        # 口径与上面 IP 字面量那几条逐字对齐：回环与"全零"是同一个开关管的
+        # （都是"本机"，只是写法不同——名字 vs 数字），私有/链路本地则无论
+        # 开关如何都拒。开关存在的理由是"允许自建模型"，不是"允许扫内网"。
+        if addr.is_loopback or addr.is_unspecified:
+            if ALLOW_LOCALHOST_BASE_URL:
+                continue
+            return (f"base_url 的主机名 {host} 解析到本机地址 {literal}，服务端不做本机请求；"
+                    "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+        for network in _PRIVATE_NETWORKS:
+            if addr in network:
+                return (f"base_url 的主机名 {host} 解析到内网地址 {literal}"
+                        f"（{network}），服务端不做内网请求")
+        # 这两段刻意不写进 _PRIVATE_NETWORKS，是因为那里头只有 IPv4 的
+        # 169.254/16：IPv6 链路本地 fe80::/10 与组播是各自独立、跨版本语义稳定的
+        # 属性（不像 is_global 那样随 Python 版本改口径，见上面网段清单的注释），
+        # 而 169.254.169.254 那类元数据服务在 v6 双栈上就写在这两段里。
+        if addr.is_link_local:
+            return (f"base_url 的主机名 {host} 解析到链路本地地址 {literal}，"
+                    "服务端不做内网请求")
+        if addr.is_multicast:
+            return (f"base_url 的主机名 {host} 解析到组播地址 {literal}，"
+                    "服务端不向组播目标发请求")
     return ""
 
 
