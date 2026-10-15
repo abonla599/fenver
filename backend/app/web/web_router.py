@@ -62,6 +62,11 @@ PAGE_CACHE = "public, max-age=30"
 # 哪些引用要跟着水印走：按扩展名认，不另列清单——加一个新资源不需要想起来改第二处。
 _REF = re.compile(r'\b(?:src|href)="[^"?]*\.(?:css|js|png|jpe?g|svg|webmanifest)"')
 
+# `?v=` 只许长成这个样子：一串十进制数字，也就是 `asset_token()` 自己发得出去的那一枚
+# （`f"{_newest_mtime():.0f}"`）。用 [0-9] 而不是 \d，因为 `\d` 认梵文/阿拉伯-印度数字，
+# 而那些字符同样不该被拼进 JS 字面量。判据与理由见 _query_token。
+_QUERY_TOKEN_RE = re.compile(r"[0-9]+")
+
 _TOKEN = ""
 
 
@@ -90,9 +95,30 @@ def asset_token() -> str:
 
 
 def _query_token(scope) -> str:
+    """`?v=` 里那一串：只认服务端自己发得出来的形状（纯数字），别的算"没有"。
+
+    为什么必须校验（2026-10-08 安全收口）：这个值不是"用来比对的输入"，它是**要被拼进
+    页面和 worker 的那段 JS 的字面量**。`rewritten_html` 把它原样 `replace` 到
+    `__ASSET_TOKEN__` 的位置上，落点是 `static/index.html:753` 的
+    `window.__ASSETS__ = "…"` 与 `static/sw.js:9` 的 `const V = "…"`。取的是
+    `scope["query_string"]` 的原始字节（不经 Starlette 解码，也就任何形状都可能进来），
+    于是 `?v=A"B` 就把一行 `window.__ASSETS__ = "A"B";` 发到了别人浏览器里——一次查询
+    参数反射。写这行的人当时只想"让带水印的 URL 走 immutable"，没意识到同一个值还有
+    第二个用处，这条判据补的就是那处没说出口的假设。
+
+    合格线就是 `asset_token()` 自己的形状：它算出来的那一句 `f"{_newest_mtime():.0f}"`
+    ——纯十进制数字，没有引号、没有 `<`、没有空白。
+
+    不合格时回空串，而**调用点 `token or asset_token()` 会把它回落到服务端那一枚**——
+    这一档是特意选的，不是图省事：回空串会让 `window.__ASSETS__` 变成空字串，页面就
+    拿不到自己的构建号，`app.js` 的 `staleBuild` 对账随之失效，人正好落进
+    "旧 HTML 配新 JS" 那一档（缺元素、点了没反应）。缓存那一侧的行为不变且仍然保守：
+    不认识的 `?v=` 不等于当下水印，所以拿不到 `IMMUTABLE`，照旧 no-cache。
+    """
     for pair in (scope.get("query_string") or b"").split(b"&"):
         if pair.startswith(b"v="):
-            return pair[2:].decode("utf-8", "replace")
+            raw = pair[2:].decode("utf-8", "replace")
+            return raw if _QUERY_TOKEN_RE.fullmatch(raw) else ""
     return ""
 
 
@@ -183,7 +209,14 @@ class RevalidatingStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         target = getattr(response, "path", "") or ""
         if isinstance(response, StarletteFileResponse) and target.endswith((".html", "sw.js")):
+            # 这里必须留 `or asset_token()`：`token` 为空串的两种来源（没带 `?v=`、
+            # 带了但不是纯数字）都要回落成服务端自己那一枚，页面与 worker 才拿得到构建号
+            # （判据见 _query_token 那段：占位符落点是 index.html 的 `window.__ASSETS__`
+            # 与 sw.js 的 `const V`，两处都是 JS 字符串字面量，所以"发出去的字面量"只有
+            # 经过校验的这一种形状）。
             return rewritten_html(response, token or asset_token(), incoming)
+        # 认不出当下水印（包括压根不合格）的一律 no-cache：给一个 URL 上带任意查询参数的
+        # 响应发一年 immutable，等于让人存进书签的那条旧地址被钉死一年。
         return site_headers(response, cache=IMMUTABLE if token == asset_token() else "no-cache")
 
 
