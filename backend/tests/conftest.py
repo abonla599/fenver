@@ -205,6 +205,31 @@ def _stub_llm_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_dns_resolution(monkeypatch):
+    """把 base_url 闸门里的 DNS 解析打桩：测试一律不许真去查 DNS。
+
+    v0.34.2 起 `providers._base_url_reject_reason` 对**域名**会先解析一次再判地址
+    形状（此前缺口是"一个好名字 + 一条指着 127.0.0.1 的 A 记录"能过关）。不打桩
+    有两个硬伤：
+
+    1. 全套有 30 多处 `store.upsert(base_url="https://a.invalid/v1")` 这种假域名写法，
+       而 `.invalid` 按 RFC 2606 恒 NXDOMAIN。闸门是 fail closed 的，于是这些用例
+       会因为"解析不出来"被判拒——红的地方离产品坏没坏八丈远。
+    2. 解析成不成随本机网络与 hosts 变，同一份代码在有网/断网的机器上给出相反结论。
+       这个坑 conftest 顶部已经为 `.env` 记过一次（"同一份代码在两种机器上给出
+       相反的结果"），DNS 是同一类外部状态，只是更不稳。
+
+    这里给的是公网答案，等价于维持既有断言在 v0.34.2 之前的可见行为。闸门自身的
+    判据不在这里钉，在 `tests/test_v0342_ssrf_resolve_guards.py`：那里每条用例把
+    答案换成它要演的那个地址，"解析到内网必须拒""解析不出必须拒""解析到公网必须放"
+    三类各有用例——把解析闸门从 `_base_url_reject_reason` 里删掉，红的是那个文件。
+    """
+    from app.core import providers
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda host: ["93.184.216.34"])
+
+
+@pytest.fixture(autouse=True)
 def _isolated_throttle():
     """限流账本是模块级全局状态，每条用例都必须从空表开始。
 
