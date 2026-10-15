@@ -108,6 +108,163 @@ def test_r1_fail_backoff_resets_on_success():
     assert guard.check("web_search", {"query": "test"}) is None
 
 
+# ---------- R1-bis 总额熔断（__all__）真的挡得住任意工具（v0.34.2 补的） ----------
+# record_tokens() 从 v0.31 起就在超限时往 _fused_tools 里塞一个 "__all__" 键，
+# 而 check() 只查 `self._fused_tools[tool_name]`——那把通配符**从来没被读过**。
+# is_all_fused() 存在，但全仓零调用点（grep 得证）。结果就是"熔断所有工具"这句
+# 文案发得出去、工具一个都没停：token 上限跳了之后模型还能继续调 web_search 烧钱。
+# 断言一律收在"回来的必须是一句非空的话"上：只断 not None 会把空串当成拦截成功，
+# 而调用方 `if blocked:` 恰恰把空串当放行。
+
+def test_r1b_token_cap_fuses_any_tool_name():
+    """R1 判据 4：token 上限跳了之后，**任意**工具名都要被拦。
+
+    这里挑一个本轮从没出现过的名字：老写法查的是 _fused_tools[tool_name]，
+    新名字必然不在表里 → 放行 → 本条红。
+
+    负向锁：把 check() 里 `_fused_all_reason()` 那三行删掉，本条红（返回 None）。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=100)
+    guard.record_tokens(100)
+
+    blocked = guard.check("web_search", {"query": "随便搜点什么"})
+    assert isinstance(blocked, str), f"必须是一句话，拿到 {type(blocked).__name__}"
+    assert blocked, "token 上限跳了却放行（空串=不拦）"
+    assert "token" in blocked or "上限" in blocked, f"理由要说清是总额上限：{blocked}"
+
+    # 换一个从没见过的名字也一样拦：这条钉的是"所有"，不是"这一个"
+    other = guard.check("calculator", {"expr": "1+1"})
+    assert other == blocked, f"总额熔断应当对所有工具给同一句话：{other!r}"
+
+
+def test_r1b_fuse_survives_repeated_calls():
+    """R1 判据 4 补充：熔断状态不许被后续 check() 消耗掉。
+
+    负向锁：把 _fused_tools["__all__"] 改成 `pop`（读一次就没了），第二次调用
+    返回 None，本条红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=50)
+    guard.record_tokens(60)
+
+    first = guard.check("web_search", {"query": "a"})
+    assert first, "第一次就该拦"
+    for name in ("web_search", "execute_code", "read_file"):
+        for _ in range(3):
+            again = guard.check(name, {"query": "a"})
+            assert again == first, f"{name}：第 N 次调用把熔断状态吃掉了或换了口径"
+    assert guard.is_all_fused(), "重复调用后状态应当仍在"
+
+
+def test_r1b_round_under_cap_still_returns_none():
+    """R1 判据 4 的另一半：没到上限的一轮不许拦——否则"绿"只是因为什么都拒。
+
+    负向锁：把 check() 里的总额判断写成无条件 `return reason`，本条红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=50000)
+    guard.record_tokens(1000)
+    assert guard.check("web_search", {"query": "正常一轮"}) is None
+    assert guard.check("calculator", {"expr": "1+1"}) is None
+    assert not guard.is_all_fused()
+
+
+def test_r1b_is_all_fused_and_check_share_one_verdict():
+    """`is_all_fused()` 必须与 `check()` 同一个判据（单点定义，不许两份口径）。
+
+    这一条钉的是实现形状而不只是结果：老写法是 check() 自己 `in` 一遍、
+    is_all_fused() 再 `in` 一遍，两份写在两处迟早对不上（比如其中一份漏了空串判断）。
+
+    负向锁：让 is_all_fused() 直接读 `self._fused_all_reason()` 之外的另一份状态
+    （比如换成 `self._total_tokens > self.max_tokens`，注意是 > 不是 >=），
+    在"恰好等于上限"那一格两条断言就会一个 True 一个 False，本条红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=100)
+    assert guard.check("web_search", {}) is None and not guard.is_all_fused()
+    guard.record_tokens(100)                    # 恰好等于上限：>= 才算跳
+    assert guard.is_all_fused(), "record_tokens 之后状态位应当是 True"
+    assert guard.check("web_search", {}), "check 与 is_all_fused 必须同一判据"
+
+
+def test_r1b_fuse_does_not_deadlock_under_the_nonreentrant_lock():
+    """锁不可重入：check() 在锁内读总额熔断，绝不能反过来调用会自我加锁的方法。
+
+    这是这一处改动唯一能把"绿"变成"整套测试永远挂住"的错法（把
+    `if self.is_all_fused():` 写进已经持锁的 check() 里就是这样）。所以这条用例
+    把调用放进线程里并限时 join：真自锁死的话它报红而不是把整个 pytest 吊住。
+
+    负向锁：把 check() 里那行换成 `if self.is_all_fused(): return ...`，本条 2 秒后红。
+    """
+    import threading
+
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=10)
+    guard.record_tokens(50)
+
+    box = {}
+
+    def run():
+        box["blocked"] = guard.check("web_search", {"q": "1"})
+        box["flag"] = guard.is_all_fused()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive(), "check()/is_all_fused() 互相加锁把调用吊死了"
+    assert box.get("blocked"), f"应当拿到理由，拿到 {box.get('blocked')!r}"
+    assert box.get("flag") is True
+
+
+def test_r1b_fuse_adds_no_new_event_type():
+    """事件集合不许因为这次改动变长：读侧（面板与账本 guard_events）没准备好接新 kind。
+
+    负向锁：在 check() 的熔断分支里追加一个新类型的 events.append，本条红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=100)
+    guard.record_tokens(120)
+    types_at_trip = {e["type"] for e in guard.guard_events}
+    assert types_at_trip == {"cost_cap_tokens"}, f"跳闸只记这一种：{types_at_trip}"
+    for _ in range(3):
+        guard.check("web_search", {"query": "x"})
+    after = [e["type"] for e in guard.guard_events]
+    assert after == ["cost_cap_tokens"], f"被拦住的调用不该再记账：{after}"
+
+
+def test_r1b_clip_output_still_clips_after_the_fuse_trips():
+    """总额熔断不许改变 clip_output 的行为——它管的是"已经跑完的输出占多少字"。
+
+    把那份输出换成一句"预算已用尽"，等于把理由里"请基于已有结果直接回答用户"要
+    它依据的结果本身销毁掉。这一条钉的是这个边界没有被顺手扩出去（见 record_tokens
+    的注释）。
+
+    负向锁：让 clip_output() 在 _fused_tools 有 __all__ 时直接返回说明句，本条红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=100, max_output_chars=1000)
+    guard.record_tokens(200)
+    text, truncated = guard.clip_output("甲" * 100)
+    assert text == "甲" * 100 and truncated is False, (
+        f"熔断后 clip_output 不该改动已有输出：truncated={truncated}")
+
+
+def test_r1b_record_outcome_keeps_counting_after_the_fuse():
+    """记账一侧不许因为熔断就停：token 停了累加，上限就再也跳不出第二下，
+    而账本上"这一轮跑了几次工具"也会少记（判据理由见 record_tokens 的注释）。
+
+    负向锁：让 record_outcome() 在熔断状态下直接 return，本条的 tool_rounds 红。
+    """
+    from app.core.guardrails import RoundGuard
+    guard = RoundGuard(max_tokens=100)
+    guard.record_tokens(500)
+    guard.record_outcome("web_search", ok=True, estimated_tokens=10)
+    guard.record_outcome("web_search", ok=True, estimated_tokens=10)
+    assert guard.tool_rounds == 2, f"熔断后仍要记轮次，拿到 {guard.tool_rounds}"
+    assert guard.check("web_search", {})      # 仍然是被拦的
+
+
 # ---------- R2 工具输出预算闸 ----------
 
 def test_r2_output_budget_clips_cumulative():
