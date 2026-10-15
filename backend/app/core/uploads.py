@@ -59,6 +59,10 @@ TEXT_EXTS = {".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", 
              ".cpp", ".java", ".go", ".rs", ".sh", ".bat", ".ps1", ".sql", ".xml"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 DOC_EXTS = {".pdf", ".docx"}
+# 能拼进落盘文件名的扩展名全集：detect_kind 认下的三类，一个不多。
+# save() 落盘前把 splitext 的结果对着它筛一遍——白名单而不是"看着不像有分隔符"，
+# 因为 splitext 的输出形状由客户端给的文件名决定，黑名单永远少一条。
+STORE_EXTS = TEXT_EXTS | IMAGE_EXTS | DOC_EXTS
 DOC_MIMES = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -223,6 +227,53 @@ def _default_dir() -> str:
     if env_path:
         return os.path.abspath(env_path)
     return os.path.join(data_root(), "data", "uploads")
+
+
+def _store_ext(filename: str) -> str:
+    """客户端给的文件名 → 一个**能安全拼进路径**的扩展名；不像样就当没有。
+
+    判据的来源仍然是 `os.path.splitext(filename or "")[1].lower()`，与 detect_kind
+    用的是同一个表达式——这点必须钉住：如果这里改成从 basename 取、而 detect_kind
+    还从整串取，就变成"按 A 认的类型、按 B 落的文件名"，那正是下一类穿越。
+    这里只在其后加一层白名单（STORE_EXTS）：splitext 会交出带分隔符的尾巴
+    （`evil.png/../../x` 这类给出的扩展名里就含 `/`），也交得出长得离谱的
+    （`.verylongextensionname`）和带控制字符的（`weird.\\x00txt`）——都不许拼进路径。
+
+    落回 "" 而不是抛错是刻意的：能走到这一步的文件名已经被 detect_kind 认过，
+    真出现"认下类型却拼不出扩展名"的只剩带分隔符那一类，把它当无扩展名存
+    （文件仍是那份字节，索引仍在 uuid 那条上）比让它落进上一级目录便宜得多。
+    """
+    ext = os.path.splitext(filename or "")[1].lower()
+    return ext if ext in STORE_EXTS else ""
+
+
+def _within_dir(base_dir: str, candidate: str):
+    """candidate 规范化之后是不是落在 base_dir 里面。是→返回规范化路径，否→None。
+
+    用 realpath + commonpath，不用 `str.startswith`：前缀匹配会把
+    `<data>/uploads_evil/x.txt` 判成在 `<data>/uploads` 里面（"uploads" 正是它的前缀），
+    而这道闸门要挡的就是"看起来在里面"。realpath 管两件事：符号链接指向外面要露出来，
+    `a/./b` 与 `a/b` 是同一个文件不许判成两个。normcase 是为了 Windows：那儿
+    路径大小写不敏感，手改的索引写 `C:\\DATA\\uploads` 而 realpath 给 `c:\\data\\uploads`
+    时不许误判成"不在里面"（POSIX 上 normcase 是恒等，不影响行为）。
+    """
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    real_base = os.path.normcase(os.path.realpath(base_dir))
+    real_item = os.path.normcase(os.path.realpath(candidate))
+    try:
+        # commonpath 在不同盘符（Windows 的 C: 与 D:）或一个绝对一个相对时抛 ValueError：
+        # 那正是"不在里面"，按 None 处理而不是让它把异常顶给调用方。
+        if os.path.commonpath([real_item, real_base]) != real_base:
+            return None
+    except ValueError:
+        return None
+    if real_item == real_base:
+        # 目录自己不算"目录里的一个附件"。这一条是被测试逼出来的（不是想象出来的加固）：
+        # 少了它，`path` 写成上传目录本身时闸门会放行，全靠调用方那句 isfile(dir)
+        # 恰好也 False 才没出事——把安全前提寄存别人的返回值上就是下一个漏洞的形状。
+        return None
+    return real_item
 
 
 class UploadError(Exception):
@@ -409,13 +460,40 @@ class UploadStore:
         # replace 原子不等于落盘：公共函数里 fsync 在前、replace 在后，断电丢不了索引。
         write_json_atomic(self.index_path, self._index)
 
+    def _resolve_within_dir(self, record) -> str:
+        """索引里那条 path 能不能用。能用给规范化绝对路径，不能用给 ""。
+
+        **唯一的一道闸**：`index.json` 是读回来的，`record["path"]` 从这一步起就是
+        外部输入而不是我们写下去的那条路径。此前四个消费点（get 的 isfile、
+        read_text 的 open、data_uri 的 open+base64、delete 的 os.remove）都直接拿它
+        当路径用，于是"索引被手改/损坏/被别的写入者动过"就分别等于任意文件读、
+        任意文件读成 base64 送进模型（预览与注入那条链会把内容原样带出网）、
+        以及任意删除。模块外的两个消费点（main.py 的 /v1/uploads/{id}/file 与
+        意见反馈取图）都先走 get()，所以跟着这道闸一起收紧，不必各修一遍。
+
+        违规时的口径是"这条记录当作不存在"，不是"报错"：调用方拿到 None/"" 之后
+        走的正是附件已被清理那条路，界面与模型侧不需要知道索引被人动过。
+        """
+        if not record:
+            return ""
+        path = _within_dir(self.dir, record.get("path"))
+        if path is None:
+            # 说清是哪条记录、越到了哪儿，才查得动。路径本身不打全：那串可能指着
+            # .env 之类的敏感位置，日志里留目录与 id 足够定位。
+            print(f"⚠️ 附件索引里的 path 落在上传目录之外，已按不存在处理："
+                  f"id={record.get('id', '?')}（目录 {self.dir}）")
+            return ""
+        return path
+
     def save(self, filename: str, blob: bytes, claimed_mime: str = "",
              *, owner: str) -> dict:
         if not blob:
             raise UploadError("文件内容为空")
 
         kind, mime = detect_kind(filename, blob)
-        ext = os.path.splitext(filename or "")[1].lower()
+        # 客户端的文件名只允许决定"扩展名长什么样"这一件事，而且要先过白名单
+        # （见 _store_ext）。下面 stored 那行拼的就是这个值。
+        ext = _store_ext(filename)
         display_size = len(blob)
 
         limit = {"text": MAX_TEXT_BYTES, "image": MAX_IMAGE_BYTES, "doc": MAX_DOC_BYTES}[kind]
@@ -435,6 +513,12 @@ class UploadStore:
 
         upload_id = uuid.uuid4().hex[:16]
         stored = os.path.join(self.dir, upload_id + ext)
+        # 落盘前对落点再验一次。_store_ext 已经保证扩展名在白名单里（因此不可能带
+        # 分隔符），这一句是"别只靠上一步"：uuid 那一段哪天不再是纯十六进制，
+        # 或者 self.dir 被指到别处，穿越就在写侧当场停下，而不是留下一个
+        # 落在目录外的文件等着读侧去猜。
+        if _within_dir(self.dir, stored) is None:
+            raise UploadError(f"{filename} 无法安全落盘（落点在上传目录之外），已拒绝")
 
         with open(stored, "wb") as f:
             f.write(blob)
@@ -456,12 +540,19 @@ class UploadStore:
 
     def get(self, upload_id: str, owner: str):
         """非属主拿到 None，与"附件不存在"同一句话：id 是 16 位十六进制，
-        403 就等于把"这个 id 是真的"送出去。"""
+        403 就等于把"这个 id 是真的"送出去。
+
+        第二条 None 的来源是落点：索引里 path 不在上传目录内时，同样当作不存在
+        （判据与理由见 _resolve_within_dir）。模块外的两个消费点
+        （/v1/uploads/{id}/file 的 FileResponse、意见反馈的取图）都先过这里，
+        于是跟着一起收紧。
+        """
         with self._lock:
             record = self._index.get(upload_id)
         if not record or record.get("owner") != owner:
             return None
-        if not os.path.isfile(record["path"]):
+        path = self._resolve_within_dir(record)
+        if not path or not os.path.isfile(path):
             return None
         return record
 
@@ -474,32 +565,62 @@ class UploadStore:
 
     def read_text(self, upload_id: str, *, owner: str,
                   max_chars: int = MAX_INJECT_CHARS) -> str:
+        """文本附件正文（预览与注入模型都走这里）。path 越界的按"没有这个附件"给 ""。
+
+        这一条读出去的内容会被拼进 prompt 送给上游模型，所以它此前等于
+        "谁改过索引，谁就能让服务端把任意文本文件念给他看"。
+        闸门是 _resolve_within_dir；get() 已经判过一次，这里再判一次不是冗余——
+        这个方法是附件正文唯一的出口，而"上游已经查过"这种前提最容易在后来
+        多出一个调用点时悄悄失效。
+        """
         record = self.get(upload_id, owner)
         if not record or record["kind"] != "text":
             return ""
-        with open(record["path"], "r", encoding="utf-8", errors="replace") as f:
+        path = self._resolve_within_dir(record)
+        if not path:
+            return ""
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read(max_chars + 1)
         if len(text) > max_chars:
             return text[:max_chars] + f"\n…（已截断，原文件 {record['size']} 字节）"
         return text
 
     def data_uri(self, upload_id: str, *, owner: str):
+        """图片附件转 data: URI。path 越界的按"没有这个附件"给 None。
+
+        与 read_text 同一性质，只是更省事：整份文件 base64 之后直接进多模态请求。
+        越界时不给 None 之外的任何信号（调用方原有的"这张图取不到"分支就是正确分支）。
+        """
         record = self.get(upload_id, owner)
         if not record or record["kind"] != "image":
             return None
-        with open(record["path"], "rb") as f:
+        path = self._resolve_within_dir(record)
+        if not path:
+            return None
+        with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         return f"data:{record['mime']};base64,{b64}"
 
     def delete(self, upload_id: str, owner: str) -> bool:
+        """删除附件。path 越界的记录返回 False，且一个字节都不动、索引条目也不 pop。
+
+        上面那句 get() 已经会把越界记录当成 None，所以正常路径在这里根本进不来；
+        锁内再判一次是因为这是全模块唯一真正 `os.remove` 的地方——"越界即任意删除"
+        是这个漏洞最不可逆的一种，它不该依赖"上一个调用者替你查过"。
+        越界时**留着**索引条目也是刻意的：条目本身就是"有人改过索引"的证据，
+        悄悄 pop 掉等于把取证线索顺手擦了。
+        """
         if self.get(upload_id, owner) is None:
             return False
         with self._lock:
+            path = self._resolve_within_dir(self._index.get(upload_id))
+            if not path:
+                return False
             record = self._index.pop(upload_id, None)
             if record is None:
                 return False
             try:
-                os.remove(record["path"])
+                os.remove(path)
             except OSError:
                 pass
             self._flush()
