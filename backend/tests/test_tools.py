@@ -267,8 +267,15 @@ def test_the_agent_path_has_no_second_tool_registry():
         body = (agents / name).read_text(encoding="utf-8")
         assert not re.search(r"\beval\(", body), f"{name} 里出现了 eval"
     task = (agents / "task_agent.py").read_text(encoding="utf-8")
-    assert "execute_tool(tool_name, tool_args, user_id=self.user_id)" in task, (
+    # 走执行器有两种投影：`execute_tool` 只给文本，`execute_tool_detailed` 还给
+    # ok/truncated/suspended 这些结构化元数据。v0.35 A3 把 TaskAgent 换成后一种，
+    # 否则它拿不到"停在断点问用户"那一格，只能继续用 startswith("✓") 猜成败。
+    # 本判据要钉的是"不许绕过执行器自己 call 注册表里的函数"，所以两种写法都算数。
+    assert ("execute_tool(tool_name, tool_args, user_id=self.user_id)" in task
+            or "execute_tool_detailed(tool_name, tool_args," in task), (
         "TaskAgent 又绕过执行器直接 call 注册表里的函数：needs_user 与输出预算同时失效")
+    assert not re.search(r"\[\s*[\"']function[\"']\s*\]\s*\(", task), \
+        "TaskAgent 里出现了 tools_registry[...]['function'](...) 那种直调"
 
 
 def test_only_a_search_that_actually_returned_something_ages_the_probe(monkeypatch):

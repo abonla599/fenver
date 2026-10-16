@@ -2,7 +2,8 @@
 tools_registry = {}
 
 def register_tool(name: str, description: str, parameters: dict, available=None,
-                  needs_user: bool = False, requires_approval: bool = False):
+                  needs_user: bool = False, requires_approval: bool = False,
+                  suspends: bool = False):
     """
     装饰器：将函数注册为工具。
     name: 工具唯一名，如 "calculator"
@@ -13,6 +14,13 @@ def register_tool(name: str, description: str, parameters: dict, available=None,
                就等于请模型编一个归属人。
     requires_approval: v0.31 审批层。标了它的工具（如 execute_code）在执行前必须等用户确认。
                       确认走一次性票据，超时作废，绝不默认放行。
+    suspends: v0.35 A3。标了它 = 这条工具**愿意接回一个断点**：执行器会把
+             `resume={"state", "answer"}` 作为关键字参数递给它（只在这一次调用是续跑时）。
+             为什么是声明而不是看函数签名猜：与 needs_user 同一条纪律——能不能把服务端
+             存着的东西递进函数，是工具的**契约**，不是它的形状；靠 inspect 猜出来的
+             "它有个叫 resume 的参数"会让一次改名悄悄改变协议行为。
+             没标它的工具仍然**可以**挂起（raise ToolSuspended 照旧被接住、照旧问用户），
+             只是那次挂起的 `can_resume` 为假：没人接得住断点，就不许许诺"能续上"。
     available: 可选，无参可调用，返回这个工具"现在能不能真跑成"。
                依赖外部条件的工具（要 Docker、要够得着某个搜索源）必须给出：
                否则模型每次都会看见它、调用它、拿回一句失败，再凭失败硬答。
@@ -25,6 +33,7 @@ def register_tool(name: str, description: str, parameters: dict, available=None,
             "available": available,
             "needs_user": needs_user,
             "requires_approval": requires_approval,
+            "suspends": suspends,
         }
         return func
     return decorator

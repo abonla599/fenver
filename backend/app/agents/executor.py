@@ -24,9 +24,21 @@ class Executor:
         self.model = model
 
     def execute_task(self, task: str, user_id: str = None,
-                     provider_id: str = None) -> str:
+                     provider_id: str = None, resumed_tool: dict = None) -> str:
         """执行单个子任务。user_id 与 provider_id 一路带下去：
-        子任务里的每次模型调用都走发起人的池子、记发起人的账（v0.25 R1）。"""
+        子任务里的每次模型调用都走发起人的池子、记发起人的账（v0.25 R1）。
+
+        `resumed_tool`（⭐ v0.35 A3）原样透给 TaskAgent，不在这里做任何判断：这一层
+        只是"用 TaskAgent 跑一个子任务"的薄壳，断点怎么接、接不接得回去，判据一处
+        在执行器（tools/executor.py）、一处在编排器，中间不许再长第三份。
+        工具挂起时这一层也不接 `TaskNeedsUser`——它没有 Task，接了也落不了盘，
+        让它继续外飘给编排器（那才是唯一有 Task、能写 waiting_user 的地方）。
+
+        末行那个条件展开是有意的：`resumed_tool` 为空时**一个参数都不多给**，于是
+        按老签名替过 `TaskAgent.run` 的道具或调用方仍然逐字可用——多一个关键字参数的
+        症状不是"某个道具没跟上"，而是线上"任务跑坏了"（TypeError 会落进编排器那个
+        兜底 except，把一条正常任务标成 failed）。
+        """
         agent = TaskAgent(
             name="Executor",
             model=self.model,
@@ -36,4 +48,4 @@ class Executor:
             provider_id=provider_id,
             system_prompt="你是一个执行助手。用可用工具完成任务，返回简洁准确的结果。"
         )
-        return agent.run(task)
+        return agent.run(task, **({"resumed_tool": resumed_tool} if resumed_tool else {}))
