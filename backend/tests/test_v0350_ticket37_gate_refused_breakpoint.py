@@ -19,8 +19,10 @@ A4 要交付的第一个真工具，必须在 A4 之前关掉。
 的外部副作用——#33 那道门不许因此重新打开（六条不信任代码 + 锁内信任复核照旧有效）。
 
 一条贯穿全文件的纪律：**判据不许由被测对象自己申报。**"答案到底递没递进工具"这件事
-记在夹具闭包的三本假账上（`received`=工具收到答案、`spent`=真跑了第 1~3 步、
-`calls`=进过函数体），外加执行器新吐出的 `tool_ran`（来自 `_dispatch` 里"func 到底被
+记在夹具闭包的四本假账上（`received`=工具收到答案、`spent`=真跑了第 1~3 步、
+`calls`=进过函数体、`lies`=自报道具盖在**它自己那一份返回响应上**的 tool_ran 与对象
+本身——工单 #39 钉"`executor.py:307` 那处无条件覆盖压得住自报"的用例用它取证前提），
+外加执行器新吐出的 `tool_ran`（来自 `_dispatch` 里"func 到底被
 调用没有"这一处事实，不是来自 ok/success）。
 
 ⚠️ 本机作业纪律：这个仓库目录**同时是生产机**。每条用例的任务表都在 `tmp_path` 里
@@ -41,7 +43,7 @@ from app.agents import task_store as ts
 from app.agents.orchestrator import TOOL_SUSPENSION_KIND, Orchestrator
 from app.core import usage
 from app.tools.registry import tools_registry
-from app.tools.response import ToolSuspended
+from app.tools.response import ToolResponse, ToolSuspended
 
 _TAG = "tool_call"
 _GOAL = "点一杯咖啡"
@@ -70,14 +72,18 @@ def isolated_tasks(tmp_path, monkeypatch):
 def t37_tools():
     """道具箱：一条真会挂起的工具 + 几条专门用来演各道闸门的工具。
 
-    三本假账全在闭包里（判据问的是"这个世界里答案被递进工具几次"）：
+    四本假账全在闭包里（判据问的是"这个世界里答案被递进工具几次"）：
     - `received` 每一次"从断点接上"时**真的进到了函数体**的那一包（= tool_received_answer）；
     - `spent`   每一笔 = 一次真跑了第 1~3 步（查店 / 加购 / 发验证码）；
-    - `calls`   每一次进过工具函数体的调用（含被挂起、含在体内抛异常的那一次）。
+    - `calls`   每一次进过工具函数体的调用（含被挂起、含在体内抛异常的那一次）；
+    - `lies`    自报道具盖在**它自己返回的那一个 ToolResponse 上**的 tool_ran 值与对象
+                本身——工单 #39 的两条相撞用例用它取证"谎言确实写在进到 `_ret` 的那一个
+                对象上"，而不是写在另一份拷贝上。
     """
     received: list = []
     spent: list = []
     calls: list = []
+    lies: list = []
 
     def t37_gate(item: str = "拿铁", resume: dict = None):
         calls.append(("t37_gate", item, resume))
@@ -119,6 +125,48 @@ def t37_tools():
         calls.append(("t37_calc", expression, None))
         return {"1+1": 2, "2*3": 6}.get(expression, 0)
 
+    # ---- 工单 #39 的道具：往自己返回的 ToolResponse 上盖 tool_ran 的"说谎者"，正反两方向 ----
+
+    def t37_lie_body(item: str = "拿铁", resume: dict = None):
+        """跑进了函数体、返回时却在自己响应上盖 `tool_ran=False`：跑了也说"没跑"。"""
+        calls.append(("t37_lie_body", item, resume))
+        resp = ToolResponse(True, data=f"已提交订单（{item}）")
+        resp.tool_ran = False
+        lies.append({"tool": "t37_lie_body", "stamped": resp.tool_ran, "obj": resp})
+        return resp
+
+    def t37_lie_suspend(item: str = "拿铁", resume: dict = None):
+        """挂起出口（返回自己的 suspended=True 响应）同样盖 `tool_ran=False`。"""
+        calls.append(("t37_lie_suspend", item, resume))
+        resp = ToolResponse.suspend("请再输一次验证码", {"step": 4, "item": item})
+        resp.tool_ran = False
+        lies.append({"tool": "t37_lie_suspend", "stamped": resp.tool_ran, "obj": resp})
+        return resp
+
+    def t37_lie_gate(item: str = "拿铁", resume: dict = None):
+        """反方向：真被调用时在自己响应上盖 `tool_ran=True`；被闸门挡下则一个字都没写下。"""
+        calls.append(("t37_lie_gate", item, resume))
+        resp = ToolResponse(True, data=f"闸门没挡住：{item}")
+        resp.tool_ran = True
+        lies.append({"tool": "t37_lie_gate", "stamped": resp.tool_ran, "obj": resp})
+        return resp
+
+    def t37_lie_gate_id(item: str = "拿铁", resume: dict = None, user_id: str = None):
+        """缺身份那一道的反例道具：同样自报 True，只许被 needs_user 闸挡在函数体之前。"""
+        calls.append(("t37_lie_gate_id", item, resume))
+        resp = ToolResponse(True, data=f"按 {user_id} 跑了")
+        resp.tool_ran = True
+        lies.append({"tool": "t37_lie_gate_id", "stamped": resp.tool_ran, "obj": resp})
+        return resp
+
+    def t37_lie_gate_ap(expression: str = "1+1"):
+        """需审批（不挂起）、无票据那一道的反例道具：自报 True，只许被审批闸挡下。"""
+        calls.append(("t37_lie_gate_ap", expression, None))
+        resp = ToolResponse(True, data=42)
+        resp.tool_ran = True
+        lies.append({"tool": "t37_lie_gate_ap", "stamped": resp.tool_ran, "obj": resp})
+        return resp
+
     entries = {
         "t37_gate": {"function": t37_gate, "description": "下单（要验证码）",
                      "parameters": {"type": "object",
@@ -145,6 +193,31 @@ def t37_tools():
                                     "properties": {"expression": {"type": "string"}}},
                      "available": None, "needs_user": False,
                      "requires_approval": False, "suspends": False},
+        "t37_lie_body": {"function": t37_lie_body, "description": "跑了却自报没跑",
+                         "parameters": {"type": "object",
+                                        "properties": {"item": {"type": "string"}}},
+                         "available": None, "needs_user": False,
+                         "requires_approval": False, "suspends": False},
+        "t37_lie_suspend": {"function": t37_lie_suspend, "description": "挂起时自报没跑",
+                            "parameters": {"type": "object",
+                                           "properties": {"item": {"type": "string"}}},
+                            "available": None, "needs_user": False,
+                            "requires_approval": False, "suspends": True},
+        "t37_lie_gate": {"function": t37_lie_gate, "description": "真调用才自报跑了（频控/形状反例）",
+                         "parameters": {"type": "object",
+                                        "properties": {"item": {"type": "string"}}},
+                         "available": None, "needs_user": False,
+                         "requires_approval": False, "suspends": True},
+        "t37_lie_gate_id": {"function": t37_lie_gate_id, "description": "缺身份反例（自报跑了）",
+                            "parameters": {"type": "object",
+                                           "properties": {"item": {"type": "string"}}},
+                            "available": None, "needs_user": True,
+                            "requires_approval": False, "suspends": True},
+        "t37_lie_gate_ap": {"function": t37_lie_gate_ap, "description": "需审批反例（自报跑了）",
+                            "parameters": {"type": "object",
+                                           "properties": {"expression": {"type": "string"}}},
+                            "available": None, "needs_user": False,
+                            "requires_approval": True, "suspends": False},
     }
     saved = {name: tools_registry.get(name) for name in entries}
     for name, info in entries.items():
@@ -152,7 +225,7 @@ def t37_tools():
     ledger_saved = dict(ex._FREQ_LEDGER)
     limits_saved = dict(ex._FREQ_LIMITS)
     try:
-        yield {"received": received, "spent": spent, "calls": calls}
+        yield {"received": received, "spent": spent, "calls": calls, "lies": lies}
     finally:
         for name, previous in saved.items():
             if previous is None:
@@ -357,6 +430,104 @@ def test_tool_ran_is_true_when_the_tool_suspends_again(t37_tools):
     assert o.tool_ran is True
     assert o.suspended is False        # t37_gate 这一跳是终点
     assert len(t37_tools["received"]) == 1
+
+
+# ---------- 工单 #39：`:307` 的无条件覆盖必须压得住工具在响应上的自报 ----------
+
+def test_tool_ran_self_declared_false_from_the_body_is_overwritten(t37_tools):
+    """工单 #39：工具体返回时在自己响应上盖 `tool_ran=False`，执行器必须仍报 **True**。
+
+    钉的是 `executor.py:307` 那句**无条件**覆盖（`resp.tool_ran = ran`）。把这一句改成
+    "工具自报就采信"（`resp.tool_ran = getattr(resp, "tool_ran", ran)`），红的是下面
+    `lie["obj"].tool_ran is True` 与 `o.tool_ran is True` 两句：自报的 False 原样留在
+    那个进到 `_ret` 的对象上——#37 的判据就此退化成"由被测对象自报"。工具只要盖一句
+    "没跑"，编排器（`orchestrator.py:386`）就不烧断点，一枚真的把答案递进过工具的断点
+    能被再递一遍、副作用落两次——#33 那道门从另一侧被重新打开。
+    前两句是前提取证而不是走过场：`calls` 证明函数体真进了；`lie["stamped"] is False`
+    配上 `lie["obj"]` 正是进到 `_ret` 的那同一个对象，证明谎言确实写在撞覆盖的那一份
+    响应上而不是另一份拷贝——否则这条绿灯是白拿的。
+    """
+    o = ex.execute_tool_detailed("t37_lie_body", {"item": "拿铁"}, user_id="u_lie_body")
+
+    assert len(t37_tools["calls"]) == 1, "前提没成立：函数体根本没跑，这一条没有东西可撞"
+    lie = t37_tools["lies"][0]
+    assert lie["stamped"] is False, "前提没成立：道具没把 tool_ran=False 盖在自己的返回上"
+    assert lie["obj"].tool_ran is True, (
+        "自报的 False 原样留在这个进到 `_ret` 的对象上——`:307` 已不是无条件覆盖")
+    assert o.tool_ran is True, (
+        "跑过函数体的工具自报 tool_ran=False 就被采信：consume-stamp / 副作用记账"
+        "被一句自报躲掉，判据成了被测对象自报")
+
+
+def test_tool_ran_self_declared_false_on_a_suspended_response_is_overwritten(t37_tools):
+    """工单 #39：挂起出口（返回 `suspended=True` 的响应）自盖 `tool_ran=False` 仍必须 **True**。
+
+    同一处守卫（`:307`），走 `:396` 那一支的另一个形状：`_settle_suspension` 对
+    "success=False + prompt 非空"的合规挂起**原样透传同一个对象**，所以工具盖在挂起
+    响应上的谎言同样撞在那处覆盖上。改成"自报就采信"，红的是 `lie["obj"].tool_ran`
+    与 `o.tool_ran` 两句："这一枚答案确实递进过工具"（递进去之后又差一个答案的那一支）
+    被工具自己一句话抹掉。
+    另一类挂起——`raise ToolSuspended`——的响应对象由执行器自己构造（`:404-405`），
+    工具体没有任何机会往上面盖字；自报与覆盖相撞只发生在工具**返回自己的**
+    ToolResponse 这两支（正常 / 挂起），上一条钉住前一支，本条钉住后一支。
+    `o.suspended is True` 钉形状没被折坏：tool_ran 与 suspended 回答的是两个问题
+    （进过函数体没有 / 现在停没停），谁也不许改写谁。
+    """
+    o = ex.execute_tool_detailed("t37_lie_suspend", {"item": "拿铁"}, user_id="u_lie_susp")
+
+    assert len(t37_tools["calls"]) == 1, "前提没成立：道具根本没被调用"
+    lie = t37_tools["lies"][0]
+    assert lie["stamped"] is False, "前提没成立：挂起响应上没盖上 tool_ran=False"
+    assert o.suspended is True, (
+        "这一挂的形状被折坏了：撞覆盖的那个对象必须还是合规挂起响应")
+    assert lie["obj"].tool_ran is True, (
+        "挂起响应上自报的 False 越过了 `:307`——同一处覆盖不再是无条件的")
+    assert o.tool_ran is True, (
+        "停在断点不等于没进函数体：采信自报 False 会把'答案递进去过、又差一个答案'"
+        "折成'没递进去'，断点能被再递一遍")
+
+
+def test_tool_ran_self_declared_true_never_fires_behind_a_gate(t37_tools):
+    """工单 #39 反方向半边：频控 / 需审批 / 缺身份 / 断点形状不对四道闸门挡下的调用，
+    `tool_ran` 恒 **False**——哪怕这件道具一旦被真调用就会在自己响应上盖 `tool_ran=True`。
+
+    正控段先证明盖章机制真的在工作（`lies` 里确有 stamped=True 那一条、函数体确进了），
+    随后四次被挡：工具体从没执行，它那句"跑了"**压根没被写下**——`:307` 的覆盖与
+    "自报就采信"在这一支不可能有区别。所以把 `:307` 改成采信自报时本条保持绿，这正是要
+    在 docstring 里写明白的形状：它不是白测，它红的是**另一族**变异（`executor.py:196`
+    的默认读法翻成 True、或任一闸门出口的 `ran=False` 被改成 True），第一句
+    `o.tool_ran is False` 就红。结论钉的是不对称本身：覆盖只在函数体真的跑过时才有
+    对手；被闸门挡下的那些 False 是世界事实，不是"没来得及说谎"。
+    """
+    # 正控：真调用时盖章机制在工作——否则下面的 False 只是"道具坏了"的假绿。
+    o = ex.execute_tool_detailed("t37_lie_gate", {"item": "拿铁"}, user_id="u_lie_gate_ok")
+    assert o.tool_ran is True, "正控前提：未被挡的调用应当报'跑了'"
+    assert [c[0] for c in t37_tools["calls"]] == ["t37_lie_gate"], "正控前提：函数体真进了"
+    assert t37_tools["lies"][-1]["stamped"] is True, "正控前提：自报 True 的盖章机制没坏"
+
+    state = {"step": 3, "item": "拿铁", "collected": {"shop": "甲"}}
+
+    # ① 频控挡下（带合法 resume：越过形状判据之后撞在函数体之前的闸门）
+    _fill_freq_gate("t37_lie_gate", "u_lie_gate_freq")
+    o = ex.execute_tool_detailed("t37_lie_gate", {"item": "拿铁"}, user_id="u_lie_gate_freq",
+                                 resume={"state": state, "answer": "8888"})
+    assert o.tool_ran is False, "被频控挡下的调用报了'跑了'"
+    # ② 需审批、无票据（纯审批不挂起的工具：选项 b 的组合闸不在这一支）
+    o = ex.execute_tool_detailed("t37_lie_gate_ap", {"expression": "1+1"},
+                                 user_id="u_lie_gate_ap")
+    assert o.tool_ran is False, "被审批闸门挡下的调用报了'跑了'"
+    # ③ 缺身份（needs_user）
+    o = ex.execute_tool_detailed("t37_lie_gate_id", {"item": "拿铁"}, user_id="",
+                                 resume={"state": state, "answer": "8888"})
+    assert o.tool_ran is False, "缺身份被挡下的调用报了'跑了'"
+    # ④ 断点形状不对（state 不是 dict）
+    o = ex.execute_tool_detailed("t37_lie_gate", {"item": "拿铁"}, user_id="u_lie_gate_bad",
+                                 resume={"state": None, "answer": "8888"})
+    assert o.tool_ran is False, "断点形状不对被挡下的调用报了'跑了'"
+
+    assert len(t37_tools["calls"]) == 1 and len(t37_tools["lies"]) == 1, (
+        "四次挡下之后账本多了一笔：某道闸门真把答案递进了函数体，它自报的那句 True"
+        "也真被写下——这一支的 False 就不再是无辜的默认值")
 
 
 # ---------- ⭐ 工单 #33 那道门不许重新打开：真的收到答案 → 必须消费 ----------
