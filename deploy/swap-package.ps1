@@ -51,6 +51,13 @@ that is genuinely still up; state=Running is
 a mid-flight instance, visible rather than fatal), WAIT marks the bounded wait
 for that instance to finish, READFAIL marks a task read that could not answer
 (fails CLOSED - it waits and then aborts instead of assuming the guard is down),
+DISABLE-THREW marks the disable call itself throwing: it prints those same four
+fields plus error=, and the stage token right after it says which of the three
+answers the switch actually gave - disable-threw-task-down (the guard really did
+go off, so this run owns it and hands it back), disable-threw-task-up (nothing
+was flipped, so no disable is owned), disable-threw-guard-state-unproven (the
+switch did not answer at all - the fail-safe, which attempts the restore anyway
+because a guard left down is worse than one re-enabled for nothing),
 and every abort ends with ABORT stage=... moved=... watchdog=... stating in one
 token whether the guard was handed back.
 
@@ -607,8 +614,72 @@ if ($DryRun) {
 # the task only ever STARTS the exe and never kills it, so a wake between the
 # stop and the rename relaunches the old package, its file handle makes the
 # rename die with PermissionError, and the box ends up "swapped halfway".
+#
+# The disable is wrapped for one reason: this script runs under
+# $ErrorActionPreference = 'Stop', so a disable that THREW used to kill the run
+# with no stage token and no restore attempt, while leaving the real state of the
+# crash guard UNKNOWN. The same CIM/Taskschd flakiness that made ticket #24 wrap
+# the stop/port stage in try -> Stop-AfterFailure can hit this cmdlet too, and it
+# can flip the switch and THEN fail on the output pipeline - so "it threw" does not
+# mean "the guard was never pressed", and guessing either way is how the guard got
+# lost once already. The handler below answers the only question that matters,
+# "is the guard up right now?", using the read helper this file already trusts
+# (Get-WatchdogTaskState: read-only, fail-closed, names which read answered). It
+# never writes the task itself: the re-enable belongs to Restore-WatchdogTask and
+# nowhere else, because two places owning one switch is how the second bug hides.
+# Do not "simplify" this back to the bare two lines - the bare form IS the hole,
+# and backend/tests/test_swap_package_disable_threw_handler.py is the lock that
+# bites when it comes back.
+#
+# The two statements inside the try deliberately stay at COLUMN 0. PowerShell is not
+# indentation-sensitive, so this behaves identically on 5.1; and three ordering locks
+# locate this step by a line starting at column 0 (disable-verify _window,
+# marker_gate _marker_gate_ok, all_or_nothing_move's same-volume precheck), so
+# re-indenting them is a lock-breaking edit rather than a cosmetic one.
+try {
 Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
 $script:watchdogDisabled = $true
+} catch {
+    # Captured first, before anything else can own $_: the nested read below has its
+    # own catch block, and a token built from $_ after it would print the wrong
+    # exception - or none - exactly when an operator needs to read what failed.
+    $disableError = $_.Exception.Message
+    # ONE read, the same helper the verify loop uses. It catches its own failures and
+    # returns, so the outer try here is only there to keep "the read could not even
+    # run" from becoming a second unaccounted exit; $disableProbe left at $null means
+    # the switch gave no answer at all, which the fail-safe branch below owns.
+    $disableProbe = $null
+    try { $disableProbe = Get-WatchdogTaskState -TaskToRead $task } catch { $disableProbe = $null }
+    # Printed once, before the branches, and it claims nothing about the outcome: it
+    # carries the raw read so the line above ABORT says what the machine answered.
+    # Which branch was taken is told by that branch's own stage token, never by a
+    # field this handler computes about itself.
+    Write-Output ('DISABLE-THREW enabled=' + $disableProbe.Enabled + ' via=' + $disableProbe.EnabledSource + ' state=' + $disableProbe.State + ' instances=' + $disableProbe.Instances + ' error=' + $disableError)
+    if ($disableProbe -and -not $disableProbe.Enabled) {
+        # (1) The switch says DOWN: the disable DID land even though the cmdlet threw,
+        # so this run owns the disable. The flag goes on BEFORE the abort because it is
+        # the only thing that makes Stop-AfterFailure's restore path hand the guard back.
+        $script:watchdogDisabled = $true
+        Stop-AfterFailure 'disable-threw-task-down' ('the failed disable did land - the watchdog switch reads OFF, so this run owns the disable and hands the guard back, aborting BEFORE touching the running package, error=' + $disableError)
+    }
+    if ($disableProbe -and $disableProbe.Enabled -and $disableProbe.EnabledSource -eq 'settings-enabled') {
+        # (2) The switch itself says UP: nothing was flipped, so this run owns NO
+        # disable and the flag is left exactly as it stands - the ABORT token then
+        # honestly reads watchdog=never-disabled instead of claiming a re-enable that
+        # never happened. Only the switch answering can take this branch: an
+        # Enabled=True coming from a failed read is branch (3), not this one.
+        Stop-AfterFailure 'disable-threw-task-up' ('the failed disable flipped nothing - the watchdog switch still reads ON from the switch itself, so the guard was never down, aborting BEFORE touching the running package, error=' + $disableError)
+    }
+    # (3) FAIL-SAFE, and deliberately the fallthrough instead of a third if: a read
+    # that cannot answer (ReadError / task-missing / settings-enabled-missing /
+    # settings-missing / the re-read returning nothing) lands here, and so does any
+    # branch added later that forgets to abort. Enabled=True from a switch that never
+    # replied means "no answer", NOT "still up", so the guard is treated as possibly
+    # down and the restore is attempted anyway: an unnecessary re-enable costs one
+    # log line, a crash guard left down costs the box until someone goes looking.
+    $script:watchdogDisabled = $true
+    Stop-AfterFailure 'disable-threw-guard-state-unproven' ('the disable call threw and the task switch could not answer whether the guard is up, so the restore is attempted anyway, aborting BEFORE touching the running package, error=' + $disableError)
+}
 # The verdict below reads the task's Settings.Enabled, not State, because the question
 # this step has to answer is "can the watchdog start the exe again during my window?" -
 # that is the Enabled switch, which the disable flips at once. It is spelled
