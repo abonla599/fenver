@@ -82,11 +82,13 @@ except ImportError as e:
     print(f"⚠️ 编排器不可用，/v1/agent/orchestrate 等端点将返回 503: {e}")
 
 try:
-    from app.agents.task_store import task_store, get_task, tasks_of, TaskStatus
+    from app.agents.task_store import (task_store, get_task, tasks_of, TaskStatus,
+                                       waiting_timeout_info)
 except ImportError:
     task_store = {}
     get_task = None
     TaskStatus = None
+    waiting_timeout_info = None
 
     def tasks_of(user_id):                # 模块未就绪时按人过滤空表——绝不返回全量
         return [t for t in task_store.values()
@@ -1768,6 +1770,14 @@ async def get_task_status(task_id: str, principal: Principal = CurrentPrincipal)
         "waiting_since": getattr(task, "waiting_since", None),
         "resume_cursor": getattr(task, "resume_cursor", None),
     }
+    # ⭐ v0.35 A5：还要不要人回来，得答得出三个数——挂了多久 / 窗口多长 / 哪一刻作废
+    # （`waiting_expires_at` 为 None = 运维没开作废窗口，永不做废，这是默认形态）。
+    # 这一格是**纯计算**：详情端点是 async def，往里加一次落盘就是往事件循环上放阻塞
+    # I/O，那正是 tests/test_event_loop_not_blocked.py 文件头那次线上 524 的形状。
+    # 超时停点的作废因此只挂在同步 def 的 /v1/agent/orchestrate 上（惰性清扫）。
+    # 键仍然是"只增"：模块未就绪时（上面那个 except ImportError）干脆不出现这些键。
+    if waiting_timeout_info is not None:
+        response.update(waiting_timeout_info(task))
     if len(task.subtasks) > 0:
         response["progress_percent"] = round(
             (task.current_subtask / len(task.subtasks)) * 100, 1
