@@ -304,6 +304,13 @@ class AgentRequest(BaseModel):
 class OrchestrateRequest(BaseModel):
     goal: str
     task_id: Optional[str] = None
+    # ⭐ v0.35 A3：用户对"挂在断上等输入的那一步"的回答（验证码、收货地址……）。
+    # Optional + 默认 None = 现网那两个字段的老调用方一个比特都不用改；不带它而
+    # 恢复一条 waiting_user 的工具断点任务，得到的是"还在等"，不是"从头再跑一遍"
+    # （判据在 Orchestrator.run 那一格，理由与它注释里那条一样：没答案就继续 = 替用户编）。
+    # 这一格不进日志、不进游标：答案只在续跑的那一次调用里过手，落盘的是**断点**，
+    # 不是用户填的那个值。
+    user_answer: Optional[str] = None
 
 # ---------- 会话存储 ----------
 from app.session.session_store import SessionStore
@@ -1711,6 +1718,10 @@ def orchestrate_task(request: OrchestrateRequest, http: Request,
         task_id=request.task_id,
         user_id=principal.user_id,
         provider_id=provider["id"],
+        # ⭐ v0.35 A3：答案原样递给编排器，判"能不能接"的闸在执行器 + Orchestrator 里。
+        # 这一格不写进日志、不写进游标（里面可能是验证码），也不参与归属判断——
+        # 归属在 orchestrator.run 开头那道"是不是你的任务"里已经判完了。
+        user_answer=request.user_answer,
     )
 
 # ---------- 任务状态 ----------
