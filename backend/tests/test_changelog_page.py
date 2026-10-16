@@ -486,19 +486,47 @@ def test_the_rendered_page_headlines_the_version_people_can_install():
         f"只换服务端的那几条没有排在分栏标题之后：{order[:4]}…{order[group_at[0]:group_at[0] + 3]}"
 
 
-def test_the_rendered_page_goes_red_when_the_headline_follows_the_newest_entry():
+def test_the_rendered_page_goes_red_when_the_headline_follows_the_newest_entry(tmp_path):
     """上面那条真渲染判据的牙：把页面头条改回「最新那一条」，渲染结果必须错。
 
     文本判据抓得住「筛子被撤了」，抓不住「筛子还在、筛错了对象」。变异样本喂进**同一个**
     node harness，判它渲染出来的那行字里出现了装不上的版本号。样本必须先生效
     （`mutated != page`），否则这条红是 fixture 坏了，不是锁有牙。
+
+    **语料是本用例自己造的**（v0.34.2 起；变异与判据一字未动，改的只有语料）。
+    原来这里直接拿现网产物当语料，它隐含的前提是"`releases[0]` 与 `installable[0]`
+    是两个不同的版本号"——那句话只在"最新一版只换服务端"的形状下成立（0.34.1 就是），
+    而 0.34.2 带着安卓包发布，`releases[0]` 从此**就是** `installable[0]`：退回
+    `releases[0]` 的变异于是渲染出与真文件一模一样的头条，那句"必须出现装不上的版本号"
+    再也不可能成立。一条只会绿的变异用例等于没有变异用例——它会在每一次运行里
+    假装证明过什么。所以这里沿用本文件既有合成语料那两条的形状（假 docs/releases +
+    真生成器 + 真判决），造出那个**必然能分辨**的形状：最新的一条 0.9.9 声明只换服务端、
+    有包的一条 0.9.8 排在它后面。两个分组各非空且版本号必然不同，于是"变异渲染错、
+    真文件渲染对"这两半都有牙，且都不依赖"现网最新那一版到底带不带包"。
+    下面那三句前提断言就是这个前提本身的牙：语料哪天塌成同号，这里红，而不是断言悄悄
+    变成恒真/恒不成立。
     """
     page = PAGE.read_text(encoding="utf-8")
     mutated = page.replace("installable[0].version", "releases[0].version")
     assert mutated != page, "变异样本没生效：页面里那一处 installable[0].version 不在了"
-    releases = _artifact_releases()
+
+    gen = _load_generator()
+    root = _fake_release_root(tmp_path, {
+        # 有安装包的那一版是**旧**的：清单能发出去的就是它
+        "v0.9.8.md": _FAKE_FULL.format(ver="0.9.8", scope=""),
+        # 最新的一条声明只换服务端（没有安装包）——这正是把头条交给 releases[0] 会出错的那个形状
+        "v0.9.9.md": _FAKE_FULL.format(ver="0.9.9", scope=SCOPE_SERVER_ONLY + "\n\n"),
+    })
+    releases = gen.build(str(root))["releases"]
     server_only = [rel for rel in releases if rel.get("server_only")]
-    assert server_only, "现网已经没有「只换服务端」的条目了，这个样本无从构造"
+    installable = [rel for rel in releases if not rel.get("server_only")]
+    assert server_only and installable, (
+        f"合成语料塌了（只换服务端 {len(server_only)} 条 / 可安装 {len(installable)} 条）："
+        "两个分组都得非空，本用例才有东西可判")
+    assert releases[0]["version"] == server_only[0]["version"], (
+        "合成语料没排成「最新那一条正是只换服务端的那一条」——变异与真文件将无从分辨")
+    assert installable[0]["version"] != server_only[0]["version"], (
+        "两个分组同号：那两句头条断言读的是同一个字符串，本用例已经在空转")
 
     out = _render_page(mutated, releases)
     assert "v" + server_only[0]["version"] in out["headline"], (
@@ -508,6 +536,11 @@ def test_the_rendered_page_goes_red_when_the_headline_follows_the_newest_entry()
     real = _render_page(page, releases)
     assert "v" + server_only[0]["version"] not in real["headline"], \
         f"真文件的渲染结果就把那个版本当头条播出去了：{real['headline']!r}"
+    # 光"没有错号"还不够：那一句在"头条是一坨含所有版本号的字"时也成立。
+    # 补一句"对号确实在"，两次渲染才证明它们读的是同一行里的不同答案
+    # （与 :469 真产物那条的判据同形，只是语料换成合成的一份）。
+    assert "v" + installable[0]["version"] in real["headline"], \
+        f"真文件的头条报的不是可安装那一版：{real['headline']!r}"
 
 
 def test_the_page_splits_server_only_notes_out_of_the_headline():
