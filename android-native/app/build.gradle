@@ -13,8 +13,8 @@ android {
         applicationId "xyz.fenever.assistant.native"
         minSdk 24
         targetSdk 34
-        versionCode 60
-        versionName "0.34.0"
+        versionCode 61
+        versionName "0.34.2"
 
         // 默认出口只钉这一个值：它与 ReleasePlan.SELF_APK_PATH 拼出来的下载地址必须同源，
         // 这条接缝由 android-native/app/src/test/.../ReleasePlanTest.java 的
