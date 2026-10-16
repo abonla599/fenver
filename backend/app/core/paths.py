@@ -101,6 +101,9 @@ DATA_PATH_ENV_VARS = {
     "附件": "UPLOAD_DIR",
     "长期记忆向量库": "CHROMA_DB_PATH",
     "任务清单": "TASKS_DB_PATH",
+    # v0.35 A2：一次性审批票据表。里面是"谁批了哪个工具、参数与执行结果"，
+    # 表键是摘要不是明文（core/approval.py），但它仍是运行时数据，一份都不许入库。
+    "审批票据": "APPROVALS_DB_PATH",
     "用量账本": "USAGE_DB_PATH",
     "日程": "SCHEDULE_DB_PATH",
     "反馈原文": "FEEDBACK_FILE",
@@ -133,6 +136,7 @@ def resolve_all_data_paths() -> list:
     from app.memory.memory_manager import _default_persist_dir as chroma_dir
     from app.preference_analyzer import PREFERENCE_FILE
     from app.agents.task_store import _default_path as tasks_path
+    from app.core.approval import _default_path as approvals_path
     from app.core.audit import _default_path as audit_path
     from app.core.schedule import _default_path as schedule_path
     from app.core.usage import _default_path as usage_path
@@ -147,6 +151,7 @@ def resolve_all_data_paths() -> list:
         "附件": uploads_dir(),
         "长期记忆向量库": chroma_dir(),
         "任务清单": tasks_path(),
+        "审批票据": approvals_path(),
         "用量账本": usage_path(),
         "日程": schedule_path(),
         "反馈原文": FEEDBACK_FILE,

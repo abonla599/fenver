@@ -33,6 +33,14 @@ DEFAULTS = {
     # 长短无关；宽限期决定的是"你离开多久之后我们还替你接着跑"。接个电话、锁屏
     # 看一眼、页面重进，都是几十秒量级，30 秒会把答案停在半路而一分钱没多省。
     "stream_no_reader_grace_seconds": 120.0,
+    # v0.35 A2：一次性审批票据的有效期（秒）。单一真相就是这里，读数走
+    # approval_ticket_ttl_seconds()（env APPROVAL_TICKET_TTL_SECONDS 优先）。
+    # 60 这个数**没变**——它就是 approval.py 从 v0.31 起一直在用的那个常量，本版只是
+    # 把它从"模块里一个字面量"升成"可配的一格"，默认照旧，谁的行为都不因此改变。
+    # 为什么值得给一个旋钮（提案 §二 第二行、§四 v0.35）：60 秒是给"弹了没人回"的
+    # 移动端定的，而一个跑几分钟的多步任务里第二次确认一定落在 60 秒之外；配的是窗口，
+    # 不是判据——到期一律作废，绝不因为"任务还活着"就续。0 是合法值：等于每次都要现批。
+    "approval_ticket_ttl_seconds": 60.0,
     # v0.25 R4b T5.8：积分的基准价——「1 积分 = 用基准价跑 1000 个混合 token」的锚。
     # 单一真相就是这一份：展示倍率 = 模型混合单价 ÷ 这里的混合价，结算换算也除这里的
     # 混合价。刻意不用"默认模型 = 1.0x"那种定义——锚跟着 ★ 漂移，管理员点一下按钮
@@ -188,6 +196,29 @@ def stream_no_reader_grace_seconds() -> float:
         return max(0.0, float(value))
     except (TypeError, ValueError):
         return float(DEFAULTS["stream_no_reader_grace_seconds"])
+
+
+def approval_ticket_ttl_seconds() -> float:
+    """一次性审批票据的有效期（秒）——全场唯一读数口径，默认 60（与 v0.31 起的常量同值）。
+
+    优先级与宽限期同一套路：环境变量 APPROVAL_TICKET_TTL_SECONDS 显式设了说话
+    （每次现读，改了不必重启），否则 data/config.json 的 approval_ticket_ttl_seconds
+    说了算。读不懂的值退回那一格默认，和"配置文件坏了先备份再按默认跑"同纪律。
+    0 是合法值（每次都要现批）；负数按 0 收——"倒着走的窗口"不是策略，是写错了。
+    """
+    raw = os.getenv("APPROVAL_TICKET_TTL_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"⚠️ 环境变量 APPROVAL_TICKET_TTL_SECONDS 不是数（{raw!r}），按下面的口径跑")
+    with _lock:
+        value = _config.get("approval_ticket_ttl_seconds",
+                            DEFAULTS["approval_ticket_ttl_seconds"])
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return float(DEFAULTS["approval_ticket_ttl_seconds"])
 
 
 def credit_benchmark() -> dict:

@@ -356,6 +356,11 @@ def test_r3_approval_timeout_never_default_allow():
     """R3 判据 2：超时/断连 → 票据作废，绝不默认放行。
 
     负向锁：把 consume_ticket 里的超时检查删掉，这条测试红。
+
+    2026-10-16 v0.35 A2 的适配（判据一字没动）：票据表现在以 sha256 摘要为键（与盘上
+    同一个形状，抄 auth.py:141-152 的"凭据只存摘要"），做旧那一步因此要先算摘要。
+    "超时不许被消费"这一句断言与它防的东西完全不变；A2 另加了一条跨重启的重放锁，
+    见 tests/test_v0350_a2_approval_persistence.py。
     """
     import time
     from app.core import approval
@@ -365,7 +370,7 @@ def test_r3_approval_timeout_never_default_allow():
     ticket_id = req["ticket_id"]
     # 手动让票据过期
     with approval._lock:
-        approval._tickets[ticket_id].expires_at = time.time() - 1
+        approval._tickets[approval.hash_ticket(ticket_id)].expires_at = time.time() - 1
     ticket = approval.consume_ticket(ticket_id, "allow", "test_user_timeout")
     assert ticket is None, "超时票据不应被消费——绝不默认放行"
 
@@ -385,18 +390,41 @@ def test_r3_approval_cross_owner_rejected():
 
 
 def test_r3_no_default_allow_grep_lock():
-    """R3 判据 2 反模式锁：全仓 grep 不到「绕过审批的默认放行」。
+    """R3 判据 2 反模式锁：审批层不许存在"超时/没人回复 → 自动放行"的代码路径。
 
-    负向锁：如果有人在 executor 里加了"审批超时自动放行"的逻辑，这条测试红。
+    2026-10-16 改动说明（**没有削弱，它第一次真的会红**）：这条原先写成四个 OR，
+    只要 ASCII 词 "default" 没出现在 approval.py 源码里就恒绿。而这份文件的源码里
+    那句中文是"绝不默认放行"，所以 OR 链的最后一项永远为假——原写法能抓到的唯一东西是
+    "有人往注释里写了英文 default"，与它 docstring 声称要防的事（executor 里加超时自动
+    放行）没有关系。v0.35 A2 给这份文件加了 `_default_path()`（与其余 13 份存储同一个
+    命名惯例，见 task_store.py:267、config_store.py:94），那个恒真的 OR 项第一次被踩断，
+    于是这条红在**一个它本该放过的改动**上——那就是"绿得没有意义"的现场证据。
+
+    现在的判据对着真正的形状，三条都是内容断言：
+    - "默认放行"这一句只许以否定形式出现（每一处前面都得有"绝不"）；
+    - 源码里不许出现把 decision **写成** "allow" 的赋值（消费路径写的是那个已经被
+      校验成 allow|reject 的入参，超时路径写的是 "timeout"）；
+    - is_granted 的闸门仍然是"decision 不是 allow 就不放行"，且到期分支落在 timeout。
+
+    负向锁：把 consume_ticket 超时分支的 `ticket.decision = "timeout"` 改成
+    `= "allow"`，第二条断言红；把 is_granted 里那句 `!= "allow"` 改成 `== "allow"`
+    （"超时也算过"）或删掉，第三条红；注释里写一句肯定的"超时默认放行"，第一条红。
     """
     import inspect
     from app.core import approval
     source = inspect.getsource(approval)
-    # 不应存在"超时后默认允许"的代码路径
-    assert "default" not in source.lower() or "allow" not in source.lower() or \
-           "timeout" not in source.lower() or "默认放行" not in source, (
-        "审批层不应有'超时默认放行'的代码路径"
-    )
+
+    for n, line in enumerate(source.splitlines(), 1):
+        if "默认放行" in line:
+            assert "绝不" in line or "不许" in line or "不默认" in line, (
+                f"approval.py:{n} 出现了肯定形式的「默认放行」：{line.strip()}")
+
+    assert 'decision = "allow"' not in source, (
+        "审批层出现了把 decision 直接写成 allow 的赋值——超时/无人回复只能写 timeout")
+    assert 'ticket.decision = "timeout"' in source, (
+        "到期分支必须显式落成 timeout，这是「超时不是一条放行路径」的唯一正面证据")
+    assert 'if ticket.decision != "allow":' in source and "return False" in source, (
+        "is_granted 的放行判据必须是 decision != allow → False（fail-closed）")
 
 
 # ---------- 双端契约文案 ----------
