@@ -253,9 +253,15 @@ def _no_bare_exit_ok(text: str) -> bool:
     前两条用行首匹配判（`throw` / `exit` 出现在这一行的第一个词），第三条用
     try 范围包含关系判（_try_spans 真数花括号）。
 
-    `Disable-ScheduledTask` 本身**刻意不在必须包 try 的名单里**：它自己抛异常的时候
-    看守根本没被按下去，没有需要恢复的东西；把它包进 try 反而会把"停用失败"和
-    "停用成功但读不到"混成同一条红。写在这里是为了下一个读的人别去"顺手补上"。
+    `Disable-ScheduledTask` **不在这条判据的 `risky` 名单里，但它如今确实被包在 try 里**
+    （2026-10-17 ticket #32 改判）。这一处原本写的是"它自己抛异常的时候看守根本没被按下去，
+    没有需要恢复的东西"——那是一句猜测而不是读数：调用抛了并不等于开关没翻（CIM 可以先翻
+    开关、再在输出管道上失败），而猜错的那一侧是把崩溃守护留在地上。现在这一段由
+    `test_swap_package_disable_threw_handler.py` 钉：try 包住那一句、catch 走
+    `Stop-AfterFailure` 的恢复机制、handler 只用只读 helper 问"看守此刻在不在"、
+    三种答案各自归属。本函数不把它加进 `risky` 名单也是有原因的，别顺手合并：
+    那会让"半修样本只红判决锁、出口锁必须保持绿"那条独立性牙印变红（半修样本里包住
+    disable 的 `} catch {` 正落在被整段替换的范围里），两条锁各判各的范围。
     """
     lines, lo, hi = _window(text)
     if lines is None:
