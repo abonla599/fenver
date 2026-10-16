@@ -47,6 +47,7 @@
 
 <main id="log">
   <p class="note" id="logHint" role="status">正在载入更新日志…</p>
+  <p class="note" id="installableLine" role="status"></p>
   <div id="logList"></div>
 </main>
 
@@ -89,42 +90,78 @@
     return box;
   }
 
+  function articleFor(rel) {
+    /* 一条发版说明 -> 一个 <article>。抽出来是因为下面要分两组渲染，
+       两组的正文形状没有任何区别，区别只在"它有没有可安装的包"。 */
+    var article = document.createElement("article");
+    article.className = "release";
+    article.id = "v" + rel.version;
+
+    var h2 = document.createElement("h2");
+    h2.textContent = rel.title || ("v" + rel.version);
+    article.appendChild(h2);
+
+    if (rel.intro) {
+      var p = document.createElement("p");
+      p.className = "note";
+      p.appendChild(inline(rel.intro));
+      article.appendChild(p);
+    }
+    (rel.sections || []).forEach(function (sec) {
+      var h3 = document.createElement("h3");
+      h3.textContent = sec.heading;
+      article.appendChild(h3);
+      var ul = document.createElement("ul");
+      (sec.items || []).forEach(function (item) {
+        var li = document.createElement("li");
+        li.appendChild(inline(item));
+        ul.appendChild(li);
+      });
+      article.appendChild(ul);
+    });
+    return article;
+  }
+
   function render(data) {
     var releases = (data && data.releases) || [];
     if (!releases.length) {
       hint.textContent = "这份包里的更新日志是空的。";
       return;
     }
+    /* 排序仍由产物负责（生成时就是新到旧）。这里只做一件事：**按能不能装分开**。
+       releases[0] 不一定是装得到的那一版——服务端可以单独发版，此时页面上"最新版"
+       三个字如果跟着 releases[0] 走，就是在把一个没有安装包的版本号当"去下载"的那一版
+       播出去（现网就是这个形状：日志头条比清单里能装的那一版大一位补丁号）。 */
+    var installable = releases.filter(function (rel) { return !rel.server_only; });
+    var serverOnly = releases.filter(function (rel) { return !!rel.server_only; });
+
     hint.textContent = "共 " + releases.length + " 个版本，最新的在最上面。";
-    releases.forEach(function (rel) {
-      var article = document.createElement("article");
-      article.className = "release";
-      article.id = "v" + rel.version;
 
-      var h2 = document.createElement("h2");
-      h2.textContent = rel.title || ("v" + rel.version);
-      article.appendChild(h2);
+    var line = document.getElementById("installableLine");
+    if (line) {
+      /* 本页唯一报版本号的那一行：报的一定是**装得上**的那一版，
+         而且这个号是从产物来的，不是抄在页面里的（抄一份下次升版就是旧的）。 */
+      line.textContent = installable.length
+        ? "可安装的最新版本：v" + installable[0].version + "（「下载安卓版」给的就是这一版）"
+        : "下面这些条目都只改了服务端，暂时没有带安装包的版本可下载。";
+    }
 
-      if (rel.intro) {
-        var p = document.createElement("p");
-        p.className = "note";
-        p.appendChild(inline(rel.intro));
-        article.appendChild(p);
-      }
-      (rel.sections || []).forEach(function (sec) {
-        var h3 = document.createElement("h3");
-        h3.textContent = sec.heading;
-        article.appendChild(h3);
-        var ul = document.createElement("ul");
-        (sec.items || []).forEach(function (item) {
-          var li = document.createElement("li");
-          li.appendChild(inline(item));
-          ul.appendChild(li);
-        });
-        article.appendChild(ul);
-      });
-      list.appendChild(article);
-    });
+    installable.forEach(function (rel) { list.appendChild(articleFor(rel)); });
+
+    if (serverOnly.length) {
+      var group = document.createElement("h2");
+      group.textContent = "仅服务端修正（无安装包）";
+      list.appendChild(group);
+      var why = document.createElement("p");
+      why.className = "note";
+      /* 走 inline() 而不是直接 textContent：那句里的 **不代表** 想让用户看见的是
+         着重，textContent 会把星号原样印出来——那是标记漏在了渲染之外。 */
+      why.appendChild(inline("下面这些版本只换这台服务器上的东西：内容一条不删，但"
+        + "版本号比上面那一行大**不代表**手机上有新的包可装，也不会因此弹更新提示。"));
+      list.appendChild(why);
+      serverOnly.forEach(function (rel) { list.appendChild(articleFor(rel)); });
+    }
+
     /* 深链：清单里那一格 changelog 锚点（形如 #v 加版本号）落到对应那一段 */
     var id = decodeURIComponent((location.hash || "").replace(/^#/, ""));
     if (id) {

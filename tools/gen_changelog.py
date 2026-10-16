@@ -11,6 +11,23 @@
 两者漂移由 `backend/tests/test_changelog_page.py` 那一把锁当场抓住：改了 md 忘了重新
 生成，测试就红——而不是页面上悄悄少一段。
 
+## 每版说明自带一个「适用范围」标记（v0.34.2 加）
+
+官网那一页原先把 `releases[0]` 当成「最新版本」播出去，而现网有两个各自独立部署的
+东西（PyInstaller 服务端整包 + 安卓 APK）：只换服务端的一版（v0.34.1）会让页面头条
+写着一个**装不上**的版本号，而能下载的那一枚仍是上一版。这不是措辞问题，是把用户送去
+点一个不存在的包。所以说明里带一行机器读得懂的结构：
+
+    <!-- scope: server-only -->
+
+写在标题之后、第一个 `##` 小节之前，一行独立注释；本脚本把它读成每条记录的
+`server_only` 布尔值，`/changelog` 那页据此把「最新版本」只从**有安装包**的条目里挑，
+其余条目收进「仅服务端修正（无安装包）」那一块（信息不删不藏，只是不再冒充可安装版本）。
+为什么是 HTML 注释而不是正文里加粗一句：官网把说明当**文字**渲染，注释不会被渲染出来，
+于是同一行既是机器读的字段，又不会变成用户看到的一句黑话。
+漏标不是静默放过——`backend/tests/test_changelog_page.py` 有两条锁分别咬
+「领先于 versionName 的说明没标」与「页面头条不是清单里那个可安装的版本」。
+
 ## 用法
 
     python tools/gen_changelog.py            # 写入 site/changelog.json
@@ -31,6 +48,39 @@ _SECTION_RE = re.compile(r"^##\s+(.*)$")
 _BULLET_RE = re.compile(r"^[-*+]\s+(.*)$")
 _NUMBERED_RE = re.compile(r"^(\d+)\.\s+(.*)$")
 _VERSION_RE = re.compile(r"^v([0-9]+(?:\.[0-9]+)*)$")
+
+# 每版说明的「适用范围」标记：一行独立的 HTML 注释，写在标题与第一个 `##` 小节之间。
+#   <!-- scope: server-only -->
+# 认这一种形状，别的写法（正文里加粗一句「本版只换服务端」）不算——那正是 v0.34.1
+# 留给人读、但没有任何机器读过的那句话。两侧空白与大小写可以松，`scope:` 后面的值必须
+# 是下面两个之一；写错值不当"没标"处理而是**报错**（见 _parse_scope），因为静默回落到
+# "有安装包"就是把一个装不上的版本播出去，而那正是本标记要防的事。
+_SCOPE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
+SCOPE_SERVER_ONLY = "server-only"      # 只换服务端，没有可安装的产物
+SCOPE_INSTALLABLE = "installer"        # 有可安装的产物（安卓包），也是【缺省】
+_VALID_SCOPES = (SCOPE_SERVER_ONLY, SCOPE_INSTALLABLE)
+
+
+def _parse_scope(text: str, version: str) -> bool:
+    """这份说明声明的是"只换服务端"吗？扫标题之后、第一个 `##` 之前那一段。
+
+    只看引言区而不是整篇：`##` 小节里的正文（比如 v0.34.1 那句"本版只换服务端"）是给
+    人读的历史叙述，不该被第二次当成机器判据——一份说明有**一个**声明位置就够了，
+    两处都认就会长出"到底哪一处算"的第三种真相。
+    """
+    for raw in text.splitlines():
+        if _SECTION_RE.match(raw):
+            break                                   # 进了小节，声明区已过
+        m = _SCOPE_RE.match(raw)
+        if not m:
+            continue
+        value = m.group(1).strip().lower()
+        if value not in _VALID_SCOPES:
+            raise ValueError(
+                "docs/releases/v%s.md 的 scope 标记写的是 %r，只认 %s"
+                % (version, m.group(1), " / ".join(_VALID_SCOPES)))
+        return value == SCOPE_SERVER_ONLY
+    return False                                    # 缺省：有安装包（历史各版都是这一形状）
 
 
 def _version_key(version: str):
@@ -57,9 +107,13 @@ def _join_block(block):
 
 
 def parse_release(text: str, version: str) -> dict:
-    """把一份发版说明切成 {version, title, intro, sections:[{heading, items}]}。
+    """把一份发版说明切成 {version, server_only, title, intro, sections:[{heading, items}]}。
 
     保持文档顺序：新版在最前是排序那一步的事，这里只忠实搬运。
+
+    `server_only` 来自 `_parse_scope` 认的那一行标记，且那一行**不会**同时进 `intro`：
+    官网把 JSON 里的正文当纯文字渲染，把 `<!-- scope: ... -->` 原样搬进 intro 就等于
+    在页面上印一行机器用的黑话（它也不会让页面变聪明，页面读的是那个布尔值）。
     """
     title = ""
     intro_blocks, blocks, headings = [], [], []
@@ -69,6 +123,8 @@ def parse_release(text: str, version: str) -> dict:
         if m_title and not title:
             title = m_title.group(1).strip()
             continue
+        if _SCOPE_RE.match(raw):
+            continue                                # 声明行只喂给 _parse_scope，不进正文
         m_sec = _SECTION_RE.match(raw)
         if m_sec:
             headings.append(m_sec.group(1).strip())
@@ -116,8 +172,8 @@ def parse_release(text: str, version: str) -> dict:
         if items:
             sections.append({"heading": heading, "items": items})
     intro = _join_block([b for b in intro_blocks if b is not None])
-    return {"version": version, "title": title or ("v" + version),
-            "intro": intro, "sections": sections}
+    return {"version": version, "server_only": _parse_scope(text, version),
+            "title": title or ("v" + version), "intro": intro, "sections": sections}
 
 
 def load_releases(docs_dir: str) -> list:
@@ -155,7 +211,15 @@ def main(argv=None) -> int:
                     help="只比对产物是否与 md 同步，不写盘")
     args = ap.parse_args(argv)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    text = render(build(root))
+    try:
+        text = render(build(root))
+    except ValueError as e:
+        # 一份说明写错 scope 值时必须**停下并说人话**，而不是回落到"有安装包"那一半：
+        # 回落的结果是官网把只有一个域名的东西播出去，而红字里看不出任何事。
+        print("changelog: BAD SCOPE —— %s" % e)
+        print('changelog: 一行只认两种值：<!-- scope: server-only -->（本版没有可安装的包）'
+              ' / <!-- scope: installer -->（有安装包）')
+        return 1
     path = output_path(root)
     if args.check:
         try:
