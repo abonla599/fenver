@@ -156,7 +156,6 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     var serverDefault by remember { mutableStateOf<String?>(null) }
     var memoryCount by remember { mutableStateOf("") }
     var scheduleVal by remember { mutableStateOf("") }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
-    var serverBuild by remember { mutableStateOf("") }
 
     /* 每页各存一份滚动位置：主列表滑到靠下 → 点进任意子页 → 返回，不再弹回顶部
        （真机反馈：以前返回后得从头重新滑到靠下才能继续操作）。弹层切页时整体不离开
@@ -186,9 +185,13 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
             memoryCount = if (arr == null) "" else
                 if (arr.size >= 50) "50+ 条" else "${arr.size} 条"
         }
-        runCatching {
-            serverBuild = Api.health()["build"]?.jsonPrimitive?.contentOrNull ?: ""
-        }
+        /* v0.34.2：这里不再拉 /health 的 build 往「版本」那一行拼。以前这一行是
+         * 「壳 v0.34.0 · 服务端 v0.34.1」两个号码并排，而 build 那截本身就是
+         * `git describe` 出来的 vX.Y.Z——在一部手机上，它长得和一个"我能装的版本"
+         * 一模一样，但它装不到手机上（能装的只有壳，且由下面「检查更新」那一行报）。
+         * 用户 2026-10 的口径：「只显示可运行的最新版本，不要两个相加什么的」。
+         * /health 的 build 字段本身没动（换包验收与 tools\pre_tag_gate.py 都读它），
+         * 网页侧「关于」也照旧显示服务端戳——浏览器里没有壳，服务端那份就是能跑的那份。 */
     }
 
     // 用户要求：设置页顶到最上面 —— 弹层高度不再封顶 600dp，直接铺满整屏
@@ -222,7 +225,7 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
                 else -> SettingsList(onOpenPage, onRequireAuth, onOpenUrl, onLoggedOut,
                     providers = providers, memoryCount = memoryCount,
                     scheduleVal = scheduleVal,
-                    serverBuild = serverBuild, identityTick = identityTick,
+                    identityTick = identityTick,
                     modelsLoading = !modelsLoaded,
                     onTick = { identityTick++ }, onNote = { t, err -> setStatus(t, err) },
                     onModelsChanged = { reloadProviders() }, canExport = canExport)
@@ -428,7 +431,7 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                          onLoggedOut: () -> Unit,
                          providers: List<ModelInfo>, memoryCount: String,
                          scheduleVal: String,
-                         serverBuild: String, identityTick: Int,
+                         identityTick: Int,
                          modelsLoading: Boolean,
                          onTick: () -> Unit,
                          onNote: (String, Boolean) -> Unit,
@@ -650,12 +653,14 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     SetNote(ABOUT_TAGLINE)
     SetCard {
         val shellVer = "v" + BuildConfig.VERSION_NAME
-        val versionVal = listOfNotNull(
-            "壳 $shellVer",
-            "服务端 $serverBuild".takeIf { serverBuild.isNotEmpty() },
-        ).joinToString(" · ")
+        // 「版本」这一行只报一个号码：这台手机上真能跑的那一版（壳的 versionName，
+        // 唯一来源是 android-native/app/build.gradle，与「检查更新」问的是同一个号）。
+        // 以前这里是「壳 vX · 服务端 vY」两个号码相加——服务端那一截本身就是
+        // git describe 出来的 vX.Y.Z，摆在一部手机上会被读成"这一版我能装"，
+        // 而它装不到手机上。可安装的那一版由下面那一行说，这里不再掺第二个号。
+        // 判据：backend/tests/test_v0342_single_version_row_contract.py
         SetRow("ⓘ", "版本", plain = true, trailing = "",
-            valSlot = { SetValText(versionVal) })
+            valSlot = { SetValText(shellVer) })
         // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
         // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
         // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。

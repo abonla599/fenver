@@ -408,7 +408,10 @@ object Api {
     suspend fun testProviderDraft(rec: JsonObject): JsonObject =
         json.parseToJsonElement(call("/v1/providers/test", "POST", rec.toString())).jsonObject
 
-    /** /health 免鉴权；build 字段 = 服务端构建戳（关于页「服务端 …」那一截）。 */
+    /** /health 免鉴权；build 字段 = 服务端构建戳（构建时由 git tag 烘进包里）。
+     *  v0.34.2 起原生「关于 → 版本」不再显示它：手机上的那一行只报能装的那一版，
+     *  而 build 的形状就是 vX.Y.Z，摆在一起会被读成第二个可安装版本。
+     *  字段本身与这条端点都没动（换包验收、tools\pre_tag_gate.py、网页侧「关于」都读它）。 */
     suspend fun health(): JsonObject =
         json.parseToJsonElement(call("/health")).jsonObject
     // v0.23 T1.8：这里不再有 latestRelease()——检查更新改走自建服务端的
