@@ -4,7 +4,13 @@
 支持任务状态持久化，可断点续传，支持任务取消
 """
 from typing import List, Optional, Dict, Any
-from .task_store import Task, TaskStatus, task_store
+from .task_store import (IllegalTaskTransition, Task, TaskStatus, can_transition,
+                         task_store)
+# 认领那一跳要用的锁就是那份存储自己那把（改表与落盘同锁，task_store.py:274）。
+# 跨模块引一个下划线开头的名字在本仓有先例（`app/web/web_router.py:24` 引
+# `auth_router._client_ip`），而这里的理由更硬：判"这条任务在不在等人"与写它的那一跳
+# 必须在**同一把**锁里，另起一把只是把窗口从一处搬到两处。
+from .task_store import _lock as _store_lock
 from .planner import Planner
 from .executor import Executor
 from .task_agent import TaskNeedsUser
@@ -17,6 +23,28 @@ from app.tools.executor import execute_tool_detailed
 # `wait_for_user` 的注释——"要往里加键不该每加一个就回来改 to_dict"），所以读侧必须
 # 能认出"这一张是工具断点"还是别的什么，认不出就什么都不接（fail-closed）。
 TOOL_SUSPENSION_KIND = "tool_suspension"
+
+# ⭐⭐ 本进程里"已经有人在跑"的任务清单（独立审查员复现出来的那一格，见 A3 测试文件
+# 末尾那族用例）。
+#
+# 为什么状态不够、必须另有一张表：一个 RUNNING 的任务有两种截然不同的下场——
+#   ① 上一次进程被打断留下的（`restore()` 给它 `interrupted_by_restart`）：再进来的人
+#      续跑它是**设计如此**，跳转表那条 `running → running` 自环就是为它开的
+#      （task_store.py:69 的注释）；
+#   ② 本进程另一条请求**正跑在这一秒**：再进来的人做什么都是错的。
+# 审查员复现出来的正是 ② 被当成 ①：第一条答案把任务从 waiting_user 翻成 RUNNING，
+# 第二条因此看不见 waiting_user，掉进那句通用的"恢复任务 … 进度: 0/1"，把整条子任务
+# 从第 1 步重跑——第 1~3 步（查店、加购、发验证码）又烧一遍，那正是 A3 承诺省掉的
+# 那一笔钱，而两个响应还互相矛盾（一个说还在等人，一个说办完了）。
+# 把 ① 与 ② 分开的唯一诚实信息是"这条任务在我这个进程里有没有人占着"，那就是一张
+# 进程内的表，不是状态字段：字段会随 tasks.json 落盘，一次崩溃就留下一个永远"有人在跑"
+# 的假案（谁也叫不动它），而这张表跟着进程一起清空。
+#
+# 边界要说实话：这张表管的是**本进程**。多个 worker 各持一份，跨进程的同一枚停点还抢
+# 得动（现网是本机 `127.0.0.1:8000` 单进程：`run_backend.py:63` 那句
+# `uvicorn.run(app, host="127.0.0.1", port=8000)` 不带 workers，换包脚本也按这一份起）；
+# 真要多进程，得换一把跨进程的锁（文件锁或 sqlite），不在这一格里，已作为 follow-up 上报。
+_EXECUTING: set = set()
 
 
 def _suspension_cursor(suspension: Dict[str, Any], subtask_index: int) -> Dict[str, Any]:
@@ -84,6 +112,10 @@ class Orchestrator:
                 与改动前逐字同形——它们碰不到这条新路，因为现网里在此之前没有任何
                 一条任务是 waiting_user（`wait_for_user` 在生产代码里零调用点，
                 这一版是第一个把它用起来的人）。
+                ⭐ 同一枚停点**只许一个答案接走**（v0.35 A3 收口，见 `_claim_execution`）：
+                两条答案一起进来时，赢的那条从断点接上，输的那条拿到
+                `{"accepted": False, "reason": …}` 与任务此刻真实的状态——它不重跑子任务、
+                不叫模型、不花一分钱，也不许看到另一条路给出的那个终态。
         Returns:
             包含任务状态和结果的字典
         """
@@ -190,12 +222,18 @@ class Orchestrator:
             task_store[task.task_id] = task
             print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
 
-        # --- 2. 更新任务状态为执行中 ---
+        # --- 2. 原子认领这一趟执行（顺带把状态翻成 running）---
         # ⭐ v0.35 A1：走状态机而不是字段赋值。到这里合法的上一状态只有 pending /
         # running（被打断后续跑）/ failed（断点重跑，上面那句 print 就是它）/
         # waiting_user（等到了人，从游标记的那一步接）。表外的跳转直接抛，
         # 不再让"半个状态"悄悄写进盘。
-        task.set_status(TaskStatus.RUNNING)
+        # ⭐ 这一跳从原来的裸 `task.set_status(...)` 挪进了 `_claim_execution`：
+        # "读到 waiting_user"与"翻成 running"之间原来没有任何东西挡着，两条答案因此
+        # 都能读到你都能动手，或者后到的那条读不到你、掉进通用续跑那一路把前三步重跑。
+        # 判与跳现在同锁同批，见那份方法的注释。
+        refused = self._claim_execution(task, claims_breakpoint=pending_resume is not None)
+        if refused is not None:
+            return refused          # 一个字节都没改、一次调用都没发、一分钱都没花
 
         try:
             # --- 2.5 ⭐ v0.35 A3：从工具断点接上（只在带着用户答案回来时发生）---
@@ -311,19 +349,182 @@ class Orchestrator:
             error_msg = scrub_secrets(f"{type(e).__name__}: {e}")
             print(f"[Orchestrator] 任务执行出错: {error_msg}")
 
-            # 先记 error 再跳状态：set_status 顺带落盘，顺序反过来的话盘上那条
-            # failed 记录会带着一格空的 error（"失败了但不知道为什么"最难查）。
-            task.error = error_msg
-            task.set_status(TaskStatus.FAILED)
-
-            return {
+            # ⭐ 这一句原来不是一个方法，而是两行裸写：`task.error = error_msg` +
+            # `task.set_status(TaskStatus.FAILED)`。后一行就是审查员那枚 500 的抛点
+            # （改动前的 :317）——`except` 块里再抛一次 `IllegalTaskTransition`，外面
+            # 没有第二层 try，它直接飘出 run()、飘出 /v1/agent/orchestrate。任务已经
+            # 被并发的那一路跑完、或被 /v1/tasks/{id}/cancel 取消之后，终态不出边，
+            # 这一跳必然被拒；拒了要说得出话，不能崩。判据与"为什么一格都不改"写在
+            # `_record_failure` 那一份里。
+            reported = self._record_failure(task, error_msg)
+            body = {
                 "task_id": task.task_id,
-                "status": "failed",
+                "status": reported,
                 "goal": task.goal,
-                "error": error_msg,
+                # 报出去的那句 error 与盘上那一条同一个值（v0.25 那条
+                # test_failure_message_is_scrubbed_before_it_leaves 钉的就是这个等式）：
+                # 跳转被拒时 task.error 没被改，这里也就不能凭空多出一格。
+                "error": task.error,
                 "current_subtask": task.current_subtask,
                 "total_subtasks": len(task.subtasks)
             }
+            if reported != TaskStatus.FAILED.value:
+                body["message"] = (
+                    f"这一轮想把任务写成 failed，被状态机拒了：它此刻是 {reported}。"
+                    "另一趟请求（或 /v1/tasks/{id}/cancel）已经先把它定论了。"
+                    "终态记录与已经花掉的钱一格都不改，这一轮的异常只回在这里："
+                    f"{error_msg}")
+            return body
+
+        finally:
+            # 执行权必须跟着这一趟一起还，不管它是跑完了、跑坏了、还是半路停在新的
+            # 问题上——漏还的症状不是报错，是这条任务在本进程里**永远**"有人在跑"，
+            # 于是谁也续不动它（见 _claim_execution 那份表）。
+            self._release_execution(task.task_id)
+
+    def _claim_execution(self, task: Task,
+                         claims_breakpoint: bool = False) -> Optional[Dict[str, Any]]:
+        """原子地占住这条任务的执行权。占到回 `None`；占不到回的就是要给调用方的那一格。
+
+        判"有没有人占着"、判"这一趟是不是来接工具断点的"、以及那一跳
+        `→ running`，全在 `task_store` 那把锁里一次做完——这正是审查员要的那一句
+        "claim the cursor atomically"。为什么必须连那一跳一起做：只加上锁而不把状态
+        一起翻，第二条请求照样能在锁外读到 waiting_user、照样各自算出一份
+        `pending_resume`。
+
+        `claims_breakpoint=True` 的那一路多一条判据：**断点只许被一个答案接走**。
+        这一趟在锁外读到 waiting_user、进锁时却发现状态已经不是它了（并发的那一条
+        刚接走 / 已经跑完 / 被取消），那就不能顺着下面那句通用的"恢复任务"把整条
+        子任务从第 1 步重跑——那笔钱与那枚重复的验证码就是这一格要挡的东西。
+        `claims_breakpoint=False` 的那几路（pending / 被重启打断的 running / failed 断点
+        重跑 / 游标不是工具断点的 waiting_user）照旧进来占位并跑，与改动前逐字同形：
+        "被打断过、可以由人接着跑"本来就是跳转表给 running → running 那条自环留的口子
+        （task_store.py:69），这一格不改它，只把"另一条请求正跑着"这一种从里面分出去。
+        不带答案停在工具断点上的那一路更早就 return 了（`run` 里那一格），压根不进这里。
+
+        回 None 之外还顺手把 `_EXECUTING` 那一格留着；调用方必须在 finally 里还。
+        """
+        with _store_lock:
+            if task.task_id in _EXECUTING:
+                return self._answer_not_accepted(task, "already_in_flight")
+            if claims_breakpoint and task.status is not TaskStatus.WAITING_USER:
+                return self._answer_not_accepted(task, "breakpoint_taken")
+            _EXECUTING.add(task.task_id)
+            try:
+                task.set_status(TaskStatus.RUNNING)
+            except Exception as e:
+                # 跳转被拒（终态在这一瞬间被 /cancel 抢先落下来）或落盘坏了（OSError）：
+                # 占位当场还回去，并把话回给调用方而不是抛出去。抛的症状是 500，
+                # 而这件事实本可以是一句"这条任务此刻是什么"。
+                _EXECUTING.discard(task.task_id)
+                return self._answer_not_accepted(task, "transition_refused", detail=e)
+        return None
+
+    @staticmethod
+    def _release_execution(task_id: str) -> None:
+        """还执行权。与认领同一把锁，免得认领那一方正读表时这里正在改。"""
+        with _store_lock:
+            _EXECUTING.discard(task_id)
+
+    def _answer_not_accepted(self, task: Task, reason: str,
+                             detail: Optional[BaseException] = None) -> Dict[str, Any]:
+        """落败者拿到的那一格：一句实话。不跑任何东西、不花一分钱、不改一个字节。
+
+        要说清"这一格是设计出来的答案，不是漏掉的"：
+        - `status` 报的是任务**此刻真实**的状态（多半是 running；断点已被接走时可能是
+          completed）。不另造一个状态字面量，也不把"我没做成"藏进 200 里当成功——
+          响应里没有 `final_answer`，也没有把任务改成 failed。
+        - `accepted: False` 就是判据本身：这一趟给的答案没有被采用。它替代了"两条都
+          说自己办完了"那种自相矛盾的形状。
+        - `reason` 给机器读：`already_in_flight`（本进程已有一趟正在跑它）/
+          `breakpoint_taken`（断点已被另一枚答案接走）/ `transition_refused`
+          （进锁之后状态机不收这一跳）。
+        - 如果此刻确实还停在一个问题上（游标认得出是工具断点），把 `question` 原样
+          带上——落败的人该知道自己要不要重答；重答要等那一趟跑完、看新的问题，
+          而不是拿同一个答案再砸一次。
+        - 钱与预算：这一路一次工具都没调、一次模型都没叫、护栏与频控一本都不动，
+          所以它既没花钱，也**没拿到**任何免费的重试额度；而它已经花掉的那一枚
+          上游限流令牌（`throttle_paid_upstream` 在进这里之前就记过账）照旧不还，
+          与本仓"被挡下的调用也不退款"那条口径同一条线。
+        """
+        status = getattr(task.status, "value", str(task.status))
+        waiting = bool(getattr(task, "can_resume", False))
+        suspension = _tool_suspension(task) if waiting else None
+        messages = {
+            "already_in_flight": (
+                f"这条任务已经有一趟请求正在执行（此刻 {status}）。这一次什么都没跑、"
+                "也没再花钱，你给的答案没有被采用。稍后用 GET /v1/tasks/{id} 看结果；"
+                "如果它又停在新的问题上，带着那个新问题再答一次。"),
+            "breakpoint_taken": (
+                f"这一步的断点已经被另一趟请求接走了（此刻 {status}）。这一次没有"
+                "重跑子任务、也没有再花钱，你给的答案没有被采用。"),
+            "transition_refused": (
+                f"这一趟没能开工：状态机不收 → running 那一跳，任务此刻是 {status}。"
+                "什么都没跑、也没再花钱。"),
+        }
+        message = messages[reason]
+        if detail is not None:
+            message += f"（{type(detail).__name__}: {scrub_secrets(str(detail))}）"
+        print(f"[Orchestrator] 任务 {task.task_id} 的这一趟没有被认领：{reason}"
+              f"（此刻状态 {status}）——没跑工具、没叫模型、任务一格未改")
+        body = {
+            "task_id": task.task_id,
+            "status": status,
+            "goal": task.goal,
+            "accepted": False,
+            "reason": reason,
+            "can_resume": waiting,
+            "current_subtask": task.current_subtask,
+            "total_subtasks": len(task.subtasks),
+            "message": message,
+        }
+        if suspension is not None:
+            # 只在"此刻真的还停在一个认得出的工具断点上"时把那句问题带回去（判据就是
+            # A1 的不变式 can_resume ⟺ waiting_user，加游标种类认得出）。症状对得上：
+            # 赢家又差了一个答案（验证码之后要收货地址），输家手里握着的是旧答案——
+            # 不给它新问题，它就只能拿旧的一遍遍砸。问题原文不写日志，只回这一格。
+            body["question"] = suspension["question"]
+        return body
+
+    def _record_failure(self, task: Task, error_msg: str) -> str:
+        """把失败写进状态机，并且**自己绝不抛**。返回这一轮该报出去的状态值。
+
+        改动前的两行裸写（`task.error = ...` + `task.set_status(FAILED)`）在任务已被
+        别的路上定论时必抛 `IllegalTaskTransition`，而它就在 `except` 块里 → 端点 500。
+        现在先问跳转表再跳，问与跳同锁（与认领同一把 `_store_lock`）。
+
+        收不下时**一格都不改**，两条理由都是本仓付过账的那种：
+        - 已经花掉的钱与已经定论的结论不许被一次没跑成的续写抹掉——一个 completed 的
+          任务被改成 failed，或反过来带着 error 文案，都是在制造第二个真相；钱仍然在
+          账上（`usage` 那本记的是每一次真发生过的调用，这一路一个字节都不碰），
+          状态却从"办成了"退成"失败了"，等于把付过的账说成没付。
+        - `error` 与 `status` 必须同批写：`set_status` 才是写盘点。先改 `error` 再被拒
+          = 内存里有错误、盘上没有（与本文件既有那条"先记 error 再跳状态"的纪律同一个
+          理由，反过来也成立）。所以那一格在真跳之前不落、跳一半失败还要吐回去。
+        """
+        with _store_lock:
+            current = getattr(task.status, "value", str(task.status))
+            if not can_transition(task.status, TaskStatus.FAILED):
+                print(f"[Orchestrator] 任务 {task.task_id} 的 failed 那一跳被状态机拒了"
+                      f"（{IllegalTaskTransition.__name__}：{current} → failed 不在合法"
+                      f"出口里）：任务此刻仍是 {current}，终态记录一格都不改；这一轮的"
+                      f"异常只回出口：{error_msg}")
+                return current
+            previous_error = task.error
+            task.error = error_msg
+            try:
+                task.set_status(TaskStatus.FAILED)
+                return TaskStatus.FAILED.value
+            except IllegalTaskTransition as jump:
+                # 上面那一问与这一跳之间的窗口：另一条线程（`/v1/tasks/{id}/cancel`
+                # 的判据在锁外）抢先把终态落了进来。同一句纪律——半个跳转不许留下，
+                # 刚写的那一格 error 也吐回去。
+                task.error = previous_error
+                print(f"[Orchestrator] 任务 {task.task_id} 的 failed 那一跳被状态机拒了"
+                      f"（{type(jump).__name__}：{jump}）：任务此刻是"
+                      f" {getattr(task.status, 'value', task.status)}，一格都不改；"
+                      f"这一轮的异常只回出口：{error_msg}")
+                return getattr(task.status, "value", str(task.status))
 
     def _park_suspension(self, task: Task, suspension: Dict[str, Any],
                          subtask_index: int) -> Dict[str, Any]:
