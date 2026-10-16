@@ -141,7 +141,20 @@ def test_enable_watchdog_only_after_both_acceptance_checks():
     st = _steps_in_order(PS1)
     assert st["health"] < st["enable"], "build 断言在启用回看门狗之前"
     assert st["accept"] < st["enable"], "app.js 标记断言在启用回看门狗之前"
-    assert re.search(r"\$afterState -ne 'Disabled'", CODE), "disable 之后必须复查 State 真Disabled，不复查等于没停"
+    # 2026-10-16 现网事故改判（v0.34.2 收口第二批）——这里要说清楚，因为它**原本钉的是
+    # `if ($afterState -ne 'Disabled') { throw ... }`，而那条判据本身就是事故本体**：
+    # 任务有一次实例正在跑时，即使停用完全成功，Task Scheduler 照样报 State=Running
+    # （停用只拦今后的触发器，不停已经在跑的那一次），于是它把一次没问题的换包判死
+    # （现网 DISABLED state=Running -> throw -> PSEXIT=1），而那一句裸 throw 还把看门狗
+    # 留在了停用态。判据没有被削弱，是换成了真问题："这段窗口里它还能不能把 exe 拉起来"
+    # = Enabled；正在跑的实例单独打 token，只在有界等待到点后按自己的 stage 走恢复机制中止。
+    # 旧判据同时被反向钉住（不许回来）。三条判据与各自的牙印见
+    # tests/test_swap_package_disable_verify.py。
+    assert re.search(
+        r"if \(-not \$verify\.Enabled -and \$verify\.Instances -eq 0\) \{ break \}", CODE), \
+        "disable 之后必须复查 Enabled 并确认没有实例在跑，不复查等于没停"
+    assert not re.search(r"\$afterState -ne 'Disabled'", CODE), \
+        "State 判决不许回来：实例在跑时它恒为 Running，是一条必然误判的判据"
 
 
 def test_old_package_renamed_never_deleted():

@@ -41,6 +41,14 @@ Progress lines are one-token machine-parsable (PRECHECK / DISABLED / STOPPED /
 BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / BUDGET / SWAP-DONE, plus
 ROLLBACK-MODE when -Rollback was used) so a future
 automation can watch a swap without reading prose.
+Since the v0.34.2 abort fixes three more tokens carry the failure side, because
+an abort that prints nothing is how the crash guard got lost: DISABLED now
+reports enabled= / state= / instances= (the verdict is enabled=; state=Running is
+a mid-flight instance, visible rather than fatal), WAIT marks the bounded wait
+for that instance to finish, READFAIL marks a task read that could not answer
+(fails CLOSED - it waits and then aborts instead of assuming the guard is down),
+and every abort ends with ABORT stage=... moved=... watchdog=... stating in one
+token whether the guard was handed back.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
 Chinese comments and dies on a syntax error - production then silently keeps
@@ -152,6 +160,11 @@ $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Backup = Join-Path $ProjectRoot ('dist\run_backend_old-' + $stamp)
 
 $script:backupDone = $false
+# Whether THIS run currently holds the watchdog down. The restore machinery keys
+# off it so an abort can say in one token whether it actually gave the guard
+# back, and so a failure raised before any disable never claims to have re-enabled
+# something it never touched.
+$script:watchdogDisabled = $false
 $script:failures   = New-Object System.Collections.ArrayList
 
 function Add-Fail {
@@ -299,23 +312,115 @@ function Show-Rollback {
     Write-Output 'ROLLBACK-HOWTO ref: deployment guide, swap section - the same steps, in reverse order.'
 }
 
+function Get-WatchdogTaskState {
+    # One FRESH read of the two task properties that answer the only question the
+    # disable step has to answer: "can the watchdog launch the exe again during my
+    # swap window?" Enabled is that switch, and Disable-ScheduledTask flips it at
+    # once. State is the live status, which tells whether an instance is already
+    # underway - Task Scheduler keeps reporting Running for a run that was already
+    # in progress when the task was disabled, because disabling blocks FUTURE
+    # triggers and does not stop the one underway.
+    #
+    # The task object captured at step 1 is deliberately NOT reused: a CIM object
+    # is a snapshot of the moment it was read, so the pre-disable copy would go on
+    # saying Enabled=True forever and this check could never pass.
+    #
+    # A read that cannot answer returns Enabled=True (fail CLOSED). Treating "no
+    # answer" as "already disabled" would reopen, as a green line, the exact hole
+    # this function exists to close.
+    param([object] $TaskToRead)
+    $enabled = $true
+    $state = 'Unreadable'
+    $readError = ''
+    try {
+        $fresh = Get-ScheduledTask -TaskPath $TaskToRead.TaskPath -TaskName $TaskToRead.TaskName
+        if ($fresh) {
+            $state = [string] $fresh.State
+            if ($null -ne $fresh.Enabled) { $enabled = [bool] $fresh.Enabled }
+        }
+    } catch {
+        # Carried out as a FIELD, never printed here: this function's result is
+        # assigned ($verify = ...), and PowerShell assigns the WHOLE output stream -
+        # a stray log line would make $verify an array and turn every property read
+        # below into a lucky guess about the wrong object.
+        $readError = $_.Exception.Message
+    }
+    # The instance count comes off the task's own live state: 1 means a watchdog
+    # run is underway right now. It is never killed here - this script stops the
+    # backend when it decides to and nothing else, the rule every other step runs
+    # on - so an underway run is waited out (bounded, see the disable step) or the
+    # swap aborts and someone retries a minute later.
+    $instances = 0
+    if ($state -eq 'Running') { $instances = 1 }
+    return [pscustomobject]@{ Enabled = $enabled; State = $state; Instances = $instances; ReadError = $readError }
+}
+
+function Restore-WatchdogTask {
+    # Give the crash guard back and report, as one token value, what actually
+    # happened. The 2026-10-16 abort at the disable-verify check was a bare throw
+    # that walked straight past this machinery and left the task DISABLED: the box
+    # then ran with no guardian until the operator found the task by its action and
+    # enabled it by hand.
+    #
+    # Its own function, and deliberately NOT nested behind the "do I also have to
+    # restart the package" decision - a restore that only runs when the OTHER
+    # restore was needed is exactly how a guard goes missing while the code that
+    # re-enables it still reads as present.
+    #
+    # Returns one object and prints nothing, for the same pipeline-capture reason
+    # as Get-WatchdogTaskState; the caller prints the tokens.
+    $status = 'never-disabled'
+    $failDetail = ''
+    if ($script:watchdogDisabled) {
+        try {
+            Enable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
+            $script:watchdogDisabled = $false
+            $status = 're-enabled'
+        } catch {
+            $status = 're-enable-FAILED'
+            $failDetail = $_.Exception.Message
+        }
+    }
+    return [pscustomobject]@{ Status = $status; Error = $failDetail }
+}
+
 function Stop-AfterFailure {
     param([string] $FailedAt, [string] $Message)
-    if (-not $script:backupDone) {
-        # before the backup rename nothing on disk was touched: restarting the
-        # intact package and re-enabling the watchdog is a complete recovery.
-        Write-Output ('ABORT stage=' + $FailedAt + ' moved=no (package never disturbed; restoring watchdog)')
+    if ($script:backupDone) {
+        # The live directory has been moved aside: nothing here is auto-undone (a
+        # wrong automatic un-rename under a file lock turns one half-swap into two)
+        # and the guard stays DISABLED on purpose - Show-Rollback step 1 says so,
+        # an unverified package must not be "protected". Stated in the token,
+        # because silence here is readable as "the machinery handled it".
+        Write-Output ('ABORT stage=' + $FailedAt + ' moved=yes watchdog=left-disabled-by-design')
+        Write-Output ('FAIL stage=' + $FailedAt)
+        Show-Rollback
+        throw $Message
+    }
+    # Before the backup rename nothing on disk was touched, so the complete
+    # recovery is: intact package running, guard enabled again. Both halves are
+    # attempted independently and the verdict is printed AFTER them, so the token
+    # states what was done and not what was intended.
+    $package = 'intact-no-restart-needed'
+    try {
         if ((Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
             # do not double-start: two backends would write the same data\ files
             Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
-            Write-Output 'RECOVERED old-package-restarted'
+            $package = 'old-package-restarted'
         }
-        Enable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
-        Write-Output 'RECOVERED watchdog-re-enabled'
-        throw $Message
+    } catch {
+        # Get-LiveProcess is a CIM query and CIM can fail. "Cannot prove it is
+        # down" is not a licence to start a second backend, so the package is left
+        # alone - while the guard still comes back below, which is the half of the
+        # recovery that must never depend on the other half.
+        Write-Output ('RECOVER-FAIL stage=' + $FailedAt + ' package-state=unproven error=' + $_.Exception.Message)
+        $package = 'restart-skipped-process-list-unreadable'
     }
-    Write-Output ('FAIL stage=' + $FailedAt)
-    Show-Rollback
+    $restore = Restore-WatchdogTask
+    if ($restore.Error) {
+        Write-Output ('RECOVER-FAIL stage=' + $FailedAt + ' watchdog-task-path-len=' + $task.TaskPath.Length + ' error=' + $restore.Error)
+    }
+    Write-Output ('ABORT stage=' + $FailedAt + ' moved=no watchdog=' + $restore.Status + ' package=' + $package)
     throw $Message
 }
 
@@ -449,34 +554,81 @@ if ($DryRun) {
 # stop and the rename relaunches the old package, its file handle makes the
 # rename die with PermissionError, and the box ends up "swapped halfway".
 Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
-$afterState = (Get-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName).State
-Write-Output ('DISABLED state=' + $afterState)
-if ($afterState -ne 'Disabled') {
-    throw 'watchdog did not actually disable - aborting BEFORE touching the running package'
+$script:watchdogDisabled = $true
+# The verdict below reads Enabled, not State, because the question this step has
+# to answer is "can the watchdog start the exe again during my window?" - that is
+# the Enabled switch, which the disable flips at once. State cannot answer it:
+# while an instance of the task is in flight Task Scheduler reports State=Running
+# even after a fully successful disable, since disabling blocks FUTURE triggers
+# and leaves the run already underway alone. The previous check required State to
+# be literally Disabled and threw otherwise, so it aborted a healthy swap whenever
+# one was attempted in the same second as a wake: the 2026-10-16 release
+# (DISABLED state=Running -> throw -> PSEXIT=1, package left untouched - the
+# fail-safe worked, the reading did not), while a retry minutes later, with no
+# instance running, printed state=Disabled and completed. That throw was also
+# bare, so it walked past Stop-AfterFailure and left the guard DISABLED: one
+# abort, two defects, and the second one silent until someone went looking.
+# Both halves are locked by backend/tests/test_swap_package_disable_verify.py.
+# An underway run is still a hazard - it can launch the old exe inside my window -
+# so it is waited out rather than waved through. The wait is bounded, because
+# every second here is a second the guard is already down and
+# watchdog-hidden.vbs waits for watchdog.ps1 to return (waitOnReturn=True), which
+# is normally seconds. Running the window out aborts through the restore machinery
+# with its own stage token; nothing is killed, and retrying a minute later is
+# cheap while a package swapped halfway is not.
+$DisableVerifyWindowSeconds = 15
+$verifyDeadline = (Get-Date).AddSeconds($DisableVerifyWindowSeconds)
+$verifyTries = 0
+while ($true) {
+    $verify = Get-WatchdogTaskState -TaskToRead $task
+    if ($verify.ReadError) { Write-Output ('READFAIL stage=task-state error=' + $verify.ReadError) }
+    Write-Output ('DISABLED enabled=' + $verify.Enabled + ' state=' + $verify.State + ' instances=' + $verify.Instances)
+    if (-not $verify.Enabled -and $verify.Instances -eq 0) { break }
+    if ((Get-Date) -ge $verifyDeadline) {
+        if ($verify.Enabled) {
+            Stop-AfterFailure 'disable-did-not-take' ('the watchdog disable did not take: Enabled is still true after ' + $DisableVerifyWindowSeconds + 's, so it can still start the exe - aborting BEFORE touching the running package')
+        }
+        Stop-AfterFailure 'disable-instance-running' ('the watchdog is disabled but an instance is still underway after ' + $DisableVerifyWindowSeconds + 's, state=' + $verify.State + ' - that run may still start the old exe, so aborting BEFORE touching the running package; retry once the wake has finished')
+    }
+    $verifyTries = $verifyTries + 1
+    Write-Output ('WAIT stage=disable-verify enabled=' + $verify.Enabled + ' state=' + $verify.State + ' instances=' + $verify.Instances + ' tries=' + $verifyTries)
+    Start-Sleep -Seconds 1
 }
 
 # ------------------------------------------------------- step 2: stop the backend
-$procs = Get-LiveProcess
-$stoppedPids = @($procs | ForEach-Object { $_.ProcessId })
-foreach ($p in $procs) {
-    Write-Output ('STOP pid=' + $p.ProcessId)
-    Stop-Process -Id $p.ProcessId -Force
-}
-Write-Output ('STOPPED pid=' + $(if ($stoppedPids.Count -gt 0) { $stoppedPids -join ',' } else { 'none' }))
-Start-Sleep -Seconds 3
+# The whole stop/port stage sits in a try that hands over to Stop-AfterFailure.
+# Why: from the disable above to the re-enable at the end, ANY way this script
+# leaves is a way the guard is left down, and the two CIM/process queries below
+# (Get-LiveProcess, Stop-Process) can raise on their own. Left bare, one of them
+# failing was a silent loss of the crash guard with no token at all - the same
+# second defect as the bare throw this ticket replaced, just arriving from a
+# cmdlet instead of an if. Before the backup rename the restore is complete
+# (package still intact on disk), so routing here is also cheap.
+try {
+    $procs = Get-LiveProcess
+    $stoppedPids = @($procs | ForEach-Object { $_.ProcessId })
+    foreach ($p in $procs) {
+        Write-Output ('STOP pid=' + $p.ProcessId)
+        Stop-Process -Id $p.ProcessId -Force
+    }
+    Write-Output ('STOPPED pid=' + $(if ($stoppedPids.Count -gt 0) { $stoppedPids -join ',' } else { 'none' }))
+    Start-Sleep -Seconds 3
 
-# --------------------------------------------- step 3: confirm the port let go
-# Warn, never silently continue: if something still listens on the port it is a
-# live handle on the directory we are about to move, and we would rather learn
-# it HERE than as a half-completed rename.
-$stillListening = @(netstat -ano | Select-String -Pattern (':{0}\s' -f $Port) | Select-String -Pattern 'LISTENING')
-if ($stillListening.Count -gt 0) {
-    Write-Output ('WARN port-' + $Port + '-still-listening count=' + $stillListening.Count)
-    $stillListening | ForEach-Object { Write-Output ('  ' + $_.Line.Trim()) }
-} else {
-    Write-Output ('PORT state=clear port=' + $Port)
+    # --------------------------------------------- step 3: confirm the port let go
+    # Warn, never silently continue: if something still listens on the port it is a
+    # live handle on the directory we are about to move, and we would rather learn
+    # it HERE than as a half-completed rename.
+    $stillListening = @(netstat -ano | Select-String -Pattern (':{0}\s' -f $Port) | Select-String -Pattern 'LISTENING')
+    if ($stillListening.Count -gt 0) {
+        Write-Output ('WARN port-' + $Port + '-still-listening count=' + $stillListening.Count)
+        $stillListening | ForEach-Object { Write-Output ('  ' + $_.Line.Trim()) }
+    } else {
+        Write-Output ('PORT state=clear port=' + $Port)
+    }
+    Start-Sleep -Seconds 1
+} catch {
+    Stop-AfterFailure 'stop' ('aborted in the stop/port stage, before any package was moved: ' + $_.Exception.Message)
 }
-Start-Sleep -Seconds 1
 
 # ------------------------------------- step 4/5: rename the old aside, then swap
 # Never Rename-Item: its -NewName takes only a LEAF name; given a full target
@@ -607,6 +759,10 @@ if ($Rollback) {
 # whole acceptance window is the point of ordering it last.
 try {
     Enable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
+    # The flag means "this run is holding the guard down", so it comes off with
+    # the planned re-enable too - otherwise a restore reached from anywhere later
+    # would report re-enabling a task this script had already given back.
+    $script:watchdogDisabled = $false
 } catch {
     Stop-AfterFailure 'enable' ('swap is verified but re-enabling the task failed: ' + $_.Exception.Message)
 }
