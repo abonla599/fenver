@@ -43,7 +43,11 @@ ROLLBACK-MODE when -Rollback was used) so a future
 automation can watch a swap without reading prose.
 Since the v0.34.2 abort fixes three more tokens carry the failure side, because
 an abort that prints nothing is how the crash guard got lost: DISABLED now
-reports enabled= / state= / instances= (the verdict is enabled=; state=Running is
+reports enabled= / via= / state= / instances= (the verdict is enabled=, which is
+read from the task's Settings.Enabled because the task object has no Enabled
+member on this machine; via= names which read answered or failed, so an
+enabled=True from a switch that never replied is distinguishable from a guard
+that is genuinely still up; state=Running is
 a mid-flight instance, visible rather than fatal), WAIT marks the bounded wait
 for that instance to finish, READFAIL marks a task read that could not answer
 (fails CLOSED - it waits and then aborts instead of assuming the guard is down),
@@ -315,28 +319,77 @@ function Show-Rollback {
 function Get-WatchdogTaskState {
     # One FRESH read of the two task properties that answer the only question the
     # disable step has to answer: "can the watchdog launch the exe again during my
-    # swap window?" Enabled is that switch, and Disable-ScheduledTask flips it at
-    # once. State is the live status, which tells whether an instance is already
-    # underway - Task Scheduler keeps reporting Running for a run that was already
-    # in progress when the task was disabled, because disabling blocks FUTURE
-    # triggers and does not stop the one underway.
+    # swap window?" The switch that answers it is the task's ENABLED SETTING, and on
+    # this box (PowerShell 5.1.26100.9549, measured read-only 2026-10-18) it lives at
+    # (Get-ScheduledTask ...).Settings.Enabled - NOT on the task object itself.
+    # Get-ScheduledTask hands back an MSFT_ScheduledTask CIM instance whose
+    # top-level members are TaskName / TaskPath / State / Actions / Triggers /
+    # Principal / Settings; Enabled is a member of that Settings association.
     #
-    # The task object captured at step 1 is deliberately NOT reused: a CIM object
-    # is a snapshot of the moment it was read, so the pre-disable copy would go on
-    # saying Enabled=True forever and this check could never pass.
+    # Why this is spelled out: commit a5d37bde fixed a real misread (State, see the
+    # disable step) and then read the bare $fresh.Enabled - a member that does not
+    # exist here. That is worse than the State bug in one specific way: a missing CIM
+    # member is not an error, it evaluates silently to $null, for all 202 tasks on
+    # this machine including the 31 that are genuinely State=Disabled. So the
+    # fail-closed default below became PERMANENT, the pass condition could never
+    # hold, and every future swap would burn the bounded window and abort with
+    # disable-did-not-take. Safely - nothing is touched, the guard is restored - but
+    # a 100% blocker on releasing, invisible to a textual lock.
+    # backend/tests/test_swap_package_watchdog_enabled_machine_truth.py is the lock
+    # that asks the MACHINE about exactly this expression, read-only, and it goes red
+    # if the read ever goes back to the bare form.
     #
-    # A read that cannot answer returns Enabled=True (fail CLOSED). Treating "no
-    # answer" as "already disabled" would reopen, as a green line, the exact hole
-    # this function exists to close.
+    # State is carried as a REPORTED field, never as the verdict: Task Scheduler keeps
+    # reporting Running for a run that was already in progress when the task was
+    # disabled, because disabling blocks FUTURE triggers and does not stop the one
+    # underway.
+    #
+    # The task object captured at step 1 is deliberately NOT reused: a CIM object is
+    # a snapshot of the moment it was read, so the pre-disable copy would go on
+    # saying Settings.Enabled=True forever and this check could never pass.
+    #
+    # A read that cannot answer returns Enabled=True (fail CLOSED) and leaves
+    # EnabledSource naming WHICH read failed, so "I could not prove it" is visible to
+    # the operator as a value in the DISABLED token instead of as a green line.
+    # Treating "no answer" as "already disabled" would reopen, as a green line, the
+    # exact hole this function exists to close.
+    #
+    # Deliberately ONE read, no cross-cmdlet fallback chain, and that choice is
+    # measured rather than stylistic: on this box Get-ScheduledTaskInfo exposes no
+    # Enabled member at all, and Get-CimInstance -Namespace
+    # root/Microsoft/Windows/TaskScheduler -ClassName MSFT_ScheduledTask exposes the
+    # same Settings.Enabled (top-level Enabled: absent). Two cmdlets would be two
+    # ways of reading one truth while adding branches a 3 a.m. operator has to reason
+    # about inside the fail-closed path.
     param([object] $TaskToRead)
     $enabled = $true
     $state = 'Unreadable'
     $readError = ''
+    $enabledSource = 'unread'
     try {
         $fresh = Get-ScheduledTask -TaskPath $TaskToRead.TaskPath -TaskName $TaskToRead.TaskName
         if ($fresh) {
             $state = [string] $fresh.State
-            if ($null -ne $fresh.Enabled) { $enabled = [bool] $fresh.Enabled }
+            if ($null -eq $fresh.Settings) {
+                # no Settings association came back at all -> nothing proves the guard
+                # is down, so the fail-closed default above stands
+                $enabledSource = 'settings-missing'
+            }
+            elseif ($null -eq $fresh.Settings.Enabled) {
+                # the a5d37bde shape of the bug: the switch is not answering. This is
+                # the one failure mode that cannot be told apart from success by
+                # looking at enabled= alone, which is why via= is in the token.
+                $enabledSource = 'settings-enabled-missing'
+            }
+            else {
+                $enabled = [bool] $fresh.Settings.Enabled
+                $enabledSource = 'settings-enabled'
+            }
+        }
+        else {
+            # the task is gone: also not proof of a disabled guard - it is proof of no
+            # guard, and this script's job here is only to hand a guard back later
+            $enabledSource = 'task-missing'
         }
     } catch {
         # Carried out as a FIELD, never printed here: this function's result is
@@ -344,6 +397,7 @@ function Get-WatchdogTaskState {
         # a stray log line would make $verify an array and turn every property read
         # below into a lucky guess about the wrong object.
         $readError = $_.Exception.Message
+        $enabledSource = 'read-threw'
     }
     # The instance count comes off the task's own live state: 1 means a watchdog
     # run is underway right now. It is never killed here - this script stops the
@@ -352,7 +406,7 @@ function Get-WatchdogTaskState {
     # swap aborts and someone retries a minute later.
     $instances = 0
     if ($state -eq 'Running') { $instances = 1 }
-    return [pscustomobject]@{ Enabled = $enabled; State = $state; Instances = $instances; ReadError = $readError }
+    return [pscustomobject]@{ Enabled = $enabled; State = $state; Instances = $instances; ReadError = $readError; EnabledSource = $enabledSource }
 }
 
 function Restore-WatchdogTask {
@@ -555,13 +609,20 @@ if ($DryRun) {
 # rename die with PermissionError, and the box ends up "swapped halfway".
 Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
 $script:watchdogDisabled = $true
-# The verdict below reads Enabled, not State, because the question this step has
-# to answer is "can the watchdog start the exe again during my window?" - that is
-# the Enabled switch, which the disable flips at once. State cannot answer it:
-# while an instance of the task is in flight Task Scheduler reports State=Running
-# even after a fully successful disable, since disabling blocks FUTURE triggers
-# and leaves the run already underway alone. The previous check required State to
-# be literally Disabled and threw otherwise, so it aborted a healthy swap whenever
+# The verdict below reads the task's Settings.Enabled, not State, because the question
+# this step has to answer is "can the watchdog start the exe again during my window?" -
+# that is the Enabled switch, which the disable flips at once. It is spelled
+# Settings.Enabled because that is where the switch actually lives on this machine: the
+# task object returned by Get-ScheduledTask has no Enabled member of its own, so the bare
+# $task.Enabled that commit a5d37bde used answers $null for all 202 tasks here (31 of them
+# genuinely disabled) without raising anything - and a $null under a fail-closed default is
+# a swap that can never pass this check. See Get-WatchdogTaskState for the measurement and
+# backend/tests/test_swap_package_watchdog_enabled_machine_truth.py for the lock that asks
+# the machine instead of the text.
+# State cannot answer it either: while an instance of the task is in flight Task Scheduler
+# reports State=Running even after a fully successful disable, since disabling blocks
+# FUTURE triggers and leaves the run already underway alone. The previous check required
+# State to be literally Disabled and threw otherwise, so it aborted a healthy swap whenever
 # one was attempted in the same second as a wake: the 2026-10-16 release
 # (DISABLED state=Running -> throw -> PSEXIT=1, package left untouched - the
 # fail-safe worked, the reading did not), while a retry minutes later, with no
@@ -569,6 +630,9 @@ $script:watchdogDisabled = $true
 # bare, so it walked past Stop-AfterFailure and left the guard DISABLED: one
 # abort, two defects, and the second one silent until someone went looking.
 # Both halves are locked by backend/tests/test_swap_package_disable_verify.py.
+# The via= field is part of the DISABLED token because enabled=True has two very
+# different meanings - "the guard is still up" and "the switch did not answer me" - and
+# an operator must be able to tell them apart from the one line the swap printed.
 # An underway run is still a hazard - it can launch the old exe inside my window -
 # so it is waited out rather than waved through. The wait is bounded, because
 # every second here is a second the guard is already down and
@@ -582,7 +646,7 @@ $verifyTries = 0
 while ($true) {
     $verify = Get-WatchdogTaskState -TaskToRead $task
     if ($verify.ReadError) { Write-Output ('READFAIL stage=task-state error=' + $verify.ReadError) }
-    Write-Output ('DISABLED enabled=' + $verify.Enabled + ' state=' + $verify.State + ' instances=' + $verify.Instances)
+    Write-Output ('DISABLED enabled=' + $verify.Enabled + ' via=' + $verify.EnabledSource + ' state=' + $verify.State + ' instances=' + $verify.Instances)
     if (-not $verify.Enabled -and $verify.Instances -eq 0) { break }
     if ((Get-Date) -ge $verifyDeadline) {
         if ($verify.Enabled) {
