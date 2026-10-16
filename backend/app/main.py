@@ -1748,7 +1748,14 @@ async def get_task_status(task_id: str, principal: Principal = CurrentPrincipal)
         "final_answer": task.final_answer,
         "error": task.error,
         "created_at": task.created_at,
-        "cancelled": task.cancelled
+        "cancelled": task.cancelled,
+        # ⭐ v0.35 A1：等待用户这一态要答得出三件事——在等什么（游标里的 question）、
+        # 能不能续（can_resume，**布尔字段**，不是状态字面量）、等了多久（waiting_since）。
+        # 全是**只增**的键：读不到它们的老客户端行为一字不变，而 UI 那半边（网页与壳
+        # 各自的状态表）按票面约定本票不动，等下一票接。
+        "can_resume": bool(getattr(task, "can_resume", False)),
+        "waiting_since": getattr(task, "waiting_since", None),
+        "resume_cursor": getattr(task, "resume_cursor", None),
     }
     if len(task.subtasks) > 0:
         response["progress_percent"] = round(

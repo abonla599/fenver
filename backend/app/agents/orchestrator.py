@@ -75,6 +75,13 @@ class Orchestrator:
             if task.status == TaskStatus.FAILED:
                 print(f"[Orchestrator] 任务 {task_id} 之前失败，从断点重新执行")
                 # 从当前中断的子任务继续
+            elif task.status == TaskStatus.WAITING_USER:
+                # ⭐ v0.35 A1：等到了人 → 从游标那一步接。这一支单独成句是有原因的：
+                # 掉进下面那句 else 的话，日志里"被重启打断后续跑"与"挂起等输入后
+                # 续跑"混成同一行，而两种恢复的原因完全不同。游标本体**不进日志**
+                # ——里面可能装着用户刚填的验证码，同"目标原文不落地"那份纪律一条线。
+                print(f"[Orchestrator] 任务 {task_id} 从等待用户输入中恢复，"
+                      f"进度: {task.current_subtask}/{len(task.subtasks)}")
             else:
                 print(f"[Orchestrator] 恢复任务: {task.task_id}, 进度: {task.current_subtask}/{len(task.subtasks)}")
         else:
@@ -100,7 +107,11 @@ class Orchestrator:
             print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
 
         # --- 2. 更新任务状态为执行中 ---
-        task.status = TaskStatus.RUNNING
+        # ⭐ v0.35 A1：走状态机而不是字段赋值。到这里合法的上一状态只有 pending /
+        # running（被打断后续跑）/ failed（断点重跑，上面那句 print 就是它）/
+        # waiting_user（等到了人，从游标记的那一步接）。表外的跳转直接抛，
+        # 不再让"半个状态"悄悄写进盘。
+        task.set_status(TaskStatus.RUNNING)
 
         try:
             # --- 3. 逐步执行子任务 ---
@@ -154,7 +165,7 @@ class Orchestrator:
 
             # 保存最终答案
             task.final_answer = final_answer
-            task.status = TaskStatus.COMPLETED
+            task.set_status(TaskStatus.COMPLETED)
 
             print(f"[Orchestrator] 任务 {task.task_id} 完成！")
 
@@ -175,8 +186,10 @@ class Orchestrator:
             error_msg = scrub_secrets(f"{type(e).__name__}: {e}")
             print(f"[Orchestrator] 任务执行出错: {error_msg}")
 
-            task.status = TaskStatus.FAILED
+            # 先记 error 再跳状态：set_status 顺带落盘，顺序反过来的话盘上那条
+            # failed 记录会带着一格空的 error（"失败了但不知道为什么"最难查）。
             task.error = error_msg
+            task.set_status(TaskStatus.FAILED)
 
             return {
                 "task_id": task.task_id,
