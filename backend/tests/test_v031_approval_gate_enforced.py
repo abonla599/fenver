@@ -284,28 +284,43 @@ def test_tickets_are_cleaned_up_on_create():
     票据现在还存着执行结果（可能上千字），只增不减既是内存增长也是留痕。
 
     负向锁：把 create_approval_request 里那段 stale 清理删掉，这条测试红。
+
+    2026-10-16 v0.35 A2 的适配（**判据一字没动**，改了两处入口）：
+    1. 票据表的键从明文 ticket_id 换成 sha256 摘要（盘上与内存同一个形状，抄的是
+       auth.py:141-152 那条"凭据只存摘要"的纪律）。所以"把这一张做旧"要先算摘要再进表。
+    2. A2 之后 get/consume/record 三个入口**也会扫**，于是"用 get_ticket(tid) is None
+       来验建票扫没扫"会自己把那张旧票扫掉——负向锁当场空转（实跑：删掉建票里的
+       `_sweep_locked(now)`，这一条照样绿）。所以判据改回直接看表，顺带把 A2 新开的
+       磁盘面钉上：内存与盘上都不许留着那张过期票。断言的两句话与它防的东西不变。
     """
     import time
     from app.core import approval
 
-    before = len(approval._tickets)
     req = approval.create_approval_request(
         "execute_code", {"code": "print(0)"}, user_id="owner_gc")
     tid = req["ticket_id"]
     # 把它做旧成"远超有效期"
     with approval._lock:
-        approval._tickets[tid].expires_at = time.time() - 10 * approval.APPROVAL_TIMEOUT_SECONDS
+        approval._tickets[approval.hash_ticket(tid)].expires_at = (
+            time.time() - 10 * approval.APPROVAL_TIMEOUT_SECONDS)
 
     fresh = approval.create_approval_request(
         "execute_code", {"code": "print(1)"}, user_id="owner_gc2")
     fresh_tid = fresh["ticket_id"]
 
-    assert approval.get_ticket(tid) is None, (
-        "远超有效期的票据应被清理——cleanup 判据不起作用就会无界堆积"
-    )
-    assert approval.get_ticket(fresh_tid) is not None, (
-        "清理不该误删刚创建的活跃票据"
-    )
+    with approval._lock:
+        assert approval.hash_ticket(tid) not in approval._tickets, (
+            "远超有效期的票据应被建票时的清理带走——cleanup 判据不起作用就会无界堆积"
+        )
+        assert approval.hash_ticket(fresh_tid) in approval._tickets, (
+            "清理不该误删刚创建的活跃票据"
+        )
+    # A2 新开的磁盘面：内存扫掉了而盘上留着，就是"文件只增不减"那个根因
+    import json
+    with open(approval._default_path(), encoding="utf-8") as f:
+        on_disk = json.load(f)["tickets"]
+    assert approval.hash_ticket(tid) not in on_disk, (
+        "过期票据从内存消失了却还躺在 data/approvals.json 里（里面是参数与执行结果）")
 
 
 # ---------- 护栏覆盖：两条自主路径也得有 ----------

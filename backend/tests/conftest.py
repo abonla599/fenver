@@ -49,6 +49,10 @@ os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 
 # 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
+# v0.35 A2：一次性审批票据表现在也落盘（data/approvals.json）。指走之外还有一层要紧：
+# 测试里每确认一次票据都会往这里写一次，而里面装着工具参数与执行结果。
+# 覆盖判据在 test_test_isolation.py（清单从 paths.DATA_PATH_ENV_VARS 派生）。
+os.environ["APPROVALS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "approvals.json")
 os.environ["USAGE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "usage.json")
 os.environ["SCHEDULE_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "schedule.json")
 # 意见反馈（user_feedback.json）同样是导入期算成模块常量的进程级单例：
