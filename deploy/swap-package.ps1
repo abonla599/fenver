@@ -49,8 +49,11 @@ member on this machine; via= names which read answered or failed, so an
 enabled=True from a switch that never replied is distinguishable from a guard
 that is genuinely still up; state=Running is
 a mid-flight instance, visible rather than fatal), WAIT marks the bounded wait
-for that instance to finish, READFAIL marks a task read that could not answer
-(fails CLOSED - it waits and then aborts instead of assuming the guard is down),
+for that instance to finish, READFAIL marks a read that could not answer and stage= names
+which one: task-state (fails CLOSED - it waits and then aborts instead of assuming the guard
+is down) or boot-poll (the process-list read inside the boot window - it asks again on that
+loop's own cadence, bounded by the window the loop already had, and gives up through
+ABORT stage=boot-poll-threw),
 DISABLE-THREW marks the disable call itself throwing: it prints those same four
 fields plus error=, and the stage token right after it says which of the three
 answers the switch actually gave - disable-threw-task-down (the guard really did
@@ -59,7 +62,11 @@ was flipped, so no disable is owned), disable-threw-guard-state-unproven (the
 switch did not answer at all - the fail-safe, which attempts the restore anyway
 because a guard left down is worse than one re-enabled for nothing),
 and every abort ends with ABORT stage=... moved=... watchdog=... stating in one
-token whether the guard was handed back.
+token whether the guard was handed back. An abort past the backup rename is a
+different animal and the tokens say so: moved=yes with
+watchdog=left-disabled-by-design plus the printed ROLLBACK recipe, because a
+watchdog re-armed over a package nobody has accepted yet is not protection - it
+is a guardian for the thing under suspicion.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
 Chinese comments and dies on a syntax error - production then silently keeps
@@ -810,13 +817,99 @@ try {
 }
 $livePid = 0
 $bootDeadline = (Get-Date).AddSeconds($StartTimeoutSeconds)
+# WHY THIS READ IS WRAPPED, AND WHY IT LEAVES THROUGH Stop-AfterFailure (#45).
+# Get-LiveProcess answers over CIM/WMI, and this file already documents twice
+# that those queries can RAISE (#24 wrapped the stop/port stage for exactly
+# this reason, #32 wrapped the disable for it). The file runs under
+# $ErrorActionPreference = 'Stop' with no trap and no finally, so an unwrapped
+# read here was a third bare exit - and the worst of the three, because by now
+# step 4 has renamed the live package aside ($script:backupDone is set), step 5
+# has renamed the NEW one into place and step 6 has started it: this run is
+# holding the crash guard down over a live slot that is sitting on a package
+# nobody has accepted yet. A bare death at that moment printed no ABORT stage=,
+# no rollback recipe and no word about the guard. Each requirement below is
+# argued here because #24 and #32 were both reopened by someone "simplifying"
+# a wrapped read back into a bare one:
+#
+#  (1) NOT a bare exit, and NOT swallowed either. The give-up aborts with its
+#      own stage, 'boot-poll-threw', in the disable-threw-* idiom. It is
+#      deliberately NOT folded into the existing 'started-check' stage below:
+#      that one means "the poll ANSWERED and saw no process", and reporting
+#      that when the poll could not answer is the same lie #32 refused to tell
+#      about the disable.
+#  (2) THE GUARD IS ACCOUNTED, NOT ASSUMED - and it is NOT raised here. The
+#      ownership flag $script:watchdogDisabled is already $true (the disable
+#      step set it), and this handler writes the scheduled task not at all:
+#      Restore-WatchdogTask is the one owner of that switch, so a second
+#      "helpful" Enable-ScheduledTask here is #32's bug wearing a new coat.
+#      Because $script:backupDone is true, what Stop-AfterFailure actually
+#      prints on this path is its post-backup branch:
+#        ABORT stage=boot-poll-threw moved=yes watchdog=left-disabled-by-design
+#        FAIL stage=boot-poll-threw   ... then the ROLLBACK recipe, then throw.
+#      It does NOT print re-enabled and does NOT call the restore, on purpose:
+#      ROLLBACK-HOWTO step 1 tells the operator to keep the guard down until
+#      the kept package is proven healthy, because re-arming a watchdog over an
+#      unverified package "protects" precisely the thing under suspicion, and a
+#      wrong automatic un-rename under a file lock turns one half-swap into two.
+#      So this fix cannot honestly raise the guard from here; what it fixes is
+#      that the guard is left down LOUDLY, with a recipe naming the backup,
+#      instead of silently.
+#  (3) ONE RAISE ASKS AGAIN, BOUNDED BY THE WINDOW THIS LOOP ALREADY OWNS. A
+#      transient CIM hiccup must not doom a swap, so the catch remembers the
+#      error and the loop re-reads on its next pass. The bound is not new
+#      machinery: it is the existing $bootDeadline, and the retry cadence is
+#      this loop's own Start-Sleep of 2 seconds - so the worst case is
+#      floor($StartTimeoutSeconds / 2) reads, 45 at the 90 s default, which is
+#      precisely the rate the loop already put on CIM when CIM was answering.
+#      That is why it can neither run past the window silently nor add load;
+#      there is no new timer, no backoff and no unbounded retry. Every raise
+#      prints its own READFAIL line (the token #24 introduced; stage= says which
+#      read failed) so 90 seconds are never spent with nothing on the screen.
+#      The give-up carries the LAST real message, and a read that ANSWERS
+#      clears it: the abort below fires only if the window's final attempt still
+#      could not look. If anything answered, the verdict stays with the existing
+#      path below, which asks /health before declaring failure (the 2026-10-03
+#      lesson) - this branch never steals it.
+#  (4) On the give-up the abort reads /health ONCE and reports it as a FIELD
+#      only. Get-HealthOnce never throws, and the verdict does not depend on it.
+#      Reason: this abort prints a ROLLBACK recipe, and a recipe is how an
+#      operator ends up tearing down a backend that was healthy all along.
+#      "The process list cannot answer" is a statement about the process list,
+#      so the line states both facts and lets the human weigh them.
+#      backend/tests/test_swap_package_boot_poll_threw_handler.py is the lock
+#      that bites when the try comes off, and it runs these same lines against a
+#      Get-LiveProcess that really throws - not a text match alone.
+$bootPollError = ''
+$bootPollFails = 0
 while ((Get-Date) -lt $bootDeadline) {
     Start-Sleep -Seconds 2
-    $running = Get-LiveProcess
+    try {
+        $running = Get-LiveProcess
+        # Cleared only on a read that ANSWERED - see (3): this is what makes
+        # "the poll could not look" and "the poll saw nothing" two different
+        # verdicts instead of one guess.
+        $bootPollError = ''
+    } catch {
+        # $_ is turned into a named variable in the first statement, before
+        # anything else can take it over, so the line below prints the real
+        # failure and not somebody else's.
+        $bootPollFails = $bootPollFails + 1
+        $bootPollError = $_.Exception.Message
+        Write-Output ('READFAIL stage=boot-poll fails=' + $bootPollFails + ' error=' + $bootPollError)
+        continue
+    }
     if ($running.Count -ge 1) {
         $livePid = (@($running)[0]).ProcessId
         break
     }
+}
+if ($livePid -eq 0 -and $bootPollError) {
+    # Report-only witness (see (4) above): never a verdict, never a throw of its
+    # own - Get-HealthOnce swallows its own failures by design.
+    $pollWitness = Get-HealthOnce
+    $pollWhy = 'the boot poll could not read the process list on its final attempt (' + $bootPollFails + ' failed reads in ' + $StartTimeoutSeconds + ' seconds), last error=' + $bootPollError
+    $pollWhy = $pollWhy + ' - this is "cannot look", NOT "no process found" (that verdict is the started-check stage, which asks /health first). The live slot already holds the package that was swapped in and this run is holding the crash guard down, so nothing here is undone automatically: follow the ROLLBACK recipe and re-enable the task only once the package you decide to keep is proven healthy. health=' + $(if ($pollWitness -and $pollWitness.build) { [string] $pollWitness.build } else { 'silent' })
+    Stop-AfterFailure 'boot-poll-threw' $pollWhy
 }
 if ($livePid -eq 0) {
     # 2026-10-03 22:44 (v0.29.2 swap): this loop ran its full window without ever
