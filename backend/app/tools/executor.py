@@ -103,14 +103,26 @@ class ToolOutcome(NamedTuple):
       为什么是一包 dict 而不是三个字段：状态本身是一张自由 dict（同 A1 那份
       `Task.resume_cursor` 的理由——工具每多带一格断点信息，不该回来改本协议的骨架）。
 
-    两个新格都带默认值，且加在末尾：既有构造点（本文件与 `streaming.py:549/:554`）
-    全是关键字写法，前五格的位置与含义一字未动。
+    ⭐ 工单 #37 `tool_ran`：这一次调用**有没有真的进到工具函数体**（`func(**kwargs)` 到底
+    被调用没有）。它是"这个答案递没递进工具"这件事的**世界事实**，由 `_dispatch` 里那一处
+    唯一赋值点给出——不是从 `ok`/`success` 猜的（被审批闸门、频控、缺身份挡下的续跑，
+    `ok` 同样是 False，却压根没进函数体）。编排器据此决定"要不要把这枚断点标成已消费"：
+    只有真的把答案交给了工具（副作用可能已落地）才许标，被闸门挡下的那种必须留着能再递。
+    默认 False = 没走到函数体。既有读者（`streaming.py`、ReAct/TaskAgent 的老写法）不读这一格，
+    与它们无关。
+
+    两个新格都带默认值：`tool_ran` 加在 `suspension` 之前而不是最末尾，是因为 `suspended`
+    与 `suspension` 必须保持是 `_fields` 的最后两格（那条形状锁见
+    `tests/test_v0350_a3_suspendable_tool_protocol.py`）；前五格（text/ok/artifacts/
+    truncated/elapsed_ms）的位置与含义一字未动，既有构造点（本文件与 `streaming.py:549/:554`）
+    全是关键字写法。
     """
     text: str
     ok: bool
     artifacts: Optional[dict]
     truncated: bool
     elapsed_ms: int
+    tool_ran: bool = False
     suspended: bool = False
     suspension: Optional[dict] = None
 
@@ -179,9 +191,13 @@ def execute_tool_detailed(tool_name: str, arguments: dict,
             "resume_state": getattr(response, "resume_state", None),
             "can_resume": _can_resume(tool_name, getattr(response, "resume_state", None)),
         }
+    # 工单 #37：这个答案有没有真的递进工具——读 `_dispatch` 在唯一赋值点贴上的那格，
+    # 不是从 ok/success 反推（见 ToolOutcome.tool_ran 的文档）。默认 False = 没进函数体。
+    tool_ran = bool(getattr(response, "tool_ran", False))
     return ToolOutcome(text=clipped, ok=bool(response.success),
                        artifacts=getattr(response, "artifacts", None),
                        truncated=truncated, elapsed_ms=elapsed_ms,
+                       tool_ran=tool_ran,
                        suspended=suspended, suspension=suspension)
 
 
@@ -280,16 +296,49 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
     **未获审批**、频控闸门、正常执行、**挂起等用户**、执行炸了——每个出口都带正确的
     success 位与（搜索这类工具的）artifacts，好让上层既能原样拿到给模型的文本，
     又能拿到结构化元数据去发过程帧。
+
+    ⭐ 工单 #37：每一个出口都另外贴一格 `tool_ran`——**`func(**kwargs)` 到底被调用没有**。
+    这是"答案递没递进工具"的唯一真相来源，写在派发处而不是让上层从 `ok` 猜：`_settle_suspension`
+    与兜底 `except Exception` 把"被审批闸门/频控挡下（压根没跑）"与"跑了一半才坏（副作用可能
+    已落地）"都折成同一句 `ok=False` 的话，从外面分不开。判"要不要把断点标成已消费"必须由这
+    一处的世界事实说了算——见 `ToolOutcome.tool_ran` 与 `orchestrator` 里那一处消费点。
     """
+    def _ret(resp: ToolResponse, *, ran: bool) -> ToolResponse:
+        resp.tool_ran = ran          # 唯一赋值点：ran=True 只在真调用 func 的那一段给
+        return resp
+
     if tool_name not in tools_registry:
-        return ToolResponse(False, error=f"未知工具: {tool_name}", hint="使用 help 工具查看可用工具列表")
+        return _ret(ToolResponse(False, error=f"未知工具: {tool_name}",
+                                 hint="使用 help 工具查看可用工具列表"), ran=False)
     info = tools_registry[tool_name]
     func = info["function"]
     # 模型偶尔会给出数组/字符串当参数。原写法 dict(arguments) 在这一支会直接炸
     # 出 TypeError（还在 try 之外）；这里按同样的口径给出结构化的"参数错误"。
     if not isinstance(arguments, dict):
-        return ToolResponse(False, error="参数错误: arguments 必须是对象",
-                            hint="请检查工具参数是否正确")
+        return _ret(ToolResponse(False, error="参数错误: arguments 必须是对象",
+                                 hint="请检查工具参数是否正确"), ran=False)
+    # ⭐⭐ 工单 #37 选项 b：既声明可挂起（suspends）又声明需审批（requires_approval）的工具，
+    # 现在**不被支持**，无论有没有票据，都在派发处响亮拒绝。理由（写死在这里，别让下一个
+    # 接手的人再推一遍）：审批票据接不过一次挂起——
+    #   ① 任务面（TaskAgent/Orchestrator）从不带 granted_ticket（见 task_agent.py:162 那段），
+    #      所以第一次调用就会被下面那道审批闸门挡在函数体之前，工具压根挂不起来，永远拿不到
+    #      断点；② 就算退一步、由带票据的 confirm 那条路让它挂起，续跑时那张票要么已被消费
+    #      （一次性，A2 判据钉着）、要么明文 id 不落盘（A2 只存 sha256 摘要，服务端事后取不回
+    #      原文），带不进下一次 `_dispatch`，于是必然停在"被拒 → 又被烧"。两个下场都指向同一
+    #      句实话：这一组合今天没法工作。宁可在这里明说一句"不支持、请二选一"，也不让 A4 把一
+    #      个"批准的是 A、执行的可能是 B、断点还接不回去"的死局悄悄上线。真要解锁这一组合，
+    #      得先让审批票据能跨请求跟着断点走（动 approval.py 与游标形状），那是独立的一票。
+    # 判据放在执行器而不是调用侧（与下面 v0.31 那道闸门同一条纪律）。
+    if info.get("suspends") and info.get("requires_approval"):
+        return _ret(ToolResponse(
+            False,
+            error=(f"{tool_name} 同时声明了可挂起（suspends）与需审批（requires_approval），"
+                   "工单 #37 起这一组合不被支持：审批票据接不过一次挂起，"
+                   "结果要么是先被审批闸门挡下（工具压根挂不起来），要么是挂起后续跑时票据"
+                   "已消费或取不回而必然接不回去。请二选一——要么去掉 suspends（一次批准一次"
+                   "执行），要么去掉 requires_approval（改成能带断点续跑的工具），要么先把审批"
+                   "票据做成能跨请求随断点走（那是另一票）。"),
+            hint="这条工具既挂起又需审批，暂不支持"), ran=False)
     # v0.31 审批闸门，挂在这里而不是调用侧。
     #
     # 为什么必须在执行器：审批是"这件事有副作用、执行前要用户点头"，那就必须由
@@ -302,11 +351,11 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
     if info.get("requires_approval"):
         from app.core import approval
         if not approval.is_granted(granted_ticket, tool_name, user_id):
-            return ToolResponse(
+            return _ret(ToolResponse(
                 False,
                 error=(f"{tool_name} 需要用户确认后才能执行，当前这次调用没有获得批准。"
                        "请改为直接回答用户，或提示用户在确认卡片上点允许。"),
-                hint="这条工具需要审批")
+                hint="这条工具需要审批"), ran=False)
     # 只放行 schema 里声明过的参数。函数签名上的形参（比如 execute_code 的
     # max_retries）模型一律不许给——否则传个 max_retries=100 就能串行拉起
     # 上百个容器。schema 是模型能碰的唯一契约。
@@ -317,39 +366,49 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
         print(f"[Tools] {tool_name} 收到 schema 外的参数 {dropped}，已丢弃")
     if info.get("needs_user"):
         if not (user_id or "").strip():
-            return ToolResponse(False, error="缺少身份：这条工具只查得到某个具体人的数据",
-                                hint="请从已登录的会话里调用")
+            return _ret(ToolResponse(False, error="缺少身份：这条工具只查得到某个具体人的数据",
+                                     hint="请从已登录的会话里调用"), ran=False)
         kwargs["user_id"] = user_id
     # ⭐ v0.35 A3：续跑（"从断点接上"）的判据放在频控**之前**。
     # 理由与下面那句"被闸门挡下的调用不该已经拉起过容器"同源：一次形状不对的续跑
     # 根本没资格消耗这个人的频控额度，更不该已经把容器拉起来了。
-    # 审批闸门（上面那道）对续跑同样成立、且**不放宽**：需要审批的工具续跑时仍然要
-    # 一张 granted_ticket。这一格在任务面（TaskAgent/Orchestrator）今天就没有票据，
-    # 所以"可挂起 + 需审批"的工具目前接不回去，是已知边界，不是这里的漏洞——
-    # 要补得先让审批票据能跨请求跟着断点走，那要动 approval.py（本票不许动）。
+    # ⭐ 工单 #37 之后这一段的审批那一半：上面那道"既挂起又需审批"的派发拒绝已经替
+    # 它把最坏的情形（A4 那个必然被拒又被烧的组合）关掉了；纯需审批（不挂起）的工具
+    # 仍要在续跑时重新过一遍 granted_ticket（不放宽），而**这些被闸门挡在函数体之前的
+    # 出口现在都回 `tool_ran=False`**——编排器因此不再把"被拒"误记成"已消费"，同一枚
+    # 答案在闸门放行后仍接得回去（见 orchestrator 消费点那一份表格）。
     if resume is not None:
         refusal = _resume_refusal(tool_name, info, resume)
         if refusal:
-            return ToolResponse(False, error=refusal,
-                                hint="按上面那句的理由办，不要重跑已跑过的步骤")
+            return _ret(ToolResponse(False, error=refusal,
+                                     hint="按上面那句的理由办，不要重跑已跑过的步骤"), ran=False)
         kwargs["resume"] = {"state": resume["state"], "answer": resume["answer"]}
     # 频控放在真正执行之前、参数清洗之后：被闸门挡下的调用不该已经拉起过容器。
     if blocked := _freq_gate(tool_name, user_id):
-        return ToolResponse(False, error=blocked,
-                            hint="等待后用一次调用完成剩余步骤")
+        return _ret(ToolResponse(False, error=blocked,
+                                 hint="等待后用一次调用完成剩余步骤"), ran=False)
     try:
+        # ⭐ 工单 #37：下面这一段是**唯一**给 `tool_ran=True` 的地方——一旦进到 `func`，
+        # 答案就已经交到工具手里了（无论是正常返回、还是跑了一半才抛，副作用都可能已经落地）。
         result = func(**kwargs)
         # 如果函数本身返回 ToolResponse，则保持（连同它的 artifacts），否则包装
         if isinstance(result, ToolResponse):
-            return _settle_suspension(tool_name, result)
-        return ToolResponse(True, data=result)
+            return _ret(_settle_suspension(tool_name, result), ran=True)
+        return _ret(ToolResponse(True, data=result), ran=True)
     except ToolSuspended as s:
         # ⭐ 第三态的入口：必须排在 `except Exception` **之前**。
         # 顺序就是这一版的生死线——Exception 在前，挂起会被兜底那句折成
         # `✗ 错误: <prompt>`，于是"问用户要验证码"在护栏里记成一次失败，
         # 两次就把这个工具在本轮熔断（负向锁见 tests/test_v0350_a3_*.py）。
-        return _settle_suspension(tool_name, ToolResponse.suspend(s.prompt, s.state, s.hint))
+        # 走到这里 = 函数体已经执行（它自己 raise 出来的）→ ran=True。
+        return _ret(_settle_suspension(
+            tool_name, ToolResponse.suspend(s.prompt, s.state, s.hint)), ran=True)
     except TypeError as e:
-        return ToolResponse(False, error=f"参数错误: {e}", hint="请检查工具参数是否正确")
+        # `func(**kwargs)` 已经**被调用**（Python 已把控制权交给它；TypeError 既可能是
+        # 形参不匹配也可能是函数体内部抛的），从外面分不开 → 保守侧记 ran=True，
+        # 与"跑了一半才坏"同一处置：宁可让人多点一次"重来"，也不能替他把可能已落地的
+        # 副作用再落一遍（工单 #33 那道门守的就是这个）。
+        return _ret(ToolResponse(False, error=f"参数错误: {e}",
+                                 hint="请检查工具参数是否正确"), ran=True)
     except Exception as e:
-        return ToolResponse(False, error=str(e), hint="重试或使用其他方法")
+        return _ret(ToolResponse(False, error=str(e), hint="重试或使用其他方法"), ran=True)

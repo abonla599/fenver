@@ -362,13 +362,29 @@ class Orchestrator:
                 # （streaming.py:544 那句）。打断它的是"替用户编一个答案"，不是
                 # "如实说这一步没成"。
                 #
-                # ⭐ 工单 #33 第三句：这一包断点**已经递出去了**，就地记一笔"已消费"。
-                # 为什么判据是"这一句返回了"而不是"这一句成功了"：`_dispatch` 把工具
-                # 函数体里的异常兜成了 `ok=False` 的一句话（`except Exception`），所以
-                # 从外面读不出"没跑成"与"跑了一半才坏"的差别——而后者恰恰是"副作用已经
-                # 落过一次"的那一种。宁可下一趟被一句实话拦住（要重新开始），也不能拿
-                # 同一句答案把订单再提交一次。代价写在 `_consume_breakpoint` 那份注释里。
-                self._consume_breakpoint(task)
+                # ⭐ 工单 #33 第三句 + 工单 #37 收口：这一包断点**真的递进工具了**才就地
+                # 记一笔"已消费"。判据不是"这一句返回了"（#33 旧写法，会把被闸门挡下的续跑
+                # 也一起烧掉），也不是"这一句成功了"，而是执行器给出的那格来自世界的
+                # `outcome.tool_ran`——`func(**kwargs)` 到底被调用没有。被闸门挡下 = 答案从没
+                # 进工具 = 必须还能再递 = 不标 consumed。
+                #
+                # 从"把包递给 execute_tool_detailed"到"工具真的跑了"之间的下场，与各自的
+                # consumed 取值（完整表见 `_consume_breakpoint` 的文档）：
+                #   审批拒 / 审批待确认   tool_ran=False → 不消费（工单 #37：答案没进工具）
+                #   频控挡下（case5）     tool_ran=False → 不消费
+                #   缺身份 needs_user     tool_ran=False → 不消费
+                #   断点形状不对          tool_ran=False → 不消费
+                #   进 execute 之前就抛   走 except→failed，压根到不了这一行 → 不消费
+                #   工具正常返回          tool_ran=True  → 消费（答案已交付，副作用可能已落地）
+                #   工具跑一半才抛        tool_ran=True  → 消费（分不开"没跑成"与"跑了一半"，
+                #                                          保守侧，守 #33 不重放副作用）
+                #   工具又挂起一次        outcome.suspended，上面已 return 走 _park_suspension
+                #                                          （写一份**新**游标，旧的 consumed 与否
+                #                                          都已不代表此刻）→ 不在此处消费
+                # 不变式：**工具没收到答案，答案就必须还能再递进去**（#37）；而"真的收到过
+                # 答案"这一枚必须只许被接一次（#33）。两条都靠 `tool_ran` 这同一个世界事实区分。
+                if outcome.tool_ran:
+                    self._consume_breakpoint(task)
                 resumed_tool = {"tool_name": suspension["tool_name"],
                                 "result": outcome.text}
 
@@ -646,7 +662,7 @@ class Orchestrator:
         return body
 
     def _consume_breakpoint(self, task: Task) -> None:
-        """把这一枚工具断点标成**已经接回去过**（工单 #33 第三句）。
+        """把这一枚工具断点标成**已经接回去过**（工单 #33 第三句；工单 #37 收窄了调用条件）。
 
         为什么必须有这一格：`_trusted_failed_breakpoint` 判的是"游标可不可信"，而一枚
         已经被递过答案的断点在形状上**依然**完全可信（同 kind、同 tool_name、同
@@ -654,17 +670,35 @@ class Orchestrator:
         工具——订单再提交一次、验证码再发一次。那是比重复付费更难发现的一类钱：付了两遍
         不说，外部世界还多了第二次副作用。
 
+        ⭐ 工单 #37——**调用条件**收窄了：本方法只在续跑**真的把答案递进了工具**
+        （`outcome.tool_ran` 为真，即 `func(**kwargs)` 被调用过）时，才由 `run` 里那一处
+        调用它。改动前它无条件落笔，于是"被闸门拒掉的续跑"（频控/审批/缺身份/断点形状不对
+        ——工具一次都没被执行）也被标成 consumed，审查员量到的 case5 就是这么来的：用户答了、
+        闸门说不、断点当场烧了，接下来只能重新开始。从"递给 execute_tool_detailed"到"工具真的
+        跑了"之间的六种下场，各自的 consumed 取值：
+
+            审批拒 / 审批待确认   → 不消费   tool_ran=False，答案从没进工具
+            频控挡下（case5）     → 不消费   tool_ran=False
+            缺身份 needs_user     → 不消费   tool_ran=False
+            断点形状不对          → 不消费   tool_ran=False（`_resume_refusal` 先于函数体）
+            进 execute 之前就抛   → 不消费   异常直接走 except→failed，根本到不了这一处
+            工具正常返回          → 消费     tool_ran=True，答案已交付、副作用可能已落地
+            工具跑一半才抛        → 消费     tool_ran=True：`_settle_suspension`/兜底 except 把
+                                             "没跑成"与"跑了一半才坏"折成同一句 ok=False，外面
+                                             分不开；分不清时宁可让人多点一次"重来"，也不能替
+                                             他把可能已落地的副作用再落一遍（#33 那道门）
+            工具又挂起一次        → 不在此处消费：`run` 里 `outcome.suspended` 一支已先 return
+                                             走 `_park_suspension`，写的是一份**新**游标，旧的那枚
+                                             consumed 与否都已不代表此刻
+
+        不变式两面同一条线：**工具没收到答案 → 答案必须还能再递进去**（#37，上面那四行 False）；
+        **工具真的收到过答案 → 这一枚只许被接一次**（#33，上面那两行 True）。两者都由同一个来自
+        世界的信号 `tool_ran` 区分，不从 `ok`/`success` 猜。
+
         只在游标**还是这一枚**断点时落这一笔（`kind` 认得出、且没标过）：如果那一趟已经
         停在了新的断点上（`_park_suspension` 写过一份新游标），把新的标成"已消费"等于
         把用户刚要回答的那个问题判死。`consumed` 这个键住在那张**自由的** dict 里（A1 留
         它的理由就是"要往里加键不该每加一个就回来改 to_dict"），本票一个字不动存储骨架。
-
-        ⚠️ 要说清的代价：被审批闸门或频控**挡下**的那一次续跑（工具压根没被调用）在这里
-        与"跑了一半才坏"读起来是同一个形状——`_dispatch` 把两种都折成一句 `ok=False`
-        的话，外面分不开。所以那一枚本来还能救的断点也会被标掉，用户拿到的是"要重新开始"
-        而不是"再答一次"。选这一侧是有意的：分不清的时候，宁可让人多点一次"重来"，也不能
-        替他把已经落地的副作用再落一遍。今天现网没有任何一条工具声明 `suspends`（A4 才是
-        第一个），所以这一格在换包之前都不会被走到。
         """
         with _store_lock:
             cursor = getattr(task, "resume_cursor", None)
