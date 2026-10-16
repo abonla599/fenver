@@ -86,6 +86,14 @@ class IllegalTaskTransition(ValueError):
 #   failed       → running                                      # 断点重跑，既有语义
 #   cancelled    →（无出口，终态）
 #
+# ⭐ 工单 #33 在这张表上**一条边都没动**，但有一句要说清，因为下一个读表的人一定会问：
+# `failed → running` 这条既有边今天由谁走。答案是"只有拿着**可信工具断点**的那一趟续跑"
+# （`orchestrator._trusted_failed_breakpoint` 判完才走，判据见那份方法）。表答的是
+# "能不能跳"，从来不该被读成"可以从第 1 步重烧"——改动前 FAILED 分支正是把这两问混成了
+# 一问：它一眼不看游标就进通用续跑，于是已经付过钱的第 1~3 步再花一遍（查店、加购、
+# 再发一次验证码）。现在没有可信断点的 `failed` 记录**一句实话拒掉**并要求一次刻意的
+# 重新开始，而不是悄悄再烧一遍。表里的边留着，是因为那条断点续跑真的需要它。
+#
 # 三处刻意的决定：
 # - `pending → waiting_user` **不走**。任务一步都没跑，没有"停在哪儿"可记，放进去只会
 #   造出一个没有游标的等待态，而游标才是这一版要解决的那个缺口。
@@ -104,6 +112,26 @@ ALLOWED_TRANSITIONS = {
     TaskStatus.FAILED: frozenset({TaskStatus.RUNNING}),
     TaskStatus.CANCELLED: frozenset(),
 }
+
+# ⭐⭐ 工单 #33：一条任务**为什么**定论了 —— 机器可读的判别器。
+#
+# 为什么要有它（不是洁癖）：v0.35 A4 那张卡片要分清三种下场——「失败了」「停在断点上
+# 等人、结果挂太久被作废」「用户自己取消的」。这三件事在盘上原本只有一句中文能表达：
+# `error` 里的措辞。审查员量到的现状就是 `{"status":"cancelled","reason":null,
+# "accepted":null}` —— 状态一格分不清是哪种取消，而"读一句中文再猜"正是本仓反复在拆的
+# 形状（客户端要为每种措辞写一份 matcher，改一个字就漏一种）。
+#
+# 三条判据：
+# - **只有定论态才有值**：`completed` 由 `status` 自己说清楚（没有"为什么"这一问），
+#   pending/running/waiting_user 更不是。所以 `end_reason` 只在 `failed` / `cancelled`
+#   上非空，离开那一态时由 `set_status` 一起清掉（见下面那一段，与 `can_resume`
+#   同一个位置、同一个理由：一条正在跑的任务不许还挂着上一轮的结论）。
+# - **写在 `set_status` 里、跟着那一跳同批落盘**，不是调用方"记得就填"的第二份字段：
+#   挂在调用方等于赌所有人都不忘（与 approval.py 的 is_granted 同一个教训）。
+# - **读侧认不出的一律当没有**（`from_dict` 里那一格）：一个猜出来的原因比没有更坑人。
+END_REASONS = frozenset({"failed", "cancelled_by_timeout", "cancelled_by_user"})
+_TERMINAL_END_REASON = {TaskStatus.FAILED: "failed",
+                        TaskStatus.CANCELLED: "cancelled_by_user"}
 
 
 def _as_status(value) -> TaskStatus:
@@ -169,6 +197,10 @@ class Task:
         self.resume_cursor = None                       # 断点位置 + 已收集参数
         self.can_resume = False                         # 布尔字段，不是状态
         self.waiting_since = None                       # 进入等待的时刻
+        # ⭐ 工单 #33：这条任务**为什么**定论了（failed / cancelled_by_timeout /
+        # cancelled_by_user）。None = 还没定论，或那一态本身答得出原因（completed）。
+        # 由 `set_status` 跟着那一跳同批写，见 `END_REASONS` 那一段。
+        self.end_reason = None
 
     def mark_cancelled(self) -> None:                   # ⭐ 新增方法
         """标记任务为已取消。走状态机（v0.35 A1）：终态上的"再取消一次"现在会抛。
@@ -214,6 +246,20 @@ class Task:
         self.can_resume = target is TaskStatus.WAITING_USER
         if not self.can_resume:
             self.waiting_since = None
+        # ⭐ 工单 #33：定论原因由**这一跳**决定，不由调用方记得填决定（与上面那两格同一个
+        # 位置、同一个理由）。三种情形：
+        # - 进 failed / cancelled → 取调用方给的那一个（超时作废传 cancelled_by_timeout），
+        #   没给就落这一态默认的那句（取消 = 人按的钮）。
+        # - 离开终态（failed → running 的可信断点续跑）→ **清掉**。一条正在跑的任务还带着
+        #   "failed"，A4 的卡片就会把"跑起来了"念成"又失败了"。
+        # - 进 completed → 也是清掉：那一态没有"为什么结束"可问。
+        self.end_reason = None
+        if target in (TaskStatus.FAILED, TaskStatus.CANCELLED):
+            given = fields.get("end_reason")
+            # 只收认得出的那一个：写进内存的值必须读得回来。否则下一次重启 `from_dict`
+            # 把它当坏键退回 None —— 内存说有、盘上没有，正是这份文件反复在钉的半个形状。
+            self.end_reason = (given if isinstance(given, str) and given in END_REASONS
+                               else _TERMINAL_END_REASON[target])
         if persist:
             save(self)
         return target
@@ -237,7 +283,7 @@ class Task:
                                waiting_since=_now().isoformat())
 
     def to_dict(self) -> dict:
-        return {
+        record = {
             "task_id": self.task_id, "user_id": self.user_id, "goal": self.goal,
             "provider_id": self.provider_id, "legacy": bool(self.legacy),
             "subtasks": list(self.subtasks), "current_subtask": self.current_subtask,
@@ -256,6 +302,15 @@ class Task:
             "can_resume": bool(self.can_resume),
             "waiting_since": self.waiting_since,
         }
+        # ⭐ 工单 #33 的判别器：**只在真的定论过的时候才多这一格**。
+        # 为什么不是无条件写：A1 那条迁移锁（`test_v0350_a1_task_state.py:322`）钉的是
+        # "一条老记录读回来再写盘，键集与 A1 交付的那一份逐字相同"——未定论的记录多出一格
+        # `end_reason: null` 就是把那句判据改掉，而那条锁守的正是"下一次落盘不许丢历史数据"。
+        # 缺键 = 没有原因，本来就是这条记录的真话（`from_dict` 那侧读不到就回 None，
+        # 与 resume_cursor/waiting_since 同一口径）。
+        if self.end_reason is not None:
+            record["end_reason"] = self.end_reason
+        return record
 
     @staticmethod
     def from_dict(data: dict) -> "Task":
@@ -282,6 +337,18 @@ class Task:
             cursor = None
         task.resume_cursor = cursor
         task.waiting_since = data.get("waiting_since", None)
+        # ⭐ 工单 #33：定论原因同样按"缺键 = 没有原因、坏键 = 不认"处理，**绝不猜**。
+        # 认不出的一格只让这一格退回 None，不许把整条记录带走（上面那三件同一个纪律）。
+        end_reason = data.get("end_reason", None)
+        if end_reason is not None and (
+                not isinstance(end_reason, str) or end_reason not in END_REASONS):
+            # `isinstance` 那一格不是摆设：盘上被人写成一张 dict 时，`dict in frozenset`
+            # 会抛 TypeError，而 `from_dict` 抛出去 = `restore()` 那一句"跳过一条读不懂的
+            # 任务记录"= **整条记录**被丢掉。一格的坏值只许带走它自己（上面三件的同一口径）。
+            print(f"⚠️ 任务 {task.task_id} 的 end_reason 认不出（{end_reason!r}），"
+                  f"按没有原因跑（合法值：{sorted(END_REASONS)}）")
+            end_reason = None
+        task.end_reason = end_reason
         # 不变式在恢复这一侧同样成立：waiting_user 就可续（哪怕盘上那一格被手改成
         # false），反过来非 waiting_user 的 true 一律不认。
         task.can_resume = task.status is TaskStatus.WAITING_USER
@@ -525,13 +592,18 @@ def expire_parked_task(task: "Task", now: datetime = None, timeout_seconds=None,
         # `orchestrator._record_failure` 里"跳一半失败要把 error 吐回去"同一条纪律：
         # 先抄这几格，写不回去就原样还回去。
         snapshot = (task.status, task.resume_cursor, task.cancelled, task.error,
-                    task.waiting_since, task.can_resume)
+                    task.waiting_since, task.can_resume, task.end_reason)
         try:
+            # end_reason 随这一跳同批落盘（工单 #33 的判别器）：超时作废与用户自己取消
+            # 在 `status` 上是同一个 cancelled，以前只有上面那句中文分得开——A4 的卡片
+            # 要的正是"不用读中文"的那一格。默认值是 cancelled_by_user，所以这里必须
+            # 显式给它，否则超时会被说成"用户取消的"。
             task.set_status(TaskStatus.CANCELLED,
-                            resume_cursor=None, cancelled=True, error=text)
+                            resume_cursor=None, cancelled=True, error=text,
+                            end_reason="cancelled_by_timeout")
         except Exception as e:
             (task.status, task.resume_cursor, task.cancelled, task.error,
-             task.waiting_since, task.can_resume) = snapshot
+             task.waiting_since, task.can_resume, task.end_reason) = snapshot
             print(f"⚠️ 任务 {task.task_id} 的停点作废那一跳落不了盘"
                   f"（{type(e).__name__}: {e}）：内存一格未还，它照旧挂在断点上等人")
             return False

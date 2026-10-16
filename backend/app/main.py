@@ -1769,6 +1769,11 @@ async def get_task_status(task_id: str, principal: Principal = CurrentPrincipal)
         "can_resume": bool(getattr(task, "can_resume", False)),
         "waiting_since": getattr(task, "waiting_since", None),
         "resume_cursor": getattr(task, "resume_cursor", None),
+        # ⭐ 工单 #33（A4 卡片要的判别器）：一条 ended 的任务**为什么**结束 ——
+        # failed / cancelled_by_timeout / cancelled_by_user（None = 还没定论，或那一态
+        # 本身答得出原因）。以前这件事只有 `error` 里一句中文能说，客户端要为每种措辞
+        # 写一份 matcher。纯读字段：这一格不新增任何一次落盘、也不依赖墙上时钟。
+        "end_reason": getattr(task, "end_reason", None),
     }
     # ⭐ v0.35 A5：还要不要人回来，得答得出三个数——挂了多久 / 窗口多长 / 哪一刻作废
     # （`waiting_expires_at` 为 None = 运维没开作废窗口，永不做废，这是默认形态）。
