@@ -41,6 +41,17 @@ DEFAULTS = {
     # 移动端定的，而一个跑几分钟的多步任务里第二次确认一定落在 60 秒之外；配的是窗口，
     # 不是判据——到期一律作废，绝不因为"任务还活着"就续。0 是合法值：等于每次都要现批。
     "approval_ticket_ttl_seconds": 60.0,
+    # v0.35 A5：一条挂在 `waiting_user` 断点上的任务最多可以挂多久（秒）。单一真相就是
+    # 这里，读数走 task_waiting_user_timeout_seconds()（env TASK_WAITING_USER_TIMEOUT_SECONDS 优先）。
+    # ⭐ 默认 0 = **永不作废**，而这不是"还没想好"，是这一格的性质：正数打开的那道动作是
+    # **销毁用户手里的断点**（作废之后答案递进去也接不回去），所以默认必须停在"不销毁"
+    # 那一头，与提案 §四 v0.35「超时语义：用户不响应**不是失败**，是挂起保活」同一方向：
+    # 默认形态下挂 5 分钟、挂 5 天都还停在同一个断点上，带答案回来就是第 4 步（判据 1）。
+    # 与上面两格不同的地方要说清：那两格的正数是"窗口更长＝更宽"，这一格的正数是
+    # "到点作废＝更狠"，所以负数与读不懂的值一律按 0 收（关），而不是按某个默认窗口收。
+    # 运维要挡"停点无限堆积"就把这一格设成正数（例：86400 = 一天）：超时的那个停点会被
+    # 翻成 cancelled 并**作废游标**（判据与为什么不是 failed 见 task_store.expire_parked_task）。
+    "task_waiting_user_timeout_seconds": 0.0,
     # v0.25 R4b T5.8：积分的基准价——「1 积分 = 用基准价跑 1000 个混合 token」的锚。
     # 单一真相就是这一份：展示倍率 = 模型混合单价 ÷ 这里的混合价，结算换算也除这里的
     # 混合价。刻意不用"默认模型 = 1.0x"那种定义——锚跟着 ★ 漂移，管理员点一下按钮
@@ -219,6 +230,34 @@ def approval_ticket_ttl_seconds() -> float:
         return max(0.0, float(value))
     except (TypeError, ValueError):
         return float(DEFAULTS["approval_ticket_ttl_seconds"])
+
+
+def task_waiting_user_timeout_seconds() -> float:
+    """一条 `waiting_user` 停点的作废窗口（秒）——全场唯一读数口径，**默认 0 = 永不作废**。
+
+    读数优先级与 TTL 那两格同一套路：环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS 显式设了
+    说话（每次现读，改了不必重启），否则 data/config.json 的
+    task_waiting_user_timeout_seconds 说了算。读不懂的值退回 0 并说一句，与"配置文件坏了
+    先备份再按默认跑"同纪律。
+
+    ⭐ 这一格里 **0 是"关"**，而它上面两格的 0 是"不留窗口"——同一个数字两种方向，
+    因为这一格管的是销毁（作废掉用户手里那个还能续的断点），不是宽限：负数与坏值一律
+    收成 0（关），绝不许"读不懂就按一个正数作废"。要开启就设正数（例：86400 = 一天）。
+    判据与落点见 `app/agents/task_store.py` 的 `is_waiting_timed_out` / `expire_parked_task`。
+    """
+    raw = os.getenv("TASK_WAITING_USER_TIMEOUT_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"⚠️ 环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS 不是数（{raw!r}），按下面的口径跑")
+    with _lock:
+        value = _config.get("task_waiting_user_timeout_seconds",
+                            DEFAULTS["task_waiting_user_timeout_seconds"])
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return float(DEFAULTS["task_waiting_user_timeout_seconds"])
 
 
 def credit_benchmark() -> dict:

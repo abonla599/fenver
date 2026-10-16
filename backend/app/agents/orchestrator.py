@@ -5,7 +5,8 @@
 """
 from typing import List, Optional, Dict, Any
 from .task_store import (IllegalTaskTransition, Task, TaskStatus, can_transition,
-                         task_store)
+                         expire_parked_task, is_waiting_timed_out,
+                         sweep_timed_out_parks, waiting_timeout_info, task_store)
 # 认领那一跳要用的锁就是那份存储自己那把（改表与落盘同锁，task_store.py:274）。
 # 跨模块引一个下划线开头的名字在本仓有先例（`app/web/web_router.py:24` 引
 # `auth_router._client_ip`），而这里的理由更硬：判"这条任务在不在等人"与写它的那一跳
@@ -164,6 +165,14 @@ class Orchestrator:
                 print(f"[Orchestrator] 任务 {task_id} 之前失败，从断点重新执行")
                 # 从当前中断的子任务继续
             elif task.status == TaskStatus.WAITING_USER:
+                # ⭐ v0.35 A5：先问"挂得太久了吗"，再问"有没有答案"。顺序是有意的：
+                # 默认窗口 0 = 永不做废，这一格直接往下走（今天的形状一字不变）；运维
+                # 配了正数才可能在这里停下。停下的下场是 cancelled + 游标清空，
+                # **不是** failed——为什么，见 task_store.expire_parked_task 里那一段
+                # （failed 留着 failed → running 那条出边，正是工单 #33 的重复付费门）。
+                expired = self._expire_if_timed_out(task)
+                if expired is not None:
+                    return expired
                 # ⭐ v0.35 A1：等到了人 → 从游标那一步接。这一支单独成句是有原因的：
                 # 掉进下面那句 else 的话，日志里"被重启打断后续跑"与"挂起等输入后
                 # 续跑"混成同一行，而两种恢复的原因完全不同。游标本体**不进日志**
@@ -191,6 +200,11 @@ class Orchestrator:
                             "subtask_index": task.current_subtask,
                             "total_subtasks": len(task.subtasks),
                             "can_resume": True,
+                            # ⭐ v0.35 A5：窗口多长 / 哪一刻作废（`waiting_expires_at`
+                            # 为 None = 运维没开作废窗口，永不做废——默认形态）。这两格是
+                            # **政策**不是"现在"：本端点的响应被 A3 那条"非属主与不存在
+                            # 给出逐字节相同的同一句话"判着，"挂了多久"因此只归 GET 详情。
+                            **waiting_timeout_info(task, elapsed=False),
                             "message": (f"任务停在第 {task.current_subtask + 1} 步等用户"
                                         "给一个答案。带上 user_answer 才会从断点继续；"
                                         "这一次没有答案，所以什么也没跑、也没再花钱。"),
@@ -221,6 +235,11 @@ class Orchestrator:
                         provider_id=provider_id)
             task_store[task.task_id] = task
             print(f"[Orchestrator] 计划生成完毕，共 {len(plan)} 个子任务")
+
+        # --- 1.9 ⭐ v0.35 A5：顺手把"挂太久"的停点收一收（惰性清扫，没有定时器）---
+        # 排在归属判完、认领之前：`skip_task_ids` 要的是**这一趟真的在处理的这一条**
+        # （别人家的 task_id 不该被当成"本趟的那一条"而跳过清扫）。
+        self._sweep_timed_out_parks(task.task_id)
 
         # --- 2. 原子认领这一趟执行（顺带把状态翻成 running）---
         # ⭐ v0.35 A1：走状态机而不是字段赋值。到这里合法的上一状态只有 pending /
@@ -428,7 +447,12 @@ class Orchestrator:
 
     def _answer_not_accepted(self, task: Task, reason: str,
                              detail: Optional[BaseException] = None) -> Dict[str, Any]:
-        """落败者拿到的那一格：一句实话。不跑任何东西、不花一分钱、不改一个字节。
+        """落败者拿到的那一格：一句实话。不跑任何东西、不花一分钱。
+
+        ⭐ v0.35 A5 之后，这一族里前三种落败是"**任务一格未改**"，而 `waiting_timeout`
+        是唯一的例外：它在回话之前已经把状态与游标同批作废了（那一跳的判据与为什么
+        是 cancelled 不是 failed，见 `task_store.expire_parked_task`）。两种都遵守同一句
+        更强的纪律——**没有任何一次付费动作**，而且报出去的状态都是任务此刻真的状态。
 
         要说清"这一格是设计出来的答案，不是漏掉的"：
         - `status` 报的是任务**此刻真实**的状态（多半是 running；断点已被接走时可能是
@@ -438,7 +462,8 @@ class Orchestrator:
           说自己办完了"那种自相矛盾的形状。
         - `reason` 给机器读：`already_in_flight`（本进程已有一趟正在跑它）/
           `breakpoint_taken`（断点已被另一枚答案接走）/ `transition_refused`
-          （进锁之后状态机不收这一跳）。
+          （进锁之后状态机不收这一跳）/ `waiting_timeout`（v0.35 A5：停点挂太久已被
+          作废，游标清空所以这个答案不可能再接回去）。
         - 如果此刻确实还停在一个问题上（游标认得出是工具断点），把 `question` 原样
           带上——落败的人该知道自己要不要重答；重答要等那一趟跑完、看新的问题，
           而不是拿同一个答案再砸一次。
@@ -461,12 +486,25 @@ class Orchestrator:
             "transition_refused": (
                 f"这一趟没能开工：状态机不收 → running 那一跳，任务此刻是 {status}。"
                 "什么都没跑、也没再花钱。"),
+            # ⭐ v0.35 A5：挂太久的那一格。话要说清三件事：超时**不是**失败（作废落的是
+            # cancelled）、断点已经不可挽回（游标清空了，同一个答案再砸也没用）、
+            # 以及已经跑过的那几步一次都没重跑。
+            "waiting_timeout": (
+                f"这条任务停在断点上等人已经超时，停点刚才被作废了（此刻 {status}，"
+                "游标已清空）：再带答案进来也接不回去，要接着办请重新发起一次任务。"
+                "作废不是失败——这一步没有重跑、这一趟也没有叫模型、没花一分钱。"),
         }
         message = messages[reason]
         if detail is not None:
             message += f"（{type(detail).__name__}: {scrub_secrets(str(detail))}）"
+        # 那句"任务一格未改"对前三种落败是真的（判完就return，谁都没动过任务），而
+        # v0.35 A5 的 `waiting_timeout` 是唯一一个**先作废再回话**的：状态与游标在刚才
+        # 那一跳里一起改了。日志不许在这一格说假话，所以按 reason 分岔——而不是把
+        # "改了"藏起来，也不是给超时另写一份响应形状（那两处都会漂）。
+        untouched = ("任务一格未改" if reason != "waiting_timeout"
+                     else "任务的状态与游标已在那一跳里一起作废（已花掉的一格未动）")
         print(f"[Orchestrator] 任务 {task.task_id} 的这一趟没有被认领：{reason}"
-              f"（此刻状态 {status}）——没跑工具、没叫模型、任务一格未改")
+              f"（此刻状态 {status}）——没跑工具、没叫模型、{untouched}")
         body = {
             "task_id": task.task_id,
             "status": status,
@@ -526,6 +564,57 @@ class Orchestrator:
                       f"这一轮的异常只回出口：{error_msg}")
                 return getattr(task.status, "value", str(task.status))
 
+    def _sweep_timed_out_parks(self, current_task_id: Optional[str] = None) -> None:
+        """惰性清扫：把挂太久的停点作废。返回值没有意义——它不许影响这一趟任务。
+
+        为什么挂在 `run` 里（第 1.9 步，认领之前）而不是挂在定时器上：本仓不起后台线程
+        也不起定时器（判据见 A3 测试文件末尾那条 AST 锁），既有先例是
+        `approval._sweep_locked` 的"每个入口都扫"与 `stream_runs` 的"清扫挂在新 run
+        创建时"。这一格的入口就是 `/v1/agent/orchestrate`（同步 def，写盘本来就在线程池里）。
+
+        `current_task_id` 交给清扫器当"这一条别动"：本趟要处理的那一条由
+        `_expire_if_timed_out` 自己判，它说得出"你的答案没被采用，因为停点超时作废了"
+        那一句；被清扫抢先的话，调用方只会拿到通用的"任务已被取消"（同一件事实，
+        前者更准，而客户端要的正是那句可判的话）。
+
+        ⭐ 默认窗口 0 时 `sweep_timed_out_parks` 头一句就返回，**一次遍历都不做、
+        一个字节都不写**——所以"没配这一格的部署"与改动前逐字同形。
+
+        整段裹在 try 里是有意的：清扫是家务，不是这一趟请求的一部分。它坏了（落盘
+        OSError、某条记录形状怪）最坏的结果是"停点还挂着"，绝不能是这一次调用变 500。
+        """
+        try:
+            voided = sweep_timed_out_parks(skip_task_ids=(current_task_id,)
+                                           if current_task_id else ())
+        except Exception as e:
+            print(f"[Orchestrator] 停点超时清扫没跑动（{type(e).__name__}: "
+                  f"{scrub_secrets(str(e))}）：跳过这一轮家务，所有挂着的断点照旧有效")
+            return
+        if voided:
+            print(f"[Orchestrator] 已作废 {len(voided)} 条超时停点：{voided}"
+                  f"（只是状态与游标，没有任何一条被重跑）")
+
+    def _expire_if_timed_out(self, task: Task) -> Optional[Dict[str, Any]]:
+        """这条挂起的任务是否已经超时；超时就把停点作废并回一句实话，否则回 None。
+
+        回 None = 照旧按 `waiting_user` 走（默认窗口 0 恒走这一支，今天的形状一字不改）。
+        回一个 dict = 这一趟的答案不接了，而它**必须**是"什么都不做"那一族：
+        没叫模型、没调工具、没重跑子任务，与 `_answer_not_accepted` 同一条纪律。
+
+        两处不许含糊的地方：
+        - 「超时不是失败」：作废落的是 `cancelled`，`failed` 在这一族里一次都没出现
+          （为什么，见 `task_store.expire_parked_task` 里工单 #33 那一段）。
+        - 作废写不下去时（终态被并发抢先 / OSError）回 None：任务照旧挂在断点上，
+          宁可让它继续等人，也不把"还没作废"说成"已作废"。
+        """
+        if not is_waiting_timed_out(task):
+            return None
+        if not expire_parked_task(task):
+            return None
+        # 话由 `_answer_not_accepted` 那一份说：同一个"你的答案没生效"的形状只许有一处
+        # 定义，抄第二份就是漂移的开始（那句日志也在那里按 reason 分岔，不说假话）。
+        return self._answer_not_accepted(task, "waiting_timeout")
+
     def _park_suspension(self, task: Task, suspension: Dict[str, Any],
                          subtask_index: int) -> Dict[str, Any]:
         """把一次工具挂起落到任务上。能接回去 → waiting_user；接不回去 → 如实 failed。
@@ -572,6 +661,11 @@ class Orchestrator:
             "subtask_index": subtask_index,
             "total_subtasks": len(task.subtasks),
             "can_resume": True,
+            # ⭐ v0.35 A5：挂起的那一刻就把"窗口多长、哪一刻作废"说出去
+            # （`waiting_expires_at` 为 None = 运维没开作废窗口，永不做废——默认形态）。
+            # UI 那半边的超时倒计时读的就是这一格，本票只提供数据不提供渲染；
+            # "挂了多久"不在这里报，理由见上面 run() 里那一格（同一句"逐字节相同"的判据）。
+            **waiting_timeout_info(task, elapsed=False),
             "results": task.results,
             "message": (f"任务停在第 {subtask_index + 1} 步：{tool_name} 需要用户给一个"
                         "答案才能继续。带上 user_answer 再调一次本端点，"

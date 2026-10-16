@@ -12,17 +12,41 @@
 几版的事，这里刻意不提前做）。v0.35 A1 补上的是承重的那一格——`waiting_user` 若只
 活在内存里，判据 2"重启后仍在"就无从谈起，补法正是文件头原先承诺的那一条：
 让状态变更走一个显式的 `save(task)`，而不是在 getter 里藏写盘。
+
+v0.35 A5 在这份存储里加的是**读侧的秒数**与一条作废跳转（文件中部那一族
+`is_waiting_timed_out` / `expire_parked_task` / `sweep_timed_out_parks`）：默认窗口
+0 = 永不作废，所以默认形态下这份文件**一次多余的盘都不写**；运维把窗口设成正数
+之后，作废走的仍是 `set_status` → `save` 这条既有路（同锁、同批、同一份原子替换），
+跳转表一格未动。
 """
 import json
+import math
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import List, Optional
 
 from app.core.atomic_write import write_json_atomic
 from app.core.paths import data_root
+
+
+def _now() -> datetime:
+    """墙上时钟的**唯一**出口（v0.35 A5）。
+
+    为什么要有这一格：`waiting_since` 记的是时刻，而"挂多久了""到点了没"都是拿它与
+    "现在"作差。判"超时"这件事要能被测试确定地推进（挂 5 分钟、挂 30 天），而不能靠
+    真等——真等既慢又测不到东西。函数级的接缝（monkeypatch `_now`）比往 `Task` 上
+    挂一个 `now` 参数更省：调用方一路都要带着那个 `now` 走，漏一处就测不到。
+
+    诚实的边界：这一格用的是 `datetime.now()`（**本地墙上时钟**），不是单调时钟——
+    与 A1 写进 `waiting_since` 的那一份同一个域。运维把系统时钟往回拨，一条已经挂了
+    很久的停点会算出负数或更小的秒数；负数在下面**一律不判过期**（`is_waiting_timed_out`），
+    方向是"少销毁一次"，不是"多销毁一次"。要换单调域就得连 `waiting_since` 的盘上格式
+    一起换（那是跨重启的判据，不属于这一格）。
+    """
+    return datetime.now()
 
 
 class TaskStatus(str, Enum):
@@ -210,7 +234,7 @@ class Task:
         merged.setdefault("question", str(question or ""))
         return self.set_status(TaskStatus.WAITING_USER,
                                resume_cursor=merged,
-                               waiting_since=datetime.now().isoformat())
+                               waiting_since=_now().isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -320,6 +344,273 @@ def save(task: "Task") -> "Task":
     if task.task_id in task_store:
         task_store[task.task_id] = task
     return task
+
+
+# ---------- ⭐ v0.35 A5：超时是"还在挂"，不是失败 ----------
+#
+# 提案 §四 v0.35 那一行写的是「超时语义：用户不响应**不是失败**，是 `needs_input`
+# （挂起保活）」，验收判据 1 写的是「跑到第 3 步需要验证码的任务能挂起 5 分钟，
+# 用户输入后从第 4 步继续，全上下文不丢」。A3 交付了"挂得起也接得回"（它的测试文件
+# 开头就把"5 分钟"那一半交还给本票），所以 A5 只管**时间**那一半。两处措辞按 A1
+# 已经落地的形状读，两条都不按字面抄：
+#
+# - `needs_input` 没有落地，这一格也不新加字面量：本版仍然只有一个等待态
+#   `waiting_user`（见 TaskStatus 上面那段），"挂起保活"说的就是这个状态本身。
+# - 「超时」在这里指**这条任务自己挂了多久**（`waiting_since` 到现在的秒数），
+#   **不是**流式那条路上"没有读者的宽限期"。后者是
+#   `config_store.stream_no_reader_grace_seconds`（默认 120 秒），管的是「没有活读者
+#   就不起飞新一轮」那道钱闸，A5 一个字不动它（判据锁在
+#   `tests/test_v025_r3b_no_reader_billing.py`）。两条路回答的其实是同一个问题
+#   ——「没人等的时候要不要继续花钱」——而答案刻意不对称：流式那边**正有**模型调用
+#   在飞，所以到点要停手；任务这边挂在断点上时一个调用都没在飞、一分钱都没在花，
+#   所以到点既不停手也不改状态，**停着本身就是零开销**。把这条不对称抹平
+#   （"超时就把挂起的任务判 failed"）省不下一分钱，只会让用户回来发现断点没了、
+#   只能从第 1 步再烧一遍——那正是提案 §二 第一行写的"问了就是整轮失败"。
+#
+# 一条诚实的边界（与 `orchestrator._EXECUTING` 那段同一个形状）：这一族的判据是
+# **本进程内存里的那张表**。多 worker 各持一份 tasks.json 的内存视图，作废与续跑
+# 都只在自己那一进程内串行；现网是单进程（`run_backend.py:63` 那句 `uvicorn.run`
+# 不带 workers），跨进程的同一枚停点还归不了一。已作为 follow-up 上报，不属于这一格。
+
+
+def _status_of(task: "Task") -> Optional[TaskStatus]:
+    """这条任务的状态，认不出回 None（不猜）。
+
+    `_as_status` 抛 ValueError 是给**写路径**用的（写坏状态要响）；这里在读路径上，
+    一条读不懂的记录该被当成"判不出挂了多久"，而不是让一次 GET 变 500。
+    """
+    try:
+        return _as_status(task.status)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _window_seconds(timeout_seconds=None) -> float:
+    """把"要用的作废窗口"归成一个**非负有限**秒数。坏值一律收成 0（= 关）。
+
+    `None` = 现读 `config_store.task_waiting_user_timeout_seconds()`。这一格与 TTL 那
+    两格方向相反，所以兜底也相反：那两格的坏值会倒向"更严"，而这里的任何不确定都
+    不许倒向"销毁"——0 是"永不做废"，是这里唯一安全的兜底。
+    """
+    if timeout_seconds is None:
+        return task_waiting_user_timeout_seconds()
+    try:
+        value = float(timeout_seconds)
+    except (TypeError, ValueError):
+        print(f"⚠️ 停点作废窗口不是数（{timeout_seconds!r}），按不作废跑")
+        return 0.0
+    if not math.isfinite(value):        # inf / nan：比较起来恒 False，不能让它穿过判据
+        return 0.0
+    return max(0.0, value)
+
+
+def task_waiting_user_timeout_seconds() -> float:
+    """作废窗口的读数口径：单一真相住在 `core/config_store.py` 那一格，这里只是现读。
+
+    函数内导入（不在文件头 import config_store）：`paths.resolve_all_data_paths()`
+    会在函数内导入 task_store，模块级互相引用会把导入顺序变成一份债。
+    """
+    from app.core import config_store
+    return config_store.task_waiting_user_timeout_seconds()
+
+
+def parse_waiting_since(value) -> Optional[datetime]:
+    """把 `waiting_since` 认回一个 naive 本地 datetime；认不出回 **None**（不猜、不抛）。
+
+    认不出 = "不知道它挂了多久"，而"不知道"在这一族里永远不等于"可以作废"。
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        # 盘上那份是 naive 本地时刻（`_now().isoformat()`）。带时区的一条按**同一个域**
+        # 读：先换到本机时区再去掉 tzinfo——naive 与 aware 直接作差是 TypeError，会被
+        # 当成"读不懂"，一条本来判得出的停点就白判了。
+        try:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        except (OSError, OverflowError, ValueError):
+            return None
+    return parsed
+
+
+def waiting_elapsed_seconds(task: "Task", now: datetime = None) -> Optional[float]:
+    """这条任务已经在断点上挂了多少秒。答不出来回 None（**≠ 0 秒**）。
+
+    两种 None 都是实话：它此刻不在等待态（没有"挂了多久"这回事），或 `waiting_since`
+    那一格读不懂（起点没记上，宁可说不知道）。可能为负：系统时钟被往回拨时就是这个
+    形状，而 `is_waiting_timed_out` 只认 `>= 正窗口`，负数永远不作废。
+    """
+    if _status_of(task) is not TaskStatus.WAITING_USER:
+        return None
+    start = parse_waiting_since(getattr(task, "waiting_since", None))
+    if start is None:
+        return None
+    reference = _now() if now is None else now
+    return (reference - start).total_seconds()
+
+
+def waiting_deadline(task: "Task", timeout_seconds=None,
+                     now: datetime = None) -> Optional[datetime]:
+    """这条停点该在哪一刻作废。None = 此刻没有到期时刻（不在等待态 / 窗口关 / 起点读不懂）。"""
+    window = _window_seconds(timeout_seconds)
+    if window <= 0 or _status_of(task) is not TaskStatus.WAITING_USER:
+        return None
+    start = parse_waiting_since(getattr(task, "waiting_since", None))
+    if start is None:
+        return None
+    return start + timedelta(seconds=window)
+
+
+def is_waiting_timed_out(task: "Task", now: datetime = None,
+                         timeout_seconds=None) -> bool:
+    """这条挂起的任务是否**已经**超过作废窗口。每一条判据都朝"不作废"那一侧倒。
+
+    fail-closed 的四格：窗口 ≤0（默认就是这一格：0 = 永不作废）、不在等待态、
+    起点读不懂、秒数还不够。反过来，只有"窗口是正数且挂的秒数 ≥ 它"才回 True。
+    """
+    window = _window_seconds(timeout_seconds)
+    if window <= 0:
+        return False
+    elapsed = waiting_elapsed_seconds(task, now=now)
+    if elapsed is None:
+        return False
+    return elapsed >= window
+
+
+def expire_parked_task(task: "Task", now: datetime = None, timeout_seconds=None,
+                       reason: str = None) -> bool:
+    """把一条挂太久的停点作废：**cancelled + 游标清空**，同一跳落盘。
+
+    True 只在这一跳真的成立时给。False 的三种情形（没超时 / 被并发抢先定了论 / 落盘
+    坏掉）里任务**一格都没改**，还是那条能续的 waiting_user——销毁失败不许顺带把
+    "还没作废"说成"已作废"。
+
+    ⭐ 为什么是 `cancelled` 而不是 `failed`——这一条就是本票与工单 #33 的接缝：
+    `failed` 在 A1 的跳转表里有一条出边 `failed → running`（断点重跑，既有语义，见
+    `ALLOWED_TRANSITIONS[TaskStatus.FAILED]` 那一行）。一条 `failed` 却还带着
+    `kind=="tool_suspension"` 游标的记录因此谁都能再把它从第 1 步点着跑一遍——查店、
+    加购、再发一次验证码，那正是 #33 说的重复付费形状（`orchestrator.run` 的 FAILED
+    分支不读游标，直接进通用续跑）。
+    `cancelled` 在表里**一条出边都没有**（`ALLOWED_TRANSITIONS[TaskStatus.CANCELLED]`
+    是空集），作废之后没有任何代码路径能再把它跑起来；这一格另外还把游标本身清空
+    （`resume_cursor=None`），于是即便将来有人在 cancelled 上开出口，手里也没有一份
+    "看起来还能接"的断点。两道一起才是 fail-closed。
+
+    与 A1 三条既有纪律不冲突：走 `set_status`（判、跳、落盘同锁同批，见那个方法自己的
+    文档）、`can_resume` 由不变式跟着翻成 False、`waiting_since` 由同一句清掉，
+    **跳转表一格未动**（`waiting_user → cancelled` 本来就在表里）。
+    """
+    window = _window_seconds(timeout_seconds)
+    with _lock:
+        if not is_waiting_timed_out(task, now=now, timeout_seconds=window):
+            return False
+        elapsed = waiting_elapsed_seconds(task, now=now) or 0.0
+        text = reason or (
+            f"在断点上挂了 {elapsed:.0f} 秒，超过运维设的上限 {window:.0f} 秒："
+            "停点已作废（resume_cursor 已清空，答案递进去也接不回去）。"
+            "要接着办请重新发起一次任务——这一步没有重跑，也没有再花钱。")
+        # set_status 的落盘在**改完内存之后**（先 `self.status = target`，最后才 save），
+        # 所以 OSError 抛出来时内存已经是 cancelled + 游标清空的那一份了。不还原的话
+        # 症状是"盘上还在等、内存里没游标"——调用方接着往下走会读不到断点，掉进
+        # 通用续跑那一路把第 1~3 步重烧一遍（工单 #33 那一笔钱）。与
+        # `orchestrator._record_failure` 里"跳一半失败要把 error 吐回去"同一条纪律：
+        # 先抄这几格，写不回去就原样还回去。
+        snapshot = (task.status, task.resume_cursor, task.cancelled, task.error,
+                    task.waiting_since, task.can_resume)
+        try:
+            task.set_status(TaskStatus.CANCELLED,
+                            resume_cursor=None, cancelled=True, error=text)
+        except Exception as e:
+            (task.status, task.resume_cursor, task.cancelled, task.error,
+             task.waiting_since, task.can_resume) = snapshot
+            print(f"⚠️ 任务 {task.task_id} 的停点作废那一跳落不了盘"
+                  f"（{type(e).__name__}: {e}）：内存一格未还，它照旧挂在断点上等人")
+            return False
+        print(f"⏳ 任务 {task.task_id} 的停点超时作废（挂了 {elapsed:.0f}s > 上限 "
+              f"{window:.0f}s）：翻 cancelled、游标清空；没重跑子任务、没叫模型")
+        return True
+
+
+def sweep_timed_out_parks(now: datetime = None, timeout_seconds=None,
+                          tasks: List["Task"] = None,
+                          skip_task_ids=()) -> List[str]:
+    """把挂太久的停点挨个作废，返回被作废的 task_id 列表。惰性清扫：**没有定时器**。
+
+    与 `core/approval.py:_sweep_locked` 同一个做法（那里是"每个入口都扫"），与
+    `core/stream_runs.py` 的"清扫挂在新 run 创建时"同一个形状：本仓不起后台线程
+    （判据见 `tests/test_v0350_a3_suspendable_tool_protocol.py` 末尾那条
+    `test_no_new_background_threads_timers_or_loop_blocking_io`），所以触发点是
+    **走进任务面的那一次请求**（`Orchestrator.run` 里认领之前的那一步），不是时钟。
+
+    默认窗口 0 → 头一句就返回 []：既不遍历也不写盘，**今天的可观察行为一字不变**。
+
+    `skip_task_ids` = 这一轮不动的那几条 id。编排器传的是**本趟请求正要处理的那一条**：
+    它由后面的 `_expire_if_timed_out` 处理，那里能给调用方一句"你的答案没被采用，因为
+    停点超时作废了"（`reason=waiting_timeout`）；清扫先一步把它作废的话，调用方拿到的
+    会是那句通用的"任务已被取消"——同一件事实，前者说得更准。跳过不改变结果，只改变
+    那一句由谁写。
+
+    `tasks` 是给测试与将来的调用方留的一圈：默认扫进程内那张表；传一份**手工造的列表**
+    就能在不碰真库的前提下判"这条扫得动"。本机这个目录同时是生产机，所以测试里绝不
+    把真的 `TASKS_DB_PATH` 放进环境——判据要验的是扫法，不是写盘。
+    """
+    window = _window_seconds(timeout_seconds)
+    if window <= 0:
+        return []
+    skip = set(skip_task_ids or ())
+    rows = list(task_store.values()) if tasks is None else list(tasks)
+    voided: List[str] = []
+    for task in rows:
+        if getattr(task, "task_id", None) in skip:
+            continue
+        try:
+            if expire_parked_task(task, now=now, timeout_seconds=window):
+                voided.append(task.task_id)
+        except Exception as e:
+            # 一条作废不动不许带走其余的，也不许把调用它的那一次请求带崩（那的症状是 500）。
+            print(f"⚠️ 任务 {getattr(task, 'task_id', '?')} 的停点作废扫不动"
+                  f"（{type(e).__name__}: {e}）：跳过这一条，其余照扫")
+    return voided
+
+
+def waiting_timeout_info(task: "Task", now: datetime = None,
+                         elapsed: bool = True) -> dict:
+    """读侧那三个数：挂了多久 / 窗口多长 / 哪一刻作废。**纯计算，一个字节都不写盘**。
+
+    为什么必须是纯的：详情端点是 `async def`，往里加一次落盘就是往事件循环上放阻塞
+    I/O——那正是 `tests/test_event_loop_not_blocked.py` 文件头那次线上 524 的形状。
+    清扫因此只挂在同步 def 的 `/v1/agent/orchestrate` 上，读侧只把此刻算得出来说出来。
+
+    `elapsed=False` 那一档给**编排器**用，理由是本仓一条既有判据：A3 的
+    `test_a_stranger_answering_a_parked_task_gets_the_same_answer_as_a_missing_id`
+    要求"非属主"与"不存在的 id"两次拿到**逐字节相同**的一句话。挂了多久这一格是拿
+    `now` 作差出来的，同一条任务隔一毫秒读两次就不一样——它进了那个响应，那句"同一
+    句话"就永远对不齐（本票第一次就是这么把 A3 弄红的，改的是这里而不是那条测试）。
+    所以：**编排器的响应只报政策（窗口 + 到期时刻），"现在过了多久"归 GET 详情**。
+
+    三个键按 A1 的口径都是**只增**：读不到就给 None，老客户端一个比特都不用改。
+    `waiting_expires_at` 给 None 就是"永不做废"，这正是默认形态——UI 那半边（超时
+    倒计时，提案 §四 第四条）要渲染的也就是这一格。
+    """
+    reference = _now() if now is None else now
+    window = _window_seconds(None)
+    deadline = waiting_deadline(task, timeout_seconds=window, now=reference)
+    info = {
+        "waiting_timeout_seconds": window,
+        "waiting_expires_at": deadline.isoformat() if deadline is not None else None,
+    }
+    if elapsed:
+        info["waiting_elapsed_seconds"] = waiting_elapsed_seconds(task, now=reference)
+    return info
 
 
 def _flush() -> None:
