@@ -17,7 +17,9 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
 第二个还是静默的：任何后来在那一行中止的换包都会再丢一次守护。
 
 本文件钉三件事（对应 ticket 的三条判据）：
-(i)  disable 之后的判决读的是 `Enabled`（真问题：这段窗口里它还能不能把 exe 拉起来），
+(i)  disable 之后的判决读的是任务的 `Settings.Enabled`（真问题：这段窗口里它还能不能把 exe 拉起来；
+     2026-10-18 又红过一次：这一句原本写「读 Enabled」，而本机任务对象上**没有** Enabled 成员，
+     真值在 Settings 那一层——见 tests/test_swap_package_watchdog_enabled_machine_truth.py），
      正在跑的实例单独打 token 供人看，只在**有界的**等待到点后按自己的 stage 中止；
 (ii) 从 disable 那一句到「旧包让位」（`$script:backupDone = $true`）之间**不存在任何绕过
      恢复机制的出口**：裸 `throw` / `exit` 一律不许；那几句会抛异常的 cmdlet 必须落在
@@ -34,10 +36,18 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
 为什么没有行为层：这一步只有真把生产任务停用下来才跑得进去，而本次票面明令禁止
 （不许对现网任务动 Disable/Enable/Unregister/Register，也不许跑 swap-package.ps1，带
 -DryRun 也不行——DryRun 在 disable 之前就 return 了，证明不了任何事）。所以这三条**全是
-静态锁，下一次换包就是它们的第一次实跑**：盯 `DISABLED enabled=... state=... instances=`、
+静态锁，下一次换包就是它们的第一次实跑**：盯 `DISABLED enabled=... via=... state=... instances=`、
 `WAIT`、`READFAIL`、`ABORT stage=... moved=... watchdog=...` 四行 token。牙印在文件末尾
 六条 `test_mutation_*`：旧判据回来、裸 throw 回来、恢复被删、恢复被嵌进 if、被赋值的
 helper 里漏一行日志、塞进一个非 ASCII 字节——每一种都必须红。
+
+静态锁的射程要说在前面（这是 2026-10-18 那次红的直接教训）：本文件判的是「代码里写了什么」，
+判不了「那样写在这台机器上读不读得到」。`a5d37bde` 把判决从 `State` 换成裸 `$fresh.Enabled`，
+上面 13 条**一条都没红**——文本上它确实"读 Enabled、有界等待、走恢复机制"，全对；
+可本机 `Get-ScheduledTask` 回来的对象没有 Enabled 成员，读它安静地给 $null，fail-closed
+默认从此永久，通过条件永不成立。补这一层射程的是同目录的
+`test_swap_package_watchdog_enabled_machine_truth.py`（只读问机器 + 真停用任务阳性对照 + 
+裸写法牙印）。以后动这一段的判决，两个文件要一起绿。
 """
 import os
 import re
