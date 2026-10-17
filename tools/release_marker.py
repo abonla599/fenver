@@ -50,6 +50,12 @@
     `release-marker-v0.34.1` 会命中 `release-marker-v0.34.10` 那一行，于是"看起来是两枚
     不同的标记"其实是一枚两边都有的假判据
 
+    docs/releases 里最高的那一版说明不得跑在 <VERSION> 前面，**除非它自己声明的是
+    `<!-- scope: server-only -->`**：
+    只换服务端的那一版不 bump versionName，所以"说明比声明侧新"正是它的预期形状（#71）——
+    否则发版准备把说明落下来的那一刻，裸跑会常年红着，还顺手教人去 bump 一个装不上的版本号。
+    读不出这一版的 scope（值不认识 / 读不出文本）就**不豁免**，照旧红
+
 发版准备那次一提交说明、一进版本，这里立刻给结论，并把**该用的那一串**直接打在消息里——
 标记于是是抄机器的，不是挑的。说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），
 不放行，也**不许**顺手把 versionName 顶上去当替代判据。
@@ -384,8 +390,23 @@ def evaluate(repo_root, expect=None, live_appjs=None):
     if notes:
         newest_note = max(notes, key=version_key)
         if version_key(newest_note) > version_key(target):
-            problems.append("token=release-note=ahead docs/releases/v%s.md 比目标版本 v%s 还新 —— "
-                            "说明文档跑在声明侧前面，先核 versionName" % (newest_note, target))
+            # #71：这一格吃的是 `:270` 同一把尺子（`note_scope`），不是第二套读法。
+            # 只换服务端的一版**本来就不 bump** build.gradle 的 versionName（实测 v0.34.1：
+            # build.gradle 停在 0.34.0/60，而 docs/releases/v0.34.1.md 存在并写着只换服务端），
+            # 所以发版准备把 docs/releases/v0.35.0.md 落下来的那一刻，裸跑（target=声明侧）看到
+            # "说明比声明侧新"就是这一形态的**预期形状**。照老写法它从这里开始常年红——同一版
+            # 说明会一直领先，直到换包把版本号追平，而这一版根本不追——而且它印的"先核
+            # versionName"正是 #65/#67 禁止的动作：逼着人把一个装不上的安卓版本声明出去。
+            # 注意要读的是**最高那一版说明**自己的 scope（`server_only` 那个变量是 `:270` 按
+            # target 判的，裸跑时 target 还是上一版，复用它会一点都不松）。读不出结论（scope 值
+            # 不认识 / 说明读不出文本）就**不豁免**，照旧红：这条豁免只在真的读到
+            # `scope: server-only` 时生效，其余情形一字未改。
+            newest_server_only, _ = note_scope(repo_root, newest_note)
+            if not newest_server_only:
+                problems.append("token=release-note=ahead docs/releases/v%s.md 比目标版本 v%s 还新 —— "
+                                "说明文档跑在声明侧前面，先核 versionName（如果这一版其实只换服务端，"
+                                "那就在 docs/releases/v%s.md 补一行 %s，而不是 bump 版本号）"
+                                % (newest_note, target, newest_note, SCOPE_SERVER_ONLY_LINE))
 
     if problems:
         lines.extend("RELEASE-MARKER verdict=FAIL " + p for p in problems)

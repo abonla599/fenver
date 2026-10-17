@@ -21,7 +21,10 @@
             无论仓库怎样都红（那两侧就分不开，就是空转验收）。且 app.js 里不得有比它更新的
             标记。装机侧读不到 ⇒ 退 2 fail-closed，**绝不**默认成"里面没有"
     任意两枚标记不得互为子串（`Select-String -SimpleMatch` 数子串，v0.34.1 会命中 v0.34.10）
-    docs/releases 里最高的那一版不得跑在目标版本前面
+    docs/releases 里最高的那一版不得跑在目标版本前面 —— **但这一格也吃同一条 scope 判读**
+            （#71）：最高那一版自己声明 `scope: server-only` 时，"说明比声明侧新"正是这一形态
+            的预期形状（只换服务端的一版不 bump versionName），裸跑必须绿；没声明 / 声明读不出
+            ⇒ 照旧红，这条豁免不是"说明领先就不管了"的旁路
     说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），不放行也不许拿 bump 当替代
 
 **为什么不在 `tools/pre_tag_gate.py` 里加第 6 条**：那把闸的第 3 条要求线上 `/health` 的
@@ -472,3 +475,80 @@ def test_live_appjs_override_names_a_path_and_never_skips_the_check(tmp_path):
     installed.write_text("/* 手工造的假日机包 */\n/* release-marker-v0.35.0 */\n", encoding="utf-8")
     assert rm.main(base + ["--live-appjs", str(installed)]) == 1, \
         "覆盖路径里已经有这一枚串还被放行：装机侧这一格被绕过了"
+
+
+# --------------------------------- #71：说明领先这一条也要吃同一把 scope 尺子
+def test_ahead_server_only_note_leaves_the_bare_run_green(tmp_path):
+    """发版准备提交 `docs/releases/v0.35.0.md`（带 `scope: server-only`）的那一刻，**裸跑**
+    （不带 `--expect`，target=versionName=0.34.2）必须是绿的。
+
+    这一棵树就是 #69 那两支测试**看不见**的形状：它们都带 `--expect v0.35.0`，于是 target 直接
+    落在领先的那一版上，`:384-388` 那条"说明比目标版本新"根本不会被触发。裸跑才是常驻锁
+    (`test_real_repo_marker_equals_the_derived_declared_version`) 与换包窗口里 `python
+    tools/release_marker.py` 抄一行用的那一条命令 —— 只换服务端的一版**本来就不 bump**
+    versionName（实测 `v0.34.1` 的 build.gradle 停在 0.34.0/60，而 `docs/releases/v0.34.1.md`
+    存在），所以"说明跑在声明侧前面"正是这一形态的预期形状；照 `:384-388` 的老写法它会红，
+    并且从有人提交这一版说明的那一刻起**常年红**（同一版说明一直领先，直到换包把版本号追平——
+    而这一版根本不追）。它印的"先核 versionName"又恰是 #65/#67 禁止的动作。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2",),
+               notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    rc, lines = _run(tmp_path)                      # 裸跑：判据自己从 versionName 推 target
+    assert rc == 0, "只换服务端的一版把说明提交上去之后裸跑就红了：%s" % lines
+    assert any("scope=installer" in ln and "target=v0.34.2" in ln for ln in lines), \
+        "target 仍然是声明侧那一版（本条只放行说明领先这一格，不放宽形态判读）：%s" % lines
+    assert not any("release-note=ahead" in ln for ln in lines), lines
+    assert lines[-1].startswith("RELEASE-MARKER verdict=PASS") \
+        and "release-marker-v0.34.2" in lines[-1], lines
+
+
+def test_only_a_server_only_declaration_suppresses_the_ahead_token(tmp_path):
+    """反面对照（同形状、只差那一行 scope）：这一格不是"说明领先就不管了"的全局旁路。
+    说明没带 `scope: server-only` ⇒ 有安装包那一版而声明侧没跟上，那才是文档真的跑在前面，
+    照旧红、照旧同一个 token、同一个 rc。少了这一条，:294 那条 `the_scope_line_is_not_a_global_bypass`
+    就只覆盖了 versionName 一格。
+    """
+    green = _fake_repo(tmp_path / "server-only", version_name="0.34.2", markers=("0.34.2",),
+                       notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    red = _fake_repo(tmp_path / "installer", version_name="0.34.2", markers=("0.34.2",),
+                     notes=("v0.34.2", "v0.35.0"))          # 同一棵树，少那一行 scope
+    assert _run(green)[0] == 0, _run(green)[1]
+    rc, lines = _run(red)
+    assert rc == 1, "说明没声明只换服务端、却领先声明侧，被放行了：%s" % lines
+    assert any("token=release-note=ahead" in ln and "v0.35.0" in ln and "v0.34.2" in ln
+               for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_ahead_check_reads_the_newest_note_only(tmp_path):
+    """被 scope 豁免的必须是**最高**那一版说明：判据问的是"领先声明侧的那些说明是不是都只换
+    服务端"，而领先的那一版恰好就是最高的那一版。中间的说明带 scope、最高的那版不带 ⇒ 照旧红
+    （否则"某一版写过 server-only"会永久把这一格关掉，又一个全局旁路）。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2",),
+               notes=("v0.34.2", "v0.35.0", "v0.36.0"), server_only=("v0.35.0",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, "最高的说明 v0.36.0 没声明只换服务端却被放行：%s" % lines
+    assert any("token=release-note=ahead" in ln and "docs/releases/v0.36.0.md" in ln
+               for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_unreadable_or_bogus_scope_on_the_newest_note_still_fires(tmp_path):
+    """豁免的前提是**读得出**"只换服务端"这个结论：scope 值不认识、或说明根本读不出文本时，
+    照旧红（沿用 #69 那条纪律——读不到就不当成"没问题"），免得一个坏 scope 值顺手把这一格
+    变成全局旁路。两棵树都只改最高那一版说明。
+    """
+    for name, body in (("unknown-scope", "# v0.35.0\n\n<!-- scope: only-server -->\n"),
+                       ("binary-note", None)):
+        root = _fake_repo(tmp_path / name, version_name="0.34.2", markers=("0.34.2",),
+                          notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+        note = root / "docs" / "releases" / "v0.35.0.md"
+        if body is None:
+            note.write_bytes(b"# v0.35.0 \xff\xfe\x00\n")
+        else:
+            note.write_text(body, encoding="utf-8")
+        rc, lines = _run(root)
+        assert rc == 1, "%s：读不出 server-only 这个结论却把说明领先放行了：%s" % (name, lines)
+        assert any("token=release-note=ahead" in ln for ln in lines), lines
+        assert not any("verdict=PASS" in ln for ln in lines), lines
