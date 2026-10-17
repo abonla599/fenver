@@ -53,7 +53,8 @@ for that instance to finish, READFAIL marks a read that could not answer and sta
 which one: task-state (fails CLOSED - it waits and then aborts instead of assuming the guard
 is down) or boot-poll (the process-list read inside the boot window - it asks again on that
 loop's own cadence, bounded by the window the loop already had, and gives up through
-ABORT stage=boot-poll-threw),
+ABORT stage=boot-poll-threw) or final-enabled-read (the confirmation read right after the
+re-enable - it does not abort, it degrades into the ENABLED line below),
 DISABLE-THREW marks the disable call itself throwing: it prints those same four
 fields plus error=, and the stage token right after it says which of the three
 answers the switch actually gave - disable-threw-task-down (the guard really did
@@ -67,6 +68,30 @@ different animal and the tokens say so: moved=yes with
 watchdog=left-disabled-by-design plus the printed ROLLBACK recipe, because a
 watchdog re-armed over a package nobody has accepted yet is not protection - it
 is a guardian for the thing under suspicion.
+
+THE POST-ACCEPTANCE TAIL DEGRADES INTO TOKENS INSTEAD OF DYING, and that is a rule, not a
+preference: past ACCEPT there is no failure allowed to leave the run token-less, because
+the swap has already been accepted and re-rolling it is not on the table. Two sites carry
+it. BUDGET state=read-threw / BUDGET state=write-threw is the restart-budget ledger at the
+last step - data\watchdog-state.json, which deploy\watchdog.ps1 rewrites on every patrol
+(once a minute), so colliding with a mid-write is a normal outcome, not an exotic one. The
+line prints budget-returned=false, meaning this run did NOT hand the credits back: a crash
+inside the next hour can meet the already-spent budget and watchdog.ps1's own fuse
+(Get-LaunchCount reaching -MaxRestartsPerHour) returns WITHOUT launching - unsupervised.
+backend-entries= on the same line tells the operator whether the failed step owed anything
+(0 = the ledger held no backend key to clear, unproven = the read never answered at all).
+The fix is that one key in that file, by hand, or letting the hour roll; nothing here
+retries the write forever and nothing here deletes or truncates live state.
+ENABLED state=Unreadable is the same rule on the re-enable's confirmation read, with the
+READFAIL stage=final-enabled-read line above it naming which read went silent. Neither
+site calls Stop-AfterFailure, and that is on the record because the next person will want
+to "unify" it with the aborts above: Stop-AfterFailure's post-backupDone branch prints the
+literal watchdog=left-disabled-by-design plus a full ROLLBACK recipe, and by then both
+would be FALSE - the guard is back up and the package has passed HEALTH build= and ACCEPT
+marker-lines=. Aborting there would tell an operator to tear down a healthy, supervised
+service over a bookkeeping file. So the tail says what it knows and finishes at SWAP-DONE.
+backend/tests/test_swap_package_post_acceptance_tokens.py locks both routes by making this
+machine answer, not by matching text.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
 Chinese comments and dies on a syntax error - production then silently keeps
@@ -270,14 +295,82 @@ function Clear-BackendBudget {
     #     next Read-State see a leading U+FEFF inside the first key name.
     #   - never Remove-Item: the whole no-delete rule of this script applies to
     #     every file it touches, and the watchdog may be mid-write.
-    #   - writes with [System.IO.File]::WriteAllBytes, one shot, so a failure
-    #     leaves the previous file intact rather than a half-written state.
+    #   - writes with [System.IO.File]::WriteAllText, one shot, so an open that
+    #     fails never gets as far as truncating (measured below, not assumed).
     param([string] $StatePath)
     if (-not (Test-Path -LiteralPath $StatePath)) {
         Write-Output 'BUDGET state=absent (nothing to clear)'
         return
     }
-    $bytes = [System.IO.File]::ReadAllBytes($StatePath)
+    # WHY THE TWO FILE CALLS BELOW ARE WRAPPED, AND WHY NEITHER ONE ABORTS (#47).
+    #
+    # This function is called BARE, at the very tail of the run: after ACCEPT, after
+    # the re-enable, one line before SWAP-DONE. Before this wrap a throw here killed
+    # the script with NO BUDGET token, NO SWAP-DONE and the watchdog's restart
+    # budget still spent - the loudest possible silence in the worst possible place,
+    # because the swap itself had already succeeded and been guarded. The file's own
+    # comment above says the watchdog may be mid-write to this exact path, and that
+    # is a measurement, not a hedge: deploy/watchdog.ps1 calls Save-State at :585 on
+    # EVERY patrol, the patrol runs once a minute (register-watchdog.ps1:145
+    # RepetitionInterval=1min), and the live ledger's mtime here was sampled at
+    # 09:12:05 -> 09:13:05 -> 09:14:05 (delta exactly 60 s, 799 bytes unchanged) while
+    # this ticket was being written. So a sharing violation here is a NORMAL outcome,
+    # not an exotic one, and the odds of hitting it rise with every second the swap
+    # takes. Measured here 2026-10-17 on PS 5.1.26100.9549, against hand-built fake
+    # paths (never the live ledger) - the exception CHAINS are what justify two wraps
+    # instead of one, since the two halves fail as different types:
+    #   ReadAllBytes, file held by another handle (FileShare=None) ->
+    #     MethodInvocationException / IOException  "... being used by another process";
+    #   ReadAllBytes on a directory -> MethodInvocationException / UnauthorizedAccessException;
+    #   ReadAllBytes on a read-only-attribute file -> ANSWERS, no throw (15 bytes read);
+    #   WriteAllText on that same read-only file -> MethodInvocationException /
+    #     UnauthorizedAccessException, and the fake file came back byte-for-byte
+    #     (measured unchanged=True) because the throw was at the open, not after it;
+    #   WriteAllText into a directory that does not exist -> DirectoryNotFoundException.
+    # Note the third and fourth lines together: the read half and the write half fail in
+    # DIFFERENT ways, so one state= value covering both would describe an event that did
+    # not happen. That is the whole reason for two wraps.
+    #
+    # WHY DEGRADE AND NOT ABORT, and why this is NOT the same animal as a pre-swap
+    # failure: at this point the package is accepted (HEALTH build= and ACCEPT
+    # marker-lines= both passed) and the crash guard is already back up. Aborting
+    # would go through Stop-AfterFailure, whose post-backupDone branch prints a full
+    # ROLLBACK recipe over a service that is healthy and supervised - the wrong thing
+    # to tell an operator at 3 a.m., and precisely the judgment #45's reviewer made
+    # about the phase after backupDone. So the token says the bookkeeping failed, and
+    # the run goes on to SWAP-DONE. Someone will want to "unify" this with the aborts
+    # above; this paragraph is the argument against, kept here rather than in a doc.
+    #
+    # WHY THE TOKEN CLAIMS ONLY budget-returned=false: a throw at the open leaves the
+    # previous file byte-for-byte (measured above), but a throw AFTER the open would
+    # have truncated first - and nothing here can tell the two apart from the
+    # exception alone. So the line refuses to claim the ledger is intact. It states
+    # the one thing this run knows about itself: the budget was NOT handed back. What
+    # that costs is spelled out at :250-258 - the next real crash can meet a spent
+    # budget and the watchdog logs "budget exhausted" instead of starting the service
+    # (deploy/watchdog.ps1:442 returns without launching once Get-LaunchCount reaches
+    # -MaxRestartsPerHour), i.e. a crash right after the swap can go unsupervised.
+    # backend-entries= is what makes the line actionable: unproven on the read side
+    # (nothing was parsed yet), and on the write side the count this run found in the
+    # ledger and could not take out - 0 means the failed write owed nothing, because
+    # the budget was already unspent (the live file today carries no backend key at
+    # all, measured 2026-10-17). The fix is a manual edit of that one key, or letting
+    # the hour roll - re-running the swap with -KeepBackendBudget would NOT help, that
+    # switch keeps a spent ledger on purpose, it does not hand credits back.
+    # Do not "fix" a throw on this path by retrying the write in a loop: this is
+    # bookkeeping, and a bounded retry that also fails would still need this token.
+    $bytes = $null
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($StatePath)
+    } catch {
+        # $_ captured first, before anything else can take it over - the same reason
+        # the disable handler spells `$disableError = $_.Exception.Message` as its
+        # first statement: a token built from $_ after a nested call prints somebody
+        # else's failure exactly when an operator needs to read what failed.
+        $budgetReadError = $_.Exception.Message
+        Write-Output ('BUDGET state=read-threw budget-returned=false backend-entries=unproven error=' + $budgetReadError)
+        return
+    }
     $hadBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
     $text = [System.Text.Encoding]::UTF8.GetString($bytes)
     if ($hadBom) { $text = $text.TrimStart([char]0xFEFF) }
@@ -305,7 +398,19 @@ function Clear-BackendBudget {
     # positions; that is still valid JSON for the watchdog's reader, so it is
     # left alone rather than "fixed" with a regex that could corrupt values.
     $enc = New-Object System.Text.UTF8Encoding($hadBom)
-    [System.IO.File]::WriteAllText($StatePath, $json, $enc)
+    # ITS OWN try, separate from the read above (#47): the two halves fail for
+    # different measured reasons - the read throws on a sharing violation or a
+    # directory, the write throws on an attribute or an ACL - and one state= value
+    # cannot name both without lying about which half ran. The write is the half that
+    # COULD truncate, so this line claims nothing about the file's state either; see
+    # the (#47) block at the top of this function for why.
+    try {
+        [System.IO.File]::WriteAllText($StatePath, $json, $enc)
+    } catch {
+        $budgetWriteError = $_.Exception.Message
+        Write-Output ('BUDGET state=write-threw budget-returned=false backend-entries=' + $(if ($null -eq $had) { '0' } else { $had }) + ' error=' + $budgetWriteError)
+        return
+    }
     Write-Output ('BUDGET backend-entries-cleared=' + $(if ($null -eq $had) { '0' } else { $had }) +
                   ' bom=' + $hadBom + ' other-keys-kept=true')
 }
@@ -1038,8 +1143,67 @@ try {
 } catch {
     Stop-AfterFailure 'enable' ('swap is verified but re-enabling the task failed: ' + $_.Exception.Message)
 }
-$finalState = (Get-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName).State
-Write-Output ('ENABLED state=' + $finalState)
+# WHY THIS CONFIRMATION READ GOES THROUGH THE HELPER, AND WHY IT NEVER EXITS (#47).
+#
+# Up to two lines ago this was `$finalState = (Get-ScheduledTask ...).State`, a BARE
+# read sitting immediately after a SUCCESSFUL re-enable. The re-enable is already wrapped
+# (the `Stop-AfterFailure 'enable'` catch right above this block); the read that confirms
+# it was the one unwrapped statement left in the post-acceptance region, and
+# $ErrorActionPreference = 'Stop' with no trap and no finally means one throw there was
+# a third bare exit in the same tail (#32, #45 and #50 fixed the ones before it). Measured 2026-10-17 on this box (PS
+# 5.1.26100.9549), read-only, against a hand-built fake identity
+# (\t47-fake-path\ / t47-fake-task) so the live guard was never aimed at:
+#   Get-ScheduledTask -TaskPath ... -TaskName ... for an identity that does not answer
+#     -> THROWS Microsoft.PowerShell.Cmdletization.Cim.CimJobException ("no matching
+#        MSFT_ScheduledTask objects"), so under Stop the script dies printing NO
+#        ENABLED, NO BUDGET and NO SWAP-DONE;
+#   the same call with -ErrorAction SilentlyContinue -> returns nothing, and the .State
+#     of nothing is $null, so the "helpful" fix would print `ENABLED state=` with an
+#     EMPTY value - a token that says neither yes nor no.
+# Both shapes are avoided by routing the read through Get-WatchdogTaskState, which
+# catches its own failures and hands the outcome back as FIELDS. That reuse is the
+# point, not the wrap: this file already paid for one way of reading this switch (the
+# helper's own comment records the a5d37bde misread, and its "deliberately ONE read,
+# no cross-cmdlet fallback chain" records why a second spelling is not a convenience).
+# Wrapping the raw cmdlet here would have installed a SECOND owner of that property
+# path, and a5d37bde's silent-$null bug is exactly what duplicates like that keep.
+#
+# THE SHAPE WAS MEASURED, NOT READ OFF THE INTENT, because #50 is about this exact
+# trap: what the call returns to $finalProbe is ONE object (is_array=False), and on
+# this PowerShell a bare PSCustomObject answers .Count as $null - so any future
+# judgement written as a count on this variable would be silently False forever. The
+# site reads NoteProperties only (State, ReadError), which is what the helper returns:
+# Enabled / State / Instances / ReadError / EnabledSource. ReadError is non-empty
+# exactly when the read could not answer, and State carries 'Unreadable' then; the
+# helper itself prints nothing (test_swap_package_disable_verify.py
+# _single_value_helpers_ok is the lock that keeps that true, because $finalProbe is
+# assigned and an assignment takes the WHOLE output stream).
+#
+# WHY DEGRADE AND NOT STOP-AFTER-FAILURE, and this one is not a judgment call, it is
+# an arithmetic fact about the tokens: by the time this line runs, $script:watchdogDisabled
+# has just been set to $false by the re-enable above, and $script:backupDone is $true -
+# so Stop-AfterFailure's post-backup branch would print the literal string
+# 'watchdog=left-disabled-by-design' about a guard this run re-enabled two lines ago,
+# followed by a ROLLBACK recipe for a package that has already passed HEALTH build= and
+# ACCEPT marker-lines=. Same conclusion #45's reviewer reached for the phase after
+# backupDone, for a different reason: there the guard really is down and the recipe is
+# the honest output; here both would be false. So: say what the read answered, say
+# plainly when it could not answer, and walk on to BUDGET and SWAP-DONE.
+#
+# What is deliberately NOT added here: enabled= / via= / instances= fields. Those would
+# be token cosmetics for whoever owns the token shapes, and enabled= in particular is
+# fail-CLOSED inside the helper (a read that cannot answer reports Enabled=True, which
+# is the right default for "may I assume the guard is down?" at the disable step and is
+# NOT the question being asked here) - printing it at step 8 would need its own
+# argument. The state= value alone keeps this ticket's change to one line of grammar.
+$finalProbe = Get-WatchdogTaskState -TaskToRead $task
+if ($finalProbe.ReadError) {
+    # The third member of the READFAIL stage= family (task-state, boot-poll, and now
+    # this one), named by the header registry: a read that could not answer, saying
+    # which. It is a report line, not a verdict - ENABLED below still prints.
+    Write-Output ('READFAIL stage=final-enabled-read error=' + $finalProbe.ReadError)
+}
+Write-Output ('ENABLED state=' + $finalProbe.State)
 
 # ------------------------------------------------- step 9: hand the budget back
 # Comes AFTER re-enable and after both acceptance assertions: the counter is
