@@ -486,6 +486,9 @@ def stream_chat_events(
 
                 if rich:   # 两支都产出了 outcome（#76a），这里只判发不发帧
                     summary = result
+                    # 工单 #80（补 #76b 漏记的那句）：挂起这一支今天往帧里报的是 `ok:false`
+                    # —— 挂起时 outcome.ok 同为 False，帧里没有第三态那一格；第三态的帧形状/
+                    # 取值属 A4 与工单 #82，这里只加说明，不改任何取值。
                     rframe = se.tool_result_frame(call_id, name, outcome.ok, summary,
                                                   elapsed_ms=outcome.elapsed_ms,
                                                   truncated=is_truncated)

@@ -316,6 +316,8 @@ class ChatPipeline:
                             "content": result
                         })
                         if rich:
+                            # 工单 #80：与流式那一支同构 —— 挂起时这里往 trace 步里报的也是
+                            # `ok:false`，第三态的帧形状/取值属 A4 与工单 #82，本单不改取值。
                             trace_out.append(se.step_tool(tool_call.id, name, label,
                                                           outcome.ok, result,
                                                           elapsed_ms=outcome.elapsed_ms,
