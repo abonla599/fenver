@@ -21,15 +21,24 @@
   （`tools/response.py:84-87`）让每一次真挂起的文本都以 `⏸ ` 开头，而成功/失败两支分别是
   `✓ `/`✗ 错误: `——所以在真执行器下面两者今天恒等相关，行为层面造不出"前缀说挂起、
   结构化说不挂起"的输入。**实测过**：把 pipeline 与 react_agent 两处**挂起**判据换成
-  `startswith("⏸ ")` 之后，本文件 7 条全绿（rc=0）——这把锁管不了前缀判据，别以为它在管。
-  D1 只能由"读数点写成 `outcome.suspended`"这个形状保证（审 `pipeline.py:306`、
-  `streaming.py:478`、`react_agent.py:212`、`task_agent.py:178` 那四处），硬造一把前缀反例锁
-  只能靠 mock 渲染器，那是让被测对象自报，本仓不认。
+  `startswith("⏸ ")` 之后，本文件 7 条全绿（rc=0）——**本文件这把行为锁到今天仍然管不了前缀
+  判据**，别以为它在管。原因不在测试写得薄，而在等价性由执行器替所有读法兜住
+  （`executor.py:251-256` 的 fail-closed + `executor.py:82` 的保头裁剪），这一族回归在行为层面
+  **结构上抓不到**。
+* 抓得到的是源码形状，而**形状这一侧此前无锁**（只靠人工审那四个读数点）。⭐ 工单 #80 已把它
+  变成两把机器锁，就在 `tests/test_v0350_80_d1_shape_and_forbidden_prefix_locks.py`：
+  **形状锁**钉四个读数点（`pipeline.py:306`、`streaming.py:478`、`react_agent.py:212`、
+  `task_agent.py:178`）的两个关键字实参必须逐字是 `ok=bool(outcome.ok)` 与
+  `suspended=bool(outcome.suspended)`，且任何 `record_outcome(...)` 都不许被 `startswith(...)` 的
+  结果喂进去；**禁字锁**钉 `⏸` / `SUSPEND_PREFIX` 在 `backend/app/**` 里只许出现在
+  `tools/response.py` 的定义与渲染两处。硬造一把前缀反例锁仍然不被接受：那只能靠 mock 渲染器，
+  等于让被测对象自报，本仓不认。
 * ⭐ 工单 #76b（本票的第二波，只换判据、不加锁也不删锁）：`react_agent.py:212` 那一行的**成败**
   判据也已从 `str(tool_result).startswith("✓")` 换成 `ok=bool(outcome.ok)`，与上面四处同形；同一
   口径实测过——把那处摘回文本前缀写法之后**全量仍绿**（passed/skipped/rc 见 #76b 的 commit
-  正文）⇒ 本文件与 #29 那一份只管 `suspended=`，没有任何一把锁读得出这一处回归。读数点的
-  形状锁归 #80，本单不补（协议层 `ToolOutcome` 不校验，手搓 `ok=True/text="t"` 合法）。
+  正文）⇒ 落锁之前本文件与 #29 那一份只管 `suspended=`，**当时**没有任何一把锁读得出这一处回归；
+  这一处现在由 #80 的形状锁读（协议层 `ToolOutcome` 不校验，手搓 `ok=True/text="t"` 仍合法，
+  那一格不在本单射程）。
 
 现网可达性：这一批对现网零行为改变——`ToolSuspended` 在 `backend/app/**` 里零 `raise`，
 `registry` 也没有任何一条工具声明 `suspends`，第三态今天到不了。本文件的道具就是一次
@@ -290,7 +299,8 @@ def test_lock2_react_agent_suspensions_never_fuse_the_tool(monkeypatch, t76a_too
 
     这一条路 #76a 之前只有纯文本（`execute_tool` 的投影）+ `startswith("✓")` 猜成败，
     挂起必然被记成失败；#76a 换成 detailed 后文本仍取 `.text`，#76b 已把那处成败判据换成
-    `ok=bool(outcome.ok)`（本文件读不出那一步，见文件头 D1 那一族）。摘掉 `suspended=` →
+    `ok=bool(outcome.ok)`（**本文件**读不出那一步 —— 行为锁结构上抓不到，那一种回归今天由
+    #80 的形状锁 + 禁字锁读，见文件头 D1 那一族）。摘掉 `suspended=` →
     两记失败 → 本条最后一句红。
     """
     seen = _spy_guard(monkeypatch, react_agent_mod, [])
