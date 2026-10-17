@@ -32,10 +32,20 @@
                  versionname-not-bumped，这是它本来就该拦的）；app.js 里这一串所在的行
                  必须**恰好一行**，而且 app.js 里最靠新的那枚标记必须就是这个版本
     **只换服务端那一版**：不许要求 bump versionName（它本来就不动，硬要求等于逼着发版的人
-                 去宣布一个装不上的新安卓版本）。改成：release-marker-v<VERSION> **此刻还
-                 不得出现在 app.js 里**——出现了就说明这枚串已经在线上那份包里，两侧计数
-                 会变成"两边都有"，那正是 v0.34.1 用 `/changelog` 撞上的空转验收；并且
-                 app.js 里不得有比它更新的标记（标记是累积的，v0.34.2 那版就是两行）
+                 去宣布一个装不上的新安卓版本）。判据是一条**世界事实**、不是"开发者手边开着
+                 哪个文件"：release-marker-v<VERSION> 此刻**不得出现在线上那份包里**
+                 （`dist/run_backend/_internal/app/web/static/app.js` —— 就是 `swap-package.ps1`
+                 数装机侧的那一份）。仓库的 app.js 里有没有这一行只说明走到哪一步，两种都**绿**，
+                 token 写明是哪一刻：没有 ⇒ `server-only-moment=add-this-line`（把这一行补进去
+                 再构建）；有了 ⇒ `server-only-moment=verified-ready-to-build`（暂存≥1 / 装机=0
+                 的形状已经成立，可以构建）。已经在**线上**了 ⇒ 无论仓库里有没有都拒绝
+                 （`server-only-marker=already-present`）：两侧都数得到同一枚串 = v0.34.1 拿
+                 `/changelog` 撞上的空转验收。并且 app.js 里不得有比它更新的标记
+                 （`server-only-marker=newest-above`，标记是累积的，v0.34.2 那版就是两行）
+                 **线上那份包读不到（新克隆 / CI / `dist/` 被清）⇒ 退 2 fail-closed**，
+                 绝不当成"里面没有"——默认成 absent 等于在任何没有 `dist/` 的机器上把这一版事故
+                 静默放成绿灯；要指认别的路径用 `--live-appjs <path>`（精确路径覆盖，
+                 **不是**一个"跳过这一格"的布尔开关）
     任意两枚标记之间**不得互为子串**：`Select-String -SimpleMatch` 数的是子串命中，
     `release-marker-v0.34.1` 会命中 `release-marker-v0.34.10` 那一行，于是"看起来是两枚
     不同的标记"其实是一枚两边都有的假判据
@@ -57,9 +67,12 @@
 
     python tools/release_marker.py                    # 自检并打印本版的 -Marker 串
     python tools/release_marker.py --expect v0.35.0   # 构建之前按目标版本核
+    # 只换服务端那一版才会读装机侧；仓库不在生产机上时用 --live-appjs 指到那份真在读的 app.js
+    python tools/release_marker.py --expect v0.35.0 --live-appjs D:/old/run_backend/_internal/app/web/static/app.js
 
-退出码：0 齐备；1 标记缺失/对不上号（上面那两种事故形状）；2 判据本身拿不到
-（fail-closed，与 `pre_tag_gate.py` 同一档：证明不了就不许）。
+退出码：0 齐备；1 标记缺失/对不上号/那枚串已经在线上包里（上面那两种事故形状）；2 判据本身
+拿不到（fail-closed，与 `pre_tag_gate.py` 同一档：证明不了就不许——**装机侧读不到也算拿不到**，
+不放行、也不按"里面没有"处理）。
 """
 import argparse
 import os
@@ -73,6 +86,11 @@ MARKER_RE = re.compile(r'release-marker-v(\d+\.\d+\.\d+)')
 RELEASE_NOTE_RE = re.compile(r'^v(\d+\.\d+\.\d+)\.md$')
 FULL_TAG_RE = re.compile(r'^v\d+\.\d+\.\d+$')
 APP_JS_RELPATH = os.path.join("backend", "app", "web", "static", "app.js")
+# 装机侧（线上那份包）的 app.js：`deploy/swap-package.ps1` 数 `$liveMarkerLines` 读的就是这一份，
+# 本文件把它当同一份事实来读——判据的输入必须和它建模的那道闸的输入一致，否则"绿"只是两套
+# 各算各的。仓库目录在这台机器上同时是生产机，所以缺省就在 repo_root 下面；读，**绝不写**。
+LIVE_APP_JS_RELPATH = os.path.join(
+    "dist", "run_backend", "_internal", "app", "web", "static", "app.js")
 GRADLE_RELPATH = os.path.join("android-native", "app", "build.gradle")
 RELEASES_RELPATH = os.path.join("docs", "releases")
 # 与 tools/gen_changelog.py 的 _SCOPE_RE / SCOPE_SERVER_ONLY / SCOPE_INSTALLABLE 必须是同一条
@@ -202,8 +220,34 @@ def collisions(marker_a, marker_b):
     return marker_a in marker_b or marker_b in marker_a
 
 
-def evaluate(repo_root, expect=None):
-    """返回 (rc, 机读行列表)。rc：0 绿 / 1 形状不对 / 2 判据拿不到。"""
+def live_appjs_path(repo_root, override=None):
+    return override if override else os.path.join(repo_root, LIVE_APP_JS_RELPATH)
+
+
+def read_live_appjs(repo_root, override=None):
+    """装机侧那份 app.js ——「这枚串是不是已经在线上」的唯一判得住的事实。
+
+    返回 `(text, path, None)` 或 `(None, path, reason)`。**读不到绝不回落成"里面没有"**：
+    默认成 absent 就等于在任何没有 `dist\\` 的机器（新克隆、CI、清过盘）上把两侧都有的空转
+    验收静默放成绿灯——那正是本文件要拦的事故，不能由判据自己制造。调用方拿到 reason
+    一律退 2（fail-closed）。只读，不写、不建目录、不碰网络。
+    """
+    path = live_appjs_path(repo_root, override)
+    if not os.path.isfile(path):
+        return None, path, "live-appjs-missing:%s" % path
+    try:
+        return _read_text(path), path, None
+    except MarkerSourceError as exc:
+        return None, path, "live-appjs-unreadable:%s" % exc
+
+
+def evaluate(repo_root, expect=None, live_appjs=None):
+    """返回 (rc, 机读行列表)。rc：0 绿 / 1 形状不对 / 2 判据拿不到。
+
+    `live_appjs` 只换服务端那一版才会用到（装机侧路径覆盖，形状同 `swap-package.ps1` 读的
+    那份）；有安装包那一版**不读** `dist\\`——它的 versionName 已经追平，标记天然就在已装的
+    那份包里，把"不在装机侧"套到它头上就是把 v0.34.2 这种已上线的形状判成红。
+    """
     lines = []
     try:
         declared = declared_version(repo_root)
@@ -255,20 +299,49 @@ def evaluate(repo_root, expect=None):
 
     found = marker_lines(app_js)
     if server_only:
-        # 只换服务端的一版不 bump versionName，所以"该用的那一串"此刻【必须还没进】app.js：
-        # 它已经在了就说明这枚串同样在线上那份包里，两侧计数会两边都有 = 那次空转验收。
-        hit_lines = count_marker_lines(app_js, marker)
-        if hit_lines:
-            problems.append("token=server-only-marker=already-present marker=%s lines=%d —— "
-                            "本版说明写的是 %s（不出新安卓包），而 %r 已经在 app.js 里了："
-                            "线上那份包里也有这一串，换包预检数的就是这种两边都有的假判据"
-                            % (marker, hit_lines, SCOPE_SERVER_ONLY, marker))
+        # 只换服务端的一版不 bump versionName，所以"这一枚串能不能把两侧分开"跟开发者手上
+        # 那个文件有没有改过无关（#65 把 app.js 里在不在当判据，于是补了行的那一版和该补行的
+        # 那一版**都**红——现网不存在绿色状态，而这一刻恰恰是标记必须存在的时刻）。真正分得开的
+        # 只有装机侧那一份事实：它在线上包里 = 两侧都数得到 = 空转验收；不在 = 形状成立。
+        repo_lines = count_marker_lines(app_js, marker)
+        live_text, live_path, live_reason = read_live_appjs(repo_root, live_appjs)
+        if live_reason:
+            lines.append("RELEASE-MARKER verdict=UNKNOWN token=live-appjs=unreadable %s —— "
+                         "本版说明写的是 %s，判据要读装机侧那份 app.js 才能分清「合法的未来标记」"
+                         "和「两边都有的盖章」；读不到**不能**当成「里面没有这一串」——那等于在每台"
+                         "没有 dist\\ 的机器（新克隆 / CI / 清过盘）上把这次事故静默放成绿灯。"
+                         "把包放回来，或 --live-appjs <path> 指到真在读的那份；本工具没有跳过"
+                         "这一格的开关" % (live_reason, SCOPE_SERVER_ONLY))
+            return 2, lines
+        live_lines = count_marker_lines(live_text, marker)
+        if live_lines:
+            problems.append("token=server-only-marker=already-present marker=%s live-lines=%d "
+                            "repo-lines=%d —— 本版说明写的是 %s（不出新安卓包），而 %r 已经出现在"
+                            "**线上那份包**（%s）里：换包预检两侧都数得到它，这正是 v0.34.1 用 "
+                            "/changelog 撞上的空转验收。从仓库里删掉这一行不解决问题——线上那份里"
+                            "有它，这枚串对本版就不是判据；要么版本号真的往前走一版，要么本版其实"
+                            "带了前端改动（那就不是 server-only）"
+                            % (marker, live_lines, repo_lines, SCOPE_SERVER_ONLY, marker, live_path))
         above = [v for _, v in found if version_key(v) > version_key(target)]
         if above:
             problems.append("token=server-only-marker=newest-above newest=v%s target=v%s —— "
                             "app.js 里已经有比这一版更新的标记（标记是累积的，v0.34.2 那版就是"
                             "两行）：版本号错位的一刻正是数行数错的一刻"
                             % (max(above, key=version_key), target))
+        if not live_lines and not above:
+            # 两侧形状已经分得开了，但"补行"和"已补"是发版链上两个不同的时刻，token 必须说清
+            # 现在站在哪一刻——否则下一个人还是只能猜（这正是 #65 猜错的地方）。
+            if repo_lines:
+                lines.append("RELEASE-MARKER verdict=OK token=server-only-moment="
+                             "verified-ready-to-build marker=%s repo-lines=%d live-lines=0 —— "
+                             "这一行已经在仓库的 app.js 里、线上那份包里没有：暂存侧≥1 / 装机侧=0 "
+                             "正是换包闸要的两侧形状，可以构建了（构建完再跑一次不会变红）"
+                             % (marker, repo_lines))
+            else:
+                lines.append("RELEASE-MARKER verdict=OK token=server-only-moment=add-this-line "
+                             "marker=%s repo-lines=0 live-lines=0 —— 线上那份包里没有这一串、仓库的 "
+                             "%s 里也还没有：把 %r 原样补成一行再构建，补完再跑这里会报 "
+                             "verified-ready-to-build" % (marker, APP_JS_RELPATH, marker))
         for existing in sorted({v for _, v in found}, key=version_key):
             if version_key(existing) == version_key(target):
                 continue
@@ -330,8 +403,15 @@ def main(argv=None):
                         help="the tag about to be cut, e.g. v0.35.0; its release note's scope line "
                              "decides whether versionName must have reached it; "
                              "default = build.gradle versionName")
+    parser.add_argument("--live-appjs", default=None, dest="live_appjs",
+                        help="path of the INSTALLED package's app.js, used only by a "
+                             "server-only release to prove the marker is not already live; "
+                             "default = <repo-root>\\dist\\run_backend\\_internal\\app\\web\\static\\app.js. "
+                             "This is an exact-path override for reading a different package, "
+                             "NOT a switch that skips the check: an unreadable live copy fails "
+                             "closed with rc=2.")
     args = parser.parse_args(argv)
-    rc, lines = evaluate(args.repo_root, args.expect)
+    rc, lines = evaluate(args.repo_root, args.expect, args.live_appjs)
     for line in lines:
         print(line)
     return rc

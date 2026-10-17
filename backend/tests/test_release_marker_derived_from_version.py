@@ -14,8 +14,12 @@
     有安装包那一版（说明没带 scope 或写 installer）：versionName 必须已等于这一版，
             标记在 app.js 里恰好命中一行，且是 app.js 里最高的那枚
     只换服务端那一版（<!-- scope: server-only -->，v0.34.1 就是这一形态）：**不要求 bump
-            versionName**（它本来就不动），改成这一枚标记此刻还**不得**在 app.js 里，
-            且 app.js 里不得有比它更新的标记
+            versionName**（它本来就不动）。#69 把这一支的判据从"app.js 里在不在"换成一条
+            **世界事实**：这一枚标记**不得出现在线上那份包里**（dist/run_backend/_internal/
+            app/web/static/app.js，与 swap-package.ps1 数的装机侧同一份）。app.js 里在不在
+            只说明走到哪一步——没有 ⇒ 补这一行，有了 ⇒ 可以构建，两种都绿；已经在装机包里 ⇒
+            无论仓库怎样都红（那两侧就分不开，就是空转验收）。且 app.js 里不得有比它更新的
+            标记。装机侧读不到 ⇒ 退 2 fail-closed，**绝不**默认成"里面没有"
     任意两枚标记不得互为子串（`Select-String -SimpleMatch` 数子串，v0.34.1 会命中 v0.34.10）
     docs/releases 里最高的那一版不得跑在目标版本前面
     说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），不放行也不许拿 bump 当替代
@@ -26,11 +30,13 @@ build **已经**等于这个 tag，也就是它只有在下**线之后**才可�
 `CI 全绿 → 本地全量复跑`，所以常驻判据落在这里。
 
 反例全部是 `tmp_path` 下现造的假树（`android-native/app/build.gradle` +
-`backend/app/web/static/app.js` + `docs/releases/`），**不碰仓库里的真文件、更不碰
-`data\\`（真数据目录）**：判据读的是传进去的 `repo_root`，这一点由
-`test_the_tool_reads_only_the_root_it_is_handed` 钉住。
+`backend/app/web/static/app.js` + `docs/releases/` + 一棵**假的**装机包
+`dist/run_backend/_internal/app/web/static/app.js`），**不碰仓库里的真文件、不碰真
+`dist\\`（这台机器上它就是线上服务）、更不碰 `data\\`（真数据目录）**：判据读的是传进去的
+`repo_root`，这一点由 `test_the_tool_reads_only_the_root_it_is_handed` 钉住。
 """
 import importlib.util
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -55,12 +61,32 @@ cl = _load(CHANGELOG, "gen_changelog_for_scope_drift")
 
 
 # ------------------------------------------------------------------ 假树脚手架
+LIVE_APP_JS = Path("dist") / "run_backend" / "_internal" / "app" / "web" / "static" / "app.js"
+
+
+def _gradle_versionname() -> str:
+    """测试自己独立读一遍声明侧：期望值**不许**从要验的那把尺子的输出里拿。
+
+    这里用字面正则、不用 `rm.VERSION_NAME_RE`，所以"工具读错了文件"照样会红；而版本号本身
+    是从 `android-native/app/build.gradle` 现读的，不是写死的 `0.34.2`——写死的那行每次发版
+    都要人记得改、改漏了就常年红着（#69 就是要拆掉这种会腐烂的字面量）。
+    """
+    text = (REPO_ROOT / "android-native" / "app" / "build.gradle").read_text(encoding="utf-8")
+    match = re.search(r'^\s*versionName\s+"([^"]+)"', text, re.M)
+    assert match, "build.gradle 里读不到 versionName，这条锁没有输入"
+    return match.group(1)
+
+
 def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v0.34.2",),
-               server_only=()):
-    """只放判据真正会读的三样东西，路径形状与仓库一致。
+               server_only=(), live_markers=None):
+    """只放判据真正会读的那几样东西，路径形状与仓库一致。
 
     `server_only` 里点名的那份说明会带上机器读的 `<!-- scope: server-only -->`（写在标题之后、
     第一个小节之前，与仓库里 v0.34.1.md 的位置一致）；不在名单里的说明就是缺省形状（有安装包）。
+
+    `live_markers` 是**假日机包**里已有的标记（缺省跟着 `markers`，即"仓库和线上是同一版"那种
+    已上线状态）：#69 之后只换服务端那一版要读装机侧那一份，所以假树里必须自己带一棵假的
+    `dist\\run_backend\\...`，测试永远不碰真 `dist\\`。
     """
     gradle = root / "android-native" / "app" / "build.gradle"
     gradle.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +100,14 @@ def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v
     for one in markers:
         body += "/* release-marker-v%s：本版说明 */\n" % one
     (static / "app.js").write_text(body, encoding="utf-8")
+    if live_markers is None:
+        live_markers = markers
+    live_static = root / LIVE_APP_JS.parent
+    live_static.mkdir(parents=True, exist_ok=True)
+    live_body = "/* 假日机包（不是真 dist\\） */\n"
+    for one in live_markers:
+        live_body += "/* release-marker-v%s：装机包 */\n" % one
+    (live_static / "app.js").write_text(live_body, encoding="utf-8")
     releases = root / "docs" / "releases"
     releases.mkdir(parents=True, exist_ok=True)
     for note in notes:
@@ -85,8 +119,8 @@ def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v
     return root
 
 
-def _run(root, expect=None):
-    return rm.evaluate(str(root), expect)
+def _run(root, expect=None, live=None):
+    return rm.evaluate(str(root), expect, live)
 
 
 # ---------------------------------------------------------------------- 正对照
@@ -96,14 +130,24 @@ def test_derivation_script_is_in_the_repo_and_runnable():
 
 
 def test_real_repo_marker_equals_the_derived_declared_version():
-    """现网这一版（v0.34.2）：标记必须由 versionName 算出来，且真在 app.js 里恰好一行。"""
+    """现网这一版：标记必须由 versionName 算出来，且真在 app.js 里恰好一行。
+
+    原来这里写死的是 `"release-marker-v0.34.2"`（#69 拆掉的那根会腐烂的钉子）：换成测试自己
+    从 `build.gradle` 现读的 `versionName`，"尺子读错文件"照样红，而版本号不用再跟着发版改。
+    """
     declared = rm.declared_version(str(REPO_ROOT))
     marker = rm.marker_for(declared)
     rc, lines = _run(REPO_ROOT)
     assert rc == 0, "仓库现状必须绿，否则下面所有反例都无从对照：%s" % lines
     text = APP_JS.read_text(encoding="utf-8")
-    assert marker == "release-marker-v0.34.2", (
-        "声明侧读出来的版本与现网不符：拿到 %r。要么 versionName 被改过，要么这把尺子读错了文件" % marker)
+    gradle_version = _gradle_versionname()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", gradle_version), (
+        "build.gradle 的 versionName 不是三段号：拿到 %r" % gradle_version)
+    assert declared == gradle_version, (
+        "工具读出来的声明侧 %r 与测试独立读到的 %r 不符：要么 versionName 被改过，"
+        "要么这把尺子读错了文件" % (declared, gradle_version))
+    assert marker == "release-marker-v" + gradle_version, (
+        "标记不是由声明侧那一个版本推出来的：marker=%r declared=v%s" % (marker, gradle_version))
     assert rm.count_marker_lines(text, marker) == 1, (
         "%r 在 backend/app/web/static/app.js 里必须恰好一行，Select-String 数的就是行数" % marker)
     assert any("verdict=PASS" in ln for ln in lines), lines
@@ -234,6 +278,9 @@ def test_server_only_marker_already_in_app_js_is_refused(tmp_path):
     """说明写着只换服务端，而 `release-marker-v0.34.1` 已经在 app.js 里了 ⇒ 拒绝。
     已经在了就是说线上那份包里也有这一串，两侧计数会"两边都有"——那正是空转验收的形状，
     也是 #43 手工补行留下的坑：补早了比不补更危险。
+
+    #69 之后这棵假树的 `live_markers` 缺省跟着 `markers`，也就是"仓库和线上是同一版"，
+    被拒的理由落在**装机侧那一份**上（`already-present` 这个 token 一字未改，断言也未改）。
     """
     _fake_repo(tmp_path, version_name="0.34.0", markers=("0.34.0", "0.34.1"),
                notes=("v0.34.0", "v0.34.1"), server_only=("v0.34.1",))
@@ -310,3 +357,118 @@ def test_unreadable_sources_fail_closed_not_green(tmp_path):
     assert rc5 == 2 and any("release-note-unreadable" in ln for ln in lines5), lines5
     for lines_x in (lines4, lines5):
         assert not any("verdict=PASS" in ln for ln in lines_x), lines_x
+
+
+# ---------------------------------------------------- #69：装机侧那一份事实才是判据
+def test_server_only_marker_added_to_app_js_but_not_live_is_green(tmp_path):
+    """这一条就是 #69 的全部要点：发版提交把 `release-marker-v0.35.0` 补进 app.js **之后**
+    那一棵树必须是绿的。旧判据（"app.js 里不许有"）在这个形状下恒红——只换服务端的一版在
+    "标记必须存在"的那一刻根本不存在绿色状态，操作者在换包窗口里没有可抄的绿灯。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+               notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path, expect="v0.35.0")
+    assert rc == 0, "标记已补进 app.js、线上那份里没有，却被拦住了：%s" % lines
+    assert any("token=server-only-moment=verified-ready-to-build" in ln
+               and "release-marker-v0.35.0" in ln and "live-lines=0" in ln
+               and "repo-lines=1" in ln for ln in lines), \
+        "绿了但没说清「这一行已经在仓库里、可以构建」：%s" % lines
+    assert lines[-1].startswith("RELEASE-MARKER verdict=PASS") \
+        and "release-marker-v0.35.0" in lines[-1], lines
+    assert not any("already-present" in ln for ln in lines), lines
+    assert not any("versionname-not-bumped" in ln for ln in lines), lines
+
+
+def test_server_only_marker_absent_on_both_sides_is_green_and_says_add_this_line(tmp_path):
+    """同一条判据的前一个时刻：仓库里没有、线上也没有 ⇒ 一样绿，但 token 必须说"还差一行"，
+    并把该抄的那一串原样给出来（两个时刻都绿，靠 token 分辨，不靠让其中一个红）。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2",),
+               notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path, expect="v0.35.0")
+    assert rc == 0, lines
+    assert any("token=server-only-moment=add-this-line" in ln and "repo-lines=0" in ln
+               and "live-lines=0" in ln and "release-marker-v0.35.0" in ln for ln in lines), lines
+    assert not any("already-present" in ln for ln in lines), lines
+    assert sum(1 for ln in lines if "token=server-only-moment=" in ln) == 1, \
+        "两个时刻的 token 同时报了，等于没说：%s" % lines
+
+
+def test_marker_already_in_the_live_package_is_refused_even_when_repo_is_clean(tmp_path):
+    """空转验收的形状，而且旧判据看不见它：仓库的 app.js 里**没有**这一枚串（干净），
+    线上那份包里却已经躺着 `release-marker-v0.35.0` ⇒ 必须红。删掉"线上已经有了就拒绝"这一格
+    就是把 v0.34.1 拿 /changelog 撞上的那次盖章重新放成绿灯（变异 (i) 量的是这一条 + 上面
+    那条 already-present）。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2",),
+               notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+               live_markers=("0.34.2", "0.35.0"))
+    rc, lines = _run(tmp_path, expect="v0.35.0")
+    assert rc == 1, "标记已经在线上那份包里却被放行：%s" % lines
+    assert any("token=server-only-marker=already-present" in ln and "release-marker-v0.35.0" in ln
+               and "live-lines=1" in ln and "repo-lines=0" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+    assert not any("server-only-moment" in ln for ln in lines), \
+        "已经判红了还报「可以构建/该补行」的时刻：%s" % lines
+
+
+def test_server_only_newest_marker_above_target_is_refused(tmp_path):
+    """:266-271 那条 `newest-above` 今天零测试（reviewer 把它删掉，17 条全绿 = 这条判据没牙）。
+    树：目标 v0.34.1（只换服务端），仓库 app.js 里却躺着 v0.34.2 那枚更新的标记，装机侧干净。
+    """
+    _fake_repo(tmp_path, version_name="0.34.0", markers=("0.34.0", "0.34.2"),
+               notes=("v0.34.0", "v0.34.1"), server_only=("v0.34.1",), live_markers=("0.34.0",))
+    rc, lines = _run(tmp_path, expect="v0.34.1")
+    assert rc == 1, "app.js 里有比目标更新的标记却被放行：%s" % lines
+    assert any("token=server-only-marker=newest-above" in ln and "newest=v0.34.2" in ln
+               and "target=v0.34.1" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+    assert not any("server-only-moment" in ln for ln in lines), lines
+
+
+def test_unreadable_live_package_fails_closed_instead_of_defaulting_to_absent(tmp_path):
+    """新克隆 / CI / `dist\\` 被清掉：装机侧读不到 ⇒ 退 2，**绝不**当成"里面没有"。
+    默认成 absent 的话，这台机器之外的每一份克隆都会把两侧都有的事故静默放成绿灯——判据自己
+    造出它要防的那次事故（变异 (ii) 量的是这一条）。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+                      live_markers=("0.34.2",))
+    ok_rc, ok_lines = _run(root, expect="v0.35.0")
+    assert ok_rc == 0, ok_lines                       # 同一个形状，假日机包读得到就是绿的
+    live_js = root / LIVE_APP_JS
+    live_js.unlink()
+    rc, lines = _run(root, expect="v0.35.0")
+    assert rc == 2, "装机侧读不到却给了绿/普通红灯：%s" % lines
+    assert any("verdict=UNKNOWN" in ln and "token=live-appjs=unreadable" in ln
+               and "live-appjs-missing" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+    assert not any("live-lines=0" in ln for ln in lines), \
+        "读不到被当成「里面没有」了：%s" % lines
+    live_js.parent.mkdir(parents=True, exist_ok=True)
+    live_js.write_bytes(b"\xff\xfe\x00\x01 not utf-8 at all\n")   # 路径在、读不出文本
+    rc2, lines2 = _run(root, expect="v0.35.0")
+    assert rc2 == 2 and any("live-appjs-unreadable" in ln for ln in lines2), lines2
+    assert not any("verdict=PASS" in ln for ln in lines2), lines2
+
+
+def test_live_appjs_override_names_a_path_and_never_skips_the_check(tmp_path):
+    """`--live-appjs` 是**精确路径覆盖**（测试/别的机器指认另一份包用），不是"跳过这一格"的
+    布尔开关：指到不存在的文件照样退 2，指到手工造的假日机包就按那份的内容判（这里让它**带**
+    本版那枚串 ⇒ 仍然红）。走 `main()` 是为了把命令行这一层也钉住。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+                      live_markers=("0.34.2",))
+    (root / LIVE_APP_JS).unlink()
+    base = ["--repo-root", str(root), "--expect", "v0.35.0"]
+    assert rm.main(base + ["--live-appjs", str(root / "nowhere" / "app.js")]) == 2, \
+        "覆盖成一个不存在的路径却过了：这一格被当成开关用了"
+    installed = tmp_path / "hand-built-package" / "live_app.js"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text("/* 手工造的假日机包：还没有本版那枚串 */\n", encoding="utf-8")
+    assert rm.main(base + ["--live-appjs", str(installed)]) == 0, \
+        "覆盖路径读得到、里面干净，却没放行"
+    installed.write_text("/* 手工造的假日机包 */\n/* release-marker-v0.35.0 */\n", encoding="utf-8")
+    assert rm.main(base + ["--live-appjs", str(installed)]) == 1, \
+        "覆盖路径里已经有这一枚串还被放行：装机侧这一格被绕过了"
