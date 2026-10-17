@@ -20,17 +20,29 @@
 
 ## 规则（可机读，并且在构建之前就核得动）
 
-    <VERSION>  = android-native/app/build.gradle 的 versionName
-                 （pre_tag_gate.py 第 1 条判据拿来跟 tag 比的就是同一个声明侧）
+    「这一版要发的是哪个号、是哪一形态」的权威 = docs/releases/<tag>.md 的 scope 行
+        <!-- scope: server-only -->   ⇒ 本版只换服务端，安卓包不动（v0.34.1 就是这一形态）
+        没有这一行 / 写 installer      ⇒ 有可安装产物的那一版
+    <VERSION>  = --expect 传进来的 tag；没有 --expect 时才是 build.gradle 的 versionName
+                 （pre_tag_gate.py 第 1 条判据拿来跟 tag 比的就是那个**声明侧**，但它不是
+                 "要切哪一版"的权威——只换服务端的一版根本不 bump 它）
     -Marker    必须逐字符等于 "release-marker-v<VERSION>"
-    app.js 里这一串所在的行必须**恰好一行**
-    app.js 里最靠新的那枚标记必须就是这个版本（落后＝空转验收，跑在 bump 前面＝假版本）
+
+    **有安装包那一版**：build.gradle 的 versionName 必须已经等于 <VERSION>（没追平就是
+                 versionname-not-bumped，这是它本来就该拦的）；app.js 里这一串所在的行
+                 必须**恰好一行**，而且 app.js 里最靠新的那枚标记必须就是这个版本
+    **只换服务端那一版**：不许要求 bump versionName（它本来就不动，硬要求等于逼着发版的人
+                 去宣布一个装不上的新安卓版本）。改成：release-marker-v<VERSION> **此刻还
+                 不得出现在 app.js 里**——出现了就说明这枚串已经在线上那份包里，两侧计数
+                 会变成"两边都有"，那正是 v0.34.1 用 `/changelog` 撞上的空转验收；并且
+                 app.js 里不得有比它更新的标记（标记是累积的，v0.34.2 那版就是两行）
     任意两枚标记之间**不得互为子串**：`Select-String -SimpleMatch` 数的是子串命中，
     `release-marker-v0.34.1` 会命中 `release-marker-v0.34.10` 那一行，于是"看起来是两枚
     不同的标记"其实是一枚两边都有的假判据
 
-发版准备那次提交一 bump `versionName`，这里立刻红，并把**该用的那一串**直接打在消息里——
-标记于是是抄机器的，不是挑的。
+发版准备那次一提交说明、一进版本，这里立刻给结论，并把**该用的那一串**直接打在消息里——
+标记于是是抄机器的，不是挑的。说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），
+不放行，也**不许**顺手把 versionName 顶上去当替代判据。
 
 ## 为什么落在这里，而不是 pre_tag_gate.py 的第 6 条
 
@@ -63,6 +75,16 @@ FULL_TAG_RE = re.compile(r'^v\d+\.\d+\.\d+$')
 APP_JS_RELPATH = os.path.join("backend", "app", "web", "static", "app.js")
 GRADLE_RELPATH = os.path.join("android-native", "app", "build.gradle")
 RELEASES_RELPATH = os.path.join("docs", "releases")
+# 与 tools/gen_changelog.py 的 _SCOPE_RE / SCOPE_SERVER_ONLY / SCOPE_INSTALLABLE 必须是同一条
+# 尺子（分叉由 backend/tests/test_release_marker_derived_from_version.py 钉住）：适用范围只有
+# 一个声明位置、一套读法，否则"这一版到底是不是只换服务端"会长出第三种真相。
+SCOPE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
+SECTION_RE = re.compile(r"^##\s+(.*)$")
+SCOPE_SERVER_ONLY = "server-only"
+SCOPE_INSTALLABLE = "installer"
+VALID_SCOPES = (SCOPE_SERVER_ONLY, SCOPE_INSTALLABLE)
+SCOPE_SERVER_ONLY_LINE = "<!-- scope: server-only -->"
+NOTE_MISSING = "missing"
 
 
 class MarkerSourceError(Exception):
@@ -139,6 +161,40 @@ def released_note_versions(repo_root):
     return versions
 
 
+def release_note_path(repo_root, version):
+    return os.path.join(repo_root, RELEASES_RELPATH, "v%s.md" % normalize_version(version))
+
+
+def note_scope(repo_root, version):
+    """这一版声明的是"只换服务端"吗？权威就是它自己那份发版说明的 scope 行。
+
+    返回 `(server_only, reason)`：reason 为 None 表示读到了结论；否则是
+    `NOTE_MISSING`（没有这份说明）/ 一段"读不到"的说明（不是 utf-8、是目录……）。
+    只扫标题之后、第一个 `##` 之前的引言区，与 gen_changelog._parse_scope 同一口径：正文里
+    那句给人读的"本版只换服务端"不该被第二次当成机器判据。scope 值不认识 = 报错，不当"没标"
+    处理——静默回落成"有安装包"就是把一个装不上的版本号播出去，正是这枚标记要防的事。
+    """
+    path = release_note_path(repo_root, version)
+    if not os.path.isfile(path):
+        return False, NOTE_MISSING
+    try:
+        text = _read_text(path)
+    except MarkerSourceError as exc:
+        return False, "release-note-unreadable:%s" % exc
+    for raw in text.splitlines():
+        if SECTION_RE.match(raw):
+            break
+        match = SCOPE_RE.match(raw)
+        if not match:
+            continue
+        value = match.group(1).strip().lower()
+        if value not in VALID_SCOPES:
+            return False, "release-note-scope-unknown:%s=%s（只认 %s）" % (
+                path, match.group(1), " / ".join(VALID_SCOPES))
+        return value == SCOPE_SERVER_ONLY, None
+    return False, None
+
+
 def collisions(marker_a, marker_b):
     """两枚标记互为子串就是假判据：-SimpleMatch 数不出区别。"""
     if marker_a == marker_b:
@@ -165,18 +221,64 @@ def evaluate(repo_root, expect=None):
         if not FULL_TAG_RE.match(value):
             return 1, ["RELEASE-MARKER verdict=FAIL token=expect-must-be-full-tag got=%s" % value]
         target = normalize_version(value)
-        if version_key(target) != version_key(declared):
-            return 1, ["RELEASE-MARKER verdict=FAIL token=versionname-not-bumped "
-                       "expect=v%s declared=v%s —— 三件套的声明侧还没改到这个版本，"
-                       "先把 build.gradle 的 versionName  bump 上来再核标记"
-                       % (target, declared)]
+
+    # 形态判读：要切的这一版是不是"只换服务端"，权威是它自己的发版说明，不是 versionName。
+    server_only, reason = note_scope(repo_root, target)
+    if reason == NOTE_MISSING:
+        # 缺说明只在"目标还没被声明侧追平"时才拦：那一刻除了那份说明，仓库里没有任何机器
+        # 可读的东西说明这一版是什么形态，顺着操作者的嘴放行 = 把装不上的版本号播出去，
+        # 而按旧判据逼他 bump versionName 是同一个错的另一种写法。
+        if expect and version_key(target) != version_key(declared):
+            return 2, ["RELEASE-MARKER verdict=UNKNOWN token=no-release-note-for-target "
+                       "target=v%s declared=v%s —— docs/releases/v%s.md 还不存在，现在没有任何"
+                       "机器可读的东西说明 v%s 是「只换服务端」还是「有安装包」，所以既不放行、"
+                       "也不许去把 build.gradle 的 versionName 顶上来；先把这一版的发版说明落下来"
+                       "（只换服务端的那一版在标题之后、第一个小节之前补一行 %s）"
+                       % (target, declared, target, target, SCOPE_SERVER_ONLY_LINE)]
+    elif reason:
+        return 2, ["RELEASE-MARKER verdict=UNKNOWN reason=%s —— 判据读不到就是不许" % reason]
+
+    if not server_only and version_key(target) != version_key(declared):
+        # 有安装包的那一版：这条判据是对的，留着——装不上的包不 bump versionName，能装的必须 bump。
+        return 1, ["RELEASE-MARKER verdict=FAIL token=versionname-not-bumped "
+                   "expect=v%s declared=v%s —— 本版说明没带 %s，那就是要出安卓包的一版，"
+                   "而三件套的声明侧还没改到这个版本：先把 build.gradle 的 versionName bump "
+                   "上来再核标记（如果这一版其实只换服务端，那就在 docs/releases/v%s.md 补 scope "
+                   "标记，而不是 bump 版本号）"
+                   % (target, declared, SCOPE_SERVER_ONLY, target)]
 
     marker = marker_for(target)
-    lines.append("RELEASE-MARKER declared=v%s target=v%s marker=%s" % (declared, target, marker))
+    lines.append("RELEASE-MARKER declared=v%s target=v%s scope=%s marker=%s"
+                 % (declared, target,
+                    SCOPE_SERVER_ONLY if server_only else SCOPE_INSTALLABLE, marker))
     problems = []
 
     found = marker_lines(app_js)
-    if not found:
+    if server_only:
+        # 只换服务端的一版不 bump versionName，所以"该用的那一串"此刻【必须还没进】app.js：
+        # 它已经在了就说明这枚串同样在线上那份包里，两侧计数会两边都有 = 那次空转验收。
+        hit_lines = count_marker_lines(app_js, marker)
+        if hit_lines:
+            problems.append("token=server-only-marker=already-present marker=%s lines=%d —— "
+                            "本版说明写的是 %s（不出新安卓包），而 %r 已经在 app.js 里了："
+                            "线上那份包里也有这一串，换包预检数的就是这种两边都有的假判据"
+                            % (marker, hit_lines, SCOPE_SERVER_ONLY, marker))
+        above = [v for _, v in found if version_key(v) > version_key(target)]
+        if above:
+            problems.append("token=server-only-marker=newest-above newest=v%s target=v%s —— "
+                            "app.js 里已经有比这一版更新的标记（标记是累积的，v0.34.2 那版就是"
+                            "两行）：版本号错位的一刻正是数行数错的一刻"
+                            % (max(above, key=version_key), target))
+        for existing in sorted({v for _, v in found}, key=version_key):
+            if version_key(existing) == version_key(target):
+                continue
+            if collisions(marker_for(existing), marker):
+                problems.append("token=marker=prefix-collision v%s <-> v%s —— "
+                                "Select-String 是按子串数行的，这一版该用的那枚和 app.js 里已有的"
+                                "那枚互相命中，换包预检分不清新旧两侧，等于挑了一个两边都有的假判据"
+                                % (existing, target))
+                break
+    elif not found:
         problems.append("token=marker=absent app.js 里一枚 release-marker-vX.Y.Z 都没有，"
                         "-Marker 就没有可推导的来源；补一行 %r" % marker)
     else:
@@ -225,7 +327,9 @@ def main(argv=None):
         description="derive the swap -Marker from the version being released (never hand-pick it)")
     parser.add_argument("--repo-root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     parser.add_argument("--expect", default=None,
-                        help="the tag about to be cut, e.g. v0.35.0; default = build.gradle versionName")
+                        help="the tag about to be cut, e.g. v0.35.0; its release note's scope line "
+                             "decides whether versionName must have reached it; "
+                             "default = build.gradle versionName")
     args = parser.parse_args(argv)
     rc, lines = evaluate(args.repo_root, args.expect)
     for line in lines:
