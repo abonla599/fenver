@@ -46,8 +46,16 @@ def _stub_side_checks(gate, monkeypatch):
 
     发版说明是否存在、versionName 涨没涨，都是**另一条**判据（下面各有专门的用例）。
     留着它们，测错位的那条会先撞上"v0.33.1 的说明还没写"，红的理由和断言的理由对不上。
+
+    #22 起多一条同级的旁证：发版物料顺序闸（清单宣告 vs 盘上的包）。它自己有专门的
+    用例文件（test_v0350_release_materials_gate.py，真的跑闸门、真的拿 tmp 物料），
+    这里照上面那条的同一手法接掉——否则这些用例会先撞上"v0.33.1 的包不在盘上"，
+    红的理由和断言的理由又对不上了。**接掉的只是这条判据在本文件里的噪声，
+    判据本身与它的顺序一个字没动。**
     """
     monkeypatch.setattr(gate, "release_note_exists", lambda root, tag: True)
+    monkeypatch.setattr(gate, "check_announcement_materials",
+                        lambda root, ver: (True, "ok", "stubbed：本用例只测 build 判据"))
 
 
 def test_gate_script_exists_and_is_the_documented_shape():
