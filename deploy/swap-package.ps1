@@ -471,6 +471,25 @@ function Stop-AfterFailure {
     # states what was done and not what was intended.
     $package = 'intact-no-restart-needed'
     try {
+        # MEASURED, NOT DERIVED - and correct here only by an accident worth naming.
+        # With exactly ONE process running, this call unwraps to a bare CimInstance
+        # (the shape the boot poll documents below), a bare CimInstance answers
+        # .Count as $null, and $null -eq 0 is False, so the branch stays shut while
+        # a backend is up - the wanted verdict, but not one this line computes from
+        # a count. This box (PS 5.1.26100.9549), 0/1/2 processes: as written it
+        # answers True/False/False, and wrapping the call in @() before .Count
+        # answers the same True/False/False, so the two spellings behave alike
+        # today. The wrap is deliberately NOT applied here: this predicate's exact
+        # text is the locator that test_swap_package_disable_verify.py uses to prove
+        # the guard restore is not nested inside this if, so re-shaping the line
+        # would move another ticket's lock. The truth table is pinned by the machine
+        # probe instead (backend/tests/
+        # test_swap_package_boot_poll_single_process_machine_truth.py), which
+        # evaluates THIS line's own condition for 0/1/2 processes and requires
+        # True/False/False - so a future edit that turns the accident into a real
+        # count, or into a branch that fires while a backend is up (two backends
+        # writing the same data\ files), is caught by the machine and not by a
+        # reader's guess.
         if ((Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
             # do not double-start: two backends would write the same data\ files
             Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
@@ -898,7 +917,32 @@ while ((Get-Date) -lt $bootDeadline) {
         Write-Output ('READFAIL stage=boot-poll fails=' + $bootPollFails + ' error=' + $bootPollError)
         continue
     }
-    if ($running.Count -ge 1) {
+    # ONE RUNNING PROCESS IS THE NORMAL CASE, AND IT ARRIVES HERE UNWRAPPED.
+    # Get-LiveProcess (:195-204) wraps its own pipeline in @(), but PowerShell
+    # enumerates function output element by element, so a one-element result
+    # lands on $running as a BARE CimInstance - and a bare CimInstance answers
+    # .Count as $null, which makes -ge 1 False. Measured on this box 2026-10-17
+    # (PS 5.1.26100.9549) with exactly one run_backend.exe serving, pid 126256:
+    # is_array=False, .Count=$null, ($running.Count -ge 1)=False, @($running) has
+    # 1 element. Do not eyeball this from scalar behaviour: an int answers .Count
+    # as 1 and $null answers it as 0 - the CimInstance is the exception, which is
+    # exactly why this survived two readers. Unbroken, the loop never breaks on
+    # the normal path: it burns the whole $StartTimeoutSeconds window on every
+    # swap, and the only pid it can then report is the /health sentinel below
+    # (-1) rather than the pid this loop exists to find.
+    # So re-wrap it, AT THE PREDICATE - the idiom this file already uses where it
+    # assigns $task, $stoppedPids and $stillListening, and the one watchdog.ps1
+    # uses against this same flattening bug (its :315 -is [array], :377, :480).
+    # The wrap is safe for the no-process case (measured: @(Get-LiveProcess)
+    # counts 0, and an $running freshly assigned from a command that emitted
+    # nothing also counts 0), but it is not a general identity - @($null) over a
+    # literal $null value counts 1 - so a future "$running = $null" initialiser
+    # plus a path that reaches this line without a fresh read would quietly
+    # change what the count means. The lock that asks the machine instead of the
+    # reader is backend/tests/
+    # test_swap_package_boot_poll_single_process_machine_truth.py and it goes red
+    # against an unwrapped predicate - do not "simplify" this back.
+    if (@($running).Count -ge 1) {
         $livePid = (@($running)[0]).ProcessId
         break
     }
