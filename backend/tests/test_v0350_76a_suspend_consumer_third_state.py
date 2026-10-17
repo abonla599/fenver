@@ -4,7 +4,7 @@
 `record_outcome(..., suspended=True)` 在 `guardrails.py:167-173`，排在 `:175` 的 `if ok:`
 之前；调用点此前一律传 `ok=bool(outcome.ok)`，于是"请输入短信验证码"被读成一次工具
 失败，两次就把这个工具在本轮熔断（`guardrails.py:177-180`）。#76a 把四个读数点接上
-结构化那一格：`pipeline.py:306`、`streaming.py:478`、`react_agent.py:213`、
+结构化那一格：`pipeline.py:306`、`streaming.py:478`、`react_agent.py:212`、
 `task_agent.py:178`。#29 那一份锁（`test_v0350_ticket29_guardrail_third_state.py`）
 是**直接对 RoundGuard 说话**的，摘掉调用点的 `suspended=` 它一条都不会红——所以本文件
 补的是"走真实代码路"的那一把，摘掉就红。
@@ -20,11 +20,16 @@
 * D1（不许发明文本前缀判据）在这里为什么不给"前缀 vs 结构化"的反例锁：渲染器
   （`tools/response.py:84-87`）让每一次真挂起的文本都以 `⏸ ` 开头，而成功/失败两支分别是
   `✓ `/`✗ 错误: `——所以在真执行器下面两者今天恒等相关，行为层面造不出"前缀说挂起、
-  结构化说不挂起"的输入。**实测过**：把 pipeline 与 react_agent 两处判据换成
+  结构化说不挂起"的输入。**实测过**：把 pipeline 与 react_agent 两处**挂起**判据换成
   `startswith("⏸ ")` 之后，本文件 7 条全绿（rc=0）——这把锁管不了前缀判据，别以为它在管。
   D1 只能由"读数点写成 `outcome.suspended`"这个形状保证（审 `pipeline.py:306`、
-  `streaming.py:478`、`react_agent.py:213`、`task_agent.py:178` 那四处），硬造一把前缀反例锁
+  `streaming.py:478`、`react_agent.py:212`、`task_agent.py:178` 那四处），硬造一把前缀反例锁
   只能靠 mock 渲染器，那是让被测对象自报，本仓不认。
+* ⭐ 工单 #76b（本票的第二波，只换判据、不加锁也不删锁）：`react_agent.py:212` 那一行的**成败**
+  判据也已从 `str(tool_result).startswith("✓")` 换成 `ok=bool(outcome.ok)`，与上面四处同形；同一
+  口径实测过——把那处摘回文本前缀写法之后**全量仍绿**（passed/skipped/rc 见 #76b 的 commit
+  正文）⇒ 本文件与 #29 那一份只管 `suspended=`，没有任何一把锁读得出这一处回归。读数点的
+  形状锁归 #80，本单不补（协议层 `ToolOutcome` 不校验，手搓 `ok=True/text="t"` 合法）。
 
 现网可达性：这一批对现网零行为改变——`ToolSuspended` 在 `backend/app/**` 里零 `raise`，
 `registry` 也没有任何一条工具声明 `suspends`，第三态今天到不了。本文件的道具就是一次
@@ -278,14 +283,15 @@ def test_lock1_control_pipeline_real_failures_still_fuse(monkeypatch, t76a_tools
         f"两次真失败必须熔断（#29 没放宽这一条）：{blocked!r}")
 
 
-# ---------- 锁 2：ReAct（react_agent.py:213，本单从纯文本换成结构化那一格） ----------
+# ---------- 锁 2：ReAct（react_agent.py:212，#76a 换 detailed、#76b 把成败判据换成 outcome.ok） ----------
 
 def test_lock2_react_agent_suspensions_never_fuse_the_tool(monkeypatch, t76a_tools):
-    """走 ReActAgent.run 的真实循环：证明 :213 传的是 `outcome.suspended` 那格。
+    """走 ReActAgent.run 的真实循环：证明 :212 传的是 `outcome.suspended` 那格。
 
-    这一条路本单改动前只有纯文本（`execute_tool` 的投影）+ `startswith("✓")` 猜成败，
-    挂起必然被记成失败；换成 detailed 之后文本仍取 `.text`（:212 那个成败判据本单不动），
-    记账多带 `suspended=`。摘掉 `suspended=` → 同样两记失败 → 本条最后一句红。
+    这一条路 #76a 之前只有纯文本（`execute_tool` 的投影）+ `startswith("✓")` 猜成败，
+    挂起必然被记成失败；#76a 换成 detailed 后文本仍取 `.text`，#76b 已把那处成败判据换成
+    `ok=bool(outcome.ok)`（本文件读不出那一步，见文件头 D1 那一族）。摘掉 `suspended=` →
+    两记失败 → 本条最后一句红。
     """
     seen = _spy_guard(monkeypatch, react_agent_mod, [])
     calls = _client_for(react_agent_mod, monkeypatch, [
@@ -306,7 +312,7 @@ def test_lock2_react_agent_suspensions_never_fuse_the_tool(monkeypatch, t76a_too
 
 
 def test_lock2_control_react_agent_real_failures_still_fuse(monkeypatch, t76a_tools):
-    """同一条路上的反例：ReAct 这条两次真失败照样熔断，兜底异常支（:218）也不许被顺手改成挂起。"""
+    """同一条路上的反例：ReAct 这条两次真失败照样熔断，兜底异常支（:217）也不许被顺手改成挂起。"""
     seen = _spy_guard(monkeypatch, react_agent_mod, [])
     _client_for(react_agent_mod, monkeypatch, [
         _resp(_tool_call_msg(FAILING, {"item": "拿铁"}, "f1")),

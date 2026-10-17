@@ -9,9 +9,10 @@
 
 本票只做两件事：护栏里那一格第三态的**状态**，以及下面这些**会红的锁**。
 调用点是 **工单 #76** 的活：第一波 **#76a 已落**——两条聊天路径（读数点 pipeline.py:306、
-streaming.py:478）、react_agent.py:213 与 task_agent.py:178 都改吃 execute_tool_detailed
-并传 `suspended=bool(outcome.suspended)`；判据读的是结构化那一格（唯一赋值点
-executor.py:181），不是文本前缀。现网行为仍然一字未变，但**原因换了**：不再是"调用点
+streaming.py:478）、react_agent.py:212 与 task_agent.py:178 都改吃 execute_tool_detailed
+并传 `suspended=bool(outcome.suspended)`；判据读的是结构化那一格（挂起在 executor.py:181、
+成败在 :197，#76b 已把 react_agent 的成败判据从 `startswith("✓")` 换成 `outcome.ok`），不是
+文本前缀。现网行为仍然一字未变，但**原因换了**：不再是"调用点
 没接（休眠）"，而是 `backend/app/**` 里 `ToolSuspended` 零 raise、registry 无一声明
 `suspends`，第三态根本到不了。A4 交出第一条真 `suspends: True` 的工具之前 #76 必须落全。
 因此本文件里任何一条锁都**不依赖**调用点是否已经传 `suspended=`——它们直接对 RoundGuard 说话；
@@ -189,7 +190,7 @@ def test_29_old_ok_fail_callers_keep_working_unchanged():
     """#76a 接上了四个调用点，但两参老写法还在（react_agent 的兜底异常支），原意不许变。
 
     `suspended` 做成**关键字限定**参数（默认 False）而不是第 3 个位置参数，理由：
-    位置参数会顶掉 `estimated_tokens` 的位置——`react_agent.py:218` 那条兜底异常支
+    位置参数会顶掉 `estimated_tokens` 的位置——`react_agent.py:217` 那条兜底异常支
     `record_outcome(tool_name, False)` 不疼，但任何按位置传第三参的写法会静默把
     token 数读成布尔。默认参数 vs 新关键字里选后者，因为它的破坏面可被签名检查证明为零。
     另：把 `ok` 改成 `Optional[bool]`（None=挂起）被否掉——现网没人传 None，
@@ -205,7 +206,7 @@ def test_29_old_ok_fail_callers_keep_working_unchanged():
     assert list(params) == ["self", "tool_name", "ok", "estimated_tokens", "suspended"], list(params)
 
     guard = RoundGuard()
-    guard.record_outcome("web_search", False)     # 位置写法（react_agent.py:218 兜底异常支）
+    guard.record_outcome("web_search", False)     # 位置写法（react_agent.py:217 兜底异常支）
     guard.record_outcome("web_search", ok=False, estimated_tokens=7)  # 关键字写法
     blocked = guard.check("web_search", {"query": "同一个参数"})
     assert blocked, "两态老写法仍须在两次失败后熔断"

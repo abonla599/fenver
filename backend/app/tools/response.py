@@ -32,7 +32,7 @@ class ToolSuspended(Exception):
     这条异常**绝不允许飘出执行器**：`_dispatch` 就地接住、折成一个 `suspended=True` 的
     `ToolResponse`（见 `executor.py` 的 `_settle_suspension`）。理由是向后兼容的承重墙，
     不是洁癖——所有既有调用侧都写着兜底 `except Exception`（`streaming.py:553`、
-    `pipeline.py`、`react_agent.py:219`），异常一旦外飘就立刻被折成一句"工具执行错误"，
+    `pipeline.py`、`react_agent.py:215`），异常一旦外飘就立刻被折成一句"工具执行错误"，
     第三态当场退化回失败态，正是这一版要拆掉的形状。工具要挂起就 raise，
     raise 出去的东西由执行器负责变成值。
     """

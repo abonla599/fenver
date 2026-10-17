@@ -153,10 +153,10 @@ class RoundGuard:
           "尝试即计数"同口径（不记就是给重试留免费额度、绕开成本上限）。
         * **另起一格账**：`_suspensions` 计数 + 事件 `suspend`，可观测（中性 ≠ 隐形）。
 
-        `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：工单 #76a
-        已把三条聊天路径与 task_agent 的调用点接上这一格，但老写法 `record_outcome(name,
-        ok)` 仍在（react_agent 的成败判据与那条兜底异常支都是两参调用），于是
-        `estimated_tokens` 的位置与含义必须一字不变——挪成位置参数就静默把 token 数读成布尔。
+        `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：工单 #76a 已把三条
+        聊天路径与 task_agent 的调用点接上这一格，两参写法 `record_outcome(name, ok)` 今天在 app 里
+        只剩 react_agent.py:217 那条兜底异常支（异常不是挂起；#76b 已把该文件的成败判据换成
+        `outcome.ok`），于是 `estimated_tokens` 的位置与含义必须一字不变——挪成位置参数就静默把 token 数读成布尔。
 
         可用性探测已剔除的工具不进熔断计数（它们根本不会被调用到这里）。
         """
