@@ -231,9 +231,11 @@ def test_suspension_is_the_third_outcome_and_not_the_error_one(fake_tools):
 def test_the_three_outcomes_have_three_mutually_distinct_text_projections(fake_tools):
     """只读文本的老消费者（`execute_tool` 那一条）也分得开三态。
 
-    这是 `react_agent.py:212` / `task_agent.py` 老写法 `startswith("✓")` 那一族的
-    底线判据：三种前缀互不重叠，且挂起那一支**既不是 ✓ 也不是 ✗**。老读法把它
-    读成"这次没拿到可用结果"是安全的方向；读成"成功了"才是事故。
+    历史口径（这一族今天已经没有生产读者）：`task_agent.py:178` 早在 #76a 之前就改读
+    `ok=bool(outcome.ok)`，`react_agent.py` 那句 `str(tool_result).startswith("✓")` 也在 #76b
+    换成了 `outcome.ok`（现在写在 :212）。所以本条钉的是**文本形状本身**：三种前缀互不重叠，
+    挂起那一支**既不是 ✓ 也不是 ✗**——按前缀猜成败的读法只会把它读成"这次没拿到可用结果"，
+    那是安全的方向；读成"成功了"才是事故。
     """
     ok = ex.execute_tool("a3_calc", {"expression": "2*3"}, user_id="u-1")
     fail = ex.execute_tool("a3_boom", {}, user_id="u-1")
@@ -285,7 +287,7 @@ def test_no_suspension_signal_ever_escapes_the_executor(fake_tools):
     """挂起在协议里是**值**，不是异常：两条公开函数都只回 str / ToolOutcome。
 
     这条是向后兼容的承重墙。调用侧全都写着兜底 `except Exception`
-    （`streaming.py:553`、`pipeline.py`、`react_agent.py:219`），异常一旦外飘立刻被
+    （`streaming.py:553`、`pipeline.py`、`react_agent.py:215`），异常一旦外飘立刻被
     折成一句"工具执行错误"，第三态当场退化回失败态。
     """
     try:

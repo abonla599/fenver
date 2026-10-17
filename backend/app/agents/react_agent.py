@@ -207,10 +207,9 @@ class ReActAgent:
                             # 所以这里如实告诉模型改用聊天路径，而不是替用户批准。
                             outcome = execute_tool_detailed(tool_name, tool_args, user_id=user_id)
                             tool_result = outcome.text   # #76a：给模型的文本仍取 .text 那一格
-                            # 局部名不叫 ok：run 级的 ok 在 :108 已有含义（覆盖它会把一次工具失败
-                            # 记成整轮 run 失败）。第三态读 outcome.suspended 那格世界事实（#76a/D1）。
-                            tool_ok = str(tool_result).startswith("✓")
-                            guard.record_outcome(tool_name, tool_ok, suspended=bool(outcome.suspended))
+                            # #76b：成败与挂起都读结构化那两格（outcome.ok / outcome.suspended，executor.py:197/:181），
+                            # 不再猜文本 ✓；今天等价靠 executor.py 两处承重：:251-256 的 fail-closed、:82 的 clip_for_model 保头。
+                            guard.record_outcome(tool_name, ok=bool(outcome.ok), suspended=bool(outcome.suspended))
                             if self.verbose:
                                 print(f"[ReActAgent] ✅ 工具结果: {str(tool_result)[:200]}...")
                         except Exception as e:

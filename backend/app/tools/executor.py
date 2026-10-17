@@ -108,8 +108,8 @@ class ToolOutcome(NamedTuple):
     唯一赋值点给出——不是从 `ok`/`success` 猜的（被审批闸门、频控、缺身份挡下的续跑，
     `ok` 同样是 False，却压根没进函数体）。编排器据此决定"要不要把这枚断点标成已消费"：
     只有真的把答案交给了工具（副作用可能已落地）才许标，被闸门挡下的那种必须留着能再递。
-    默认 False = 没走到函数体。既有读者（`streaming.py`、ReAct/TaskAgent 的老写法）不读这一格，
-    与它们无关。
+    默认 False = 没走到函数体。除 `orchestrator.py:386` 那一处消费点外，既有读者（`pipeline.py`、
+    `streaming.py`、`react_agent.py`、`task_agent.py`、`main.py:974`）都不读这一格，与它们无关。
 
     两个新格都带默认值：`tool_ran` 加在 `suspension` 之前而不是最末尾，是因为 `suspended`
     与 `suspension` 必须保持是 `_fields` 的最后两格（那条形状锁见
@@ -153,8 +153,8 @@ def execute_tool(tool_name: str, arguments: dict, user_id: str = None,
 
     ⚠️ 文本投影读不出第三态的完整形状：挂起时这里返回的是 `⏸ 需要用户输入：…`
     那句话（`✓`/`✗` 之外的第三个前缀），而 `can_resume` 这类结构化信息只在
-    `execute_tool_detailed` 里有。只拿文本的消费者（ReAct/TaskAgent 的老写法）至少
-    能分清"这不是失败"，要接回断点就得换 detailed 那条——这是有意的分层，不是遗漏。
+    `execute_tool_detailed` 里有。⭐ 工单 #76b 之后 `backend/app/**` 已无"只拿文本"的读数点（各处
+    都取 detailed，文本只是它投影出的那一格），这层投影今天只剩测试在吃：它至少能分清"这不是失败"。
     """
     return execute_tool_detailed(tool_name, arguments, user_id=user_id,
                                  granted_ticket=granted_ticket, resume=resume).text
