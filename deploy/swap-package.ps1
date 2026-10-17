@@ -93,6 +93,36 @@ service over a bookkeeping file. So the tail says what it knows and finishes at 
 backend/tests/test_swap_package_post_acceptance_tokens.py locks both routes by making this
 machine answer, not by matching text.
 
+THE ROLLBACK PATH CANNOT BE ALLOWED TO START BLIND - THE RUNTIME DATA IS SNAPSHOT FIRST (#42).
+v0.35 parks a task by writing status "waiting_user" plus a resume_cursor into data\tasks.json.
+The ALREADY SHIPPED v0.34.2 package restores that file through TaskStatus(data.get("status",
+...)): in its own blob (git show v0.34.2:backend/app/agents/task_store.py) that call sits at
+:101, and TaskStatus there has exactly five members (pending / running / completed / failed /
+cancelled), so the literal raises ValueError. The per-record handler at :206-207 prints
+"skipping one unreadable task record" and drops that record from MEMORY, and the flush at
+:216-217 - or any later write, since :156-160 dumps the whole dict - rewrites the file FROM
+MEMORY. A v0.35 -> v0.34.2 rollback therefore does not "hide the parked tasks in the old UI",
+it ERASES them together with their breakpoints, and the shipped package's code is exactly the
+thing that cannot be edited. Hence DATA-SAVED: before this run can let any package start, it
+copies data\tasks.json and data\approvals.json into data\swap-snapshots\<stamp>\ and prints
+where. Three asymmetries carry the design and each is argued at its own site: (1) the snapshot
+runs in BOTH modes, not only rollback - a forward swap to v0.35 is what CREATES the records the
+next rollback would eat, and copying a 19-byte file costs nothing; (2) a failed COPY aborts
+(DATA-SAVE-FAIL, then a pre-flight-style throw while nothing has been stopped and no guard is
+held down) while a failed COUNT only degrades to waiting_user=unproven - the copy is the only
+thing that makes recovery possible, a missing number is not. That is the mirror image of the
+degrade rule above: back there the swap had already succeeded, here the run is still free to
+refuse; (3) the copies go under data\ and never dist\ - dist\run_backend_old-* is precisely
+what a "delete the build garbage" pass eats, while data\ is declared a runtime asset that no
+cleanup may touch, so a copy meant to outlive the rollback package must sit where the cleaner
+does not go. The copies are copies: this step never moves or deletes an original, and a file it
+cannot read is reported unreadable rather than as zero records ("cannot read" and "read zero"
+are different verdicts, same rule as backend-entries=unproven above).
+backend/tests/test_swap_package_rollback_data_snapshot.py runs the WHOLE script against a fake
+project root with Start-Process / Stop-Process / the scheduled-task cmdlets stubbed to a log,
+and requires DATA-SAVED on the observed output BEFORE the first would-start entry - the
+ordering is proven by what this machine did, not by where the line sits.
+
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
 Chinese comments and dies on a syntax error - production then silently keeps
 serving the OLD build for nine days because every later step never ran. Also
@@ -201,6 +231,16 @@ $StageAppJs = Join-Path $StageDir '_internal\app\web\static\app.js'
 $StageStamp = Join-Path $StageDir '_internal\version.txt'
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Backup = Join-Path $ProjectRoot ('dist\run_backend_old-' + $stamp)
+# The two runtime data files an older package can eat (#42), and where this run keeps its
+# copies. Under data\ and NOT under dist\: dist\run_backend_old-* is exactly the shape a
+# "delete the build garbage" pass removes, while data\ is the directory the machine's own
+# AGENTS.md declares a runtime asset that no cleanup may touch. A copy whose whole job is to
+# outlive a rollback has to sit where the cleaner does not go; and no code path globs data\ -
+# both files are opened by their exact names (task_store.py _default_path, approval.py
+# _default_path), so a snapshot subdirectory is inert to the running service.
+$TasksJson       = Join-Path $ProjectRoot 'data\tasks.json'
+$ApprovalsJson   = Join-Path $ProjectRoot 'data\approvals.json'
+$DataSnapshotDir = Join-Path $ProjectRoot ('data\swap-snapshots\' + $stamp)
 
 $script:backupDone = $false
 # Whether THIS run currently holds the watchdog down. The restore machinery keys
@@ -415,6 +455,127 @@ function Clear-BackendBudget {
                   ' bom=' + $hadBom + ' other-keys-kept=true')
 }
 
+function Get-TaskFileVerdict {
+    # HOW MUCH IS AT RISK, read from the JSON (#42). This function exists so the operator can
+    # see, before choosing to roll back, how many parked tasks and breakpoints the package
+    # coming in is about to erase.
+    #
+    # WHY THE COUNT IS READ FROM THE FILE AND NOT BY RE-USING THE RESTORE CODE: the restore
+    # logic that does the damage lives inside the frozen onedir package (its own TaskStatus
+    # enum has no waiting_user member, which is the whole incident), so there is nothing here
+    # to import, and re-implementing it in PowerShell would be a second ruler that drifts the
+    # moment the state machine changes. Reading the JSON needs no semantics: "waiting_user" is
+    # the persisted literal, written as .value by to_dict precisely so the file stays readable
+    # across versions (task_store.py documents that str() would print "TaskStatus.PENDING").
+    #
+    # WHY -ceq AND NOT -eq: PowerShell's -eq is case-insensitive, and this count is a claim
+    # about the exact literal the old enum rejects. A status stored as "WAITING_USER" is not a
+    # parked task, it is a different verdict about a different file.
+    #
+    # "CANNOT READ" IS NOT "READ ZERO", the standing rule of this file (see
+    # backend-entries=unproven in Clear-BackendBudget). Every non-ok state reports
+    # unproven, never 0, because 0 is what tells the operator the rollback is safe.
+    #
+    # Returns ONE object and prints nothing, for the pipeline-capture reason documented in
+    # Get-WatchdogTaskState: the caller assigns this result, and an assignment takes the WHOLE
+    # output stream.
+    param([string] $TasksPath)
+    if (-not (Test-Path -LiteralPath $TasksPath)) {
+        # no file at all is a read verdict, not a failure: nothing is parked, nothing to copy
+        return [pscustomobject]@{ State = 'absent'; Records = 'absent'; WaitingUser = 'absent'; Detail = '' }
+    }
+    $text = $null
+    try {
+        $text = [System.IO.File]::ReadAllText($TasksPath)
+    } catch {
+        $verdictReadError = $_.Exception.Message
+        return [pscustomobject]@{ State = 'unreadable'; Records = 'unproven'; WaitingUser = 'unproven'; Detail = $verdictReadError }
+    }
+    if ($null -eq $text -or -not $text.Trim()) {
+        return [pscustomobject]@{ State = 'empty-file'; Records = 'unproven'; WaitingUser = 'unproven'; Detail = 'read answered no content' }
+    }
+    $data = $null
+    try {
+        $data = $text | ConvertFrom-Json
+    } catch {
+        $verdictParseError = $_.Exception.Message
+        return [pscustomobject]@{ State = 'unparsable'; Records = 'unproven'; WaitingUser = 'unproven'; Detail = $verdictParseError }
+    }
+    if ($null -eq $data.tasks) {
+        # Guarded BEFORE any counting, and that order is a measurement rather than a style
+        # choice: @($null).Count answers 1 on this PowerShell, so counting through the wrap
+        # would report one record that does not exist - the same flattening trap documented at
+        # the boot poll. A file that parses but has no tasks object is a shape this script has
+        # never seen, so it gets unproven, not a number.
+        return [pscustomobject]@{ State = 'no-tasks-key'; Records = 'unproven'; WaitingUser = 'unproven'; Detail = 'json answers no tasks object' }
+    }
+    if ($data.tasks -is [array]) {
+        return [pscustomobject]@{ State = 'tasks-not-object'; Records = 'unproven'; WaitingUser = 'unproven'; Detail = 'tasks key is an array, not the id-keyed object write_unlocked emits' }
+    }
+    $props = @($data.tasks.PSObject.Properties)
+    $waiting = @($props | Where-Object { $_.Value.status -ceq 'waiting_user' })
+    return [pscustomobject]@{ State = 'ok'; Records = [string] $props.Count; WaitingUser = [string] $waiting.Count; Detail = '' }
+}
+
+function Save-RuntimeDataSnapshot {
+    # The copies that make a rollback reversible (#42). COPY ONLY - never a move, never a
+    # rename, never a delete, of anything under data\: the originals are the files the service
+    # that is still answering requests is reading and writing, and this step runs while it is
+    # up. [System.IO.File]::Copy opens the source for read and writes a new path; the source
+    # keeps its bytes, its mtime and its existence.
+    #
+    # Overwrite is $true and that is safe only because $DataSnapshotDir carries the swap stamp
+    # (:202 Get-Date yyyyMMdd-HHmmss), so two runs never share a destination - the same
+    # no-overwrite reasoning the backup directory uses for its name.
+    #
+    # WHY A FAILURE HERE ABORTS AND DOES NOT DEGRADE (the mirror image of #47's tail rule, and
+    # the opposite ruling on purpose): Clear-BackendBudget degrades because by then the swap
+    # has been ACCEPTED and aborting would print a rollback recipe over a healthy, guarded
+    # service. Here nothing has succeeded yet, no package has moved, the crash guard has not
+    # been touched - so the run is still free to refuse, and what it would be refusing to
+    # permit is the irreversible half of this ticket: without a copy there is no recovery from
+    # the erase documented in the header. The caller throws the pre-flight way; deliberately
+    # NOT through Stop-AfterFailure, whose pre-backupDone branch calls Start-Process on
+    # $LiveExe whenever the process list answers zero - i.e. the very thing being protected
+    # against, started by the failure handler meant to prevent it.
+    #
+    # Returns one object, prints nothing (same pipeline-capture rule as the helper above).
+    param([string] $Dir, [string] $TasksPath, [string] $ApprovalsPath)
+    try {
+        [void] [System.IO.Directory]::CreateDirectory($Dir)
+    } catch {
+        $snapshotDirError = $_.Exception.Message
+        return [pscustomobject]@{ Ok = $false; Dir = $Dir; Tasks = 'failed'; Approvals = 'not-attempted'; Error = $snapshotDirError }
+    }
+    $savedTasks = 'absent'
+    if (Test-Path -LiteralPath $TasksPath) {
+        $destTasks = Join-Path $Dir 'tasks.json'
+        try {
+            [System.IO.File]::Copy($TasksPath, $destTasks, $true)
+            $savedTasks = $destTasks
+        } catch {
+            $tasksCopyError = $_.Exception.Message
+            return [pscustomobject]@{ Ok = $false; Dir = $Dir; Tasks = 'failed'; Approvals = 'not-attempted'; Error = $tasksCopyError }
+        }
+    }
+    $savedApprovals = 'absent'
+    if (Test-Path -LiteralPath $ApprovalsPath) {
+        # v0.34.2 has no reader for this file at all (git grep approvals v0.34.2 -- backend/app
+        # answers nothing), so a rollback leaves it as an orphan holding tool arguments and
+        # execution results that only the new code sweeps (approval.py:193-212). It is copied
+        # for the same reason as tasks.json: it is the only record of what was parked where.
+        $destApprovals = Join-Path $Dir 'approvals.json'
+        try {
+            [System.IO.File]::Copy($ApprovalsPath, $destApprovals, $true)
+            $savedApprovals = $destApprovals
+        } catch {
+            $approvalsCopyError = $_.Exception.Message
+            return [pscustomobject]@{ Ok = $false; Dir = $Dir; Tasks = $savedTasks; Approvals = 'failed'; Error = $approvalsCopyError }
+        }
+    }
+    return [pscustomobject]@{ Ok = $true; Dir = $Dir; Tasks = $savedTasks; Approvals = $savedApprovals; Error = '' }
+}
+
 function Show-Rollback {
     # printed, never auto-run: after the live dir has been moved aside, a wrong
     # automatic un-rename under a file lock converts one half-swap into two.
@@ -432,6 +593,7 @@ function Show-Rollback {
     Write-Output 'ROLLBACK-HOWTO 5) start the old package and wait until /health answers with the OLD build:'
     Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden")
     Write-Output 'ROLLBACK-HOWTO 6) only now re-enable the watchdog task (find it by its action, as this script did)'
+    Write-Output ('ROLLBACK-HOWTO 7) runtime data copies this run saved (DATA-SAVED dir=) live at ' + $DataSnapshotDir + ' - if the package going live is older than v0.35 it cannot parse a waiting_user status and erases those records from data\tasks.json on its first flush, so stop the backend, copy tasks.json back over data\tasks.json, then start it again (DATA-SAVE-FAIL instead of DATA-SAVED means no copy exists)')
     Write-Output 'ROLLBACK-HOWTO ref: deployment guide, swap section - the same steps, in reverse order.'
 }
 
@@ -710,6 +872,58 @@ if ($script:failures.Count -gt 0) {
            ' problems) - nothing was stopped, production is untouched')
 }
 Write-Output ('PRECHECK ok stage-version=' + $stageVersion + ' marker-lines=' + $stageMarkerLines + ' live-marker-lines=' + $liveMarkerLines + ' live-appjs=' + $(if ($liveAppJsPresent) { 'present' } else { 'missing' }) + ' marker-mode=' + $(if ($Rollback) { 'rollback' } else { 'forward' }))
+
+# ---------------------------------- step 0b: snapshot the runtime data nobody can re-derive
+# Everything above this line only READS. Everything below it can move a package and start a
+# process, and the process that comes up is the one that rewrites data\tasks.json.
+#
+# WHY THE COPY COMES HERE AND NOT NEXT TO THE BACKUP STEP: the backup rename (:910) is not the
+# first moment a package can start. Stop-AfterFailure's pre-backupDone branch calls
+# Start-Process on $LiveExe whenever the process list answers zero, and the first such call
+# site is the disable-verify abort (:855/:857) - i.e. before any rename, before any stop. A
+# snapshot taken at the backup step would therefore already be reachable by a start of the
+# package that eats the file. This site is the earliest one that has both resolved paths
+# ($ProjectRoot is absolute from :179) and a preflight verdict, and it is before every one of
+# those exits.
+#
+# WHY BOTH MODES (#42 ruling, and the reason is a date not an opinion): -Rollback is the mode
+# that starts an old package now. A FORWARD swap to v0.35 is what puts waiting_user records on
+# disk in the first place, so the rollback that matters is always the NEXT one, and by then
+# the file has grown. One copy of a 19-byte file (measured on this box 2026-10-19:
+# data\tasks.json = 19 bytes, content {"tasks": {}}, 0 records; data\approvals.json absent)
+# costs nothing and makes the hazard moot from this hour forward, so the step does not branch
+# on direction.
+#
+# WHY THE COUNT DEGRADES AND THE COPY ABORTS: see Save-RuntimeDataSnapshot - the short version
+# is that a missing number costs a look at the file, while a missing copy costs the parked
+# tasks. Neither one is allowed to pass silently: an unreadable file prints state=unreadable
+# waiting_user=unproven, never 0, and a copy that threw prints DATA-SAVE-FAIL and stops the
+# run while production is still untouched.
+#
+# The warning line is rollback-only because that is the mode where the erasing package comes
+# up in THIS run. Forward swaps get the same sentence in ROLLBACK-HOWTO step 7, which is the
+# only place a forward run can end up starting an old package (a hand-followed recipe).
+# Spelled $DryRun.IsPresent, not $DryRun: three existing locks locate the -DryRun exit with a
+# FIRST-MATCH on ^if \(\$DryRun\) (test_swap_package_marker_gate.py _marker_gate_ok and
+# test_dryrun_path_reports_the_gate_it_just_passed, test_swap_package_disable_verify.py
+# test_pre_move_window_is_located_at_all). A second column-0 match ahead of the real exit would
+# not fail them today - they only compare "before the disable" - but it would silently move
+# three other tickets' anchor, so the branch is written in the form that cannot.
+$SwapMode = $(if ($Rollback) { 'rollback' } else { 'forward' })
+if ($DryRun.IsPresent) {
+    Write-Output ('DRYRUN would-save-data mode=' + $SwapMode + ' dir=' + $DataSnapshotDir + ' tasks=' + $(if (Test-Path -LiteralPath $TasksJson) { 'present' } else { 'absent' }) + ' approvals=' + $(if (Test-Path -LiteralPath $ApprovalsJson) { 'present' } else { 'absent' }))
+} else {
+    $taskVerdict = Get-TaskFileVerdict -TasksPath $TasksJson
+    $snap = Save-RuntimeDataSnapshot -Dir $DataSnapshotDir -TasksPath $TasksJson -ApprovalsPath $ApprovalsJson
+    if (-not $snap.Ok) {
+        Write-Output ('DATA-SAVE-FAIL mode=' + $SwapMode + ' dir=' + $snap.Dir + ' state=' + $taskVerdict.State + ' records=' + $taskVerdict.Records + ' waiting_user=' + $taskVerdict.WaitingUser + ' error=' + $snap.Error)
+        throw ('runtime data snapshot failed - refusing to continue, because a package older than v0.35 drops every waiting_user record it cannot parse and its next flush rewrites data\tasks.json from memory, so with no copy there is nothing to recover the parked tasks and their breakpoints from. Nothing was stopped and no package was moved: production is untouched. ' + $snap.Error)
+    }
+    Write-Output ('DATA-SAVED mode=' + $SwapMode + ' dir=' + $snap.Dir + ' tasks=' + $snap.Tasks + ' approvals=' + $snap.Approvals + ' state=' + $taskVerdict.State + ' records=' + $taskVerdict.Records + ' waiting_user=' + $taskVerdict.WaitingUser + ' moved=no')
+    if ($Rollback) {
+        Write-Output ('DATA-WARNING mode=rollback parked=' + $taskVerdict.WaitingUser + ' records=' + $taskVerdict.Records + ' state=' + $taskVerdict.State + ' hazard=old-package-restore-drops-waiting_user-and-its-next-flush-rewrites-the-file-from-memory copies=' + $snap.Dir + ' recovery=stop-the-backend-then-copy-' + $snap.Tasks + ' over-' + $TasksJson + '-then-start-again')
+    }
+}
 
 # --------------------------------- step 1: find the watchdog task and its state
 # Located by ACTION (wscript.exe + watchdog-hidden.vbs), NOT by name: the task
