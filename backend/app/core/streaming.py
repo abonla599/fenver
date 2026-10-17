@@ -19,7 +19,7 @@ from app.core import usage   # 账本：两条聊天路径共用一个口径，�
 from app.core import stream_events as se
 from app.core.guardrails import RoundGuard
 from app.core import approval
-from app.tools.executor import execute_tool, execute_tool_detailed, ToolOutcome
+from app.tools.executor import execute_tool_detailed, ToolOutcome
 
 
 class StreamCancelled(Exception):
@@ -189,9 +189,9 @@ def stream_chat_events(
     - usage 在 finally 里结：半截消耗同样要记账，取消/故障也不例外。
 
     过程留痕：非内容帧与步除了产出/回填 trace_out，还会就地塞进本线程的 ambient sink
-    （若端点 begin_trace 过）。rich 判定 = 有 trace_out 或有 sink：只有需要发帧/留痕时
-    才走 execute_tool_detailed 那条重一点的路；纯文本消费者（如 stream_chat 过滤器在
-    无 sink 时）退回 execute_tool 的公开文本契约——两条都是真跑、都带 user_id，绝不双跑。
+    （若端点 begin_trace 过）。rich 只决定**发不发帧**：工单 #76a 起两支都走
+    execute_tool_detailed 那一份实现（纯文本消费者只投影它的 .text），因为只读文本分不出
+    "失败"和"停在断点问用户"，记账判据必须是结构化那一格。两条都真跑、都带 user_id，绝不双跑。
     """
     provider = store.resolve(provider_id, legacy_model=model)
     client = build_client(provider)
@@ -471,20 +471,20 @@ def stream_chat_events(
 
                 if rich:
                     outcome = _run_tool_detailed(name, raw_args, user_id=user_id)
-                    result = outcome.text
                 else:
-                    result = _run_tool(name, raw_args, user_id=user_id)
-                    outcome = None
-                # 护栏：记录结果（成功/失败 → 退避计数）
-                guard.record_outcome(name, ok=bool(outcome.ok if outcome else True))
+                    outcome = _run_tool(name, raw_args, user_id=user_id)
+                result = outcome.text   # 工单 #76a：两支同形，文本在这里投影
+                # 护栏：记录结果（三态：成功 / 失败 / 挂起）——判据读 outcome.suspended
+                guard.record_outcome(name, ok=bool(outcome.ok),
+                                     suspended=bool(outcome.suspended))
                 # R2 工具输出预算闸：单轮累计超限时截断并告知
-                already_trunc = bool(outcome.truncated if outcome else False)
+                already_trunc = bool(outcome.truncated)
                 result, budget_trunc = guard.clip_output(str(result), already_trunc)
                 is_truncated = already_trunc or budget_trunc
                 msgs.append({"role": "tool", "tool_call_id": call_id,
                              "content": result})
 
-                if rich and outcome is not None:
+                if rich:   # 两支都产出了 outcome（#76a），这里只判发不发帧
                     summary = result
                     rframe = se.tool_result_frame(call_id, name, outcome.ok, summary,
                                                   elapsed_ms=outcome.elapsed_ms,
@@ -517,23 +517,23 @@ def stream_chat_events(
                           paid_by=provider.get("paid_by") or "operator",
                           tool_rounds=max(0, rounds - 1), ok=ok, **billed)
 
-def _run_tool(name: str, raw_arguments: str, user_id: str = None) -> str:
-    """执行一个工具调用，永远回一个字符串（非富路径：只需要给模型的文本）。
+def _run_tool(name: str, raw_arguments: str, user_id: str = None) -> ToolOutcome:
+    """执行一个工具调用，产出 **ToolOutcome**（非富路径：调用方只取 `.text` 给模型）。
 
     工具炸了不能把整条 SSE 打断：那时用户看到的是半句话加一个断流，而模型永远
     不知道自己哪里没算成。把错误当作工具结果回灌，模型才能解释它。
 
-    与 _run_tool_detailed 是同一条执行的两种投影（execute_tool 就是
-    execute_tool_detailed(...).text），两条都把服务端算出的 user_id 递到底。
+    ⭐ 工单 #76a：这一支的形状从纯文本换成 ToolOutcome，实现与富路径共用同一个
+    _run_tool_detailed —— 坏 JSON 与异常那两道兜底由它给全，文案与改动前逐字相同
+    （"工具参数不是合法 JSON，没能执行：…" 与 "工具执行错误: …"），所以这里不抄第二份：
+    两处各写一份兜底，迟早有一份偷偷改了措辞，而模型那边无声变卦。
+
+    留这一层而不是在调用点直接写 detailed 那一条，为的是把"非富路径"这个意思留在名字
+    里：它和 _run_tool_detailed 的差别只在调用方取哪几格（文本 vs 整包），不在执行本身。
+    两个分支于是产出同一个形状，读数点只有一处，"停在断点"不必再由文本前缀猜；那条纯
+    文本投影本身还在 executor.py:159-160，留给只要文本的调用方。
     """
-    try:
-        args = json.loads(raw_arguments or "{}")
-    except json.JSONDecodeError as e:
-        return f"工具参数不是合法 JSON，没能执行：{e}"
-    try:
-        return str(execute_tool(name, args, user_id=user_id))
-    except Exception as e:  # 工具内部任何异常都只影响这一次调用
-        return f"工具执行错误: {e}"
+    return _run_tool_detailed(name, raw_arguments, user_id=user_id)
 
 
 def _run_tool_detailed(name: str, raw_arguments: str, user_id: str = None) -> ToolOutcome:

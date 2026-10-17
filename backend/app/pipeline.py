@@ -15,7 +15,7 @@ from app.memory.memory_router import memory_manager
 from app.memory import signals
 from app.preference_analyzer import read_preference
 from app.tools.registry import get_available_tools_schema
-from app.tools.executor import execute_tool, execute_tool_detailed
+from app.tools.executor import execute_tool_detailed
 from app.core import stream_events as se
 from app.core.guardrails import RoundGuard
 from app.core import approval
@@ -193,11 +193,11 @@ class ChatPipeline:
         配置缺失或调用失败一律抛异常：把故障当回复文本返回，会让错误写进会话
         历史，并被上层当作模型输出继续加工。
 
-        trace_out 给了就把每一步收进去（工具/搜索的过程步）；给了就走
-        execute_tool_detailed（一次执行同时拿回文本与 ok/truncated/elapsed/artifacts），
-        没给就退回 execute_tool 这条公开的文本契约——两条都把服务端算出的 user_id 递到
-        工具底层，且各自只跑一次，绝不双跑。默认 None 保证既有直连调用方（含账本用例）
-        行为逐字不变。
+        trace_out 只决定**发不发帧**，不决定执行形状：工单 #76a 起两支都走
+        execute_tool_detailed（一次执行同时拿回文本与 ok/truncated/elapsed/artifacts/
+        suspended），下游只取 .text。老写法里"没给 trace 就退回纯文本投影"那一支读不出
+        "停在断点问用户"这一格，会把挂起记成一次失败退避；两支都把服务端算出的 user_id
+        递到工具底层、各自只跑一次，绝不双跑。默认 None 保证既有直连调用方行为逐字不变。
         """
         provider = store.resolve(provider_id, legacy_model=model)
         client = build_client(provider)
@@ -297,16 +297,16 @@ class ChatPipeline:
                             continue
                         print(f"[Pipeline] 调用工具: {name}({args})")
                         label = _tool_label(name, args)
-                        if rich:
-                            outcome = execute_tool_detailed(name, args, user_id=self.user_id)
-                            result = outcome.text
-                        else:
-                            result = execute_tool(name, args, user_id=self.user_id)
-                            outcome = None
-                        # 护栏：记录结果（成功/失败 → 退避计数）
-                        guard.record_outcome(name, ok=bool(outcome.ok if outcome else True))
+                        # 工单 #76a：两支都产出 ToolOutcome —— 记账判据只许读结构化那一格
+                        # （outcome.suspended，唯一赋值点 executor.py:181）。非富那支不再退回
+                        # 纯文本投影，否则"停在断点问用户"在这一条路上又被读成一次失败。
+                        outcome = execute_tool_detailed(name, args, user_id=self.user_id)
+                        result = outcome.text
+                        # 护栏：记录结果（三态：成功 / 失败 / 挂起，挂起不进退避算术）
+                        guard.record_outcome(name, ok=bool(outcome.ok),
+                                             suspended=bool(outcome.suspended))
                         # R2 工具输出预算闸：单轮累计超限时截断并告知
-                        already_trunc = bool(outcome.truncated if outcome else False)
+                        already_trunc = bool(outcome.truncated)
                         result, budget_trunc = guard.clip_output(str(result), already_trunc)
                         is_truncated = already_trunc or budget_trunc
                         # 将工具结果作为 tool 消息添加

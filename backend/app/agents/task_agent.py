@@ -165,16 +165,18 @@ class TaskAgent:
                     # 第⑤件（⭐ v0.35 A3）：挂起。这一行换成 detailed 那一条不是为了多拿
                     # 什么，是因为**只读文本分不出"失败"和"停在断点问用户"**：老写法
                     # `str(result).startswith("✓")` 会把"请输入短信验证码"记成一次工具
-                    # 失败，而失败退避两次就熔断（guardrails.py:122-143）——挂起的任务
+                    # 失败，而失败退避两次就熔断（guardrails.py:177-180）——挂起的任务
                     # 于是永远续不上。结构化那一格（outcome.suspended）才是判据。
                     outcome = execute_tool_detailed(tool_name, tool_args,
                                                     user_id=self.user_id)
                     # 护栏：挂起这一格**照旧记这一轮**（轮次是真花掉的，不记就是给
-                    # 重试留免费额度，与频控那份"尝试即计数"同一个口径），但 ok 读的是
-                    # outcome.ok —— 挂起时它是 False。这一记会让同一轮里第二次挂起把该
-                    # 工具熔断：guardrails 没有第三态的入口，本票不许改那份文件，
-                    # 已作为 follow-up 上报（见交付报告）。
-                    guard.record_outcome(tool_name, ok=bool(outcome.ok))
+                    # 重试留免费额度，与频控那份"尝试即计数"同一个口径）。⭐ 工单 #76a：
+                    # 第三态由 `suspended=` 自己说，读的是 outcome.suspended 那格世界事实
+                    # （唯一赋值点 executor.py:181）——不是文本前缀（D1），也不从 ok 反猜：
+                    # 挂起时 ok 同样是 False，只传 ok 会让同一轮里第二次挂起把该工具熔断。
+                    # #29 已在 guardrails.py:167-173 开好这一格入口，这里接上它。
+                    guard.record_outcome(tool_name, ok=bool(outcome.ok),
+                                         suspended=bool(outcome.suspended))
                     if outcome.suspended:
                         # 不回填给模型、不重试、不编答案：整条子任务在这里交回编排器，
                         # 由它把断点落成 waiting_user。顺序要紧——必须在 clip_output

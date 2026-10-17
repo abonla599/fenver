@@ -94,7 +94,7 @@ class ToolOutcome(NamedTuple):
     - `suspended`：这一次调用**没跑完也没失败**，它停在断点等用户给一个答案。
       读法纪律：`ok=False` 只说明"没产出结果"，**不**说明"失败了"；想知道是哪一种，
       只看 `suspended`。把挂起读成失败，代价是把"问用户要验证码"记进失败退避
-      （`guardrails.py:122-143`），两次就把这个工具在本轮熔断，用户永远续不上。
+      （`guardrails.py:177-180`），两次就把这个工具在本轮熔断，用户永远续不上。
     - `suspension`：续跑要的整包状态，只在 suspended 时非空：
       `{"tool_name", "arguments", "prompt", "resume_state", "can_resume"}`。
       `arguments` 是**服务端这一侧**的调用参数（不是模型事后能改的那一份），续跑时
@@ -131,9 +131,9 @@ def execute_tool(tool_name: str, arguments: dict, user_id: str = None,
                  granted_ticket=None, resume: dict = None) -> str:
     """执行一条工具，返回**已在上下文预算内**的结果文本。
 
-    这是全站对外稳定的文本契约：两条聊天路径与 ReAct 那条都靠它，签名与返回类型
-    （str）一律不动。真正干活的是 execute_tool_detailed——这里只是把它结果里的
-    `.text` 投影出来，于是"唯一实现"只有一份，两侧不可能各长出一套截断/频控逻辑。
+    这是全站对外稳定的文本契约（签名与返回类型 str 一律不动）：真正干活的是
+    execute_tool_detailed，这里只投影它的 `.text`，于是"唯一实现"只有一份，两侧不可能
+    各长出一套截断/频控逻辑。⭐ 工单 #76a 起三条消费路都改吃 detailed 那一格，这里留给只要文本的调用方。
 
     `user_id` 由调用方从**凭据**里算出来传进来（两条聊天路径都是这么做的），它不进
     模型可见的参数表：标了 needs_user 的工具，执行器用服务端那份覆盖掉模型可能传上

@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 from app.core.providers import store, build_client, scrub_secrets
 from app.core import usage
 from app.core.guardrails import RoundGuard
-from app.tools.executor import execute_tool
+from app.tools.executor import execute_tool_detailed
 from app.tools.registry import get_available_tools_schema
 
 
@@ -205,12 +205,12 @@ class ReActAgent:
                             # 没带票据的 execute_code 会被执行器直接拒掉。ReAct 这条路
                             # 是同步跑完就返回的，装不下"等用户点确认"这个交互，
                             # 所以这里如实告诉模型改用聊天路径，而不是替用户批准。
-                            tool_result = execute_tool(tool_name, tool_args, user_id=user_id)
-                            # 局部名不叫 ok：run 级的 ok 在 :108 已有含义（这次
-                            # 上游调用整体成不成功），在这里覆盖它会让一次工具失败
-                            # 被记成整轮 run 失败。护栏只认这一次调用自己的成败。
+                            outcome = execute_tool_detailed(tool_name, tool_args, user_id=user_id)
+                            tool_result = outcome.text   # #76a：给模型的文本仍取 .text 那一格
+                            # 局部名不叫 ok：run 级的 ok 在 :108 已有含义（覆盖它会把一次工具失败
+                            # 记成整轮 run 失败）。第三态读 outcome.suspended 那格世界事实（#76a/D1）。
                             tool_ok = str(tool_result).startswith("✓")
-                            guard.record_outcome(tool_name, tool_ok)
+                            guard.record_outcome(tool_name, tool_ok, suspended=bool(outcome.suspended))
                             if self.verbose:
                                 print(f"[ReActAgent] ✅ 工具结果: {str(tool_result)[:200]}...")
                         except Exception as e:
