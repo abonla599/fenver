@@ -97,6 +97,10 @@ docs-internal/
 # 与 docs/releases/*.md 同步；脚本进不了仓库，那把锁就变成一句注释。纯标准库、只读
 # docs/releases/ 下的 md、只写 backend/app/web/site/changelog.json 这一个产物。
 !/tools/gen_changelog.py
+# 换包标记的推导器（#43）。与 pre_tag_gate / gen_changelog 同一个理由：它必须进 CI 那次 checkout——
+# backend/tests/test_release_marker_derived_from_version.py 直接它执行并核它，脚本进不了仓库，那把锁就变成一句注释，
+# 而发版人在换包窗口里也拷不到该用的那一串。纯标准库、只读三个仓库文件、不写盘、不碰网络。
+!/tools/release_marker.py
 server.log
 tunnel.log
 PATH_backup_*.txt
