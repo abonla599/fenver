@@ -23,11 +23,12 @@ r"""换包脚本「等进程起来那一句轮询自己抛异常」这条路的�
 所以本文件像 `test_swap_package_watchdog_enabled_machine_truth.py` 那样生成探针跑 PowerShell，
 但问的不是任务属性而是**路由**：探针把脚本自己的轮询那一段**原文抄进**生成的 .ps1，只把
 三个外部依赖换成桩（会抛的 `Get-LiveProcess`、绝不联网的 `Get-HealthOnce`、打印一行
-SENTINEL 就收口的 `Stop-AfterFailure`），然后看这台机器实际走到哪一步。四种答案的分工
+SENTINEL 就收口的 `Stop-AfterFailure`），然后看这台机器实际走到哪一步。六档答案的分工
 全部由机器判：一直抛 → `SENTINEL stage=boot-poll-threw`；抛一次之后答出两个进程 → 没有
 SENTINEL，`$livePid` 带着 4242 破出循环并一路走到 HARNESS_DONE（保护没有把正常路径吞掉）；一次都没抛但确实没进程 →
 走既有的 `stage=started-check`；**先抛、后面答到「没进程」** → 仍然 `started-check`，因为
-「看不见进程」与「看不了」是两种判决（这一例正是本票最容易被糊过去的地方）。
+「看不见进程」与「看不了」是两种判决（这一例正是本票最容易被糊过去的地方）；另有两档答的是
+**恰好一个进程**（ticket #50 补的，理由见下面那一节），它们要求轮询第一次读到就破出循环。
 第五条探针再往前一步：它抄的是脚本**真的** `Stop-AfterFailure` 与 `Show-Rollback` 函数体，
 只把 `Restore-WatchdogTask` 换成会喊一声的桩，于是「改名之后中止打印哪几行、看守到底有没有
 被这次运行扶回去」由这台机器回答而不是由注释回答——本票要的正是这个确认：
@@ -42,6 +43,22 @@ SENTINEL，`$livePid` 带着 4242 破出循环并一路走到 HARNESS_DONE（保
 现网就在这个端口上服务），不碰 `dist\`、不碰 `data\`，跑在 `tmp_path`（仓库外）。
 牙印样本一律落**仓库外**的副本并经 `SWAP_PS1_UNDER_TEST` 复跑整文件（作者留这个变量的
 本意见 `test_swap_package_disable_verify._target_ps1`）。
+
+**ticket #50 补进来的那一档（原用例集合自己的洞）**：上面那四种答案把进程数只喂过
+**0 与 2**（`_CASES` 里 procs 的取值），**从没喂过 1** —— 而 1 才是现网的常态：换包时
+起来的就是一个 `run_backend.exe`。这不是顺手的疏漏，是本票的另一半：PowerShell 是
+**逐元素枚举函数输出**的，`Get-LiveProcess` 里那句 `@( ... )` 在结果恰好一个时到调用侧
+会散成**裸 CimInstance**，而裸 CimInstance 答 `.Count` 给的是 `$null`（本机实测：`int` 答 1、
+`$null` 答 0，CimInstance 是例外，所以这事不能靠直觉推）。于是本票之前那句
+`if ($running.Count -ge 1)` 在「恰好一个进程」时恒假：轮询永远破不出循环，每次换包烧完
+整个 `$StartTimeoutSeconds`，而 `STARTED pid=` 那个数是下面 /health 哨兵给的 -1，不是循环
+找到的 pid。所以 `_CASES` 现在多两档：`transient-then-one`（与 #45 作者当年那句
+「抛一次之后答出进程就能认出 pid」同形状，只是只有一个进程）和 `answers-one`（一次都不抛、
+就一个进程，也就是现网的正常路径）。这两档在**改动前那一份**上都由这台机器判红（livePid 停在
+0、判决被送到 `stage=started-check`），改好后判绿；而「那个对象到底答不答 `.Count`」这件
+机器形状的事，由 `test_swap_package_boot_poll_single_process_machine_truth.py` 问机器，
+不靠本文件的文本判据。少了 1 这一档，#45 那 17 条对坏代码和对本代码同样绿——正是
+`test_swap_package_watchdog_enabled_machine_truth.py` 说过的那类「文本锁证不了机器形状」。
 
 CRLF 陷阱（上一次审查员踩过的）：本机 `core.autocrlf=true`，`git show HEAD:deploy/...` 给出
 的是 **LF** blob；拿它当「改动前那份」喂给文件自带的 ASCII/CRLF 判据，会先红在格式上，
@@ -129,11 +146,18 @@ while ((Get-Date) -lt $bootDeadline) {
     }
 }"""
 
-# 机器探针的四种答案：case -> (前几次读抛, 答出几个进程, 期望走到的 stage)。
+# 机器探针的答案档位：case -> (前几次读抛, 答出几个进程, 期望走到的 stage)。
 # 期望值不是猜的，理由见模块 docstring 的分工说明。
+# **进程数必须包含 1**（ticket #50）：本文件原来只有 0 与 2，而现网换包时起的就是一个
+# run_backend.exe——恰好 1 个时函数输出散成裸 CimInstance、`.Count` 是 $null，那句
+# `$running.Count -ge 1` 恒假，轮询破不出循环。0 与 2 两档看不出这个形状（0 走 $null
+# 答 0、2 走数组答 2），所以原来的四种答案对坏代码同样绿。机器形状本身由
+# test_swap_package_boot_poll_single_process_machine_truth.py 问这台机器。
 _CASES = {
     "always-throws": (99, 0, "boot-poll-threw"),
     "transient-then-two": (1, 2, None),
+    "transient-then-one": (1, 1, None),
+    "answers-one": (0, 1, None),
     "answers-empty": (0, 0, "started-check"),
     "throws-then-empty": (1, 0, "started-check"),
 }
@@ -151,11 +175,20 @@ $script:reads = 0
 switch ($case) {
     'always-throws' { $script:failFor = 99; $script:procs = 0 }
     'transient-then-two' { $script:failFor = 1; $script:procs = 2 }
+    'transient-then-one' { $script:failFor = 1; $script:procs = 1 }
+    'answers-one' { $script:failFor = 0; $script:procs = 1 }
     'answers-empty' { $script:failFor = 0; $script:procs = 0 }
     'throws-then-empty' { $script:failFor = 1; $script:procs = 0 }
     default { 'UNKNOWN-CASE ' + $case; exit 3 }
 }
 function Get-LiveProcess {
+    # Shape note (ticket #50): this returns @(pipeline) exactly like the real
+    # Get-LiveProcess, so with procs=1 PowerShell's element-by-element function
+    # output leaves the caller a BARE object, and a bare object here answers
+    # .Count as $null - measured on this box for both a bare PSCustomObject and a
+    # bare Win32_Process CimInstance. The production TYPE is what
+    # test_swap_package_boot_poll_single_process_machine_truth.py asks the machine
+    # about; this harness only has to reproduce the flattening.
     $script:reads = $script:reads + 1
     if ($script:reads -le $script:failFor) { throw 'CIM-PROBE-FAILURE cannot enumerate Win32_Process' }
     if ($script:procs -le 0) { return @() }
@@ -168,7 +201,7 @@ function Stop-AfterFailure {
     exit 0
 }
 __REGION__
-'HARNESS_DONE livePid=' + $livePid
+'HARNESS_DONE livePid=' + $livePid + ' reads=' + $script:reads
 """
 
 # 第五条探针：抄脚本**真的** Stop-AfterFailure 与 Show-Rollback 函数体，只把
@@ -601,7 +634,8 @@ def _to_pre_ticket_shape(text: str):
 
 @pytest.fixture(scope="module")
 def routed(tmp_path_factory):
-    """四种答案各跑一次真探针，结果整个模块共用（生成一次、四次 powershell 启动，约 16 秒）。"""
+    """`_CASES` 每档各跑一次真探针，结果整个模块共用（生成一次、六次 powershell 启动，
+    约 24 秒；每档约 4 秒，就是 $StartTimeoutSeconds 那颗窗口）。"""
     if _POWERSHELL is None:
         _skip_machine()
     work = tmp_path_factory.mktemp("boot-poll-routing")
@@ -691,21 +725,59 @@ def test_probe_is_wired_to_the_scripts_own_poll_lines_and_cannot_touch_productio
     assert not _TASK_WRITE.search(harness), "探针里出现了写计划任务的 cmdlet"
 
 
-def test_machine_routes_the_four_answers_the_way_the_stages_claim(routed):
-    """机器判据：四种答案在**这台机器**上真的各走各的路（分工见模块 docstring）。"""
-    for case, (_fail_for, _procs, expect_stage) in _CASES.items():
+def test_machine_routes_the_six_answers_the_way_the_stages_claim(routed):
+    """机器判据：`_CASES` 那六档在**这台机器**上真的各走各的路（分工见模块 docstring）。
+
+    「认出进程」那一档的 READFAIL 行数不再写死 1，而是等于该档设定前几次抛（fail_for）——
+    新增的 `answers-one` 一次都不抛，写死 1 只会让这条锁在好代码上假红。
+    """
+    for case, (fail_for, procs, expect_stage) in _CASES.items():
         got = routed[case]
         if expect_stage is None:
             assert got["sentinel"] == [], f"{case} 不该中止，却拿到了 {got['sentinel']}"
-            assert got["done"] == ["HARNESS_DONE livePid=4242"], \
-                f"{case} 应当由轮询认出进程、破出循环并一路走到头（livePid=4242）：{got}"
-            assert len(got["readfail"]) == 1, f"{case} 里那一次抛应当留一行 READFAIL：{got}"
+            assert len(got["done"]) == 1 and got["done"][0].startswith("HARNESS_DONE livePid=4242"), (
+                f"{case}（{procs} 个进程）应当由轮询认出进程、破出循环并一路走到头"
+                f"（livePid=4242）；这台机器判成 {got['done']}——轮询没认出那一个进程的话，"
+                "pid 就只剩 /health 哨兵那个 -1，而本档的桩根本不联网")
+            assert len(got["readfail"]) == fail_for, \
+                f"{case} 应当留下恰好 {fail_for} 行 READFAIL：{got}"
             assert len(got["started"]) == 0, "探针的区间止于 STARTED 那一行之前，这里只该看到 livePid"
             continue
         assert len(got["sentinel"]) == 1, f"{case} 应当恰好一次中止收口：{got}"
         assert got["sentinel"][0].startswith("SENTINEL stage=" + expect_stage + " "), \
             f"{case} 本该走 stage={expect_stage}，这台机器判成了 {got['sentinel'][0][:140]!r}"
         assert got["started"] == [], f"{case} 中止了还打印 STARTED，说明桩没接住：{got}"
+
+
+def test_machine_the_single_process_answer_breaks_the_poll_instead_of_burning_the_window(routed):
+    """机器判据（ticket #50 的那一档）：**恰好一个进程**时轮询必须当场破出循环。
+
+    窗口 4 秒、循环体里那颗原有的 `Start-Sleep -Seconds 2` 定节奏，所以整个窗口最多问两次：
+      * `answers-one`（一次都不抛、就一个进程 = 现网换包的正常路径）读到**第一次**就破出，
+        reads=1；改动前那份（`$running.Count -ge 1`，裸 CimInstance 的 `.Count` 是 $null）
+        在这里永远破不出，两次都问完、livePid 停在 0、判决被送到 `stage=started-check`。
+      * `transient-then-one`（先抛一次再答出一个进程，正是 #45 作者那句「抛一次之后答出
+        进程就能认出 pid」的形状）reads=2：第一次抛留一行 READFAIL，第二次认出进程。
+    这一条是「进程数只喂 0 与 2」那套用例看不见的洞的机器证据：0 走 $null 答 0、2 走数组
+    答 2，两档对坏代码同样绿；只有 1 会散成裸对象。对象形状为什么是 $null 由
+    test_swap_package_boot_poll_single_process_machine_truth.py 问机器。
+    """
+    one = routed["answers-one"]
+    assert one["done"] == ["HARNESS_DONE livePid=4242 reads=1"], (
+        "一次都不抛、恰好一个进程时，轮询应当在第一次读到就认出 pid 并破出循环；"
+        f"reads=2 就是没破出、把 4 秒窗口烧完（ticket #50 那个洞的形状）：{one}")
+    assert one["sentinel"] == [], f"轮询认出了进程却还走中止出口，判决被抢走了：{one['sentinel']}"
+    assert one["readfail"] == [], f"这一档一次都没抛却打出 READFAIL：{one}"
+
+    transient = routed["transient-then-one"]
+    assert transient["done"] == ["HARNESS_DONE livePid=4242 reads=2"], (
+        "先抛一次再答出一个进程：应当是第二次读到就破出（抛的那次不算读到）："
+        f"{transient}")
+    assert len(transient["readfail"]) == 1, f"那一次抛要留下一行证据：{transient}"
+    assert transient["sentinel"] == [], (
+        f"#45 作者那句「抛一次之后答出进程就能认出 pid」的说法，在**一个进程**的形状上必须"
+        f"成立，否则本票的洞又回来了：{transient['sentinel']}")
+
 
 
 def test_machine_the_give_up_carries_the_last_real_error_and_says_cannot_look(routed):
