@@ -50,6 +50,30 @@ v0.28.1"——事后谁也说不清用户装的是哪一版，而这恰好是最
 推断就是这次事故的重演入口。选了会打印 `apk-materials=SKIPPED` 留痕。反过来它也**不
 授权事故本身**：清单已经把这一版宣告出去、盘上却没有那串字节时，带了这个开关照样红。
 
+## 第 1 条判据的形态豁免（#67）
+
+**只换服务端的一版根本不 bump `build.gradle` 的 versionName**，实测 v0.34.1：
+`git show v0.34.1:android-native/app/build.gradle` 是 `versionCode 60 / versionName "0.34.0"`，
+而 `docs/releases/v0.34.1.md` 第 3 行写着 `<!-- scope: server-only -->`。旧写法在这里先于
+第 2 条判据红（`versionname-mismatch`），唯一的出路是 `--no-versionname-check`，而那面旗的
+help 自己写明只给"这份 checkout 里没有 android-native/"用（CI 那一格，`release-apk.yml`）。
+把"这一版是什么形态"的判断权交回人的嘴 = #65/#69/#71 在另一把锁上刚修掉的同一个错误，
+而同一脚本的第 5 条判据早就接受形态声明（`--backend-only` 的 help 还写着"纯后端版，
+v0.35.x 就可能是"）——一把锁两种说法。
+
+现在第 1 条判据**读这一版自己那份发版说明**：
+- `scope: server-only` ⇒ 不要求 `versionName == tag`，打印 `versionname=waived-scope` 留痕，
+  并且反过来核**逆命题**：`versionName` 已经等于这个 tag 时拒绝（`versionname-bumped-without-package`）——
+  只换服务端的一版把 versionName 顶上去，等于对外宣布一个盘上根本不存在的可安装安卓版本，
+  违反"只播最新**装得上**的那一版"（#17/#18）；
+- 缺说明 / 说明读不动 / scope 值不认识 ⇒ **不豁免**，第 1 条照旧要求 `versionName == tag`，
+  与改动前逐字一致（默认成 server-only 就是把这条锁静默放成绿灯）；
+- 其余形态一字未改，`--no-versionname-check` 的语义仍是"这份 checkout 没有 android-native/"。
+
+scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 `note_scope`（同目录、
+`!/tools/release_marker.py` 保证 CI checkout 里有；那个文件的路径检查由契约测试钉住），
+否则"这一版是不是只换服务端"会长出第三份真相。`tools/gen_changelog.py` 那一处副本归 #68。
+
 ## 用法
 
 本机（打 tag 之前，推荐连本地 8000 一起核）：
@@ -72,6 +96,23 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+
+# ---- 形态判读复用 `tools/release_marker.py` 的那把尺子（#67），不写第三份 scope 正则 ----
+# 两个文件同在 `tools/` 下，`!/tools/release_marker.py` 保证它在 CI 那次 checkout 里
+# （这条前提由 backend/tests/test_v0350_pre_tag_gate_scope_waiver.py 用 git check-ignore
+# 钉住，与 test_v0331_pre_tag_gate_contract.py 对闸门自己做的事同一手法）。
+# `release_marker.py` 的 argparse 全在 `main()` 内、模块级只有 `if __name__ == "__main__"`
+# 守卫（实测该文件 :419/:441），import 它不会顺手解析本闸门的 argv。
+# 按脚本跑时 sys.path[0] 就是 tools/，被测试用 importlib 加载时不是，所以补一句。
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+from release_marker import (  # noqa: E402
+    MarkerSourceError,
+    NOTE_MISSING,
+    SCOPE_SERVER_ONLY_LINE,
+    note_scope,
+)
 
 DEFAULT_HEALTH_URL = "https://ai.fenever.xyz/health"
 DEFAULT_LOCAL_HEALTH_URL = "http://127.0.0.1:8000/health"
@@ -305,6 +346,25 @@ def release_note_exists(repo_root: str, tag: str) -> bool:
     return os.path.isfile(os.path.join(repo_root, "docs", "releases", "%s.md" % tag))
 
 
+def note_declares_server_only(repo_root: str, tag: str):
+    """**要切的这一版**自己声明的是不是"只换服务端"？返回 (是不是, 读不出的理由)。
+
+    权威是 `docs/releases/<tag>.md` 的 scope 行，读法是 `tools/release_marker.py:note_scope`
+    那**一把**尺子（#67：同一句判据在 `gen_changelog.py` 和 `release_marker.py` 里已经有两份
+    副本，这里不再抄第三份）。
+
+    fail-closed 的方向必须钉死：**只有真的读到 `scope: server-only` 才回 True**。缺说明
+    （`NOTE_MISSING`）、说明读不动、scope 值不认识——一律回 False，也就是"不豁免"，第 1 条
+    判据照旧要求 `versionName == tag`，与改动前逐字一致。默认成 server-only 等于把这把发版
+    闸门在任何一份坏掉的说明面前静默放成绿灯，而那正是它被写出来要拦的时刻。
+    """
+    try:
+        return note_scope(repo_root, normalize_version(tag))
+    except MarkerSourceError as exc:
+        # 版本号形状不认识之类：读不出形态 = 不豁免（第 1 条照旧核），不退 2、不放行。
+        return False, "release-note-scope-error:%s" % exc
+
+
 def git_branch(repo_root: str) -> str:
     try:
         out = subprocess.run(["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
@@ -345,13 +405,35 @@ def main(argv=None) -> int:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     print("PRETAG expect=%s branch=%s health=%s" % (tag, git_branch(root), args.health_url))
 
-    # 1) 声明侧：仓库里写的 versionName 必须等于这个 tag。
+    # 1) 声明侧：仓库里写的 versionName 必须等于这个 tag——**除非这一版自己声明只换服务端**。
+    #    豁免的判据是"世界事实"（docs/releases/<tag>.md 里那一行），不是操作者手边的旗子：
+    #    --no-versionname-check 的语义保持原样（这份 checkout 里没有 android-native/，CI 那一格）。
     if not args.no_versionname_check:
+        server_only, scope_reason = note_declares_server_only(root, tag)
+        if scope_reason and scope_reason != NOTE_MISSING:
+            # 读不出形态就不豁免；打印出来是为了日志能说清"为什么没走 server-only 那一格"，
+            # 而不是让人以为判据坏了、再顺手去补一面旗。
+            print("PRETAG versionname=scope-unreadable reason=%s —— 不豁免，照旧核 versionName"
+                  % scope_reason)
         declared, why = declared_version_name(root)
         if declared is None:
             print("PRETAG versionname=unknown (%s)" % why)
             if not args.allow_unreachable:
                 return _fail("versionname-unreadable: %s" % why, 2)
+        elif server_only:
+            if declared == tag.lstrip("v"):
+                # 逆命题：只换服务端的一版把 versionName 顶到这个号 = 对外宣布一个盘上没有的
+                # 可安装安卓版本，正是"只播最新装得上的那一版"（#17/#18）禁止的形状。
+                return _fail(
+                    "versionname-bumped-without-package declared=%s tag=%s —— docs/releases/%s.md "
+                    "声明的是 %s（不出新安卓包），而 build.gradle 的 versionName 已经等于这个号："
+                    "这一格会把一个装不上的安卓版本播出去。要么把 build.gradle 回退到上一版，"
+                    "要么本版其实出了新包（那就把说明的 scope 行改成 installer 并重新核第 5 条）"
+                    % (declared, tag, tag, SCOPE_SERVER_ONLY_LINE))
+            print("PRETAG versionname=waived-scope note=%s scope=server-only declared=%s —— "
+                  "本版说明声明只换服务端，versionName 不动才是预期形状（实测 v0.34.1 停在 0.34.0）；"
+                  "这一格**不是** --no-versionname-check，那面旗只表示『这份 checkout 没有 "
+                  "android-native/』" % (tag, declared))
         elif declared != tag.lstrip("v"):
             return _fail("versionname-mismatch declared=%s tag=%s —— 三件套还没改，"
                          "这个 tag 会发出一个和 APK 里不一致的 Release" % (declared, tag))
