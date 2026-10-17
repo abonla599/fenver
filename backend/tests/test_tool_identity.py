@@ -90,13 +90,19 @@ def test_both_chat_paths_hand_the_caller_down_to_the_tool():
     import app.core.streaming as streaming
     import app.pipeline as pipeline_mod
 
-    # 判"execute_tool 那一句带没带身份"，不判"文件里有没有 user_id 字样"：
-    # 后者账本那几行就能把它喂绿。
+    # 判"执行器那一句带没带身份"，不判"文件里有没有 user_id 字样"：
+    # 后者账本那几行就能把它喂绿。两个入口名字都要认——工单 #76a 把"不需要留痕就退回
+    # 纯文本投影"那一支也换成了 detailed（记账要读结构化那一格），只认旧名字的话这条锁
+    # 会因为一次合法的调用名切换而空转报错；反过来把调用整个删掉也一样红（下面那句
+    # assert calls 就是"锁不许空转"的那一半）。
+    _ENTRY_POINTS = ("execute_tool(", "execute_tool_detailed(")
+
     def calls_with_identity(src):
-        return [ln for ln in src.splitlines() if "execute_tool(" in ln]
+        return [ln for ln in src.splitlines()
+                if any(fn in ln for fn in _ENTRY_POINTS)]
 
     for label, src in (("非流式", pipe_src := inspect.getsource(pipeline_mod)),
                        ("流式", inspect.getsource(streaming))):
         calls = calls_with_identity(src)
-        assert calls, f"{label}那条找不到 execute_tool 调用：这条锁在空转"
+        assert calls, f"{label}那条找不到执行器调用：这条锁在空转"
         assert all("user_id=" in c for c in calls), f"{label}那条有调用没带身份：{calls}"

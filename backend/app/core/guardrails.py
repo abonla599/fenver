@@ -11,9 +11,9 @@ v0.31 新增。挂在现有 usage 账本同轮记录上（guard_events 字段）
 本模块此前只有两态，于是第三态被读成失败、两次就把该工具在本轮熔断。现在
 `record_outcome(..., suspended=True)` 是独立的一格：不计退避、不跳熔断、照记轮次、
 另起 `suspend` 账（判据与不变量写在该方法的 docstring 里）。
-**这一票只提供护栏侧的状态与锁**：三条聊天路径（pipeline / streaming / react_agent）
-与 task_agent 的调用点仍传 `ok=bool(outcome.ok)`，改动尚未在现网生效（休眠），
-接上它们是工单 #76；A4 交出第一条真 `suspends: True` 的工具之前 #76 必须落。
+**这一票只提供护栏侧的状态与锁**；把调用点接上它的是工单 #76（第一波 #76a 已落：
+两条聊天路径 + react_agent + task_agent 都改吃 execute_tool_detailed 的 `suspended=`，
+判据读结构化那一格）。A4 交出第一条真 `suspends: True` 的工具之前 #76 必须落全。
 """
 import json
 import threading
@@ -153,10 +153,10 @@ class RoundGuard:
           "尝试即计数"同口径（不记就是给重试留免费额度、绕开成本上限）。
         * **另起一格账**：`_suspensions` 计数 + 事件 `suspend`，可观测（中性 ≠ 隐形）。
 
-        `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：三条聊天
-        路径（pipeline / streaming / react_agent）与 task_agent 的调用点归工单 #76，
-        本票不动它们，于是老写法 `record_outcome(name, ok)` 里 `estimated_tokens`
-        的位置与含义必须一字不变——挪成位置参数就会把 token 数静默读成布尔。
+        `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：工单 #76a
+        已把三条聊天路径与 task_agent 的调用点接上这一格，但老写法 `record_outcome(name,
+        ok)` 仍在（react_agent 的成败判据与那条兜底异常支都是两参调用），于是
+        `estimated_tokens` 的位置与含义必须一字不变——挪成位置参数就静默把 token 数读成布尔。
 
         可用性探测已剔除的工具不进熔断计数（它们根本不会被调用到这里）。
         """

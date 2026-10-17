@@ -485,12 +485,24 @@ def test_the_suspend_text_carries_no_success_mark(fake_tools):
 def test_suspending_round_is_counted_and_not_credited_as_success(fake_tools, monkeypatch):
     """挂起落在护栏账上：**记这一轮**（轮次是真花掉的），但**不占**本轮输出预算。
 
-    两个反面都要防：
+    三个反面都要防：
     - 不 `record_outcome` → 本轮轮次少记一笔 → 成本上限被绕过（本仓那条
       "尝试即计数"的口径，见 tools/executor.py:16-18）。
     - 先 `clip_output` 再抛 → 那句根本没给模型看的问话还吃掉了本轮输出预算。
-    负向锁：删掉 `task_agent.py` 里 `guard.record_outcome(tool_name, ok=bool(outcome.ok))`
+    - 挂起被记成失败 → 退避/熔断那一族事件混进这一轮的账里。
+    负向锁：删掉 `task_agent.py` 里 `guard.record_outcome(tool_name, ok=..., suspended=...)`
     那一行 → `tool_rounds == 1` 立刻红。
+
+    ⭐ 下面最后那组断言在工单 #76a 改过一次，改前/改后各钉什么要说清（不写就变成
+    "谁红改谁"）：#29 只开了护栏侧的入口，调用点还传 `ok=bool(outcome.ok)`，挂起被读成
+    **失败**，那一轮一条事件都不会产生 → 这里钉的是 `types == []`。#76a 把 task_agent
+    接上 `suspended=` 之后，`guardrails.py:171-172` 必然追加一条 `suspend` 事件 →
+    空清单那条断言必红（本单最大的红点）。现在钉的是"**只有** `suspend` 这一条、而且是
+    机器自己数出来的那一条"：类型清单、工具名、`suspension_counts` 三样同时成立，并且
+    熔断/退避那一族（fail_backoff / duplicate / cost_cap_*）一条都不许出现。
+    于是红的是这两种回归：① 摘掉 `suspended=`（挂起顺流成失败）→ 清单里冒出
+    `fail_backoff`、`suspension_counts` 变空 → 红；② 把挂起干脆不记账 → `tool_rounds`
+    那句先红。**不许**放宽成 `>= 0` 或 `in [...]`：那等于把"挂起照记一格账"这件事又放回隐形。
     """
     seen = []
     from app.core.guardrails import RoundGuard as RealGuard
@@ -512,7 +524,13 @@ def test_suspending_round_is_counted_and_not_credited_as_success(fake_tools, mon
     guard = seen[0]
     assert guard.tool_rounds == 1, "挂起那一轮没记账，等于给重试留了免费额度"
     assert guard.output_chars == 0, "没给模型看的问话占用了本轮输出预算"
-    assert [e["type"] for e in guard.guard_events] == [], guard.guard_events
+    types = [e["type"] for e in guard.guard_events]
+    assert types == ["suspend"], f"挂起这一轮只许有一条 suspend：{guard.guard_events}"
+    assert guard.guard_events[0]["tool"] == "a3_order", guard.guard_events
+    assert guard.guard_events[0]["suspensions"] == 1, guard.guard_events
+    assert guard.suspension_counts == {"a3_order": 1}, guard.suspension_counts
+    for forbidden in ("fail_backoff", "duplicate", "cost_cap_rounds", "cost_cap_tokens"):
+        assert forbidden not in types, f"挂起这一轮冒出熔断/退避类事件 {forbidden}：{types}"
 
 
 def test_usage_already_spent_before_a_suspension_stays_on_the_ledger(fake_tools, monkeypatch):
