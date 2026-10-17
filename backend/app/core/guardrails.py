@@ -6,6 +6,14 @@ v0.31 新增。挂在现有 usage 账本同轮记录上（guard_events 字段）
 为什么三个放一个模块：它们共享同一份"单轮状态"（RoundGuard 实例），
 触发后的回填文案格式也一致（给模型看的一句话 + 给人看的面板标记）。
 拆开反而要让三个类互相传同一份计数器。
+
+⭐ v0.35 工单 #29：工具结果在 A3 之后是**三态**（成功 / 失败 / 停在断点问用户），
+本模块此前只有两态，于是第三态被读成失败、两次就把该工具在本轮熔断。现在
+`record_outcome(..., suspended=True)` 是独立的一格：不计退避、不跳熔断、照记轮次、
+另起 `suspend` 账（判据与不变量写在该方法的 docstring 里）。
+**这一票只提供护栏侧的状态与锁**：三条聊天路径（pipeline / streaming / react_agent）
+与 task_agent 的调用点仍传 `ok=bool(outcome.ok)`，改动尚未在现网生效（休眠），
+接上它们是工单 #76；A4 交出第一条真 `suspends: True` 的工具之前 #76 必须落。
 """
 import json
 import threading
@@ -62,6 +70,13 @@ class RoundGuard:
         self._fused_tools: Dict[str, str] = {}  # tool_name → 熔断原因
         # tool_name → 连续失败次数
         self._consecutive_fails: Dict[str, int] = {}
+        # ⭐ v0.35 工单 #29：tool_name → 挂起（停在断点问用户）次数。
+        # 这是一格**独立**的账，不复用 _consecutive_fails：那格是熔断算术的唯一输入
+        # （record_outcome 里直接拿它跟 fail_threshold 比），往里记挂起等于把
+        # "问用户要验证码"记成工具坏了；而为了不计熔断给它加一个平行阈值，算术就从
+        # 一处变成两处，两边迟早对不上。中性 ≠ 隐形：这一格和 events 里的 `suspend`
+        # 就是给人和日志看的那一眼。
+        self._suspensions: Dict[str, int] = {}
         # 总工具轮次
         self._tool_rounds = 0
         # 总 token（估算）
@@ -120,15 +135,42 @@ class RoundGuard:
             return None
 
     def record_outcome(self, tool_name: str, ok: bool,
-                       estimated_tokens: int = 0) -> None:
-        """记录一次工具调用的结果（成功/失败 + 估算 token）。
+                       estimated_tokens: int = 0, *,
+                       suspended: bool = False) -> None:
+        """记录一次工具调用的结果，三态：挂起 / 成功 / 失败（+ 估算 token）。
 
-        失败退避的计数在这里更新：成功时清零，失败时累加。
+        ⭐ v0.35 工单 #29（A3 的第三态在这里落地）：`suspended=True` 时**不读 `ok`**。
+        按 `ToolOutcome` 的读法纪律（`tools/executor.py:93-102`），`ok=False` 只说明
+        "没产出结果"，不说明"失败了"；想知道是哪一种，只看 `suspended`。把挂起读成失败
+        记进退避账，代价是同一工具在本轮两次就熔断——用户两次"请把验证码发我"之后再
+        也续不上。
+
+        三条不变量：
+        * **不计退避、不跳熔断**：这一支一行都不碰 `_consecutive_fails`——既不加分
+          （顺流成失败），也不抹历史（把它当成功清零）。所以 (失败, 挂起, 失败) 与
+          (失败, 失败) 落到**同一个**熔断状态，挂起是中性的。
+        * **照记这一轮**：`_tool_rounds` 与 `estimated_tokens` 照常累，与频控那条
+          "尝试即计数"同口径（不记就是给重试留免费额度、绕开成本上限）。
+        * **另起一格账**：`_suspensions` 计数 + 事件 `suspend`，可观测（中性 ≠ 隐形）。
+
+        `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：三条聊天
+        路径（pipeline / streaming / react_agent）与 task_agent 的调用点归工单 #76，
+        本票不动它们，于是老写法 `record_outcome(name, ok)` 里 `estimated_tokens`
+        的位置与含义必须一字不变——挪成位置参数就会把 token 数静默读成布尔。
+
         可用性探测已剔除的工具不进熔断计数（它们根本不会被调用到这里）。
         """
         with self._lock:
             self._tool_rounds += 1
             self._total_tokens += estimated_tokens
+
+            if suspended:
+                # 只有这一支是新增的：挂起单独累，失败表 / 熔断表 / __all__ 一概不碰。
+                susp = self._suspensions.get(tool_name, 0) + 1
+                self._suspensions[tool_name] = susp
+                self.events.append({"type": "suspend", "tool": tool_name,
+                                    "suspensions": susp})
+                return
 
             if ok:
                 self._consecutive_fails[tool_name] = 0
@@ -157,6 +199,13 @@ class RoundGuard:
           也会少记——熔断的"次数"证据从此不可查。
         * 事件的类型集合没有扩：现有四类（cost_cap_rounds / duplicate / fail_backoff /
           cost_cap_tokens）的读侧形状没准备好接新 kind，加一种就是让面板与账本猜。
+          ⭐ 工单 #29 在这条上开了**一个**受控的例外，且只开在记账一侧：挂起新增
+          `suspend` 一种（clip_output 那两种 `output_*` 是 R2 早已在用的，与本模块的
+          熔断判据无关）。判据是"这一 kind 读出来必须是另一个意思"——把挂起塞进
+          `fail_backoff` 会让读侧以为工具坏了，而它其实是在等人，所以只能另起一种；
+          除此之外本票没有为熔断加任何 kind。（#29 的锁见
+          `tests/test_v0350_ticket29_guardrail_third_state.py`；`check()` 门口那三行的
+          事件集合仍由 `test_r1b_fuse_adds_no_new_event_type` 钉着，一条没松。）
         """
         with self._lock:
             self._total_tokens += tokens
@@ -191,6 +240,17 @@ class RoundGuard:
     def tool_rounds(self) -> int:
         with self._lock:
             return self._tool_rounds
+
+    @property
+    def suspension_counts(self) -> Dict[str, int]:
+        """⭐ 工单 #29：本轮里每个工具挂起过几次——挂起可观测的那一格账。
+
+        出口给的是快照（同 `guard_events` 的口径），读侧不会边读边被生产线程改。
+        它**不**参与任何熔断判据：判据只有 `check()` 门口那一条，这一格只负责被看见
+        （人和日志都要能读出"这一轮这个工具是在等人，不是坏了"）。
+        """
+        with self._lock:
+            return dict(self._suspensions)
 
     @property
     def guard_events(self) -> List[Dict]:
