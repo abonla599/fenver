@@ -62,13 +62,25 @@ r"""换包脚本**验收之后那段尾巴**的两处裸出口：step 8 的确�
 
 红绿分工（为什么本文件必须存在，而不是往旧锁里加一条 risky）：
 `test_pre_fix_reconstruction_is_green_on_the_existing_locks_and_red_on_ours` 用 `git cat-file`
-取 `HEAD` 那份 blob、**按 CRLF 重建**再判。本机 `core.autocrlf=true`，`git show HEAD:deploy/...`
-给的是 **LF** blob：HEAD 那份实测 63590 字节 / CRLF 0 / LF 1055 / 非 ASCII 0 /
+取**改前那一份** blob、**按 CRLF 重建**再判。锚点是**字面 SHA**，不是 `HEAD`：
+`_PRE_FIX_REF = b0cde6be`（#50 那一版，本票 token 出现 0 次）与 `_PREV_REF = 00f7fded`
+（#45 那一版）。初版写的是 `HEAD` / `HEAD~1`，于是这条锁只在"#47 还没 commit"的那段时间为绿，
+提交那一秒 `HEAD` 自己变成了修复，下面每条"必须红"当场反向——它在自己的 commit 上变红
+（实测本文件 1 failed / 31 passed，全量 1 failed / 2320 passed）。"改前"交给 `HEAD` 表达，
+等于把判据绑在作者按下回车的那一刻；能诚实回答"改前"的只有字面 SHA，配套的自守断言
+（锚点那份里不许出现本票 token，见 `_head_blob`）防的就是有人把锚点重新指回 `HEAD`。
+代价也说清楚：字面 SHA 挡不住 rebase/squash，历史被重写后锚点解析不出来，那时它是**响亮
+失败**而不是 skip，按 `git log --oneline -- deploy/swap-package.ps1` 重挑 SHA 即可。
+本机 `core.autocrlf=true`，`git cat-file blob <ref>:deploy/...` 给的是 **LF** blob：`b0cde6be`
+那份实测 63590 字节 / CRLF 0 / LF 1055 / 非 ASCII 0 /
 sha256 `a6772ba1cc9a4048abeb1001077fd0c62f1beba7fca0234a35a9bea823cf65a0`；换成 CRLF 之后
 64645 字节 / CRLF 1055 / LF 1055 / 非 ASCII 0 / sha256
-`59b68cb4a594322b0c3f3f6b9c458fde1a91b6c449c3698fd65272c5ad07e835`，与工作树那份逐字节相同。
-**票面写的 60226 不是 HEAD 的 blob**——那是 `HEAD~1`（#45 落地之前那一版）的 LF blob 大小，
-本条把三个数都当场取出来放进断言消息，免得下一个人又按 60226 去找。
+`59b68cb4a594322b0c3f3f6b9c458fde1a91b6c449c3698fd65272c5ad07e835`。逐字节相同的是
+**"CRLF 重建"与"落盘副本"**这两者（本条当场重算比对），不是工作树那份——工作树已经是修复后的。
+**票面写的 60226 是 `00f7fded` 那份 LF blob 的大小**（60226 字节 / LF 1011），既不是
+`b0cde6be` 的 63590；初稿把它记成 `HEAD~1`，那是"当时 HEAD 恰好是 `b0cde6be`"的巧合，
+`HEAD` 一动这个 ref 就指错对象。本条把三个数都当场取出来放进断言消息并钉住两个字节数，
+免得下一个人又按 60226 去找。
 **另注意 `_no_bare_exit_ok` 绿不等于它扫过尾巴**：那把尺的射程是 disable 到
 `$script:backupDone` 那一段，本票两处都在它之后——这台机器用 `Get-Content -Tail 40` 现场念一遍
 改前那份的尾巴（裸读与收尾都还在原位），红绿分工才算有据。
@@ -114,6 +126,7 @@ from tests.test_swap_package_disable_threw_handler import (
     _try_wraps_and_routes,
 )
 from tests.test_swap_package_disable_verify import (
+    REPO_ROOT,
     _ascii_ok,
     _code_lines,
     _func_body,
@@ -146,6 +159,9 @@ _FAIL_KEYS = ("budget-returned=false", "backend-entries=", "error=")
 _SUCCESS_TOKEN = "BUDGET backend-entries-cleared="
 _ENABLED_READ_STAGE = "final-enabled-read"
 _READFAIL_ENABLED = "READFAIL stage=" + _ENABLED_READ_STAGE
+# SITE 2 改后才会出现的那一句（复用 helper 而非裸读）：连同上面三枚 token 一起当作
+# "锚点指错到了修复之后"的证据，见 _head_blob 的自守断言。
+_HELPER_READ_PREFIX = "$finalProbe = Get-WatchdogTaskState"
 _UNREADABLE = "Unreadable"
 _PROBE_MARK = "t47-fake-state.json"
 _FAKE_TASK_PATH = "\\t47-fake-path\\"
@@ -180,7 +196,7 @@ _RETRY = re.compile(r"\bwhile\b|\bfor\b|foreach\s*\(|Start-Sleep|AddSeconds|New-
 _TRUNCATE = re.compile(r"Remove-Item|Set-Content|Clear-Content|Out-File|Add-Content|WriteAllBytes")
 _VERDICT_FIELD = re.compile(r"(verdict|aborted|swallowed|handled|branch)=")
 
-# 改动前（HEAD 那份）SITE 2 的两行原文：牙印四与"改前那份"都用它，逐字照抄 blob
+# 改动前（锚点 `b0cde6be` 那份，见 `_PRE_FIX_REF`）SITE 2 的两行原文：牙印四与"改前那份"都用它，逐字照抄 blob
 PRE_TICKET_ENABLED_BLOCK = """$finalState = (Get-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName).State
 Write-Output ('ENABLED state=' + $finalState)"""
 
@@ -828,7 +844,7 @@ def _abort_budget_site(text: str, which: str):
 
 
 def _to_pre_ticket_enabled(text: str):
-    """SITE 2 退回改动前那两行裸读（HEAD 那份的形状）。"""
+    """SITE 2 退回改动前那两行裸读（锚点 `b0cde6be` 那份的形状）。"""
     en = _enabled_ctx(text)
     if en is None:
         return None
@@ -1572,43 +1588,80 @@ def test_mutation_encoding_gates_bit_on_written_copies(tmp_path):
 
 
 # ------------------------------------------------------------------ 红绿分工
-def _head_blob(ref: str = "HEAD"):
-    """`git cat-file blob <ref>:deploy/swap-package.ps1` -> (LF blob, 按 CRLF 重建的同一份)。"""
-    repo = str(SWAP_PS1.parents[1])
-    if subprocess.run(["git", "cat-file", "-e", ref + ":deploy/swap-package.ps1"], cwd=repo).returncode != 0:
-        pytest.skip(ref + " 里没有 deploy/swap-package.ps1 这一版")
+# 锚点是**字面 SHA**，不是 `HEAD`：这条锁要的是"改前那一份"，而 `HEAD` 指向谁是提交那一刻决定
+# 的。写成 `HEAD` 时它只在"#47 还没进仓库"的那段时间为真，commit 那一秒 `HEAD` 就是修复本身，
+# 下面每条"必须红"当场反向，这条锁在自己的 commit 上变红（实测 1 failed / rc=1，全量 rc=1）。
+# 一个会随世界状态重定义自己的断言不是锁，是作者跑测试那一刻的快照——诚实的锚点只能是 SHA。
+#   _PRE_FIX_REF = b0cde6be  #50 那一版：本票 token 0 次，LF blob 63590 字节（旧代码里的 "HEAD"）
+#   _PREV_REF    = 00f7fded  #45 那一版：LF blob 60226 字节 = 票面那个数。旧代码写 `HEAD~1`，
+#                            只是当时 HEAD=b0cde6be 的巧合；HEAD 一动它就指到 63590 那一版。
+# 代价：字面 SHA 挡不住 rebase/squash——历史重写后这两个 ref 解析不出来，_head_blob 会响亮
+# 失败（绝不 skip），届时按 `git log --oneline -- deploy/swap-package.ps1` 重挑 SHA。
+_PRE_FIX_REF = "b0cde6be"
+_PREV_REF = "00f7fded"
+
+
+def _head_blob(ref: str):
+    """`git cat-file blob <ref>:deploy/swap-package.ps1` -> (LF blob, 按 CRLF 重建的同一份)。
+
+    仓库根取 `REPO_ROOT`（这份测试文件自己所在的 checkout），**不**跟着 `SWAP_PS1_UNDER_TEST`
+    走。旧写法用 `SWAP_PS1.parents[1]`：那条通道把被测副本放在仓库外，于是 `git cat-file` 失败，
+    于是 `pytest.skip`——红绿分工的整条证据静默消失，报告里只多出一个没人看的 "1 skipped"。
+    这条锁的 subject 就是仓库历史本身，指不到历史只能算失败，不许算跳过。
+
+    第二件事是自守：锚点一旦被挪到修复**之后**的提交（包括把它改回 `HEAD`），那份 blob 里就
+    带着本票的 token，下面每条"必须红"又会整体反向——所以在取锚点的那一刻就断言它不含本票 token。
+    """
+    repo = str(REPO_ROOT)
+    probe = subprocess.run(["git", "cat-file", "-e", ref + ":deploy/swap-package.ps1"],
+                           cwd=repo, capture_output=True)
+    assert probe.returncode == 0, (
+        "锚点 " + ref + " 在这份工作树里解析不出 deploy/swap-package.ps1（cwd=" + repo + "，"
+        "git 说：" + (probe.stderr or b"").decode("utf-8", "replace").strip() + "）。这条锁判的就是"
+        "仓库历史，跳过等于把红绿分工的证据扔掉，所以这里只有失败。三查：①是不是在 checkout 里"
+        "跑的；②锚点有没有被 rebase/squash/gc 换掉（`git log --oneline -- deploy/swap-package.ps1`"
+        " 重挑 SHA）；③设了 SWAP_PS1_UNDER_TEST 的话那条通道与本锁无关，unset 它再跑。")
     blob = subprocess.run(["git", "cat-file", "blob", ref + ":deploy/swap-package.ps1"],
                           cwd=repo, capture_output=True, check=True).stdout
+    for token in _FAIL_TOKENS + (_READFAIL_ENABLED, _HELPER_READ_PREFIX):
+        assert token.encode() not in blob, (
+            "锚点 " + ref + " 那份里已经有本票的 token「" + token + "」——说明锚点被指到了 #47 之后"
+            "的提交，它不是「改前那一份」。本函数下面每条判据都指望锚点是改前的（必须红），锚点一挪"
+            "就整体反向变红，这正是当初把「改前」锚在 HEAD 上自毁的同一个坑。改回 _PRE_FIX_REF / "
+            "_PREV_REF 指向修复之前的 SHA，别去改判据。")
     return blob, blob.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
 
 
 def test_pre_fix_reconstruction_is_green_on_the_existing_locks_and_red_on_ours(tmp_path):
-    """红绿分工（票面第 4 条要求可复跑）：**按 CRLF 重建**的 HEAD 那份。
+    """红绿分工（票面第 4 条要求可复跑）：**按 CRLF 重建**的 `_PRE_FIX_REF` 那份。
 
-    取证：LF blob 的 字节/CRLF/LF/非 ASCII/sha256 与 CRLF 重建后的同样五项，外加 `HEAD~1`
-    （上一版）blob 的大小——票面那个 60226 就是它，不是 HEAD 的。判据两路：本文件每条判据
-    对它都红（洞不在改前那份里就不必修），既有六把尺照旧绿——少了这半条，就没人能说明
-    本文件为什么必须存在，而不是往旧锁里加一条 risky。
+    取证：LF blob 的 字节/CRLF/LF/非 ASCII/sha256 与 CRLF 重建后的同样五项，外加 `_PREV_REF`
+    （票面那一份，60226 字节 LF blob）的大小——两个字节数一并钉住，锚点被挪就在这里红。判据两路：
+    本文件每条判据对它都红（洞不在改前那份里就不必修），既有六把尺照旧绿——少了这半条，就没人能
+    说明本文件为什么必须存在，而不是往旧锁里加一条 risky。
     """
-    lf, crlf = _head_blob()
-    prev, _prev_crlf = _head_blob("HEAD~1")
+    lf, crlf = _head_blob(_PRE_FIX_REF)
+    prev, _prev_crlf = _head_blob(_PREV_REF)
     facts = {
-        "HEAD_lf_bytes": len(lf), "HEAD_lf_crlf": lf.count(b"\r\n"), "HEAD_lf_lf": lf.count(b"\n"),
-        "HEAD_lf_nonascii": sum(1 for b in lf if b >= 0x80),
-        "HEAD_lf_sha": hashlib.sha256(lf).hexdigest(),
-        "HEAD_crlf_bytes": len(crlf), "HEAD_crlf_crlf": crlf.count(b"\r\n"),
-        "HEAD_crlf_lf": crlf.count(b"\n"), "HEAD_crlf_nonascii": sum(1 for b in crlf if b >= 0x80),
-        "HEAD_crlf_sha": hashlib.sha256(crlf).hexdigest(),
-        "HEAD1_lf_bytes": len(prev), "HEAD1_lf_crlf": prev.count(b"\r\n")}
+        "PRE_FIX_REF": _PRE_FIX_REF, "PREV_REF": _PREV_REF,
+        "PRE_FIX_lf_bytes": len(lf), "PRE_FIX_lf_crlf": lf.count(b"\r\n"), "PRE_FIX_lf_lf": lf.count(b"\n"),
+        "PRE_FIX_lf_nonascii": sum(1 for b in lf if b >= 0x80),
+        "PRE_FIX_lf_sha": hashlib.sha256(lf).hexdigest(),
+        "PRE_FIX_crlf_bytes": len(crlf), "PRE_FIX_crlf_crlf": crlf.count(b"\r\n"),
+        "PRE_FIX_crlf_lf": crlf.count(b"\n"), "PRE_FIX_crlf_nonascii": sum(1 for b in crlf if b >= 0x80),
+        "PRE_FIX_crlf_sha": hashlib.sha256(crlf).hexdigest(),
+        "PREV_lf_bytes": len(prev), "PREV_lf_crlf": prev.count(b"\r\n")}
     msg = "\n".join(f"{k}={v}" for k, v in facts.items())
-    assert facts["HEAD_lf_crlf"] == 0, "改前那份 blob 竟然带 CRLF：autocrlf 前提变了，本函数要重写\n" + msg
-    assert facts["HEAD_lf_lf"] == facts["HEAD_crlf_crlf"] == facts["HEAD_crlf_lf"], \
+    assert facts["PRE_FIX_lf_bytes"] == 63590 and facts["PREV_lf_bytes"] == 60226, \
+        "两个锚点的 LF blob 大小与票面取证（63590 / 60226）对不上：锚点被挪过，取证段要重写\n" + msg
+    assert facts["PRE_FIX_lf_crlf"] == 0, "改前那份 blob 竟然带 CRLF：autocrlf 前提变了，本函数要重写\n" + msg
+    assert facts["PRE_FIX_lf_lf"] == facts["PRE_FIX_crlf_crlf"] == facts["PRE_FIX_crlf_lf"], \
         "LF 行数与 CRLF 重建对不上\n" + msg
-    assert facts["HEAD_crlf_nonascii"] == 0 and facts["HEAD_lf_nonascii"] == 0, msg
+    assert facts["PRE_FIX_crlf_nonascii"] == 0 and facts["PRE_FIX_lf_nonascii"] == 0, msg
     assert not crlf.startswith(b"\xef\xbb\xbf"), msg
-    copy = _write_crlf(tmp_path, "swap-package-head-crlf.ps1", crlf.decode("utf-8"))
+    copy = _write_crlf(tmp_path, "swap-package-pre-fix-crlf.ps1", crlf.decode("utf-8"))
     assert copy.read_bytes() == crlf, "CRLF 重建没落到盘上"
-    assert hashlib.sha256(copy.read_bytes()).hexdigest() == facts["HEAD_crlf_sha"], msg
+    assert hashlib.sha256(copy.read_bytes()).hexdigest() == facts["PRE_FIX_crlf_sha"], msg
     pre = crlf.decode("utf-8")
     # 本票的判据：改前那份每条都红
     assert _budget_ctx(pre) is None, "改前那份的读/写没被包住，定位锁必须红（红才对）\n" + msg
