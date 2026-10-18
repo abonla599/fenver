@@ -74,6 +74,30 @@ scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 
 `!/tools/release_marker.py` 保证 CI checkout 里有；那个文件的路径检查由契约测试钉住），
 否则"这一版是不是只换服务端"会长出第三份真相。`tools/gen_changelog.py` 那一处副本归 #68。
 
+## 第 6 条判据：泄露隔离闸（这把锁上唯一没有开关的一条）
+
+**只要任何一个还可能被推出去的 ref 能走到那个含过凭据的提交，这一版就不许被打 tag。**
+被推走的是 ref，不是"当前分支"——所以"泄露提交不在 develop 的历史上"不构成放行理由：
+一次 `git push --tags`、一次把旧 tag 顺手补推的 `git push fenver <name>`，都足以把那串字节
+重新带回公开仓库，而那一刻没有任何东西变红。判据因此问一个世界事实：本地 tag 与分支头
+这个集合里，有没有谁的祖先链上躺着 `QUARANTINED` 中的哪一个。
+
+三档按 `git merge-base --is-ancestor` 的**退出码**分，逐档的理由见 `_ref_reaches_quarantined`：
+0 = 确实到了 → 拒绝，并把 offending 的 ref 名单原样打出来（那份名单就是"该删哪些"）；
+1 = 证明没到 → 这一格放行；**其余一律（含 128：对象不在库里、目录不是仓库、ref 解析不了）
+= 判不出来 → 也拒绝**。"验不出问题"在这把锁里从来不是"没问题"——#74 咬的就是把 128 当 1。
+
+这一格**没有旗子、没有环境变量、没有 warn-only 模式**，是有意的：本文件另外三面旗能做的
+都只是把"取不到"降级，而"要不要放过一个含泄露的 ref"不属于任何操作者当场能授权的事。
+让它变绿只有一个办法：把名单里那些 ref 删掉。删干净之后 `QUARANTINED` 里那一项**继续留着**
+（这一格要的是"没有任何 ref 能到它"，不是"那个提交还躺在库里"）；真要把它从隔离清单里摘掉，
+那是改代码、过一次 review 的事，不是手边一面旗的事。
+
+一个后续状态要说在前面：那份对象一旦被 `git gc` 或历史重写清掉，这一格会从"绿"变回
+`probe-undecidable` 的红（128 那一档不认识"查无此对象"这种好消息）。那不是故障，是这条
+判据的定义本身——届时唯一的出路是把那一项从清单里显式删掉（一次代码改动、一次 review），
+而不是给闸门补一面旗。
+
 ## 用法
 
 本机（打 tag 之前，推荐连本地 8000 一起核）：
@@ -84,8 +108,9 @@ CI —— **#90b 起不再由 `release-apk.yml` 跑这把全量闸门**：那一
 `docs/releases/<tag>.md` 在不在。线上 build 与物料顺序这两格 CI 判不到（#57：`/health` 是对岸
 进程，`data/` 与 `version.json` 被 .gitignore 排除），**这两格只剩上面那条本机命令这一道闸**。
 
-退出码：0 放行；1 版本不符（含 versionName 与 tag 不符、清单宣告跑在了落盘的包前面）；
-2 判据拿不到（fail-closed）。
+退出码：0 放行；1 已经证明它是反的（versionName 与 tag 不符、清单宣告跑在了落盘的包前面、
+某个可推送 ref 的祖先链上躺着被隔离的提交）；2 判据拿不到（fail-closed，含"祖先关系判不
+出来"与"连 ref 清单都列不出来"）。
 """
 import argparse
 import hashlib
@@ -286,6 +311,107 @@ def check_announcement_materials(repo_root: str, expect_version: str):
             % (actual[:8], sha[:8], apk))
     return True, "ok", ("清单 %s 宣告 %s，包 %s 在盘上且摘要对得上（sha256 %s…）"
                         % (path, announced, apk, actual[:12]))
+
+
+# ---- 第 6 条判据的隔离清单：含过公开不了的凭据、因而绝不能再被推出去的提交。
+# 元组是为了"再加一个"是改一行数据、不是加一面旗。每一项必须是完整 40 位十六进制：
+# 缩写既能撞上歧义、也让人分不清"解析不了"和"证明没有"，而这一格判的就正是这两者的区别。
+QUARANTINED = ("c97296a917bcd98421e4d167802fa9216e046c78",)
+
+
+def _git_lines(repo_root: str, args, timeout: float = 30):
+    """跑一条只读 git 命令，带回 (stdout 的行 | None, 退出码或错误说明)。不写任何东西。"""
+    try:
+        out = subprocess.run(["git", "-C", repo_root] + list(args),
+                             capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return None, "%s:%s" % (type(exc).__name__, exc)
+    if out.returncode != 0:
+        err = (out.stderr or "").strip().replace("\n", " ")
+        return None, "rc=%d%s" % (out.returncode, (" %s" % err[:180] if err else ""))
+    return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()], "ok"
+
+
+def pushable_refs(repo_root: str):
+    """这一次可能被封存出去的 ref 集合：**所有本地 tag + 所有分支头**。
+
+    不看远端已经有哪些——"对岸已经脏了"不是本地继续推脏东西的理由；也不看当前分支——
+    `git push --tags` 压根不看当前分支。仓库目录同时是生产机，这一集合里只要有一个还
+    能走到被隔离的提交，把它推出去就是一次按键的事，所以这一格必须在封版之前问。
+    """
+    lines, why = _git_lines(repo_root, ["for-each-ref", "--format=%(refname)",
+                                        "refs/tags", "refs/heads"])
+    if lines is None:
+        return None, why
+    return lines, "ok"
+
+
+def _ref_reaches_quarantined(repo_root: str, commit: str, ref: str):
+    """这个 ref 的祖先链里有没有那个提交？回三档之一：`reaches` / `clean` / `undecidable`。
+
+    **退出码的三档必须分开对待**，这是本条判据的全部难点：`merge-base --is-ancestor` 用
+    0 表示"是祖先"、用 1 表示"不是祖先"，而 128 是完全另一回事——被隔离的那个对象不在这
+    份 checkout 里、目录不是 git 仓库、ref 名字解析不了，全都落在 128 上。把 128 读成 1
+    （"没验出问题"＝"没问题"）就是 fail-open，所以这里只承认 0 与 1，其余一律 undecidable。
+    """
+    try:
+        out = subprocess.run(["git", "-C", repo_root, "merge-base", "--is-ancestor",
+                              commit, ref], capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return "undecidable", "probe-error:%s" % type(exc).__name__
+    if out.returncode == 0:
+        return "reaches", ""
+    if out.returncode == 1:
+        return "clean", ""
+    err = (out.stderr or "").strip().replace("\n", " ")
+    return "undecidable", "rc=%d%s" % (out.returncode, (" %s" % err[:180] if err else ""))
+
+
+def check_leak_quarantine(repo_root: str):
+    """**有没有任何一个还能被推出去的 ref 能走到被隔离的提交？** 回 (可以, 记号, 说明)。
+
+    形状照 `check_announcement_materials`（布尔 + token + 给人看的说明），退出码分档照
+    本文件既有规矩：证明它是反的＝1，判不出来＝2。
+
+    - `ref-reaches-quarantined`：名单里的 ref 一个都不许留下——说明里就是那份"该删哪些"，
+      不需要人再数一遍；
+    - `probe-undecidable`：某个 ref 的祖先关系判不出来。**判不出来就不是干净**，不放行；
+    - `refs-unenumerable`：连 ref 清单都列不出来（这个目录到底是不是仓库都答不上来），
+      那就没有一条判据谈得上"通过"。
+
+    逐个 ref 一次 `merge-base` 是 O(refs) 次 git 调用——一次发版只跑一遍，慢不是问题，
+    漏才是。只读，一个字节都不写。
+    """
+    refs, why = pushable_refs(repo_root)
+    if refs is None:
+        return False, "refs-unenumerable", "列不出可推送的 ref 清单：%s（%s）" % (why, repo_root)
+    offenders, offender_commits, undecidable = [], [], []
+    for commit in QUARANTINED:
+        for ref in refs:
+            verdict, detail = _ref_reaches_quarantined(repo_root, commit, ref)
+            if verdict == "reaches":
+                if ref not in offenders:
+                    offenders.append(ref)
+                if commit not in offender_commits:
+                    offender_commits.append(commit)
+            elif verdict == "undecidable" and not any(u[0] == ref for u in undecidable):
+                undecidable.append((ref, commit, detail))
+    if offenders:
+        # 名单本身就是"该删哪些"，所以逐个列全、不缩写、不计数了事：看一眼就能照着删。
+        return False, "ref-reaches-quarantined", (
+            "%d 个可推送 ref 能走到被隔离的提交（%s）：%s —— 只要它们还在本地，一次 push "
+            "就把那个提交重新带回公开仓库；按名单删干净（删 ref 不删对象，删完这条自己会绿）"
+            % (len(offenders), "、".join("%s…" % c[:12] for c in offender_commits),
+               " ".join(offenders)))
+    if undecidable:
+        return False, "probe-undecidable", (
+            "%d 处 ref 的祖先关系判不出来：%s —— 判不出来不等于干净，不放行"
+            % (len(undecidable), "；".join(
+                "%s / %s…：%s" % (ref, commit[:12], detail)
+                for ref, commit, detail in undecidable)))
+    return True, "ok", (
+        "%d 个可推送 ref（tag + 分支头）逐个核过，没有一个能走到被隔离的提交（%s）"
+        % (len(refs), "、".join("%s…" % c[:12] for c in QUARANTINED)))
 
 
 def _fail(msg: str, code: int = 1) -> "int":
@@ -504,6 +630,21 @@ def main(argv=None) -> int:
                      "本版确实不发新 APK 就显式带 --backend-only" % token, code)
     else:
         print("PRETAG apk-materials=ok %s" % detail)
+
+    # 6) 泄露隔离闸：**任何一个还可能被推出去的 ref 能走到被隔离的提交，就不许封这一版**。
+    #    放在 PASS 之前、五条判据都跑完之后：沿用第 5 条"挂最后"的手法，前面各条的红先按
+    #    自己的理由报出来，不抢诊断结论。它不因此变得可绕过——这一格没有旗子，带不带
+    #    `--allow-unreachable` / `--no-versionname-check` / `--backend-only` 都照样执行。
+    leak_ok, leak_token, leak_detail = check_leak_quarantine(root)
+    if leak_ok:
+        print("PRETAG leak-quarantine=ok %s" % leak_detail)
+    else:
+        print("PRETAG leak-quarantine=REFUSED token=%s %s" % (leak_token, leak_detail))
+        # 名单是"已经证明它带着泄露"＝1（与版本不符同一档）；判不出来／列不出来＝2
+        # （与"线上取不到"同一档）。两种都是非零，都不许往下敲 git tag。
+        leak_code = 1 if leak_token == "ref-reaches-quarantined" else 2
+        return _fail("leak-quarantine-%s：%s —— 这一格没有开关，也不该有；名单清干净之前"
+                     "任何 tag 都会把那个提交一起推出去" % (leak_token, leak_detail), leak_code)
 
     print("PRETAG verdict=PASS —— 线上（与本机）正在服务的就是 %s，可以打 tag" % tag)
     return 0
