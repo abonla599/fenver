@@ -1,4 +1,25 @@
-r"""#92a：把 #90a 那把浅克隆哨从"只盯 tests.yml"泛化成"任何读历史的 job 必配 `fetch-depth: 0`"。
+r"""#92a：把 #90a 那把浅克隆哨从"只盯 tests.yml"泛化成"run 正文命中 `HISTORY_READING_MARKERS`
+的 job 必配 `fetch-depth: 0`"（#92a 修复轮把这半句措辞对齐实测：射程等于标记集合的射程，
+不是"凡读历史的 job 都被判"——下面"射程"那一节的仍漏清单就是差额）。
+
+## #92a 修复轮改了什么（独立审查判 BLOCK 的那一条）
+
+审查员实测：在仓库外的 `git archive` 副本里给 `build-native-apk.yml` 注入
+`run: git describe --tags`（或 `run: git show 262b1224:deploy/swap-package.ps1`）、不配
+fetch-depth ⇒ 这把哨**静默判绿**。而三处措辞（`.github/workflows/tests.yml` 的注释、
+`.github/workflows/gitleaks.yml` 的注释、本文件参数化锁的 docstring）写的是"**凡** run 正文
+读仓库历史的 job 都必须 fetch-depth: 0"——声明比实测宽。本轮的四处动作：
+
+1. 三处措辞收窄成"命中 `HISTORY_READING_MARKERS`（`_SYNTH_*` 那批钉子按条守着，条数以那个
+   元组为准；写进注释的数字只是提交后态、会漂）里任一条标记"。两份 workflow 只动了 `#` 行。
+2. 射程段补上**仍漏清单**：同样读历史、但在标记集合之外、实测仍绿的命令，逐条附本机
+   `--depth 1` 副本与 workflow 副本的实跑结果。
+3. 加三组钉子：**逐标记有牙**（每条标记自带一枚"注入它 ⇒ 必须红"的合成反例，元组的第三、
+   四格就是为此存在的）、**边界钉**（仍漏清单里每条一枚 expect_red=False 的钉：谁把它加进
+   标记集合而没回来改清单，这枚钉就红）、**条数钉**
+   （`test_the_marker_count_and_each_markers_own_counterexample_are_pinned`）。
+4. 两条间接标记收紧成命令形状（`\bpytest\b` → `python -m pytest` 那一族、`\bgitleaks\b` →
+   `gitleaks detect` 那一族），代价与复验都记在射程段。
 
 ## 这把锁守的是哪一格（#90a 的原始事故，一个字没改）
 
@@ -29,19 +50,33 @@ deploy/swap-package.ps1"，下一个人先去查 `swap-package.ps1` 的代码，
    两处都不算数，才配得上"读的是可执行位置，不是散文"（口径同
    `test_machine_read_pointers.py::_from_workflows`）。
 2. 正文命中"读仓库历史"的标记集合（`HISTORY_READING_MARKERS`）⇒ 这个作业**要求历史**。
+   反过来不成立：没命中标记 = 不要求，哪怕它其实读了历史。那一半差额是本锁的边界，逐条记在
+   下面"射程"段的仍漏清单里，并由 `_SYNTH_STILL_MISSED` 那批边界钉钉住（不写成"已穷尽"）。
 3. 要求历史的作业，它的 `actions/checkout` 步必须**恰好一条**，且 `with.fetch-depth` 是
    **整数 0**（不是 bool、不是字符串 `"0"`、不是有限正整数）——形状要求整段照抄 #90a，没松。
 
-不读历史的作业**一律不要求** checkout 配 `fetch-depth`。今天 `build-native-apk.yml` 的
-`testDebugUnitTest` / `assembleDebug` / `upload-artifact` 三步都不碰历史
-（`android-native/**/*.gradle` 里 grep `git` 0 命中），`release-apk.yml` 的十三步也不碰。
-把它们判红就是假锁——判据抓错了东西时该改判据，不该改 workflow。
+没命中标记的作业**一律不要求** checkout 配 `fetch-depth`。今天 `build-native-apk.yml` 的
+`testDebugUnitTest` / `assembleDebug` / `upload-artifact` 三步与 `release-apk.yml` 的每一步
+一条标记都不命中（`android-native/**/*.gradle` 里 grep `git` 0 命中）。把它们判红就是假锁——
+判据抓错了东西时该改判据，不该改 workflow。反过来"这两份绿"也不是没跑：同一份副本里给
+`build-native-apk.yml` 注入 `run: git log --oneline -1`（不带 fetch-depth）会当场红，实测见
+下面的反例段。
 
 标记集合里除了 `git cat-file / rev-list / log / merge-base / blame` 之外还有两条，理由要写在
 这里而不是留给下一个人猜："跑本仓 pytest 套件"（那两把钉历史 SHA 的锁就住在这个套件里，
 `run: python -m pytest backend/tests/` 与 `run: git cat-file` 在这把哨眼里是同一件事）和
 "gitleaks detect"（它扫的是全历史，浅克隆让它只看得到最后一屏——`.gitleaks.toml` 那条
 `detect --source /repo` 今天就是靠 `fetch-depth: 0` 才成立的）。
+
+**这两条在 #92a 修复轮收紧过**（交付项 ④）：`\bpytest\b` → 认 `python -m pytest` 那个命令形状
+（`python`/`python3`/`python3.x` 都算），`\bgitleaks\b` → 认 `gitleaks detect` 的命令形状，含
+`gitleaks.yml` 那一步 `- name: gitleaks detect` 里的续行写法：镜像钉成
+`ghcr.io/gitleaks/gitleaks:v8.18.4` 后面接 `\`、换行才 `detect --source /repo`。收紧前
+`run: touch "$RUNNER_TEMP/pytest.log"` 这种**文件名**也算命中，
+那是拿散文当判据；复验（两份真物仍被认出）由
+`test_the_workflow_sweep_actually_sees_the_history_readers` 守着，两面证据在
+`test_tightened_indirect_markers_hit_commands_and_ignore_prose`。**代价**记在射程段：裸
+`pytest -q` 从今天起不再命中。
 
 ## 两处假理由（#92a 交付项 ②）
 
@@ -56,6 +91,47 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 - 只读 `steps[].run`。作业级 `defaults:`、`jobs.<id>.uses:`（可复用 workflow 的调用点）不在
   射程内；今天四份里没有这种形状，而 `_jobs_of` 遇到**既没有 `steps` 也不是 `uses:`** 的作业
   会判红而不是放过——认不出就说认不出，不假装"没有作业要判"。
+- **判据认的是"命中标记"，不是"读没读历史"这件事本身**（#92a 修复轮把这句钉死：上一版在两份
+  workflow 的注释和参数化锁的 docstring 里写的是"凡 run 正文读仓库历史的 job 都必须
+  fetch-depth: 0"，比实测宽——那是本会话第三次同一句错）。准确的说法只有一句：**run 正文命中
+  `HISTORY_READING_MARKERS` 里任一条标记的 job，才必须 `fetch-depth: 0`**。条数钉见
+  `test_the_marker_count_and_each_markers_own_counterexample_are_pinned`；注释里不许出现"任何
+  git 命令"这种句子，也不许把清单写成"已穷尽"。
+- **仍漏清单**：同样读仓库历史、但在标记集合之外、**实测仍绿**的形状。两组实测都出自本机实跑
+  （不是推理）——① 仓库外 `git archive` 副本：把这条注入 `build-native-apk.yml` 的 `apk` 作业
+  （它没有 fetch-depth）再跑本文件，**哨放它过**；同一份副本注入 `git log --oneline -1` 会当场
+  红，所以那批绿是"看不见"而不是"没跑"。② 浅克隆副本（`git clone --depth 1 --no-local`，实测
+  `rev-parse --is-shallow-repository` = true、`rev-list --count HEAD` = 1）里该命令的表现，
+  证明它读的确实是历史：
+  1. `git describe --tags --abbrev=0` —— ①仍绿；②rc=128 `fatal: No names found, cannot
+     describe anything.`（同一条命令在全历史的生产树里实测 rc=0、答得出最近那个 tag——被切掉的
+     正是 tag 指向的那段历史；这里刻意不写 tag 名，它每发一版就漂一次）
+  2. `git show 262b1224:deploy/swap-package.ps1` —— ①仍绿；②rc=128 `fatal: invalid object
+     name '262b1224'.`（正是那两把钉锚点的锁的取锚形状，审查员实测的那枚 BLOCK）
+  3. `git rev-parse 262b1224^{commit}` —— ①仍绿；②rc=128 `fatal: ambiguous argument
+     '262b1224^{commit}': unknown revision or path not in the working tree.`
+  4. `git archive --format=tar 262b1224` —— ①仍绿；②rc=128 `fatal: not a valid object name:
+     262b1224`。同一条写成 `git archive --format=tar HEAD` 在②实测 rc=0（它只要 HEAD 那一格），
+     所以这条漏的是"取历史里某一格"那一半
+  5. `git diff 262b1224 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef -- deploy/swap-package.ps1`
+     （第二枚是合成 SHA 形状 token，任何树上都解析不出来——不许把活的分支 tip 钉进 fixture）—— ①仍绿；②rc=128
+     `fatal: bad revision '262b1224'`（第一枚先失败，换 token 不改实测）
+  6. `git shortlog -sn HEAD` —— ①仍绿；②**rc=0 但少答**：只数到切片里那一笔（同副本
+     `rev-list --count HEAD` 实测 = 1）。不报错、只少答，比 rc=128 更难发现
+  7. `git bisect start 262b1224 HEAD` —— ①仍绿；②**rc=0 且不认锚点**：只回
+     `status: waiting for both 'good' and 'bad' commits`，同副本里 `git bisect terms` 实测
+     rc=1 `error: no terms defined`、`git rev-parse --verify 262b1224` 实测 rc=128
+     `Needed a single revision`——它拿到一格不存在的历史却答"我在跑"
+  8. `pytest -q backend/tests`（裸 pytest，不带 `python -m`）—— ①**改前**被 `\bpytest\b`
+     抓住（实测 rc=1），④ 收紧之后①仍绿（实测 rc=0）。这是本轮主动换来的代价：不再拿文件名与
+     文案当判据，代价就是裸命令这一格。写在这里而不是假装没有。
+  清单里每一条都对应 `_SYNTH_STILL_MISSED` 里一枚 **expect_red=False** 的边界钉（形状照 #83
+  的 `_SYNTH_TWO_HOP_FEED` / `_SYNTH_APPEND_FEED`；条数不写在这里，名单以那个元组为准）：今天必须绿，
+  谁把某条加进 `HISTORY_READING_MARKERS` 而没回来改这段清单和两份 workflow 的注释，那枚钉就红。
+  清单与本文件 docstring 的对应关系也被钉住
+  （`test_the_marker_count_and_each_markers_own_counterexample_are_pinned` 要求每条边界钉的命令
+  在这段清单里出现），所以"加一枚钉忘了写账"和"改账忘了改钉"都会红。
+  **把这批命令加进标记集合是下一步的事**（#92b 或后续单），今天没做，就不许把声明写得像已经做了。
 - #90b 那条反向钉（`run` 正文不许再出现 `tools/pre_tag_gate.py`）目前**只覆盖
   release-apk.yml 一个文件**，抄进别的 workflow 今天不红；扩到全 `run:` 集合归 #92b。
   这句话同时写在
@@ -68,7 +144,7 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 文件读不到、YAML 解析不出映射、取不到 jobs / steps、作业形状认不出、checkout 步不恰好
 一条、`with` 缺失、值不是整数 0 —— 全是 `assert` 红；另外
 `test_the_workflow_sweep_actually_sees_the_history_readers` 是一条**反空转**判据：枚举结果里
-必须真的存在"读历史的作业"，且今天这两份（tests.yml / gitleaks.yml）必须还在里面——否则
+必须真的存在"run 正文命中标记的作业"，且今天这两份（tests.yml / gitleaks.yml）必须还在里面——否则
 "glob 写错 / 目录被挪走 / 标记集合被削光"都会让上面那条参数化锁在空地上判绿。git 那侧：
 `rc != 0` 红，并且**分开报** rc=1 / rc=128 / 其它（#74 那条"把 rc=128 当 rc=1"就是这个坑：
 128 说的是"cwd 压根不是仓库"，1 说的是"仓库在但这个问题答不出来"，两种情况的下一步动作
@@ -85,6 +161,19 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 位置算出），所以把它拷进一份真浅克隆里就能就地变红。四枚反例（加一步 `git log` 不带
 fetch-depth ⇒ 红；同一处只写成 YAML 注释 ⇒ 绿；删 tests.yml 的 `fetch-depth: 0` ⇒ 红；
 删 gitleaks.yml 的 `fetch-depth: 0` ⇒ 红）的实测记录写在 #92a 的提交正文里。
+
+#92a 修复轮在同一套口子上另跑了两批（结果写在**本轮**的提交正文里，这里只说形状与去向）：
+
+- **仓库外副本注入 `build-native-apk.yml`**（`git archive HEAD` 导出、CRLF 归一、无 BOM，与工作
+  树逐字节相同）：仍漏清单里那批命令逐条注入 ⇒ 哨放它过；阳性对照 `git log --oneline -1` /
+  `git cat-file -t 262b1224` / `python -m pytest backend/tests/ -q` ⇒ 红在"checkout 没有 with:
+  块"那一句；不加东西的原样副本 ⇒ 全绿。这批实跑是"仍漏清单"的出处，不是推理。
+- **合成反例已经进代码**，不依赖 `WORKFLOWS_DIR_UNDER_TEST`：`_synthetic_steps` 把一条 run 正文
+  拼成真 YAML，喂给 `_judge_job`（参数化锁的同一条具身）。三组钉子各管一件事——
+  `test_each_history_marker_has_its_own_counterexample`（逐标记有牙，每条都必须红）、
+  `test_the_still_missed_list_is_still_missed_today`（边界钉，今天必须绿）、
+  `test_the_marker_count_and_each_markers_own_counterexample_are_pinned`（条数钉 + "每条标记
+  自带反例"的结构钉）。红路子里没有 skip，也没有 `pytest.xfail`。
 """
 
 import os
@@ -110,21 +199,41 @@ PINNED_HISTORY_ANCHORS = ("262b1224", "b0cde6be", "00f7fded")
 
 _PROBE_TIMEOUT_SECONDS = 60
 
-# "这个作业读仓库历史"的标记集合。前五条是直接的 git 历史读取；后两条是**间接但等价**的：
-# 跑本仓测试套件（那两把钉历史 SHA 的锁住在里面）与 gitleaks detect（判据就是全历史）。
-# 每条带一句"为什么算"的理由，是为了红话说得出人话，不是为了好看。
+# "这个作业读仓库历史"的标记集合。**这是一份有限清单，不是"任何读历史的做法"**——判据认的
+# 是"run 正文命中下面某一条标记"，射程段（模块 docstring）另有一份"同样读历史但在清单之外、
+# 实测仍绿"的仍漏清单，两边都由本文件下面的钉子守着。
+# 前五条是直接的 git 历史读取；后两条是**间接但等价**的：跑本仓测试套件（那两把钉历史 SHA 的
+# 锁住在里面）与 gitleaks detect（判据就是全历史）。
+# 每条四格：(红话里给看的理由, 编译好的正则, 合成反例的 id, 反例的 run 正文行)。第三四格是
+# #92a 修复轮加的**结构性牙齿**：加一条标记就必须同时交一枚"注入它、不配 fetch-depth ⇒ 红"
+# 的反例，不然 `test_the_marker_count_and_each_markers_own_counterexample_are_pinned` 当场红
+# ——这一格治的正是"改了判据忘了改清单/忘了补牙"。
+# 后两条的正则是 #92a 修复轮交付项 ④ 收紧过的：`\bpytest\b` → 认 `python -m pytest` 命令形状
+# （旧串连 `$RUNNER_TEMP/pytest.log` 这种文件名都命中，属过度要求）；`\bgitleaks\b` → 认
+# `gitleaks detect`（含把镜像钉在 `ghcr.io/gitleaks/gitleaks:v8.18.4 \` 后面换行接 detect 的
+# 续行写法，那是 gitleaks.yml 今天真正的形状）。收紧的代价记在射程段的仍漏清单里。
 HISTORY_READING_MARKERS = (
     ("git cat-file（按 SHA 取对象：两把钉历史锚点的锁用的就是它）",
-     re.compile(r"\bgit\s+cat-file\b")),
-    ("git rev-list（数历史）", re.compile(r"\bgit\s+rev-list\b")),
-    ("git log（读提交流）", re.compile(r"\bgit\s+log\b")),
-    ("git merge-base（找共同祖先）", re.compile(r"\bgit\s+merge-base\b")),
-    ("git blame（追某一行的归属）", re.compile(r"\bgit\s+blame\b")),
-    ("跑本仓 pytest 套件（test_swap_package_data_snapshot.py 与 "
-     "test_swap_package_post_acceptance_tokens.py 那两把钉历史 SHA 的锁就在这个套件里）",
-     re.compile(r"\bpytest\b")),
-    ("gitleaks detect（扫的是全历史，浅克隆只看得到最后一屏）",
-     re.compile(r"\bgitleaks\b")),
+     re.compile(r"\bgit\s+cat-file\b"),
+     "cat-file",
+     ("git cat-file -e 262b1224:deploy/swap-package.ps1",)),
+    ("git rev-list（数历史）", re.compile(r"\bgit\s+rev-list\b"), "rev-list",
+     ("git rev-list --count HEAD",)),
+    ("git log（读提交流）", re.compile(r"\bgit\s+log\b"), "git-log",
+     ("git log --oneline -1",)),
+    ("git merge-base（找共同祖先）", re.compile(r"\bgit\s+merge-base\b"), "merge-base",
+     ("git merge-base HEAD develop",)),
+    ("git blame（追某一行的归属）", re.compile(r"\bgit\s+blame\b"), "blame",
+     ("git blame -L 1,10 backend/tests/test_ci_history_depth.py",)),
+    ("跑本仓 pytest 套件（认 python -m pytest 这个命令形状；test_swap_package_data_snapshot.py "
+     "与 test_swap_package_post_acceptance_tokens.py 那两把钉历史 SHA 的锁就在这个套件里）",
+     re.compile(r"\bpython(?:3(?:\.\d+)?)?\s+-m\s+pytest\b"), "python-m-pytest",
+     ("python -m pytest backend/tests/ -q --tb=short 2>&1 | tee \"$RUNNER_TEMP/pytest.log\"",)),
+    ("gitleaks detect（认 gitleaks detect 的命令形状，含钉镜像后换行接 detect 的续行写法；"
+     "它扫的是全历史，浅克隆只看得到最后一屏）",
+     re.compile(r"\bgitleaks[\w./:@+\-]*\s+(?:\\\s*\n\s*)?detect\b"), "gitleaks-detect",
+     ("docker run --rm -v \"$PWD:/repo\" ghcr.io/gitleaks/gitleaks:v8.18.4 \\",
+      "detect --source /repo -c /repo/.gitleaks.toml --redact --exit-code 1")),
 )
 
 # 收集期就把目录摊开 ⇒ 一份 workflow 一个参数化 id（今天四份 ⇒ 四条）。目录为空时
@@ -163,8 +272,11 @@ def _run_bodies(steps) -> str:
 
 
 def _history_markers_in(bodies: str) -> list:
-    """返回命中的标记理由清单；空清单 = 这个作业不读仓库历史。"""
-    return [label for label, pattern in HISTORY_READING_MARKERS if pattern.search(bodies)]
+    """返回命中的标记理由清单；空清单 = 这把哨认为这个作业不读仓库历史。
+
+    空清单**不等于**"这个作业真的不读历史"——射程段的仍漏清单记的就是这个差别。"""
+    return [label for label, pattern, _tooth_id, _tooth_lines in HISTORY_READING_MARKERS
+            if pattern.search(bodies)]
 
 
 def _load_doc(path: Path, where: str):
@@ -209,11 +321,17 @@ def _jobs_of(doc, where: str) -> list:
 
 
 def _assert_checkout_fetches_full_history(steps, where: str, markers: list) -> None:
-    """形状判据（#90a 整段保留）：恰好一条 checkout，`with.fetch-depth` 必须是整数 0。"""
+    """形状判据（#90a 整段保留）：恰好一条 checkout，`with.fetch-depth` 必须是整数 0。
+
+    #92a 修复轮四处红话各带上 `why`（这一格是被哪条标记要求历史的）。#90a 只在"checkout 步
+    不恰好一条"那一句里写过标记，剩下三句只说"缺 fetch-depth"——于是红话讲不出"凭什么是这一格
+    要历史"，下一个人只能自己回去 grep 标记集合。判据一个字没改，改的是红话能不能指对人。
+    """
+    why = "（run 正文命中：" + "；".join(markers) + "）"
     hits = [(i, s) for i, s in enumerate(steps)
             if isinstance(s, dict) and _action_name(s) == "actions/checkout"]
     assert len(hits) == 1, (
-        where + " 要求全历史（run 正文命中：" + "；".join(markers) + "），但它的 checkout 步不"
+        where + " 要求全历史" + why + "，但它的 checkout 步不"
         "恰好一条（读到 " + str(len(hits)) + " 条，位置 " + str([i for i, _ in hits])
         + " / 全部 uses "
         + str([s.get("uses") for s in steps if isinstance(s, dict) and s.get("uses")])
@@ -224,13 +342,13 @@ def _assert_checkout_fetches_full_history(steps, where: str, markers: list) -> N
     with_ = checkout.get("with")
     assert isinstance(with_, dict), (
         where + " 第 " + str(idx) + " 步（" + str(checkout.get("uses")) + "）**with: 块缺失或"
-        "读不出映射**（读到 " + repr(with_) + "）："
+        "读不出映射**（读到 " + repr(with_) + "）" + why + "："
         "fetch-depth 就用的是 checkout 的默认浅克隆，那两把钉历史 SHA 的锁（锚点 "
         + " / ".join(PINNED_HISTORY_ANCHORS) + "）会在 checkout 之后红成\"锚点解析不出来\"，"
         "看着像 deploy/swap-package.ps1 坏了。这是本锁要防的那一格，别把它改成注释。")
     assert "fetch-depth" in with_, (
         where + " 的 checkout 步有 with: 块，但里面没有 fetch-depth（读到键 "
-        + str(sorted(with_)) + "）：缺这一条 = 用默认浅克隆，同上。判据认的是这个键的实际取值，"
+        + str(sorted(with_)) + "）" + why + "：缺这一条 = 用默认浅克隆，同上。判据认的是这个键的实际取值，"
           "不是文件里有没有出现过 fetch-depth 这个词。")
 
     depth = with_["fetch-depth"]
@@ -238,23 +356,135 @@ def _assert_checkout_fetches_full_history(steps, where: str, markers: list) -> N
     # 那不是"全量"，那是把默认浅克隆放过的另一条路。
     assert isinstance(depth, int) and not isinstance(depth, bool), (
         "fetch-depth 的值不是整数（读到 " + repr(depth) + "，类型 " + type(depth).__name__
-        + "）：字符串 \"0\" 与 null 都不会让 checkout 取全历史，别让它们在 Python 的相等里蒙过去。")
+        + "）" + why + "：字符串 \"0\" 与 null 都不会让 checkout 取全历史，"
+        "别让它们在 Python 的相等里蒙过去。")
     assert depth == 0, (
-        "fetch-depth 读到的值是 " + str(depth) + "，判据要求恰好 0（全量历史）。"
+        "fetch-depth 读到的值是 " + str(depth) + "，判据要求恰好 0（全量历史）" + why + "。"
         "正整数只往回取那么多多代，锚点 " + " / ".join(PINNED_HISTORY_ANCHORS)
         + " 里最老的一枚在 " + str(depth) + " 代之外时，那两把锁照样红——浅克隆哨不放行有限深度。")
 
 
+def _judge_job(steps, where: str) -> list:
+    """对一个作业的 steps 走完整三步判据，返回命中的标记清单（空表 = 这把哨不要求它配）。
+
+    参数化锁与下面所有合成反例走的都是这一个函数：反例必须喂给**判据本体**，不能另抄一份
+    近似逻辑——否则"见过红"证明的是那份近似而不是这把锁（口径同 #83 的 `_read_point_shape_problems`）。
+    """
+    markers = _history_markers_in(_run_bodies(steps))
+    if markers:
+        _assert_checkout_fetches_full_history(steps, where, markers)
+    return markers
+
+
+# 合成反例的载体：把几条 shell 行拼成一份**真 YAML**，再按参数化锁同一条路解析出 steps。
+# 不手搓 dict——手搓的 dict 会替 YAML 撒谎（块标量怎么剥缩进、`fetch-depth: no` 解析成什么，
+# 都由 yaml 说了算）。checkout 那一步刻意不带 `with:`：反例要演的就是"命中了标记却没配
+# fetch-depth"那一格，于是有牙的那批红在这里，边界钉那批正因为没命中标记而走到不了这里。
+_SYNTH_WORKFLOW = """name: Synthetic
+on: [push]
+jobs:
+  synth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: synthetic step
+        run: |
+{body}
+"""
+
+
+def _synthetic_steps(run_lines) -> list:
+    body = "\n".join("          " + ln for ln in run_lines)
+    doc = yaml.safe_load(_SYNTH_WORKFLOW.replace("{body}", body))
+    jobs = _jobs_of(doc, "合成 workflow（#92a 修复轮的反例）")
+    assert [name for name, _steps in jobs] == ["synth"], (
+        "合成模板解析不出 synth 这一个作业：反例喂不进判据本体，判红而不是让它假绿")
+    steps = jobs[0][1]
+    assert steps is not None, "合成作业被当成 uses: 调用点，反例没被注入到 run 正文"
+    return steps
+
+
+# **仍漏清单**（交付项 ② 的钉子）。每条 (id, 注入的 run 正文, 今天为什么算漏)。三条实测来源：
+# ① 仓库外 `git archive` 副本里把这条注入 build-native-apk.yml 的 apk 作业（它没有 fetch-depth），
+#    跑本文件 ⇒ rc=0、哨静默放行（不红也不 skip）；同一份副本注入 `git log --oneline -1` ⇒ rc=1 红，
+#    所以那批绿是"看不见"而不是"没跑"。
+# ② 同一批命令在本机 `--depth 1`（`git clone --depth 1 --no-local`，实测
+#    `rev-parse --is-shallow-repository` = true、`rev-list --count HEAD` = 1）的副本里的表现，
+#    证明它们确实读的是历史而不是一格工作树。逐条数字写在模块 docstring 的射程段。
+# ③ 收紧间接标记（交付项 ④）换来的那一格代价（bare-pytest 那条）。
+# 每一枚都是 expect_red=False 的边界钉：谁把这条形状加进 HISTORY_READING_MARKERS 而没回来改
+# 清单，这枚钉立刻红——这就是"改了判据忘了改清单"的代价必须落在谁头上的答案。
+_SYNTH_STILL_MISSED = (
+    ("git-describe", "git describe --tags --abbrev=0",
+     "浅克隆副本实测 rc=128：`fatal: No names found, cannot describe anything.`（同一条命令在"
+     "全历史的生产树里实测 rc=0，答得出来——被切掉的正是 tag 指向的那段历史）"),
+    ("git-show-sha", "git show 262b1224:deploy/swap-package.ps1",
+     "浅克隆副本实测 rc=128：`fatal: invalid object name '262b1224'.`——正是那两把钉锚点的锁的取锚形状"),
+    ("git-rev-parse-sha", "git rev-parse 262b1224^{commit}",
+     "浅克隆副本实测 rc=128：`unknown revision or path not in the working tree`"),
+    ("git-archive-old-sha", "git archive --format=tar 262b1224",
+     "浅克隆副本实测 rc=128：`fatal: not a valid object name: 262b1224`；同一条命令写成 "
+     "`git archive --format=tar HEAD` 实测 rc=0（它只要 HEAD 那一格），所以这条漏的是「取历史"
+     "里某一格」那一半"),
+    ("git-diff-two-shas", "git diff 262b1224 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef -- deploy/swap-package.ps1",
+     "浅克隆副本实测 rc=128：`fatal: bad revision '262b1224'`（第二枚 SHA 是合成 token，全树不可解析；"
+     "不钉活的分支 tip——那个数每合一笔就漂）"),
+    ("git-shortlog", "git shortlog -sn HEAD",
+     "浅克隆副本实测 rc=0 但**少答**：只数到切片里那一笔（同副本 `git rev-list --count HEAD` "
+     "实测 = 1）。不报错、只少答，比 rc=128 更难发现"),
+    ("git-bisect", "git bisect start 262b1224 HEAD",
+     "浅克隆副本实测 rc=0 且**不认锚点**：只回 `status: waiting for both 'good' and 'bad' "
+     "commits`，同副本里 `git bisect terms` 实测 rc=1 `error: no terms defined`、"
+     "`git rev-parse --verify 262b1224` 实测 rc=128 `Needed a single revision`——它拿到一格"
+     "不存在的历史却答「我在跑」"),
+    ("bare-pytest-command", "pytest -q backend/tests",
+     "④ 收紧的代价：从前 `\\bpytest\\b` 命中它（副本实测改前 rc=1），改认 `python -m pytest` "
+     "之后不再命中（实测改后 rc=0）"),
+)
+
+# 交付项 ④ 的两面：收紧之后**命令形状仍要命中**、**散文与文件名形状不再命中**。
+# 命中的那几枚是"没把判据收没"的证据，不命中的那几枚是"不再拿散文当判据"的证据。
+_SYNTH_MARKER_SHAPE_CASES = (
+    ("py3-min-m-pytest", "python3 -m pytest -q", True,
+     "python3 也要认：CI 与本机都可能出现这个写法"),
+    ("py312-min-m-pytest", "python3.12 -m pytest backend/tests", True,
+     "带小数点的解释器名同样要认"),
+    ("gitleaks-direct-cli", "gitleaks detect --source . --redact", True,
+     "直接 CLI 那一支"),
+    ("gitleaks-image-same-line",
+     "docker run --rm ghcr.io/gitleaks/gitleaks:v8.18.4 detect --source /repo", True,
+     "把续行合成一行的写法也要认，否则收紧就成了新的漏"),
+    ("pytest-log-filename", "touch \"$RUNNER_TEMP/pytest.log\"", False,
+     "收紧前被 `\\bpytest\\b` 命中：日志文件名里有 pytest，不等于这一步读了仓库历史"),
+    ("pytest-annotation-title",
+     "echo \"::error title=pytest 红了一条::$line\"", False,
+     "tests.yml 里那句 annotations 文案，从前也算命中——那是过度要求"),
+    ("pip-install-pytest", "pip install pytest==8.3.3", False,
+     "装 pytest 不跑它，不需要历史"),
+    ("gitleaks-bare-word", "echo \"不用 gitleaks 官方 action\"", False,
+     "收紧前被 `\\bgitleaks\\b` 命中的散文形状"),
+    ("gitleaks-config-only", "ls -l .gitleaks.toml", False,
+     "只看配置文件，不扫历史"),
+    ("gitleaks-install-only", "apt-get install -y gitleaks", False,
+     "装上 gitleaks 而没 detect，判据不该要求全历史"),
+)
+
+
 @pytest.mark.parametrize("workflow_name", WORKFLOW_NAMES)
 def test_workflow_that_reads_history_checks_out_the_whole_history(workflow_name):
-    """(a) 配置判据（#92a 泛化版）：**逐份 workflow、逐作业**判"读历史 ⇒ 必须 fetch-depth: 0"。
+    """(a) 配置判据（#92a 泛化版）：**逐份 workflow、逐作业**判
+    "run 正文命中 `HISTORY_READING_MARKERS` ⇒ 必须 `fetch-depth: 0`"。
+
+    这句话的射程就等于标记集合的射程，**不是**"凡读历史的 job 都被判"：一条命令只要不在那个
+    元组里，注入它、不配 fetch-depth，今天照样静默过（副本实测见模块 docstring 的仍漏清单）。
+    #92a 修复轮把这处措辞对齐实测，是审查员判 BLOCK 的那一条。
 
     为什么必须是 0 而不是"某个较大的数"：`fetch-depth` 取正整数时只往回取 N 代，
     而钉历史 SHA 的锁要的是**任意深度**的历史（锚点是几月前的提交，深度随历史增长而
     变，任何有限值都会在下一次 squash/rebase 之后重新不够）。0 = 全量。
 
-    反过来的那一半同样重要：**不读历史的作业不要求配 fetch-depth**。今天
-    build-native-apk.yml 与 release-apk.yml 就是这样两份（它们的 run 正文一步历史都不碰），
+    反过来的那一半同样重要：**没命中标记的作业不要求配 fetch-depth**。今天
+    build-native-apk.yml 与 release-apk.yml 就是这样两份（它们的 run 正文一条标记都不命中），
     它们必须绿；无条件要求 checkout 配 fetch-depth 会得到一把假锁。
     """
     path = WORKFLOWS_DIR / workflow_name
@@ -264,10 +494,7 @@ def test_workflow_that_reads_history_checks_out_the_whole_history(workflow_name)
     for job_id, steps in _jobs_of(doc, where):
         if steps is None:
             continue
-        markers = _history_markers_in(_run_bodies(steps))
-        if not markers:
-            continue
-        _assert_checkout_fetches_full_history(steps, where + " 的作业 " + str(job_id), markers)
+        _judge_job(steps, where + " 的作业 " + str(job_id))
 
 
 def test_the_workflow_sweep_actually_sees_the_history_readers():
@@ -278,10 +505,12 @@ def test_the_workflow_sweep_actually_sees_the_history_readers():
     通过，而 CI 依旧绿。这一条就把"覆盖在场"本身钉住：
 
     1. 判据指向的目录存在、枚举非空（今天四份）；
-    2. 枚举结果里**至少有一份**作业在 run 正文读历史；
-    3. 今天这两份必须在名单里：`tests.yml`（跑本仓套件 ⇒ 间接读历史）与 `gitleaks.yml`
-       （直接扫全历史）。它们哪天不再被认出来，要么是真不读历史了（那 fetch-depth 该跟着
-       撤，由人来看），要么是标记集合瞎了——两种都必须红着让人来看，不许静默掉。
+    2. 枚举结果里**至少有一份**作业在 run 正文命中标记集合；
+    3. 今天这两份必须在名单里：`tests.yml`（run 正文命中 `python -m pytest` 那条标记 ⇒ 间接
+       读历史）与 `gitleaks.yml`（命中 `gitleaks detect` 那条 ⇒ 直接扫全历史）。#92a 修复轮
+       ④ 把这两条间接标记收紧成命令形状之后，这一条就是"收紧没把判据收没"的复验点：它们哪天
+       不再被认出来，要么是真不读历史了（那 fetch-depth 该跟着撤，由人来看），要么是标记集合
+       瞎了——两种都必须红着让人来看，不许静默掉。
     """
     assert WORKFLOWS_DIR.is_dir(), (
         "浅克隆哨（a）：workflow 目录 " + str(WORKFLOWS_DIR) + " 不存在——判据没有世界事实可读，"
@@ -298,13 +527,17 @@ def test_the_workflow_sweep_actually_sees_the_history_readers():
         for job_id, steps in _jobs_of(doc, str(path)):
             if steps is None:
                 continue
-            if _history_markers_in(_run_bodies(steps)):
-                readers.append(name + "::" + job_id)
+            # 这里只判"认没认出来"，不判 fetch-depth：那条判据归参数化锁。两处各判各的，
+            # 红话才说得出是哪一格坏了（这里红 = 覆盖不在场，那儿红 = 配置没配）。
+            hits = _history_markers_in(_run_bodies(steps))
+            if hits:
+                readers.append(name + "::" + job_id + " 命中[" + "；".join(hits) + "]")
 
     assert readers, (
         "浅克隆哨（a）：扫了 " + str(len(WORKFLOW_NAMES)) + " 份 workflow（"
         + str(WORKFLOW_NAMES) + "），没有任何一份的 run 正文命中读历史的标记集合 "
-        + str([label for label, _ in HISTORY_READING_MARKERS]) + "：这个判据已经空转。")
+        + str([label for label, _pattern, _tooth_id, _lines in HISTORY_READING_MARKERS])
+        + "：这个判据已经空转。")
     missing = [name for name in ("tests.yml", "gitleaks.yml")
                if not any(r.startswith(name + "::") for r in readers)]
     assert not missing, (
@@ -371,3 +604,125 @@ def test_this_checkout_is_not_a_shallow_clone():
         + "，stderr=" + stderr + "）。答非所问就当作判据没成立——判红，不返回'看着不像 true "
         "就当全历史'。git 对不认识的开关会把参数原样回显（实测 rc=0 + stdout 是那串参数），"
         "这一支就是接住那种形状的。")
+
+
+@pytest.mark.parametrize("marker", HISTORY_READING_MARKERS,
+                         ids=[m[2] for m in HISTORY_READING_MARKERS])
+def test_each_history_marker_has_its_own_counterexample(marker):
+    """逐标记有牙（#92a 修复轮交付项 ③ 第一组）：标记集合里**每一条**都得单独见过一次红。
+
+    做法：把这条标记自带的 run 正文（元组第四格）注入一份合成 workflow，checkout 刻意不带
+    `with:` ⇒ 判据必须红，而且红话里必须点名这一条标记。每条标记各自有牙：删掉任何一条的
+    反例、或任一条反例不再命中自己的判据，参数化用例里对应那一条当场红——而不是全场只有
+    `git log` 一枚有牙。
+
+    顺带钉住两件事：这条反例**只**命中它自己那一条标记（命中两条以上 = 标记集合互相重叠，
+    红话会指着错的那条让人查；零命中 = 反例已经跟判据分家），以及红的位置确实是
+    「checkout 没有 with: 块」那一句而不是顺带撞到别的断言。
+    """
+    label, _pattern, tooth_id, tooth_lines = marker
+    steps = _synthetic_steps(list(tooth_lines))
+    hit = _history_markers_in(_run_bodies(steps))
+    assert hit == [label], (
+        "反例「" + str(tooth_id) + "」应当只命中它自己那条标记，实得 " + str(hit) + "：命中数不对"
+        "说明标记集合互相重叠，或这条反例已经不再命中自己的判据——两种都会让红话指错地方。")
+    with pytest.raises(AssertionError) as excinfo:
+        _judge_job(steps, "合成 workflow 的作业 synth")
+    message = str(excinfo.value)
+    assert label in message, (
+        "反例「" + str(tooth_id) + "」是红了，但红话里没点名这条标记（读到 " + message[:200] + "）")
+    assert "with: 块缺失" in message, (
+        "反例「" + str(tooth_id) + "」应当红在「第 0 步的 checkout **with: 块缺失**」那一句"
+        "（合成 workflow 的 checkout 就是不带 with 写的），实得红话：" + message[:200])
+
+
+def test_the_marker_count_and_each_markers_own_counterexample_are_pinned():
+    """条数钉 + 结构钉（交付项 ③ 第三枚）。这里那个 7 是**提交后态**，故意写成裸断言而不是散文。
+
+    `len(HISTORY_READING_MARKERS) == 7`：加一条或删一条都必须让这里红。三处射程声明
+    （`.github/workflows/tests.yml` 与 `.github/workflows/gitleaks.yml` 的注释、本文件模块
+    docstring 的射程段）都只写"以那个元组为准"而**刻意不写数**——数只活在本钉里，这样
+    "改了判据忘了改清单"就红在这里，而不是让注释悄悄长成第二份没人维护的真相（同一句
+    "声明比实测宽"的病本会话已经犯过：#83、#90b、#92a 各一笔，再犯就该由这枚钉在提交前
+    拦下来，而不是等审查员再判一次 BLOCK）。
+
+    结构钉管另一头：每条标记必须自带合成反例（第三、四格非空且能命中自己），id 与理由必须唯一，
+    且 `_SYNTH_STILL_MISSED` 里每条边界钉的命令都必须出现在本文件 docstring 的仍漏清单里。
+    加了标记忘了配牙、或加了钉忘了写账 → 这里红，而不是让上面那枚参数化反例静默少生成一条用例。
+    """
+    assert len(HISTORY_READING_MARKERS) == 7, (
+        "HISTORY_READING_MARKERS 现在是 " + str(len(HISTORY_READING_MARKERS)) + " 条，而射程声明"
+        "（.github/workflows/tests.yml 与 gitleaks.yml 的注释、本文件模块 docstring 的射程段）都按"
+        "这一枚条数钉写「以那个元组为准、注释里不写数」。改判据就同批核那三处散文与本钉；只改一边"
+        "就是「声明比实测宽」再次复现。")
+    labels = [label for label, _p, _i, _l in HISTORY_READING_MARKERS]
+    tooth_ids = [tid for _l, _p, tid, _x in HISTORY_READING_MARKERS]
+    assert len(set(labels)) == len(labels), "标记理由必须互不相同：红话靠它定位命中的是哪一条"
+    assert len(set(tooth_ids)) == len(tooth_ids), "合成反例的 id 必须互不相同：参数化 id 会撞车"
+    for label, pattern, tooth_id, tooth_lines in HISTORY_READING_MARKERS:
+        assert isinstance(pattern, re.Pattern), (
+            "标记「" + str(tooth_id) + "」第二格不是编译好的正则：判据无从执行")
+        assert tooth_lines and all(isinstance(ln, str) and ln.strip() for ln in tooth_lines), (
+            "标记「" + str(tooth_id) + "」没带自己的合成反例正文：加一条标记就必须同时交一枚"
+            "「注入它、不配 fetch-depth ⇒ 红」的反例（交付项 ③）。")
+        assert label in _history_markers_in("\n".join(tooth_lines)), (
+            "标记「" + str(tooth_id) + "」自带的反例命中不了自己：这条标记实际上没有牙。")
+    # 仍漏清单与 docstring 是**同一本账**：每条边界钉的命令都必须出现在模块 docstring 的那段清单
+    # 里（换行折叠后再比）。这样"加一枚钉忘了写账"和"改账忘了改钉"都会红，注释里就不必再写条数。
+    collapsed = re.sub(r"\s+", " ", __doc__ or "")
+    unlisted = [case_id for case_id, run_line, _why in _SYNTH_STILL_MISSED
+                if run_line not in collapsed]
+    assert not unlisted, (
+        "边界钉与模块 docstring 的「仍漏清单」分家了：这几条在 `_SYNTH_STILL_MISSED` 里、却没写进 "
+        "docstring 射程段的清单 " + str(unlisted) + "。射程只能有一处真相：改判据就把那段一起改。")
+
+
+@pytest.mark.parametrize("case_id,run_line,why", _SYNTH_STILL_MISSED,
+                         ids=[c[0] for c in _SYNTH_STILL_MISSED])
+def test_the_still_missed_list_is_still_missed_today(case_id, run_line, why):
+    """边界钉（交付项 ③ 第二组；形状照 #83 的 `_SYNTH_TWO_HOP_FEED` / `_SYNTH_APPEND_FEED`，
+    expect_red=False）——这几枚**今天必须绿**。
+
+    绿的是「判据抓不住它」这件事，不是「这条命令无害」：它读的确实是历史，本机 `--depth 1`
+    副本里逐条的 rc 与首行报错写在 `_SYNTH_STILL_MISSED` 与模块 docstring 的仍漏清单里。
+
+    为什么这枚钉是本单最有价值的一格：哪天有人把 `git describe` 之类加进
+    HISTORY_READING_MARKERS（那是正确的方向），这一枚会红，红话写着「从 _SYNTH_STILL_MISSED
+    与射程段的仍漏清单里删掉它，并同步两份 workflow 的注释与条数钉」——清单就不会和判据分家。
+    """
+    steps = _synthetic_steps([run_line])
+    hit = _history_markers_in(_run_bodies(steps))
+    assert hit == [], (
+        "边界钉「" + case_id + "」红了：这条形状如今被标记集合抓住了（命中 " + str(hit) + "）。"
+        "判据变强是好消息，但**账必须一起改**：从本文件的 `_SYNTH_STILL_MISSED` 与模块 docstring "
+        "的仍漏清单里删掉它，并按需要同步 .github/workflows/tests.yml 与 gitleaks.yml 的注释和 "
+        "test_the_marker_count_and_each_markers_own_counterexample_are_pinned 那个数。这条原本"
+        "记的实测是：" + why)
+    assert _judge_job(steps, "合成 workflow 的作业 synth") == [], (
+        "边界钉「" + case_id + "」：标记没命中，判据却要求了 fetch-depth —— _judge_job 与 "
+        "_history_markers_in 有一份在撒谎，红话不可采信。")
+
+
+@pytest.mark.parametrize("case_id,run_line,expect_hit,why", _SYNTH_MARKER_SHAPE_CASES,
+                         ids=[c[0] for c in _SYNTH_MARKER_SHAPE_CASES])
+def test_tightened_indirect_markers_hit_commands_and_ignore_prose(case_id, run_line,
+                                                                  expect_hit, why):
+    """交付项 ④ 的两面证据：两条间接标记收紧成命令形状之后——
+
+    命令形状（含 `gitleaks.yml` 今天真正写的那一版：钉死的镜像后面接 `\\` 换行再 `detect`）
+    **必须仍命中**；散文与文件名形状（`$RUNNER_TEMP/pytest.log`、`title=pytest 红了一条`、
+    裸 `gitleaks` 那个词）**必须不再命中**。
+
+    这一枚只判标记本身（`_history_markers_in`），不判 fetch-depth：真物那两份还在不在名单里由
+    `test_the_workflow_sweep_actually_sees_the_history_readers` 判（它要求 tests.yml 与
+    gitleaks.yml 都在），逐条标记的红由 `test_each_history_marker_has_its_own_counterexample` 判。
+    """
+    hit = _history_markers_in(run_line)
+    if expect_hit:
+        assert hit, (
+            "形状「" + case_id + "」不再被认出来了：" + why + "。收紧判据不许把真读历史的那一格"
+            "收没——认不出就停下重新挑标记串，而不是把这份 workflow 的 fetch-depth 撤掉。")
+    else:
+        assert not hit, (
+            "形状「" + case_id + "」仍被命中（" + str(hit) + "）：" + why + "。这是过度要求："
+            "拿散文当判据会让不读历史的 job 也被要求 fetch-depth。")
