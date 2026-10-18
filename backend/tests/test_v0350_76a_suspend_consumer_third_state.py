@@ -29,9 +29,14 @@
   变成两把机器锁，就在 `tests/test_v0350_80_d1_shape_and_forbidden_prefix_locks.py`：
   **形状锁**钉四个读数点（`pipeline.py:306`、`streaming.py:478`、`react_agent.py:212`、
   `task_agent.py:178`）的两个关键字实参必须逐字是 `ok=bool(outcome.ok)` 与
-  `suspended=bool(outcome.suspended)`，且任何 `record_outcome(...)` 都不许被 `startswith(...)` 的
-  结果喂进去；**禁字锁**钉 `⏸` / `SUSPEND_PREFIX` 在 `backend/app/**` 里只许出现在
-  `tools/response.py` 的定义与渲染两处。硬造一把前缀反例锁仍然不被接受：那只能靠 mock 渲染器，
+  `suspended=bool(outcome.suspended)`；它的**孪生判据**管的是"记账不许被 `startswith(...)` 的结果
+  喂进去"，射程是**一跳之内**（直接喂，或经由一层变量喂）。#83 实测：把前缀结果**再套一层**
+  （两跳）之后那把锁文件 8 条全绿、rc=0 —— #80 原文那句"藏进一个再套一层的变量……本条就红"是
+  过度声称，已按实测收窄（边界与"剩下那一半由逐字形状锁兜"的论证见锁文件
+  `test_d1_read_points_are_never_fed_by_a_text_prefix`）。**禁字锁**钉 `⏸` / `SUSPEND_PREFIX`
+  以及 #83 补的构造写法 `chr(9208)` / `\\u23f8` 在 `backend/app/**` 的 `.py` 里只许出现在
+  `tools/response.py` 的定义与渲染两处 —— 文本级判据，只守"源码里看得见的写法"，运行时才拼出来的
+  串在射程外，**不声称已穷尽**。硬造一把前缀反例锁仍然不被接受：那只能靠 mock 渲染器，
   等于让被测对象自报，本仓不认。
 * ⭐ 工单 #76b（本票的第二波，只换判据、不加锁也不删锁）：`react_agent.py:212` 那一行的**成败**
   判据也已从 `str(tool_result).startswith("✓")` 换成 `ok=bool(outcome.ok)`，与上面四处同形；同一

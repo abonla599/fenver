@@ -2,7 +2,17 @@
 
 D1 是这条纪律：**全站只许一种"停在断点 / 成败"的判据 = 读结构化那两格**
 （`outcome.ok` / `outcome.suspended`，唯一赋值点 `executor.py:197` 与 `:181`）。代码侧 #76a/#76b
-已经把四个读数点改对了；本文件**不改任何判据**，只负责"改回去的那一刻必须红"。
+已经把四个读数点改对了；本文件**不改 app 侧任何判据**，只负责"改回去的那一刻必须红"。
+
+工单 #83 动的是**这两把锁自己**的四件事，逐条都在本机 `5aab5573` 上实跑过（app 代码零改动）：
+① 把"任何 `record_outcome(...)` 都不许被前缀喂 / 再套一层也红"那句收窄成**一跳之内**，并把
+"两跳实测静默漏"如实写进 `test_d1_read_points_are_never_fed_by_a_text_prefix`；
+② 更正本文件指 `test_v0350_76a_…` 的三枚自指旧坐标（`:262/:311/:362` → 实读
+`:271/:321/:372`），并给出"测试互引行号要不要降级成不指行号"的建议；
+③ 给禁字锁补上 `chr(9208)` / `chr(0x23f8)` / `\\u23f8` 这类**构造写法**（补之前它们全绿），
+同时写死"文本级判据挡不住运行时拼接"这条边界，不声称已穷尽；
+④ 更正"`backend/app/web/**` 不纳入扫描"那句 —— 集合按 `.py` 收，web 下那 2 个 `.py`
+（`web_router.py`、`__init__.py`）**一直在集合内**；本单把声明改对、集合不动。
 
 为什么必须是形状锁 + 禁字锁，而不是再补一把行为测试（两轮独立实跑，结论都是
 2417 passed / 14 skipped / rc=0）：
@@ -15,15 +25,28 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
 **这一族回归在行为层面结构上不可见**，只有读源码形状的锁读得到。审查员那句
 "造不出锁"只对行为锁成立，形状锁与禁字锁造得出来，就是本文件这两把。
 
-两把锁各自红的是哪一种回归：
-1. **形状锁**（`test_d1_read_point_*` 那三条）：四个读数点里任何一处把 `ok=` / `suspended=`
-   摘掉、换成位置写法、裸读 `outcome.ok`（少了 `bool(...)` 那一层）、换成**别的变量**
-   （`ok=tool_ok`）或任何从文本前缀算出来的值 —— 立刻红，文案给出 `文件:行号` 与
-   "应为 `ok=bool(outcome.ok)`、实得 …"。
+两把锁各自红的是哪一种回归（#83 把两处口径收到**实测**上，原文写的是"任何 … 就红"）：
+1. **形状锁**（`test_d1_read_point_*` 那三条）：**带着 `ok=` / `suspended=` 关键字**的读数点里
+   任何一处把 `ok=` / `suspended=` 摘掉、换成位置写法、裸读 `outcome.ok`（少了 `bool(...)`
+   那一层）、换成**别的变量**（`ok=tool_ok`）或任何从文本前缀算出来的值 —— 立刻红，文案给出
+   `文件:行号` 与"应为 `ok=bool(outcome.ok)`、实得 …"。因为口径是**逐字**那个形状，这一条对
+   变量间接的**套层深度不敏感**（#83 实测：`feed_a = str(...).startswith("✓")` →
+   `feed_b = feed_a` → `ok=feed_b` 两跳喂进 `react_agent.py:212`，红的那句是
+   "读数点的 ok= 不再是结构化那一格：应为 `ok=bool(outcome.ok)`，实得 `ok=feed_b`"）。
+   这份"逐字"确实**比语义严**：`ok=outcome.ok`（去掉 `bool(...)` 包裹）也会红 ——
+   `_slot_shape_ok` 要的是那一次 `bool` 调用，裸读是 `Attribute` 不是 `Call`（#80 审查员实测过
+   这枚变异）。这是**有意付的维护税**，换一把确定的牙；"顺手放宽成允许裸读"等于把这把锁做回
+   没牙的样子，#83 明确不做。
+   **它不收**的那一类：既不带你那两格属性、也不带关键字的**纯位置写法**（
+   `react_agent.py:217` 兜底支那种）—— 那一侧只有下面孪生判据的**一跳**射程，见
+   `test_d1_read_points_are_never_fed_by_a_text_prefix` 的边界段。
 2. **禁字锁**（`test_d1_pause_prefix_*` 那三条）：`backend/app/**` 里除 `tools/response.py`
-   之外任何 `.py` 出现 `⏸` 或 `SUSPEND_PREFIX` —— 立刻红。它备的是"下一处新违规"：
-   今天这一枚前缀只有一处合法落点，明天有人在 registry.py 里 `startswith("⏸ ")`、或到别处
-   import 那个常量，本条就拦住。
+   之外任何 `.py` 出现 `⏸`、`SUSPEND_PREFIX`，或 #83 补上的**构造写法** `chr(9208)` /
+   `chr(0x23f8)` / `\\u23f8` —— 立刻红。它备的是"下一处新违规"：今天这一枚前缀只有一处合法
+   落点，明天有人在 registry.py 里 `startswith("⏸ ")`、或到别处 import 那个常量、或改用
+   `chr(9208) + " "` 拼一个看起来一样的串，本条就拦住。**边界（#83 实测后写死）**：这是
+   文本级判据，守的是"源码里看得见的写法"，运行时才拼出来的串（从数据库/配置读出来的前缀、
+   `chr(n)` 里 `n` 是变量、`chr( 9208 )` 这种加空格的写法）一律在射程外 —— **不声称已穷尽**。
 
 两把锁都配**同一套判据本体的合成反例**（两条 `*_can_go_red` 测试）：判据先在现造的源码上
 被证明报得出红，才许采信它对真源码的绿灯（本仓规矩：一条从没红过的锁不算交付，参照
@@ -34,15 +57,31 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
 `executor.py:82` 的保头裁剪。本文件只读源码、不 import 任何 app 模块，所以它与 `data/` 之间
 没有可写路径。
 
-范围与口径上的四个取舍，写死在这里免得下一个人猜：
+范围与口径上的五个取舍，写死在这里免得下一个人猜：
 * **行号只是实测记录，不是锚点。** 四个读数点与 `response.py` 那两处（定义 / 渲染）在 #80
   落锁时逐一实读复核过（无漂移，见各条断言文案），但定位一律走 AST —— 本仓有 #44/#51 那一族
   "按列 0 字面锚导致 try 内两行无法常规缩进"的排版债，行号锚会把一次无害的缩进改动判成红。
-* **只管 `backend/app/**` 的 `.py`。** 测试侧那三处 `startswith("⏸ ")`
-  （`test_v0350_76a_suspend_consumer_third_state.py`，实读在 :262/:311/:362）断的是**回灌给
-  模型的文本**、不是记账判据，合法，不在射程内。壳侧 `backend/app/web/**` 的 js/html 属于
-  渲染消费者（第三态的帧形状归 A4 与工单 #82），落锁时实测那批文件里一枚 `⏸` 都没有，本条
-  也不把它们算进集合 —— 把渲染层判红等于替 #82 预先决定帧形状。
+* **只管 `backend/app/**` 的 `.py`。** 这一条 #83 改了两句**比实测宽**的话（审查员实测 + 本单
+  复现），逐句对齐如下：
+  ① 测试侧那三处 `startswith("⏸ ")` 断的是**回灌给模型的文本**、不是记账判据，合法，不在射程内。
+     三处都在 `test_v0350_76a_suspend_consumer_third_state.py`，且是同一句
+     `assert tool_msgs and tool_msgs[-1]["content"].startswith("⏸ ")` —— #83 自己 grep 复核的
+     实读坐标是 **:276 / :326 / :377**（#80 原文写的 `:262/:311/:362` 是它改完 76a 文件头之后
+     当场漂掉的旧坐标；本单改 76a 文件头又把它往下推了 5 行，所以这里的数按**提交后**的状态记）。
+     行号仍只是实测记录，认那**句话的字面文本**才是口径，理由见下条。
+  ② 扫描集合是 `backend/app/**/*.py` 去掉唯一豁免文件，**按扩展名收**。#83 实读
+     `backend/app/web/` 下有 2 个 `.py`（`web_router.py`、`__init__.py`）**就在集合内** ——
+     #80 原文"本条也不把它们算进集合"是**假陈述**（比声明严不会假绿，但下一个人会照着它推理），
+     所以本单把**声明改对、集合不动**（收紧集合会真的少测两个文件）。真正不在集合里的只有
+     web 那批**非 `.py`** 的 js/html：它们属渲染消费者（第三态的帧形状归 A4 与工单 #82），
+     落锁时实测那批文件里一枚 `⏸` 都没有；把渲染层判红等于替 #82 预先决定帧形状。
+* **测试文件之间互引行号，建议降级成"不指行号"的描述（本单只把上面那三枚坐标改对，不铺全仓）。**
+  理由：会漂的数没人钉就迟早变假 —— 同一族病在本仓已经挂着 #81/#46/#53 三张单，而本条这一处
+  漂掉的间隔不是一个月，是**一单**（#80 自己改的被引文件）。可复跑的替代口径这个文件里已经有了：
+  `NON_CODE_EXEMPTIONS` 按 **(文件, 那句话的字面片段)** 命中，并由
+  `test_d1_pause_prefix_exemption_list_is_all_still_true` 钉住"今天仍然命中恰好一行" —— 改一句
+  话就红，比行号锚又便宜又准。建议后续单把测试互引统一换成"字面片段 + 命中数"，行号只作为注释
+  里的实测记录保留并写明会漂。这一处属**待拍板**，本单不动别的文件。
 * **docstring/注释里的"提及"走显式豁免名单，不许用 `pytest.skip` 糊。** 名单
   （`NON_CODE_EXEMPTIONS`）每条必须写明理由，而且只豁免**非代码位置**：一行的代码段里出现
   禁字，名单救不了它（`test_d1_pause_prefix_lock_can_go_red` 的第四枚反例专门钉这一点）。
@@ -287,11 +326,31 @@ def test_d1_read_points_are_the_two_structured_slots():
 
 def test_d1_read_points_are_never_fed_by_a_text_prefix():
     """形状锁的第二半：四个读数点文件里没有任何 `record_outcome(...)` 被 `startswith(...)` 的
-    结果喂进去（直接喂，或经由 `tool_ok = str(...).startswith("✓")` 这类一跳变量喂）。
+    结果喂进去 —— 射程是**一跳之内**：直接喂，或经由 `tool_ok = str(...).startswith("✓")`
+    这类**一层**变量喂。
 
     红的是哪一种回归：#76a/#76b 两轮审查用的那两枚变异本体 —— 把判据换成
-    `startswith("⏸ ")` / `startswith("✓")`。上一条锁已经会红，这一条是**孪生保险**：万一将来
-    有人绕过形状（把前缀结果藏进一个再套一层的变量），只要账是从文本前缀算出来的，本条就红。
+    `startswith("⏸ ")` / `startswith("✓")`。上一条锁已经会红，这一条是**孪生保险**。
+
+    **边界（#83 按实测收窄；原文那句"把前缀结果藏进一个再套一层的变量……本条就红"是假的）**：
+    `_assignments_from_prefix` 只做一跳（它自己的 docstring 早写明了"只做**一跳**"，与原文
+    自相矛盾），所以"前缀结果再套一层变量"这条坏法**本条判不出来**。#83 在本机 `5aab5573`
+    复现过两枚：把 `react_agent.py` 兜底支那处改成
+    `fallback_ok = str(tool_result).startswith("✓")` → `fallback_feed = fallback_ok` →
+    `guard.record_outcome(tool_name, fallback_feed)`（**两跳**）⇒ 本文件 8 条全绿、rc=0，静默漏；
+    同一处只套一层（**一跳**）⇒ 本条红，文案点是 `…的变量 fallback_ok 来自文本前缀判据`。
+    ⇒ 这一单的处置是**措辞对齐实测**，判据射程一律不动。
+
+    为什么接受这个边界，以及剩下那一半靠什么兜：
+    * 它**不是无人守**。那四处结构化读数点由上一条形状锁按**逐字** `ok=bool(outcome.ok)` /
+      `suspended=bool(outcome.suspended)` 把关 —— 变量无论套几层都不可能等于那个字面形状，
+      所以"两跳以上的间接"在**带关键字**的读数点上照样红。本条只是它的孪生保险，不是唯一防线。
+    * 真漏的那一格只剩一种形状：**既不读 `outcome.*` 也不带 `ok=`/`suspended=` 关键字的纯位置
+      写法**（`_is_structured_read_point` 按口径不收，例如 `guard.record_outcome(tool_name,
+      False)` 那处兜底支）**并且**间接两跳以上。要抓它得做数据流分析，与本文件
+      `_assignments_from_prefix` 那句"再往上的数据流分析属于过度工程"同一口径。
+    * 扩成多跳匹配（顺带决定"纯位置写法算不算第五类读数点"）是**待拍板**事项，本单不动判据，
+      只把话说对 —— 过度声称比边界小更坏：它会让人以为那一族回归已经被牙咬住了。
     """
     problems = []
     for rel in READ_POINT_FILES:
@@ -325,9 +384,17 @@ def test_d1_read_point_shape_lock_can_go_red():
 
 
 # ---------------------------------------------------------------- 锁二：禁字锁
-PAUSE_GLYPH = "⏸"          # U+23F8
+PAUSE_GLYPH = "⏸"          # U+23F8 == 码点 9208
 # 刻意比 `"⏸ "` 宽一格：扫的是那枚字符本身，`startswith("⏸")`（漏了尾随空格）也得红。
-FORBIDDEN_TOKENS = (PAUSE_GLYPH, "SUSPEND_PREFIX")
+#
+# #83 补上的**构造写法**两枚（`chr(...)` 与 `\u23f8` 转义）。为什么要补：审查员实测、本单在本机
+# `5aab5573` 复现过 —— 旧口径只认 `⏸` / `SUSPEND_PREFIX` 这两种**字面文本**，于是把
+# `chr(9208) + " "` 或 `"\u23f8 "` 放进 `backend/app/**` 里，本锁 8 条全绿（rc=0）：同一枚字符
+# 换个写法就绕过去，那不是"D1 允许这么写"，那是漏。识别表按**小写**比对，故 `chr(0x23F8)`、
+# `"\u23F8"` 这类同码点的大小写变体一样进射程（十进制 9208 与十六进制 0x23f8 都收，见
+# `test_d1_pause_prefix_lock_anchor_and_corpus` 里"两枚数字必须仍指同一枚字符"那枚正对照）。
+CONSTRUCTED_PAUSE_TOKENS = ("chr(9208)", "chr(0x23f8)", "\\u23f8")
+FORBIDDEN_TOKENS = (PAUSE_GLYPH, "SUSPEND_PREFIX") + CONSTRUCTED_PAUSE_TOKENS
 # 唯一合法落点：定义（实读 :21）与渲染（实读 :87）都住在这里。
 SOLE_PREFIX_OWNER = "backend/app/tools/response.py"
 
@@ -392,15 +459,30 @@ def _is_non_code(row: int, col: int, comments: dict, docstring_rows: set) -> boo
 
 
 def _forbidden_hits(rel: str, source: str) -> list:
-    """这份源码里每一枚禁字：回 [{row, col, token, line}]（位置给到列，判非代码要用）。"""
+    """这份源码里每一枚禁字：回 [{row, col, token, line}]（位置给到列，判非代码要用）。
+
+    比对**不分大小写**（#83 起）：构造写法那几枚带十六进制字母（`chr(0X23F8)`、`"\\u23F8"`），
+    而这条锁禁的是"那一枚码点 / 那个常量的消费"，不是"恰好同一串大小写的字"。今天真源码里
+    `SUSPEND_PREFIX` 只有唯一合法落点那两处（#83 实读：定义 :21 + 渲染 :87，且在豁免文件内），
+    所以放宽到大小写不敏感**不带来任何新的误红**；会带来的那一点是**更严**（`suspend_prefix`
+    这种小写别名也进射程）。
+    """
     hits = []
     for row, line in enumerate(source.splitlines(), start=1):
+        lowered = line.lower()
         for token in FORBIDDEN_TOKENS:
-            col = line.find(token)
+            needle = token.lower()
+            col = lowered.find(needle)
             while col != -1:
                 hits.append({"row": row, "col": col, "token": token, "line": line})
-                col = line.find(token, col + len(token))
+                col = lowered.find(needle, col + len(needle))
     return hits
+
+
+def _source_has_forbidden_token(source: str) -> bool:
+    """整份源码里有没有任何一枚禁字 —— 与 `_forbidden_hits` 同一套大小写口径（只做预筛）。"""
+    lowered = source.lower()
+    return any(token.lower() in lowered for token in FORBIDDEN_TOKENS)
 
 
 def _exemption_for(rel: str, line_text: str):
@@ -448,7 +530,9 @@ def test_d1_pause_prefix_lock_anchor_and_corpus():
     红的是哪一种回归：① 那个常量被改名或搬走（禁字锁守的东西从此不存在）；② 定义的字面量不再
     是 `"⏸ "`（第三态前缀被换掉，而锁还在守一个旧串）；③ `SUSPEND_PREFIX` 在 response.py 里被
     多处消费（一枚前缀出现两个真相源）；④ `backend/app` 的目录形状变了，锁什么都扫不到还一路
-    全绿。
+    全绿；⑤ #83 新增 —— 构造写法识别表里那几枚**数字**不再指向 `PAUSE_GLYPH` 这一枚字符
+    （前缀换掉了而锁还在守 9208），或那张表被删空；⑥ web 那两枚 `.py` 被从集合里排除掉，
+    而文件头的声明说的是"集合按 `.py` 收、它们在 inside"。
     """
     source = _read(SOLE_PREFIX_OWNER)
     tree = _tree(SOLE_PREFIX_OWNER, source)
@@ -469,31 +553,53 @@ def test_d1_pause_prefix_lock_anchor_and_corpus():
         f"渲染侧对 `SUSPEND_PREFIX` 的消费应当恰好一处（实读在 {SOLE_PREFIX_OWNER}:"
         f"{uses[0].lineno if uses else '?'} 那一支 f-string），实得 {len(uses)} 处 —— "
         "第三态前缀不许有两个真相源")
+    # #83：构造写法那几枚必须由 PAUSE_GLYPH **推出**，不是抄一组对得上今天的数字 ——
+    # 前缀哪天换码点，表里那三枚必须跟着红，否则这把锁守的是上一个字符。
+    codepoint = ord(PAUSE_GLYPH)
+    for needle in (f"chr({codepoint})", f"chr(0x{codepoint:x})", f"\\u{codepoint:04x}"):
+        assert needle in CONSTRUCTED_PAUSE_TOKENS, (
+            f"`PAUSE_GLYPH` 是 U+{codepoint:04X}，而构造写法识别表里没有 `{needle}` —— "
+            "表与守的字符脱钩了（#83 补的就是这一族漏）")
+    assert CONSTRUCTED_PAUSE_TOKENS, "构造写法识别表被删空 —— #83 补的那两枚等于没补"
     corpus = _scanned_py_files()
     assert len(corpus) >= 50, (
         f"禁字锁只扫到 {len(corpus)} 个源文件，多半是扫描根坏了（backend/app 的目录形状变了）")
     for rel in READ_POINT_FILES:
         assert rel in corpus, f"四个读数点之一的 {rel} 不在扫描集合里 —— 形状锁与禁字锁脱了钩"
     assert SOLE_PREFIX_OWNER not in corpus
+    # #83 更正过文件头那句"web 不算进集合"（实为**在**集合内）；这里把更正后的事实钉住，
+    # 免得下一个人口头"照声明"把 web/ 排除掉 —— 真要排除是允许的，但那必须同时改这份声明。
+    for rel in ("backend/app/web/web_router.py", "backend/app/web/__init__.py"):
+        assert rel in corpus, (
+            f"{rel} 不在扫描集合里，与文件头 #83 更正后的声明相反（集合按 `.py` 收，"
+            "web 下那两枚 `.py` 在集合内）")
 
 
 def test_d1_pause_prefix_never_consumed_outside_response_py():
-    """禁字锁主判据：`backend/app/**` 里除 `tools/response.py` 之外，任何 `.py` 出现 `⏸` 或
-    `SUSPEND_PREFIX` 一律红 —— 可执行代码位置必红；注释/docstring 位置只有登记在
-    `NON_CODE_EXEMPTIONS` 并写明理由才放得过。
+    """禁字锁主判据：`backend/app/**` 里除 `tools/response.py` 之外，任何 `.py` 出现 `⏸`、
+    `SUSPEND_PREFIX`，或 #83 补上的构造写法 `chr(9208)` / `chr(0x23f8)` / `\\u23f8` 一律红 ——
+    可执行代码位置必红；注释/docstring 位置只有登记在 `NON_CODE_EXEMPTIONS` 并写明理由才放得过。
 
     红的是哪一种回归：有人在别处 `startswith("⏸ ")` 把它当记账判据（D1 破防的第一种写法），
     或从 response 里 import 那个常量自己拼前缀 / 比对前缀（第二种写法，而且它会跟着渲染器一起
-    腐烂）。已知那一处 docstring 提及（executor.py 那句）今天就是靠名单才过得去。
+    腐烂），或 #83 实测过的那第三种：`chr(9208) + " "` / `"\\u23f8 "` 这种**把同一枚字符构造出来**
+    的写法 —— 补之前旧口径只认字面文本，本条对它是绿的（静默漏）。已知那一处 docstring 提及
+    （executor.py 那句）今天就是靠名单才过得去。
+
+    **边界（不许再写成"已穷尽"）**：这是**文本级**判据，射程是"源码里看得见的写法"。运行时才
+    拼出来的串挡不住，也本来就不该由它挡：前缀从数据库/配置/常量表里读出来再拼接、`chr(n)` 的
+    `n` 是个变量、`chr( 9208 )` 这种在括号里加空格的写法、以及任何非 `.py` 的落点（js/html 走
+    #82 那条渲染锁）—— 都在射程外。真要把 D1 守成"任何写法"，得的是运行时探针或数据流分析，
+    那是另一把锁、另一张单，不是把这句话改响一点。
     """
     problems = []
     for rel in _scanned_py_files():
         source = _read(rel)
-        if any(token in source for token in FORBIDDEN_TOKENS):
+        if _source_has_forbidden_token(source):
             problems += _prefix_lock_problems(rel, source)
     assert not problems, (
-        f"`{PAUSE_GLYPH}` / `SUSPEND_PREFIX` 出了唯一合法落点 {SOLE_PREFIX_OWNER}：\n"
-        + "\n".join(problems))
+        f"`{PAUSE_GLYPH}` / `SUSPEND_PREFIX` / 构造写法 {CONSTRUCTED_PAUSE_TOKENS} "
+        f"出了唯一合法落点 {SOLE_PREFIX_OWNER}：\n" + "\n".join(problems))
 
 
 def test_d1_pause_prefix_exemption_list_is_all_still_true():
@@ -516,7 +622,7 @@ def test_d1_pause_prefix_exemption_list_is_all_still_true():
             "那句话已经改了/搬了，条目要么更新要么摘掉")
         row = matched[0]
         text = lines[row - 1]
-        assert any(token in text for token in FORBIDDEN_TOKENS), (
+        assert _source_has_forbidden_token(text), (
             f"豁免条目 {rel}:{row} 那行已不含禁字，条目该摘掉：{text!r}")
         problems = _prefix_lock_problems(rel, source)
         still_red = [p for p in problems if p.startswith(f"{rel}:{row} ")]
@@ -526,12 +632,19 @@ def test_d1_pause_prefix_exemption_list_is_all_still_true():
 
 
 def test_d1_pause_prefix_lock_can_go_red():
-    """禁字锁的牙齿（合成反例，不改任何源文件）：四种坏法必须报红，登记过的非代码提及必须不报。
+    """禁字锁的牙齿（合成反例，不改任何源文件）：九种坏法必须报红，登记过的非代码提及必须不报。
 
     ① 代码里 `startswith("⏸ ")`（#76a 那枚变异的合成版）；② 别处 import 那个常量（第四枚变异
     的合成版）；③ 没登记过的注释提及；④ **同一行既有代码又有注释**
     （`if name.startswith("⏸ "):  # 只是注释`）—— 第四种专钉"按行判注释"这个偷懒写法，
     那样本锁最该抓的形状会被它放过。
+    ⑤⑥⑦⑧⑨ 是 #83 补的**构造写法**反例（十进制 `chr(9208)`、大写十六进制 `chr(0X23F8)`、
+    `\\u23f8` 与 `\\u23F8` 两种转义、以及注释里提一句构造写法）：这五枚在补锁之前**全都是绿的**
+    —— 审查员实测过、本单在本机 `5aab5573` 拿真文件复现过（临时未跟踪探针放进
+    `backend/app/agents/` 里，旧口径 8 passed / rc=0，新口径每一条都点名到那一枚构造写法）。
+    这里额外要求"红在那一枚上"（`expected in problems`），并且要求主判据那条的**预筛**
+    `_source_has_forbidden_token` 也看得见 —— 预筛与命中判据口径不一致时，真源码那一路会整条
+    跳过，锁就白补了。
     """
     fake = "backend/app/tools/synthetic_consumer.py"
     cases = (
@@ -545,6 +658,21 @@ def test_d1_pause_prefix_lock_can_go_red():
     for label, source in cases:
         problems = _prefix_lock_problems(fake, source)
         assert problems, f"反例「{label}」没有报红 —— 这把锁是空壳：{source!r}"
+    # #83 补的五枚构造反例：必须红，而且必须红在**那一枚构造写法**上（顺带钉住预筛同口径）。
+    constructed_cases = (
+        ("chr(9208) 十进制拼前缀", 'PAUSE = chr(9208) + " "\n', "chr(9208)"),
+        ("chr(0X23F8) 大写十六进制拼前缀", 'PAUSE = chr(0X23F8) + " "\n', "chr(0x23f8)"),
+        ("\\u23f8 转义（小写）", 'PAUSE = "\\u23f8 "\n', "\\u23f8"),
+        ("\\u23F8 转义（大写，靠不分大小写命中）", 'PAUSE = "\\u23F8 "\n', "\\u23f8"),
+        ("注释里提构造写法却没登记", "# 这一支用 chr(9208) 拼\nVALUE = 1\n", "chr(9208)"),
+    )
+    for label, source, expected in constructed_cases:
+        problems = _prefix_lock_problems(fake, source)
+        assert problems, f"构造反例「{label}」没有报红 —— #83 那两枚等于没补：{source!r}"
+        assert any(expected in p for p in problems), (
+            f"构造反例「{label}」红错了地方（本条要钉的就是 `{expected}` 这一枚）：{problems}")
+        assert _source_has_forbidden_token(source), (
+            f"构造反例「{label}」被主判据的预筛漏掉了 —— 真源码那一路会整条跳过：{source!r}")
     # 与真源码同形状的绿对照：登记过的那句（executor.py 的 docstring）必须判得过
     assert not _prefix_lock_problems("backend/app/tools/executor.py",
                                      _read("backend/app/tools/executor.py"))
