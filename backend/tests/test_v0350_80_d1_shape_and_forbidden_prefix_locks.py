@@ -4,11 +4,16 @@ D1 是这条纪律：**全站只许一种"停在断点 / 成败"的判据 = 读�
 （`outcome.ok` / `outcome.suspended`，唯一赋值点 `executor.py:197` 与 `:181`）。代码侧 #76a/#76b
 已经把四个读数点改对了；本文件**不改 app 侧任何判据**，只负责"改回去的那一刻必须红"。
 
-工单 #83 动的是**这两把锁自己**的四件事，逐条都在本机 `5aab5573` 上实跑过（app 代码零改动）：
-① 把"任何 `record_outcome(...)` 都不许被前缀喂 / 再套一层也红"那句收窄成**一跳之内**，并把
-"两跳实测静默漏"如实写进 `test_d1_read_points_are_never_fed_by_a_text_prefix`；
-② 更正本文件指 `test_v0350_76a_…` 的三枚自指旧坐标（`:262/:311/:362` → 实读
-`:271/:321/:372`），并给出"测试互引行号要不要降级成不指行号"的建议；
+工单 #83（两轮）动的都是**这两把锁自己**的四件事，app 代码零改动；第一轮逐条在本机
+`5aab5573` 上实跑过，第二轮（修复轮，基线 `f9715733`，变异/探针一律只进仓库外的
+`git archive` 副本，生产树不落任何探针文件）动的是 ①②：
+① "任何 `record_outcome(...)` 都不许被前缀喂 / 再套一层也红"那句，第一轮收窄成的"一跳之内"
+   实测只跟着 `=`/`:` 赋值出来的**裸变量**，walrus/下标/属性三枚一跳写法照样绿 —— 第二轮把
+   孪生判据的跟随补上这三种形状，并把口径统一写成**实测范围**：一跳之内覆盖 `=`/`:` 赋值
+   **以及** walrus（`:=`）目标与下标/属性实参的**基名回溯**；**两跳以上仍然漏**，仍漏清单见
+   `test_d1_read_points_are_never_fed_by_a_text_prefix` 的边界段；
+② 本文件指 `test_v0350_76a_…` 的互引坐标：第一轮改过一次行号，却与下方"口径取舍"条留下
+   两组数并存的自相矛盾 —— 第二轮按拍板 B **降级成"文件名 + 那句话的字面片段"**，不写数字；
 ③ 给禁字锁补上 `chr(9208)` / `chr(0x23f8)` / `\\u23f8` 这类**构造写法**（补之前它们全绿），
 同时写死"文本级判据挡不住运行时拼接"这条边界，不声称已穷尽；
 ④ 更正"`backend/app/web/**` 不纳入扫描"那句 —— 集合按 `.py` 收，web 下那 2 个 `.py`
@@ -38,8 +43,9 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
    这枚变异）。这是**有意付的维护税**，换一把确定的牙；"顺手放宽成允许裸读"等于把这把锁做回
    没牙的样子，#83 明确不做。
    **它不收**的那一类：既不带你那两格属性、也不带关键字的**纯位置写法**（
-   `react_agent.py:217` 兜底支那种）—— 那一侧只有下面孪生判据的**一跳**射程，见
-   `test_d1_read_points_are_never_fed_by_a_text_prefix` 的边界段。
+   `react_agent.py:217` 兜底支那种）—— 那一侧只有下面孪生判据**一跳之内**的射程：覆盖
+   `=`/`:` 赋值**以及** walrus 目标与下标/属性实参的基名回溯，**两跳以上仍然漏**（仍漏清单见
+   `test_d1_read_points_are_never_fed_by_a_text_prefix` 的边界段）。
 2. **禁字锁**（`test_d1_pause_prefix_*` 那三条）：`backend/app/**` 里除 `tools/response.py`
    之外任何 `.py` 出现 `⏸`、`SUSPEND_PREFIX`，或 #83 补上的**构造写法** `chr(9208)` /
    `chr(0x23f8)` / `\\u23f8` —— 立刻红。它备的是"下一处新违规"：今天这一枚前缀只有一处合法
@@ -65,23 +71,26 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
   复现），逐句对齐如下：
   ① 测试侧那三处 `startswith("⏸ ")` 断的是**回灌给模型的文本**、不是记账判据，合法，不在射程内。
      三处都在 `test_v0350_76a_suspend_consumer_third_state.py`，且是同一句
-     `assert tool_msgs and tool_msgs[-1]["content"].startswith("⏸ ")` —— #83 自己 grep 复核的
-     实读坐标是 **:276 / :326 / :377**（#80 原文写的 `:262/:311/:362` 是它改完 76a 文件头之后
-     当场漂掉的旧坐标；本单改 76a 文件头又把它往下推了 5 行，所以这里的数按**提交后**的状态记）。
-     行号仍只是实测记录，认那**句话的字面文本**才是口径，理由见下条。
+     `assert tool_msgs and tool_msgs[-1]["content"].startswith("⏸ ")`。#83 第二轮按拍板 B 把互引
+     **降级成"文件名 + 这句话的字面片段"**，不再写行号：那组数字在两单之间已经漂过两次（#80
+     原文 `:262/:311/:362` → 第一轮 grep 复核时 `:276/:326/:377`），而第一轮一边声明"按提交后
+     状态记"、一边在文件头 ② 留着另一组数并存 —— 这就是行号锚无人钉的现行证据。认那**句话的
+     字面文本**才是口径，理由见下条。
   ② 扫描集合是 `backend/app/**/*.py` 去掉唯一豁免文件，**按扩展名收**。#83 实读
      `backend/app/web/` 下有 2 个 `.py`（`web_router.py`、`__init__.py`）**就在集合内** ——
      #80 原文"本条也不把它们算进集合"是**假陈述**（比声明严不会假绿，但下一个人会照着它推理），
      所以本单把**声明改对、集合不动**（收紧集合会真的少测两个文件）。真正不在集合里的只有
      web 那批**非 `.py`** 的 js/html：它们属渲染消费者（第三态的帧形状归 A4 与工单 #82），
      落锁时实测那批文件里一枚 `⏸` 都没有；把渲染层判红等于替 #82 预先决定帧形状。
-* **测试文件之间互引行号，建议降级成"不指行号"的描述（本单只把上面那三枚坐标改对，不铺全仓）。**
+* **测试文件之间互引坐标：#83 第二轮已按拍板 B 把本文件指 `test_v0350_76a_…` 的互引降级成
+  "文件名 + 那句话的字面片段"，不写行号。处置只覆盖本两个文件里的这几处互引，全仓行号引用
+  仍归 #81，本单不动别的文件。**
   理由：会漂的数没人钉就迟早变假 —— 同一族病在本仓已经挂着 #81/#46/#53 三张单，而本条这一处
-  漂掉的间隔不是一个月，是**一单**（#80 自己改的被引文件）。可复跑的替代口径这个文件里已经有了：
+  漂掉的间隔不是一个月，是**一单**（#80 自己改的被引文件）；第一轮留下的"文件头一组数、口径
+  取舍另一组数"并存，就是行号锚会变假的现行证据。可复跑的替代口径这个文件里已经有了：
   `NON_CODE_EXEMPTIONS` 按 **(文件, 那句话的字面片段)** 命中，并由
   `test_d1_pause_prefix_exemption_list_is_all_still_true` 钉住"今天仍然命中恰好一行" —— 改一句
-  话就红，比行号锚又便宜又准。建议后续单把测试互引统一换成"字面片段 + 命中数"，行号只作为注释
-  里的实测记录保留并写明会漂。这一处属**待拍板**，本单不动别的文件。
+  话就红，比行号锚又便宜又准。后续单可把测试互引统一换成"字面片段 + 命中数"。
 * **docstring/注释里的"提及"走显式豁免名单，不许用 `pytest.skip` 糊。** 名单
   （`NON_CODE_EXEMPTIONS`）每条必须写明理由，而且只豁免**非代码位置**：一行的代码段里出现
   禁字，名单救不了它（`test_d1_pause_prefix_lock_can_go_red` 的第四枚反例专门钉这一点）。
@@ -210,11 +219,27 @@ def _prefix_builder_used(node: ast.AST):
     return None
 
 
-def _assignments_from_prefix(tree: ast.Module, rel: str, name: str) -> list:
-    """这个文件里把 `name` 赋成"前缀判据"的那几处（`tool_ok = str(x).startswith("✓")`）。
+def _base_name_of(node: ast.AST):
+    """`name` → `name`；`name[...]` / `name.attr`（含链）→ 最底下的基名 `name`；其它 → None。
 
-    只做**一跳**：#76b 那枚真实反例就是"先算一个变量、再把它喂进记账"，一跳足够抓到它。
-    再往上的数据流分析属于过度工程，这层边界写在这里，而不是假装它不存在。
+    #83 第二轮补：下标/属性**实参**与下标/属性**赋值目标**都先回溯到基名再进一跳跟随
+    （`ok_list[0]`→`ok_list`、`_box.ok`→`_box`）。这只是形状回溯，不是可达性分析 ——
+    与 `_assignments_from_prefix` 的"只做一跳"同一口径，别把它读成"容器读法都被管住了"。
+    """
+    while isinstance(node, (ast.Subscript, ast.Attribute)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _assignments_from_prefix(tree: ast.Module, rel: str, name: str) -> list:
+    """这个文件里把 `name`（或它的 `name[...]` / `name.attr` 投影）赋成"前缀判据"的那几处
+    （`tool_ok = str(x).startswith("✓")`、`ok_list = […startswith…]`、`_box.ok = …startswith(…)`、
+    `(v := str(x).startswith("✓"))`）。
+
+    只做**一跳**，但一跳之内 `=`/`:`/`:=` 三种赋值形状都跟（#83 第二轮把 walrus 目标补了进来，
+    目标侧与实参侧的下标/属性都先回溯基名再跟）。#76b 那枚真实反例就是"先算一个变量、再把它
+    喂进记账"，一跳足够抓到它。再往上的数据流分析属于过度工程，这层边界写在这里，而不是假装
+    它不存在。
     """
     hits = []
     for node in ast.walk(tree):
@@ -222,35 +247,47 @@ def _assignments_from_prefix(tree: ast.Module, rel: str, name: str) -> list:
             targets = node.targets
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets = [node.target]
+        elif isinstance(node, ast.NamedExpr):                      # (v := str(x).startswith("✓"))
+            targets = [node.target]
         else:
             continue
-        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+        matched = [t for t in targets if _base_name_of(t) == name]
+        if not matched:
             continue
         used = _prefix_builder_used(node.value)
         if used:
-            hits.append(f"{rel}:{node.lineno} {name} = {used}")
+            hits.append(f"{rel}:{node.lineno}:{node.col_offset + 1} {ast.unparse(node)}")
     return hits
 
 
 def _prefix_feeding_problems(rel: str, source: str) -> list:
-    """形状锁的第二半（禁字锁在记账这一侧的孪生判据）：这四个读数点文件里，任何
-    `record_outcome(...)` 都不许被文本前缀的布尔结果喂进去 —— 直接喂，或经由一跳变量赋值喂。"""
+    """形状锁的第二半（孪生判据）：这四个读数点文件里的 `record_outcome(...)` 不许被文本前缀的
+    布尔结果喂进去。跟随射程（#83 第二轮实测，与 `test_d1_read_points_are_never_fed_by_a_text_prefix`
+    的 docstring 同一口径）：直接喂，或**一跳之内**经 `=`/`:` 赋值与 walrus（`:=`）目标算出来，
+    下标/属性实参（`ok_list[0]`、`_box.ok`）先回溯到基名再找那一跳；两跳以上、以及非赋值语句
+    的容器改写（append 等）仍漏 —— 清单在那条测试的 docstring 里。"""
     tree = _tree(rel, source)
     problems = []
     for call in _record_outcome_calls(tree):
         args = list(call.args) + [kw.value for kw in call.keywords]
         for arg in args:
+            where = f"{rel}:{call.lineno}:{call.col_offset + 1}"
             used = _prefix_builder_used(arg)
             if used:
                 problems.append(
-                    f"{rel}:{call.lineno} 直接把 `{used}` 的结果喂进 guard.record_outcome(...) "
+                    f"{where} 直接把 `{used}` 的结果喂进 guard.record_outcome(...) "
                     f"（整调用 `{ast.unparse(call)}`）—— D1 要禁的正是这个形状")
-            elif isinstance(arg, ast.Name):
-                hops = _assignments_from_prefix(tree, rel, arg.id)
-                if hops:
-                    problems.append(
-                        f"{rel}:{call.lineno} 喂进 guard.record_outcome(...) 的变量 {arg.id} "
-                        f"来自文本前缀判据：{'；'.join(hops)}")
+            else:
+                base = _base_name_of(arg)
+                if base is None:
+                    continue
+                hops = _assignments_from_prefix(tree, rel, base)
+                if not hops:
+                    continue
+                shape = (f"的变量 {base}" if isinstance(arg, ast.Name)
+                         else f"的变量表达式 `{ast.unparse(arg)}`（基名 {base}）")
+                problems.append(
+                    f"{where} 喂进 guard.record_outcome(...) {shape} 来自文本前缀判据：{'；'.join(hops)}")
     return problems
 
 
@@ -283,6 +320,38 @@ def run(guard, name, outcome):
 _SYNTH_CORRECT_SHAPE = '''
 def run(guard, name, outcome):
     guard.record_outcome(name, ok=bool(outcome.ok), suspended=bool(outcome.suspended))
+'''
+# #83 第二轮补的三枚**一跳**喂法（A5/A6/A7）：审查员实跑判 BLOCK 的就是这三枚，本单在
+# `f9715733` 的 `git archive` 副本里复跑，旧跟随下仍全绿 —— 根因是跟随只认 `=`/`:` 赋值的裸
+# Name。跟随补到 walrus/基名回溯后，这三枚（真文件与这里的合成形状）各红一次。
+_SYNTH_WALRUS_FEED = '''
+def run(guard, name, tool_result):
+    (feed_w := str(tool_result).startswith("\u2713"))
+    guard.record_outcome(name, feed_w)
+'''
+_SYNTH_SUBSCRIPT_FEED = '''
+def run(guard, name, tool_result):
+    feed_list = [str(tool_result).startswith("\u2713")]
+    guard.record_outcome(name, feed_list[0])
+'''
+_SYNTH_ATTRIBUTE_FEED = '''
+def run(guard, name, tool_result):
+    feed_box.ok = str(tool_result).startswith("\u2713")
+    guard.record_outcome(name, feed_box.ok)
+'''
+# **边界钉**（不是漏检炫耀，是把"仍漏清单"钉成会红的账）：这两枚今天必须绿。哪天跟随扩到
+# 咬得住它们，`test_d1_read_point_shape_lock_can_go_red` 就红，逼着回去改射程声明。
+_SYNTH_TWO_HOP_FEED = '''
+def run(guard, name, tool_result):
+    feed1 = str(tool_result).startswith("\u2713")
+    feed2 = feed1
+    guard.record_outcome(name, feed2)
+'''
+_SYNTH_APPEND_FEED = '''
+def run(guard, name, tool_result):
+    feed_items = []
+    feed_items.append(str(tool_result).startswith("\u2713"))
+    guard.record_outcome(name, feed_items[0])
 '''
 
 
@@ -325,32 +394,42 @@ def test_d1_read_points_are_the_two_structured_slots():
 
 
 def test_d1_read_points_are_never_fed_by_a_text_prefix():
-    """形状锁的第二半：四个读数点文件里没有任何 `record_outcome(...)` 被 `startswith(...)` 的
-    结果喂进去 —— 射程是**一跳之内**：直接喂，或经由 `tool_ok = str(...).startswith("✓")`
-    这类**一层**变量喂。
+    """形状锁的第二半（孪生判据）：四个读数点文件里的 `record_outcome(...)` 不许被
+    `startswith(...)` 的结果喂进去。跟随射程（#83 第二轮按实测写）：**一跳之内**覆盖 `=`/`:`
+    赋值**以及** walrus（`:=`）目标与下标/属性实参的**基名回溯**（`ok_list[0]`→`ok_list`、
+    `_box.ok`→`_box`），或直接喂；**两跳以上仍然漏**，清单见下。
 
     红的是哪一种回归：#76a/#76b 两轮审查用的那两枚变异本体 —— 把判据换成
     `startswith("⏸ ")` / `startswith("✓")`。上一条锁已经会红，这一条是**孪生保险**。
 
-    **边界（#83 按实测收窄；原文那句"把前缀结果藏进一个再套一层的变量……本条就红"是假的）**：
-    `_assignments_from_prefix` 只做一跳（它自己的 docstring 早写明了"只做**一跳**"，与原文
-    自相矛盾），所以"前缀结果再套一层变量"这条坏法**本条判不出来**。#83 在本机 `5aab5573`
-    复现过两枚：把 `react_agent.py` 兜底支那处改成
-    `fallback_ok = str(tool_result).startswith("✓")` → `fallback_feed = fallback_ok` →
-    `guard.record_outcome(tool_name, fallback_feed)`（**两跳**）⇒ 本文件 8 条全绿、rc=0，静默漏；
-    同一处只套一层（**一跳**）⇒ 本条红，文案点是 `…的变量 fallback_ok 来自文本前缀判据`。
-    ⇒ 这一单的处置是**措辞对齐实测**，判据射程一律不动。
+    **边界（#83 第二轮补强跟随后的实测口径；第一轮那句"真漏的那一格只剩一种形状……纯位置
+    写法并且间接两跳以上"当时就是假的 —— walrus/下标/属性三枚一跳写法在旧跟随下全绿）**：
+    跟随只做一跳；一跳之内今天覆盖这些形状 —— 直接喂、`x = …startswith(…)`、
+    `x: bool = …startswith(…)`、`(x := …startswith(…))`，实参侧 `x[0]` / `x.attr` 回溯基名后再找
+    那一跳。这三枚一跳形状是审查员实跑判 BLOCK 的那三枚（旧跟随下 8 passed / rc=0），本单在
+    `f9715733` 的 `git archive` 副本里复跑仍绿；第二轮把跟随补上后，同一副本里把三枚变异喂进
+    `react_agent.py` 兜底支旁边，本条**各红一次**，红话点名 文件:行:列 与是哪一枚形状
+    （逐枚结果见 #83 第二轮 commit 正文）。
 
     为什么接受这个边界，以及剩下那一半靠什么兜：
     * 它**不是无人守**。那四处结构化读数点由上一条形状锁按**逐字** `ok=bool(outcome.ok)` /
       `suspended=bool(outcome.suspended)` 把关 —— 变量无论套几层都不可能等于那个字面形状，
       所以"两跳以上的间接"在**带关键字**的读数点上照样红。本条只是它的孪生保险，不是唯一防线。
-    * 真漏的那一格只剩一种形状：**既不读 `outcome.*` 也不带 `ok=`/`suspended=` 关键字的纯位置
-      写法**（`_is_structured_read_point` 按口径不收，例如 `guard.record_outcome(tool_name,
-      False)` 那处兜底支）**并且**间接两跳以上。要抓它得做数据流分析，与本文件
+    * **仍漏清单（#83 第二轮在本机 `f9715733` 副本实测仍绿，不是推断；两枚边界钉
+      `_SYNTH_TWO_HOP_FEED` / `_SYNTH_APPEND_FEED` 把它们钉在合成反例层，判据扩了就会红）**：
+      ① 逐字形状锁不收的记法（既不读 `outcome.*` 也不带 `ok=`/`suspended=` 关键字的纯位置/
+      裸记法，例如 `guard.record_outcome(tool_name, False)` 那处兜底支）经**两跳以上**间接喂入 ——
+      实测形状：`f1 = str(tool_result).startswith("✓")` → `f2 = f1` → `record_outcome(tool_name, f2)`
+      ⇒ 8 条全绿、rc=0；上列五种一跳形状两两串成两跳同样漏。要抓它得做数据流分析，与本文件
       `_assignments_from_prefix` 那句"再往上的数据流分析属于过度工程"同一口径。
-    * 扩成多跳匹配（顺带决定"纯位置写法算不算第五类读数点"）是**待拍板**事项，本单不动判据，
-      只把话说对 —— 过度声称比边界小更坏：它会让人以为那一族回归已经被牙咬住了。
+      ② **非赋值语句**把前缀结果送进容器：`items = []` → `items.append(str(tool_result)
+      .startswith("✓"))` → `record_outcome(tool_name, items[0])` —— 基名回溯找到的那一跳赋值
+      （`items = []`）右边没有前缀判据，实测仍绿。
+    * **明确不做**：不给"纯位置写法"加逐字形状要求 —— 那是第五类读数点，负责人已判否：它会
+      引入"没有 outcome 对象"的特例，并把 #44 那族缩进债带进形状锁；真漏在变量喂这一侧，
+      已由本单的跟随补强把一跳补住，两跳以上按上一条列成清单。
+    * 过度声称比边界小更坏：它会让人以为那一族回归已经被牙咬住了 —— 所以这一族句子的口径
+      只写实测到的形状，咬不住的写进清单。
     """
     problems = []
     for rel in READ_POINT_FILES:
@@ -359,7 +438,9 @@ def test_d1_read_points_are_never_fed_by_a_text_prefix():
 
 
 def test_d1_read_point_shape_lock_can_go_red():
-    """形状锁的牙齿（合成反例，不改任何源文件）：三枚已知坏形状必须报红，正确形状必须不报。
+    """形状锁的牙齿（合成反例，不改任何源文件）：六枚坏形状必须报红；逐字正确的形状与两枚
+    "已声明仍漏"的边界钉必须报绿 —— 哪天判据咬得住边界钉里那两枚了，本条会红，逼着回去改
+    docstring 里的射程声明（边界只能被记账，不能被吹掉）。
 
     没有这一条，前两把锁可能永远是空壳：判据一旦写错方向（`kws` 取错、
     `_is_structured_read_point` 恒 False），真源码全绿而人看不出来。这里把变异形状直接喂给
@@ -370,17 +451,34 @@ def test_d1_read_point_shape_lock_can_go_red():
             ("ok 摘回 startswith(\"✓\")（#76b 实测过的那枚）", _SYNTH_PREFIX_READ, True),
             ("suspended= 被摘掉（#76a 那一族）", _SYNTH_MISSING_SUSPENDED, True),
             ("结构化两格改成位置写法", _SYNTH_POSITIONAL_STRUCTURED, True),
-            ("逐字正确的形状", _SYNTH_CORRECT_SHAPE, False)):
+            ("walrus 一跳喂（#83 第二轮 A5，第一轮实测是绿的）", _SYNTH_WALRUS_FEED, True),
+            ("下标实参基名回溯一跳喂（A6，第一轮实测是绿的）", _SYNTH_SUBSCRIPT_FEED, True),
+            ("属性实参基名回溯一跳喂（A7，第一轮实测是绿的）", _SYNTH_ATTRIBUTE_FEED, True),
+            ("逐字正确的形状", _SYNTH_CORRECT_SHAPE, False),
+            ("两跳间接喂纯位置写法（仍漏清单①，今天必须仍绿）", _SYNTH_TWO_HOP_FEED, False),
+            ("append 改写容器再下标喂（仍漏清单②，今天必须仍绿）", _SYNTH_APPEND_FEED, False)):
         problems = _read_point_shape_problems(fake, source)
         fed = _prefix_feeding_problems(fake, source)
         if expect_red:
             assert problems or fed, f"反例「{label}」没有报红 —— 这把锁是空壳：{source!r}"
         else:
-            assert not problems and not fed, f"正确形状被误判：{problems + fed}"
+            assert not problems and not fed, f"{label}被误判：{problems + fed}"
     # "摘 suspended="那枚必须红在**缺关键字**这一句，不能只是顺带红
     only_missing = _read_point_shape_problems(fake, _SYNTH_MISSING_SUSPENDED)
     assert any("少了关键字实参 suspended=bool(outcome.suspended)" in p for p in only_missing), (
         f"摘掉 suspended= 的反例红的位置不对（本条要钉的就是这一格）：{only_missing}")
+    # A5/A6/A7 三枚必须红在**孪生判据**这一侧（它们没有那两格关键字，逐字形状锁管不着），
+    # 且红话必须点名到那一枚形状 —— #83 第二轮补的跟随要是不生效，这两句先红。
+    for label, source, needle in (
+            ("walrus 一跳喂（A5）", _SYNTH_WALRUS_FEED, "feed_w"),
+            ("下标实参基名回溯（A6）", _SYNTH_SUBSCRIPT_FEED, "feed_list[0]"),
+            ("属性实参基名回溯（A7）", _SYNTH_ATTRIBUTE_FEED, "feed_box.ok")):
+        shape = _read_point_shape_problems(fake, source)
+        assert not shape, f"「{label}」不该被逐字形状锁收（它不带那两格关键字），红了说明口径漂了：{shape}"
+        fed = _prefix_feeding_problems(fake, source)
+        assert fed, f"「{label}」没被孪生判据咬住 —— 跟随补强等于没补：{source!r}"
+        assert any(needle in p for p in fed), (
+            f"「{label}」红错了地方（本条要钉的就是 `{needle}` 这一枚形状）：{fed}")
 
 
 # ---------------------------------------------------------------- 锁二：禁字锁
@@ -632,7 +730,8 @@ def test_d1_pause_prefix_exemption_list_is_all_still_true():
 
 
 def test_d1_pause_prefix_lock_can_go_red():
-    """禁字锁的牙齿（合成反例，不改任何源文件）：九种坏法必须报红，登记过的非代码提及必须不报。
+    """禁字锁的牙齿（合成反例，不改任何源文件）：九种坏法必须报红（元组条数各钉一条，#83
+    第二轮补 —— 在此之前把元组清空，本条会"全绿地什么都不验"），登记过的非代码提及必须不报。
 
     ① 代码里 `startswith("⏸ ")`（#76a 那枚变异的合成版）；② 别处 import 那个常量（第四枚变异
     的合成版）；③ 没登记过的注释提及；④ **同一行既有代码又有注释**
@@ -642,6 +741,9 @@ def test_d1_pause_prefix_lock_can_go_red():
     `\\u23f8` 与 `\\u23F8` 两种转义、以及注释里提一句构造写法）：这五枚在补锁之前**全都是绿的**
     —— 审查员实测过、本单在本机 `5aab5573` 拿真文件复现过（临时未跟踪探针放进
     `backend/app/agents/` 里，旧口径 8 passed / rc=0，新口径每一条都点名到那一枚构造写法）。
+    自 #83 第二轮起立了硬口径：这类"要被扫描集合看见"的变异/探针文件**只进仓库外的
+    `git archive` 副本**，生产树不落任何探针（本轮的 walrus/下标/属性/两跳/append 探针全在
+    仓库外的副本里跑，生产树 `backend/app/**` 零新增，还原用 `git diff` 0 字节证明）。
     这里额外要求"红在那一枚上"（`expected in problems`），并且要求主判据那条的**预筛**
     `_source_has_forbidden_token` 也看得见 —— 预筛与命中判据口径不一致时，真源码那一路会整条
     跳过，锁就白补了。
@@ -655,6 +757,9 @@ def test_d1_pause_prefix_lock_can_go_red():
          f'def f(name):\n    if name.startswith("{PAUSE_GLYPH} "):  # 只是注释\n'
          "        return True\n"),
     )
+    # 条数钉（#83 第二轮）：没有这两句，把元组悄悄清空，本条就"全绿地什么都不验" ——
+    # docstring 说九种坏法，元组就得恰好 4 + 5 枚，对不上先红在这里。
+    assert len(cases) == 4, f"基础反例元组应当恰好 4 枚，实得 {len(cases)} —— 删一枚等于拔牙"
     for label, source in cases:
         problems = _prefix_lock_problems(fake, source)
         assert problems, f"反例「{label}」没有报红 —— 这把锁是空壳：{source!r}"
@@ -666,6 +771,9 @@ def test_d1_pause_prefix_lock_can_go_red():
         ("\\u23F8 转义（大写，靠不分大小写命中）", 'PAUSE = "\\u23F8 "\n', "\\u23f8"),
         ("注释里提构造写法却没登记", "# 这一支用 chr(9208) 拼\nVALUE = 1\n", "chr(9208)"),
     )
+    assert len(constructed_cases) == 5, (
+        f"构造写法反例元组应当恰好 5 枚，实得 {len(constructed_cases)} —— 删一枚等于把 #83 "
+        "补的那族牙又拔掉一枚")
     for label, source, expected in constructed_cases:
         problems = _prefix_lock_problems(fake, source)
         assert problems, f"构造反例「{label}」没有报红 —— #83 那两枚等于没补：{source!r}"
