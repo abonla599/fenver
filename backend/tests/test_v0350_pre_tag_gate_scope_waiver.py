@@ -57,13 +57,22 @@ def _load_gate():
 def gate(monkeypatch):
     """闸门本体 + 把与第 1 条判据无关的旁证接掉（手法照 test_v0331_pre_tag_gate_contract.py）。
 
-    第 2 条（说明在不在）、第 3/4 条（`/health`）、第 5 条（发版物料顺序）**都不归本文件管**：
-    留着它们，测错位的那条会先撞上别的理由，红的理由和断言的理由对不上。
+    第 2 条（说明在不在）、第 3/4 条（`/health`）、第 5 条（发版物料顺序）、第 6 条
+    （泄露隔离闸）**都不归本文件管**：留着它们，测错位的那条会先撞上别的理由，
+    红的理由和断言的理由对不上。
+
+    第 6 格尤其必须接掉：本文件的 `root` 是**真仓库**，而那一格判的就是真仓库此刻的
+    ref 状态——不接的话这些用例断言的就不再是"第 1 条怎么豁免"，而是"本机有没有脏
+    tag"（那种断言一删 tag 就变，方向还是反的）。它自己的牙在
+    test_v0350_leak_quarantine_gate.py，用 `tmp_path` 现造的一次性仓库跑红／绿／
+    判不出三档，不借这里的地盘。
     """
     mod = _load_gate()
     monkeypatch.setattr(mod, "release_note_exists", lambda root, tag: True)
     monkeypatch.setattr(mod, "check_announcement_materials",
                         lambda root, ver: (True, "ok", "stubbed：本用例只测第 1 条判据"))
+    monkeypatch.setattr(mod, "check_leak_quarantine",
+                        lambda root: (True, "ok", "stubbed：本用例只测第 1 条判据"))
     monkeypatch.setattr(mod, "fetch_build", lambda url, timeout: (TAG, "ok"))
     return mod
 
@@ -211,10 +220,16 @@ END_TO_END = [
 @pytest.mark.parametrize("kind,gradle,token,code", END_TO_END)
 def test_check_one_actually_reads_that_note_file(tmp_path, monkeypatch, capsys,
                                                  kind, gradle, token, code):
-    """第 1 条判据**真的去读那一份文件**：上面几格是 monkeypatch 过的分支，这里一个都不 stub。
+    """第 1 条判据**真的去读那一份文件**：上面几格是 monkeypatch 过的分支，这里**第 1 条的
+    输入**一个都不 stub——说明文件是现场写进假树的，读的就是那几行字节。
 
     没有这一组，"豁免"可以只靠 stub 活着——把判读改成"说明文件存在就豁免"（#67 变异 i）或
     "读不出就默认 server-only"（变异 ii），前面那几条都不会红，而真树上一切照旧。
+
+    接掉的仍然只有旁证：`/health`（第 3 条）与物料顺序（第 5 条）照旧 stub；泄露隔离闸
+    （第 6 条）也接掉——这份假树**故意不是 git 仓库**，那一格在这儿只能列不出 ref、
+    按 fail-closed 报它自己那一档红，而红的是它的理由不是本用例的理由。它不 stub 的那些
+    牙在 test_v0350_leak_quarantine_gate.py，那里跑的是真 git 仓库。
     """
     mod = _load_gate()
     tools = tmp_path / "tools"
@@ -231,6 +246,8 @@ def test_check_one_actually_reads_that_note_file(tmp_path, monkeypatch, capsys,
     monkeypatch.setattr(mod, "fetch_build", lambda url, timeout: (TAG, "ok"))
     monkeypatch.setattr(mod, "check_announcement_materials",
                         lambda root_, ver: (True, "ok", "stubbed：本用例只测第 1 条判据"))
+    monkeypatch.setattr(mod, "check_leak_quarantine",
+                        lambda root_: (True, "ok", "stubbed：本用例只测第 1 条判据"))
     assert mod.main(["--expect", TAG]) == code, (kind, gradle)
     out = capsys.readouterr().out
     assert token in out, "形状 (%s, versionName=%s) 停在 %r，不是 %r" % (kind, gradle, out, token)
