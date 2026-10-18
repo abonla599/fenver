@@ -219,6 +219,13 @@ def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     注释又跟着**上一步**走，切出来的那一格是别人的正文。判据从此只按 YAML 结构读 Actions
     真执行的东西，注释一概不算数（与 test_apk_release_discipline.py 的 `_workflow_step`、
     test_ci_history_depth.py 的"注释不参与判据"同一个口径）。
+
+    **射程（#92a 交付项 ③：只把这句话写清楚，判据一个字没扩）**：末尾那条反向钉
+    （`assert GATE_TOKEN not in runs`）读的是 `WORKFLOW` 这一个常量指着的那份文件，也就是
+    **只有 `release-apk.yml` 的 `run` 正文**在射程内。把 `tools/pre_tag_gate.py` 原样抄进
+    `tests.yml` 或任何别的 workflow，今天**不会红**——这是判据的边界而不是它坏了；#90b 换窄
+    治的是"闸门被搬回 CI 的这一步"，抄到别处属于另一个洞。扩到全 `.github/workflows/*.yml`
+    的 `run:` 集合归 **#92b**，别在本单里顺手做掉（本单只泛化浅克隆哨那一把）。
     """
     steps = _workflow_release_steps()
     names = [s.get("name") or "" for s in steps]
