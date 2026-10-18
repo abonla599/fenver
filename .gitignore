@@ -86,11 +86,11 @@ docs-internal/
 # 不含任何密钥，输出路径全在 android-native/ 与 backend/app/web/static/ 里。
 !/tools/render-app-icon.ps1
 # 打 tag 前的闸门。这条例外**不是可选的方便，是这条机制成立的前提**：
-# release-apk.yml 里那一步跑的就是本仓 checkout 中的 tools/pre_tag_gate.py，
-# 它进不了仓库，CI 那次 checkout 就没有这个文件，整条锁当场变成一句注释。
-# 而 `/tools/*` 默认全排除，历史上 _diag_shell_bench.py 就是撞在这条上永远进不去
-# （见上面 shell_jvm_tests.py 那段）。脚本纯标准库、只读一个 URL 与两个本地文件，
-# 不含任何凭据，也不写盘。
+# backend/tests/test_v0331_pre_tag_gate_contract.py 那批行为锁用 importlib 直接加载并执行
+# tools/pre_tag_gate.py 的 main()——tests.yml 那次 checkout 里没有这个文件，整条锁当场变成
+# 一句注释。#90b 起 release-apk.yml 不再跑它（那两格判据在 CI 结构上取不到，#57，改归本机
+# 在打 tag 之前跑）。而 `/tools/*` 默认全排除，历史上 _diag_shell_bench.py 就是撞在这条上
+# 永远进不去（见上面 shell_jvm_tests.py 那段）。脚本纯标准库、不含凭据、只读不写盘。
 !/tools/pre_tag_gate.py
 # 官网「更新日志」页的数据源生成器。与 pre_tag_gate 同一个理由：它必须进 CI 那次
 # checkout —— backend/tests/test_changelog_page.py 会用它重新渲染一遍，比对产物是否

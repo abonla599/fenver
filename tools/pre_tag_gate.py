@@ -80,9 +80,9 @@ scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 
 
     python tools/pre_tag_gate.py --expect v0.33.1 --check-local
 
-CI（`release-apk.yml` 在签名与构建之前跑，红得越早越省钱）：
-
-    python tools/pre_tag_gate.py --expect "$GITHUB_REF_NAME" --no-versionname-check
+CI —— **#90b 起不再由 `release-apk.yml` 跑这把全量闸门**：那一步换窄成只核本版发版说明
+`docs/releases/<tag>.md` 在不在。线上 build 与物料顺序这两格 CI 判不到（#57：`/health` 是对岸
+进程，`data/` 与 `version.json` 被 .gitignore 排除），**这两格只剩上面那条本机命令这一道闸**。
 
 退出码：0 放行；1 版本不符（含 versionName 与 tag 不符、清单宣告跑在了落盘的包前面）；
 2 判据拿不到（fail-closed）。

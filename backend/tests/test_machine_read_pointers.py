@@ -345,8 +345,27 @@ def test_the_pointer_scanner_reads_enough_real_pointers():
     kept = _corpus()
     assert len(kept) >= 8, f"只扫到 {len(kept)} 处机器读的引用，这条锁多半在空转：{kept}"
     tokens = {t for _, t in kept}
-    assert "tools/pre_tag_gate.py" in tokens, \
-        "名单里没有 tools/pre_tag_gate.py：发版闸门在机器读的引用里都不出现了，多半是 workflow 读法坏了"
+    # ---- 这枚锚点自 #90b 起换了对象：**这是削锁**，改前/改后/补偿都写在这里，等审查员判 ----
+    # 改前钉的是 `"tools/pre_tag_gate.py" in tokens`。它在整套名单里唯一的机器读出处是
+    # `release-apk.yml` 那一步 `python3 tools/pre_tag_gate.py --expect "$GITHUB_REF_NAME"
+    # --no-versionname-check` 的 run 正文；闸门自己「用法」那一节写的也是这一行，但它在
+    # 模块 docstring 里（按本文件口径不算机器读引用）、release_marker.py 那条是注释、
+    # deploy/*.ps1 没有这个串——所以 #90b 之后这个 token 在整套名单里**再没有任何机器读的出处**。
+    # 改后钉的是 `"backend/requirements.txt"` 而且**同时钉它来自 workflow**：CI 真会 exec 的
+    # 那行 `pip install … -r backend/requirements.txt` 里 pip 真会打开这个文件，比原来那一枚
+    # 还硬一格（原来那枚的出处是 echo 出来的文案，这一枚是真参数）。红法和改前同一件事：
+    # `_from_workflows` 的读法坏了、`run:` 正文不再被抽、或 workflows 目录形状变了。
+    # 补偿控制（不归这把尺子管，写在这里是因为"少了一道"这件事必须看得见）：
+    #   · 闸门文件仍在 CI 那次 checkout 里 —— `test_v0331_pre_tag_gate_contract.py` 用
+    #     `git check-ignore` 钉着 `.gitignore` 里 `!/tools/pre_tag_gate.py` 那条例外；
+    #   · 闸门仍是打 tag 前的全量核对 —— 同文件
+    #     `test_the_two_hand_off_checks_still_run_in_the_local_gate` 真的 exec `main()`，
+    #     线上 build 与物料顺序那两格任何一格被削掉都会红；
+    #   · CI 侧不许再把闸门抄回 run 正文 —— 同文件
+    #     `test_ci_step_is_narrowed_to_what_ci_can_actually_judge` 反向钉这个 token 不在。
+    assert any(o.startswith("tests.yml") and t == "backend/requirements.txt" for o, t in kept), \
+        "名单里没有来自 tests.yml 的 backend/requirements.txt：workflow 的 run 正文不再被抽出来了，" \
+        "多半是 _from_workflows 坏了（#90b 之前这一格由 tools/pre_tag_gate.py 顶着）"
     assert "android-native/app/build.gradle" in tokens, \
         "名单里没有 android-native/app/build.gradle：CI 与 pre_tag_gate 核对 versionName 的位置" \
         "扫不到了，多半是 token 或 AST 读法坏了"

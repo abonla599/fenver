@@ -11,7 +11,8 @@ jobs:
           # 就是仓库历史本身，靠 `git cat-file` 把锚点取出来。checkout 默认给浅克隆，浅克隆下
           # 这三枚解析不出来（实测 rc=128 invalid object name），于是它们在 checkout 之后红成
           # "锚点在这份工作树里解析不出…"——看着像代码有问题，实际是 CI 没把历史给够。
-          # 与 gitleaks.yml 同一口径；快照仓只有一个提交，这条对它就是多取那一个。
+          # 与 gitleaks.yml 同一口径（fetch-depth: 0），但别照抄它那句理由：本仓不是"只有
+          # 一个提交"的快照仓——2026-10-18 实测 HEAD 194 笔、main 129 笔，浅克隆切掉的是整段历史。
           fetch-depth: 0
       - uses: actions/setup-python@v4
         with:
