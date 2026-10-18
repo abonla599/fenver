@@ -11,13 +11,14 @@ jobs:
           # 就是仓库历史本身，靠 `git cat-file` 把锚点取出来。checkout 默认给浅克隆，浅克隆下
           # 这三枚解析不出来（实测 rc=128 invalid object name），于是它们在 checkout 之后红成
           # "锚点在这份工作树里解析不出…"——看着像代码有问题，实际是 CI 没把历史给够。
-          # 与 gitleaks.yml 同一口径（fetch-depth: 0），但别照抄它从前那句"快照仓只有一个
-          # 提交"的理由——本仓不是那种形状：这里有正常生长的历史，浅克隆切掉的是锚点之前的
-          # 整段，于是那两把锁会红在 checkout 之后、红成"锚点在这份工作树里解析不出来"。
-          # 刻意不写提交数（HEAD/main/develop 各多少笔）：那个数每提一笔就漂一次，正是本仓
-          # #81 那一族病。钉这个口径的是哨不是注释：backend/tests/test_ci_history_depth.py
-          # 枚举本目录下的 workflow，凡 run 正文读仓库历史的 job 都必须 fetch-depth: 0，
-          # 这一份和 gitleaks.yml 都在它的名单里。
+          # 本仓不是"只有一个提交"的快照仓：这里有正常生长的历史，浅克隆切掉的是锚点之前的
+          # 整段，那两把锁就红在 checkout 之后。这里不写提交数（HEAD/main/develop 各多少笔）：
+          # 那个数每提一笔就漂一次。钉这个口径的是哨不是注释：backend/tests/test_ci_history_depth.py
+          # 枚举本目录下的 workflow，run 正文命中它那份 HISTORY_READING_MARKERS 里任一条标记的
+          # job 才必须 fetch-depth: 0——那是有限标记清单，不是"任何 git 命令"（条数以那个元组
+          # 为准并有条数钉守着，注释里不写数）。这一份是靠 `python -m pytest` 那一行进名单的，
+          # gitleaks.yml 靠的是 `gitleaks detect` 那一行；标记之外仍读历史、今天抓不住的形状
+          # 列在那个文件的"仍漏清单"里。
           fetch-depth: 0
       - uses: actions/setup-python@v4
         with:
