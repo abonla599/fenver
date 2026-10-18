@@ -113,11 +113,17 @@ def run_gate(gate, monkeypatch, materials, extra_argv=()):
     """真跑 `main()`：只接掉与顺序闸无关的旁证，顺序闸自己一律走真判据。
 
     - `fetch_build` 必须接掉：不接就是在测试里打线上 `https://ai.fenever.xyz/health`；
+    - 泄露隔离闸（第 6 格）也必须接掉：本文件的 `root` 是真仓库，那一格判的是真仓库
+      此刻的 ref 状态，留着它，"物料齐了就放行"这条正控测到的就不是物料顺序，而是
+      本机有没有脏 tag——那种断言一删 tag 就变，方向还是反的。它自己的牙在
+      test_v0350_leak_quarantine_gate.py（一次性 `tmp_path` 仓库，红／绿／判不出三档）；
     - versionName 那条用闸门自己的 `--no-versionname-check`（现成的、既有的口子），
       不靠 monkeypatch，免得把"这条判据还在"这件事测虚了。
     """
     monkeypatch.setattr(gate, "fetch_build", lambda url, timeout: (TAG, "ok"))
     monkeypatch.setattr(gate, "release_note_exists", lambda root, tag: True)
+    monkeypatch.setattr(gate, "check_leak_quarantine",
+                        lambda root: (True, "ok", "stubbed：本用例只测物料顺序那一格"))
     _pin_seed(gate, monkeypatch, materials["seed"])
     return gate.main(["--expect", TAG, "--no-versionname-check"] + list(extra_argv))
 

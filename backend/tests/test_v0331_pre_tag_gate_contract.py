@@ -67,10 +67,19 @@ def _stub_side_checks(gate, monkeypatch):
     这里照上面那条的同一手法接掉——否则这些用例会先撞上"v0.33.1 的包不在盘上"，
     红的理由和断言的理由又对不上了。**接掉的只是这条判据在本文件里的噪声，
     判据本身与它的顺序一个字没动。**
+
+    泄露隔离闸（任何可推送 ref 能走到被隔离的提交就不许封版）是同一条路上的第 6 格，
+    也照同一手法接掉，理由比第 5 格更硬：本文件的 `root` 是**真仓库**，而这一格判的
+    恰恰是真仓库的 ref 状态——留着它，这些用例测到的就不是自己名义上那件事，而是
+    "本机此刻有没有脏 ref"。它自己的牙在 test_v0350_leak_quarantine_gate.py，那里用
+    pytest `tmp_path` 现造一次性仓库，红／绿／判不出来三档都真跑，不借本文件的地盘。
+    这里接掉的同样是本文件的噪声，不是那条判据。
     """
     monkeypatch.setattr(gate, "release_note_exists", lambda root, tag: True)
     monkeypatch.setattr(gate, "check_announcement_materials",
                         lambda root, ver: (True, "ok", "stubbed：本用例只测 build 判据"))
+    monkeypatch.setattr(gate, "check_leak_quarantine",
+                        lambda root: (True, "ok", "stubbed：本用例只测 build 判据"))
 
 
 def test_gate_script_exists_and_is_the_documented_shape():
