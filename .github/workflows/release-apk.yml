@@ -52,22 +52,43 @@ jobs:
             exit 1
           fi
 
-      # 线上正在被服务的那一版，必须先等于这个 tag —— 发版顺序里"换包上线 + 线上验收"
-      # 排在"打 tag"之前，而这条顺序**连着被违反过两次**（v0.29.0、v0.33.0，两次的事后
-      # 记录里都写了同一段"提醒不是机制"的检讨）。所以把它做成脚本，让 CI 在生成
-      # Release 之前再跑一遍：人在本机跳过一次闸门，这里还有第二道跳不过去的。
+      # 这一格只问**CI 真能判的那件事**：本版的发版说明在不在。
+      # docs/releases/v<版本>.md 是这一版对外说了什么的唯一记录，缺了它 Release 正文只剩
+      # 通用安装说明（Publish 那步的 ::warning:: 是安静兜底，拦不了发布）；而这份文件就躺在
+      # checkout 里，CI 判它不需要任何本机状态。
       #
-      # 为什么放在签名/构建**之前**：这一步红，说明线上还是上一版，那这次 Release
+      # 从前这一步跑的是全量发版闸门（步骤名 LIVE BUILD NOT THIS VERSION），那是**结构错位**，
+      # #57 记的就是这件事：闸门里那两格判据 CI 拿不到——
+      #   · 第 3 条问"线上 /health 自报的 build 是不是这个 tag"：对岸进程的状态，checkout 里没有；
+      #   · 第 5 条问"这台生产机上清单宣告的是哪一版、data/apk/<版本>.apk 在不在盘上"：`data/`
+      #     与 `version.json` 都被 .gitignore 排除，CI 那次 checkout 里**结构上不可能**有它们，
+      #     于是每次都撞第 2 小格（被跟踪的种子清单 backend/app/web/site/version.json 停在上一版
+      #     ⇒ token=manifest-version-mismatch，rc=1）。红灯永远解不开，就不是闸门，是噪音。
+      # 所以这两格**移回本机**：由打 tag 的那个人在生产机上、敲 `git tag` 之前跑全量闸门
+      # `python tools/pre_tag_gate.py --expect v<版本> --check-local`（docs/安装部署指南.md
+      # 第六节第 3 步，非零即不许往下敲），台账留痕。**CI 侧从此不再核对物料顺序与线上 build，
+      # 这两格归本机那道闸门**——本仓"判据不许由被测对象自报"，
+      # 让一个看不见现实的位置去裁判现实，只会得到一条永远解不开的红。
+      #
+      # 为什么仍然排在签名/构建**之前**：这一步红说明本版的说明还没写，那这次 Release
       # 无论构建得多干净都不该存在。越早红，越少浪费 runner 时间，也越少一份"看起来
       # 已经发了"的半成品。
       #
-      # --no-versionname-check：上一条步骤已经专门核过 build.gradle 了，这里不重复；
-      # 这条步骤管的是**现实侧**——线上自报的 build 戳。
-      - name: "LIVE BUILD NOT THIS VERSION -> 换包/验收还没做完，不许出 Release"
+      # 文件名跟着 tag 走（带那个 v）：docs/releases/ 下的实物是带 v 的名字，剥掉 v 会永远
+      # 找不到——而缺文件的正确表现是这一步响亮地红，不是兜底成一句 warning。
+      - name: "RELEASE NOTES MISSING -> docs/releases/<tag>.md 不在：本版对外说了什么没有记录"
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -eu
-          python3 tools/pre_tag_gate.py --expect "$GITHUB_REF_NAME" --no-versionname-check
+          release_note="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$release_note" ]; then
+            echo "::error::缺 ${release_note}：这一版对外说了什么没有记录，Release 正文只剩通用安装说明。"
+            echo "::error::补法：照 docs/releases/ 里最近一版的形状写一份（开头那行 scope 注释也要有），"
+            echo "::error::提交之后重新打 tag。物料顺序与线上 build 那两格不在这里判——它们由生产机"
+            echo "::error::在打 tag 之前核，见 docs/安装部署指南.md 第六节第 3 步。"
+            exit 1
+          fi
+          echo "release-notes=ok ${release_note}"
 
       # 签名密钥从 Secrets 落盘。为什么这步必须先于构建、缺了就直接失败而不是退回去
       # 签一把新的：Android 覆盖安装判的是签名，不是版本号。之前这里跑 assembleDebug，
