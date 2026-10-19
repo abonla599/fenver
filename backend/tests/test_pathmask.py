@@ -1,10 +1,11 @@
 r"""出口路径掩码 `core.pathmask` 的判据锁：两个方向都要有人拦。
 
 这道网只有"少掩就红"的牙（`test_selfcheck`、`test_update_channel` 那几把），一句合法 URL
-被掩成半截以前没有任何一把会红。本文件补的就是**过掩**那一方向的锁，另加两把同构锁：一把把
+被掩成半截以前没有任何一把会红。本文件补的就是**过掩**那一方向的锁，另加一族同构锁：一把把
 生产网的盘符档和一份**机制不同**的 oracle 钉在同一张抽样表上；一把把全仓手抄的盘符判据按源码
-点名，逐把钉到生产网的判定上。掩码判据本身是纯字符串；两把同构锁只 `ast.parse` 兄弟模块的源码
-取字面量，不落盘、不 import 别的测试模块、不起服务、不碰记忆后端。
+点名，逐把钉到生产网的判定上；管着点名表射程的那几把（下限锁与手写钉）见模块末尾。掩码判据本身
+是纯字符串；同构锁只 `ast.parse` 兄弟模块的源码取字面量（外加本文件自己那一处），不落盘、不
+import 别的测试模块、不起服务、不碰记忆后端。
 
 射程（实测，不是声明）：`_WIN_PATH` 认「单字母 + `:` + 分隔符 + 一串非空白字符」，豁免只认
 URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 认首段列在 `_POSIX_ROOTS`
@@ -38,14 +39,34 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
   `_VERBATIM_URLS` 钉着 ⇒ 无活例。
 
 **锁级看不见清单**（与 `_LOCK_BLIND_SPOTS` 同一本账，同样每条一枚钉，全部**今天必须点不到**）：
-两把锁点名的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现 `[A-Za-z]` 紧跟 `:` 或 `]:`"；
-认不到的抄本既不被比对、也不会让绑定锁红。射程锁
-（`test_the_drive_rule_roster_is_the_whole_scanned_range`）把 `_DRIVE_RULE_SITES` 与
-`_DRIVE_RULE_SCAN_SCOPES` 那两棵子树里现扫出来的盘符判据钉成同一批，所以"在册的那几处变了形"
-和"子树里新抄了一把没登记"、"把名单摘短而判据还在原地"都会红；红不到的只剩下方逐条列出的那几种
-形状，外加 `_DRIVE_RULE_SCAN_SCOPES` 罩不到的文件——即 `backend/app/` 与 `backend/tests/`
-两棵子树之外的一切（`backend/cli.py`、`backend/requirements.txt`、仓库根的 `tools/`、`scripts/`
-与前端壳）。
+点名器（`_drive_rule_literals`）认的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现
+`[A-Za-z]` 紧跟 `:` 或 `]:`"；认不到的抄本既不被比对、也不会让绑定锁红。射程锁
+（`test_the_drive_rule_roster_is_the_whole_scanned_range`）把 `_DRIVE_RULE_SITES` 与**现扫**
+出来的盘符判据钉成同一批，而现扫的范围来自 `_tracked_python_files()`——`git ls-files` 的**被跟踪
+清单**（只按其后的 `.py` 后缀取），不是本文件里任何一处手写的目录或模式：这份名单由仓库决定，
+改这个测试文件本身缩不了它。取不到 git、清单为空、这里不是 git 仓库（`git archive` 抽出来的副本
+就是这一形）⇒ 一律响亮报红，不 skip、也不退回手写范围当兜底——那种形态下这把锁**就该红**，
+因为它无法证明自己罩住了全仓。所以"在册的那几处变了形""仓里新抄了一把没登记""把名单摘短而判据
+还在原地"都会红；下限锁（`test_the_scanned_range_reaches_both_ends_of_the_binding_lock`）再兜
+一层：现扫射程必须同时够到绑定锁的两头（生产模块与本文件自己），够不到就说明绑定锁正在对
+`_WIN_PATH` 自比，而被跟踪清单必须**严格包住**名单（清单从名单自己取来的那种自封也红）；
+手写钉（`test_the_roster_is_a_hand_copied_literal_not_a_derived_table`）钉住
+名单右侧必须是源码里手抄的字面量，写成扫描结果派生 ⇒ 恒真、不含信息，红。红不到的只剩下方逐条
+列出的那几种形状，外加射程结构性够不到的一类：**不在被跟踪清单里的文件**（未跟踪的、被
+`.gitignore` 排除的、只住在本机的）与**被跟踪但不是 `.py` 的文件**（`backend/requirements.txt`、
+`.github/workflows/*.yml`、`deploy/*.ps1`、`docs/*.md`、前端壳）——判据抄在那里头，点名器的
+`ast.parse` 就取不到字面量。仓库根的 `scripts/` 属哪一类要说清：它既不 tracked（不在
+`git ls-files` 里）、本机也不存在、也**没被 `.gitignore` 真排除**——`git check-ignore -v scripts`
+返回 rc=1，带尾斜杠那句命中的是 `.gitignore:179` 那枚**空行**（AGENTS.md 第 3 条记过的 CR 假阳性），
+所以它不在射程里的理由是"仓库里没有这个东西"，不是"射程窄"；哪天真往 `scripts/` 里落了 `.py`
+并 `git add`，它自动进射程。
+还有一格是**设计决定**而不是形状漏，与 `_LOCK_BLIND_SPOTS` 无关：把 `_GIT_LS_FILES` 那行 argv
+换成按目录收窄的 pathspec、在 Python 侧把取回的清单按路径过滤、或把那一页从跟踪里摘掉
+（`git rm --cached`，文件仍留在盘上），**同时**把 `_DRIVE_RULE_SITES` 里对应的行删掉——三选一都
+能让除两头之外的某一把探测器抄本退出比对而全量不红（下限锁只担保绑定锁不退化成自比、清单严格
+包住名单，不担保每一把探测器都在射程内）。不给这一格配牙是有理由的：要配就得在本文件里再手写
+一份"必须够到的那五处"，那正好是这把锁要消灭的手抄名单本身；而这一格要求两处（射程来源与名单）
+同向改动，两处都在 diff 里，不是改一个旋钮就能静默摘锁。
 - `copy-not-bound-to-a-module-level-name`：判据内联在调用里（`re.search(r'…', body)`）时点不到名——
   它不挂在模块级 `NAME = re.compile(...)` 上，遍历模块级赋值根本看不见这个判据。
 - `copy-assembled-at-runtime`：另一格，机制不同：名字挂对了，但实参是 `_HEAD + _SEP` 这种运行时
@@ -62,18 +83,22 @@ oracle、`test_selfcheck`／`test_update_channel`／`test_apk_self_host_cache` �
 """
 import ast
 import re
+import subprocess
 import warnings
 from pathlib import Path
 
 import pytest
 
+from app.core import pathmask as _pathmask
 from app.core.pathmask import PATH_MASK, _SEG, _WIN_PATH, hide_paths
 
 # 掩码字面被 `test_selfcheck.py` 与 `test_update_channel.py` 按字面写死，改这里就是
 # 改公开端点上那句话的形状；本文件其余用例一律引用 PATH_MASK 而不重抄字面。
 MASK = PATH_MASK
 
-_BACKEND = Path(__file__).resolve().parents[1]
+# 射程与名单都以**仓库根**为基准：清单是 `git ls-files` 给的相对仓库根路径，锚在别处就得再手写
+# 一个目录前缀，那个前缀又是一枚能把射程悄悄改窄的旋钮。
+_REPOSITORY = Path(__file__).resolve().parents[2]
 
 # 生产网的盘符档与测试侧 oracle 必须同判、且机制不同。oracle 抄的是两支并列的写法：一支要求
 # 路径前不是 scheme 字符，另一支在前面是 scheme 字符时要求分隔符不是 `//`。只判定"这里有没有
@@ -137,7 +162,7 @@ _IN_RANGE_CASES = (
     (r"值取自x.C:\p 一处", "值取自x." + MASK + " 一处"),
 )
 
-# 各判据（生产网、oracle、三把探测器）在同一条抽样表上必须给同一个"有没有盘符路径"。
+# 各判据（生产网、oracle、endpoint 探测器那几把）在同一条抽样表上必须给同一个"有没有盘符路径"。
 # `+ - .` 各占一枚、字母紧贴一枚、数字紧贴一枚；`9:\a` 钉的是"盘符档是**单字母**"——字符类
 # 一旦加宽成 `[A-Za-z0-9]`，生产网在这里认出盘符而 oracle 不认，抽样表当场分家；URL 与路径
 # 同句两枚钉的是"同一句里有掩码时不许再补一刀"；`C://x/y` 与 `错误在at-C://p 处` 是豁免的两侧。
@@ -218,20 +243,30 @@ _LOCK_BLIND_SPOTS = (
 # 对照组：绑定锁对它说"认得"的那个形状是真认得到——没有这一枚，上面那串"点不到名"是尺子在空转。
 _DISCOVERABLE_COPY = "import re\n_DRIVE_PATH = re.compile(r'[A-Za-z]:(?!//)[/]')\n"
 
-# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对 backend 的路径 → 常量名）。这张表的射程不由
-# 它自己说——由 `_scanned_drive_rule_sites()` 现扫出来跟它比（见
-# `test_the_drive_rule_roster_is_the_whole_scanned_range`）；点名器认不到的形状见 `_LOCK_BLIND_SPOTS`。
+# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对仓库根的路径 → 常量名）。这张表的射程不由它
+# 自己说——由 `_scanned_drive_rule_sites()` 拿仓库的被跟踪清单现扫出来跟它比（见
+# `_tracked_python_files` 与 `test_the_drive_rule_roster_is_the_whole_scanned_range`）；而这张表
+# 本身必须是人手抄的字面量，由 `test_the_roster_is_a_hand_copied_literal_not_a_derived_table`
+# 钉住（派生出来的表恒真、不含信息）。点名器认不到的形状见 `_LOCK_BLIND_SPOTS`。
 _DRIVE_RULE_SITES = {
-    "app/core/pathmask.py": {"_WIN_PATH"},
-    "tests/test_pathmask.py": {"_ORACLE"},
-    "tests/test_selfcheck.py": {"_DRIVE_PATH"},
-    "tests/test_update_channel.py": {"_DRIVE_PATH"},
-    "tests/test_apk_self_host_cache.py": {"_DRIVE_PATH"},
+    "backend/app/core/pathmask.py": {"_WIN_PATH"},
+    "backend/tests/test_pathmask.py": {"_ORACLE"},
+    "backend/tests/test_selfcheck.py": {"_DRIVE_PATH"},
+    "backend/tests/test_update_channel.py": {"_DRIVE_PATH"},
+    "backend/tests/test_apk_self_host_cache.py": {"_DRIVE_PATH"},
 }
 
-# 射程锁现扫的范围（相对 backend 的 glob 模式）。要放大射程就正面往这里加一条模式，
-# 别在锁里另写一份范围。
-_DRIVE_RULE_SCAN_SCOPES = ("app/**/*.py", "tests/*.py")
+# 射程的唯一来源：仓库自己声明的被跟踪清单，whole-repo，不带任何按目录收窄的 pathspec。这一行
+# argv 里没有目录可拧——要收窄射程就得正面改它，而改窄会让下限锁（两头不在清单上、清单没严格
+# 包住名单）与射程锁的"在册却扫不到"方向同时报红。`-z` 让路径按原始字节 NUL 分隔输出（不转义
+# 非 ASCII 文件名）。
+# 后缀只按 `.py` 取，因为尺子是 `ast.parse`（非 `.py` 的跟踪文件属结构性够不到，见模块
+# docstring 的锁级看不见清单）。
+_GIT_LS_FILES = ("git", "ls-files", "-z")
+
+# 原地改写手抄表的方式：`_DRIVE_RULE_SITES.update(...)` 这类调用与重新赋值同样让"每一条都是人
+# 登记的"失真，所以点名它们的地方要能红。
+_ROSTER_MUTATORS = ("update", "setdefault", "pop", "popitem", "clear", "discard", "add")
 
 # 点认识的形状：`[A-Za-z]` 后面紧跟 `:`，或先收掉包着它的那枚右括号再跟 `:`
 # （`(?P<drive>[A-Za-z]):` 是 oracle 与探测器的写法）。
@@ -279,28 +314,131 @@ def _discovered_sites():
     """按 `_DRIVE_RULE_SITES` 那份名单逐文件点名，返回 {路径: {常量名: 字面量}}。"""
     sites = {}
     for rel in _DRIVE_RULE_SITES:
-        source = (_BACKEND / rel).read_text(encoding="utf-8")
+        source = (_REPOSITORY / rel).read_text(encoding="utf-8")
         for name, literal in _drive_rule_literals(source, rel):
             sites.setdefault(rel, {})[name] = literal
     return sites
 
 
-def _scanned_drive_rule_sites():
-    """不读名单、自己按 `_DRIVE_RULE_SCAN_SCOPES` 现扫，返回 {(相对路径, 常量名): 字面量}。
+def _roster_assignments():
+    """本文件源码里所有对 `_DRIVE_RULE_SITES` 这个名字动手的地方，返回 [(节点, 目标)]。
 
-    用的尺子与绑定锁同一把（`_drive_rule_literals`），所以两把锁对"什么算一盘符判据"没有两套
-    口径；范围也只从 `_DRIVE_RULE_SCAN_SCOPES` 取，名单在这把尺子之外没有任何发言权。
+    走 `ast.walk` 而不是只看模块顶层：藏在 `if`/`try` 里的第二次赋值、下标赋值
+    （`_DRIVE_RULE_SITES[...] = ...`）与原地改写（`.update(...)`、`.setdefault(...)`）都会把
+    "这张表每一条都是人登记的"这句变成假话，所以一律算一处动手，由 `test_the_roster_is_a_hand_copied_literal_not_a_derived_table`
+    判它红。读的正是本文件自己的源码（`Path(__file__)`），不落盘、不 import 别的测试模块。
+    """
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"),
+                     filename=Path(__file__).resolve().name)
+    touched = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                base = target
+                while isinstance(base, (ast.Subscript, ast.Attribute)):
+                    base = base.value
+                if isinstance(base, ast.Name) and base.id == "_DRIVE_RULE_SITES":
+                    touched.append((node, target))
+        elif isinstance(node, ast.Attribute) and node.attr in _ROSTER_MUTATORS:
+            base = node.value
+            while isinstance(base, (ast.Subscript, ast.Attribute)):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id == "_DRIVE_RULE_SITES":
+                touched.append((node, node))
+    return touched
+
+
+def _literal_string_leaves(node):
+    """字面量容器往下逐片叶子：全是字符串常量就返回叶子表，碰到别的东西一律 None。
+
+    `ast.Call`（把名单写成扫描结果派生）、`ast.Name`、任何推导式/生成器、`*` 与 `**` 展开
+    （`ast.Dict` 里 `**` 的那一格 key 就是 None）、非字符串常量都会得到 None——也就是"这不是
+    人手抄的"。
+    """
+    if isinstance(node, ast.Constant):
+        return [node.value] if isinstance(node.value, str) else None
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        leaves = []
+        for element in node.elts:
+            if isinstance(element, ast.Starred):
+                return None
+            nested = _literal_string_leaves(element)
+            if nested is None:
+                return None
+            leaves.extend(nested)
+        return leaves
+    if isinstance(node, ast.Dict):
+        leaves = []
+        for pieces in zip(node.keys, node.values):
+            for piece in pieces:
+                nested = _literal_string_leaves(piece)
+                if nested is None:
+                    return None
+                leaves.extend(nested)
+        return leaves
+    return None
+
+
+def _tracked_python_files():
+    """仓库自己声明的被跟踪 `.py` 清单（相对仓库根）——射程的唯一来源。
+
+    跑的是不带 pathspec 的 `git ls-files -z`：argv 里没有任何目录或模式可拧，这份清单只能由
+    仓库决定，改这个测试文件本身缩不了它。`.py` 的取舍发生在 Python 侧，因为尺子是
+    `ast.parse`——非 Python 的跟踪文件属结构性够不到，已经写进模块 docstring 的锁级看不见清单。
+
+    取不到就响亮报红：不 skip、也不退回任何手写范围当兜底。`git archive` 抽出来的副本不是仓库
+    （`git ls-files` 在那里退非零），那种形态下这把锁**就该红**——它无法证明自己罩住了全仓。
+    """
+    try:
+        proc = subprocess.run(_GIT_LS_FILES, cwd=str(_REPOSITORY), capture_output=True,
+                              text=True, encoding="utf-8")
+    except OSError as exc:
+        raise AssertionError(
+            "`git ls-files` 根本跑不起来（" + repr(exc) + "）：射程的来源取不到 ⇒ 红。这把锁不许 "
+            "skip，也不许退回手写范围——要么在能问出被跟踪清单的形态里跑，要么正面回答射程由谁定。")
+    if proc.returncode != 0:
+        raise AssertionError(
+            "`git ls-files` 退出码 " + str(proc.returncode) + "（stderr: "
+            + (proc.stderr or "").strip() + "）：这里不是 git 仓库 ⇒ 被跟踪清单问不出来（`git archive`"
+            " 抽出的副本、或没带 `.git` 的导出目录就是这一形）。射程自证不了就是红，不 skip、"
+            "不退回手写范围。")
+    tracked = proc.stdout.split("\0")
+    files = tuple(sorted(path for path in tracked if path.lower().endswith(".py")))
+    if not files:
+        raise AssertionError(
+            "`git ls-files` 退出码 0 却一个被跟踪的 `.py` 都没列出来：射程是空的，而空的射程罩不住"
+            "任何一处手抄 ⇒ 红（这条绿了也没有意义）。")
+    return files
+
+
+def _scanned_drive_rule_sites():
+    """不读名单、自己按仓库的被跟踪清单现扫，返回 {(相对仓库根路径, 常量名): 字面量}。
+
+    用的尺子与绑定锁同一把（`_drive_rule_literals`），所以点名与现扫对"什么算一盘符判据"没有两套
+    口径，"谁抄了尺子"也就没有第二处可抄；范围只从 `_tracked_python_files()` 取，名单在这把尺子
+    之外没有任何发言权。清单里的 `.py` 读不出来或 `ast.parse` 过不去 ⇒ 红而不是跳过：那种情况下
+    这一站从射程里静默消失，而自证锁最怕的就是静默消失。
     """
     found = {}
+    unreadable = []
     with warnings.catch_warnings():
         # 扫到的是别人的源码文本，不是本锁的产物：被点名的模块自带 `\` 转义写法时会往测试输出里
         # 塞一条 SyntaxWarning，把人的注意力引到"要去改那个模块"上。这里只读字面量，不作答。
         warnings.simplefilter("ignore", SyntaxWarning)
-        for pattern in _DRIVE_RULE_SCAN_SCOPES:
-            for path in sorted(_BACKEND.glob(pattern)):
-                rel = path.relative_to(_BACKEND).as_posix()
-                for name, literal in _drive_rule_literals(path.read_text(encoding="utf-8"), rel):
-                    found[(rel, name)] = literal
+        for rel in _tracked_python_files():
+            try:
+                pairs = _drive_rule_literals((_REPOSITORY / rel).read_text(encoding="utf-8"), rel)
+            except (OSError, SyntaxError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+                unreadable.append((rel, type(exc).__name__))
+                continue
+            for name, literal in pairs:
+                found[(rel, name)] = literal
+    assert not unreadable, (
+        "被跟踪清单里有 `.py` 现扫读不出字面量 " + str(unreadable)
+        + "：读不到就意味着这一站从射程里静默消失，而"
+        "「`_DRIVE_RULE_SITES` 等于全仓手抄」这句自证恰恰需要它。把那个文件修得能 parse，"
+        "或正面把它从跟踪清单里摘掉（那会红在射程锁的另一个方向上）。")
     return found
 
 # 对照组：这条**在射程内**，所以"看不见"那串必须能和它区分开——尺子要是连它都量不到，
@@ -364,7 +502,7 @@ def test_every_hand_copied_drive_rule_is_bound_to_production():
     探测器与生产网同构时它瞎在网瞎的同一处，那几把 endpoint 锁就退化成恒绿自证；而"把探测器
     改窄一点（删掉豁免、换个 lookbehind、少一类字符）"这种改动原本全仓没有任何一把锁会红。
     这里补的就是那把锁：先按名单点名（在册的抄本变了形 ⇒ 不一致；名单本身有没有被人摘短、
-    子树里有没有新抄一把没登记，由下面那把射程锁管），再把每把抽出来的字面量编译起来，
+    被跟踪清单里有没有新抄一把没登记，由下面那把射程锁管），再把每把抽出来的字面量编译起来，
     在 `_DRIVE_EQUIVALENCE_CASES` 上要求它与生产网给同一个答案
     ——改窄（对 `错误在at-C:\\Users\\a` 失明）与改宽（遇合法 URL 恒红）两个方向都会红。抽取
     fidelity 自己也被钉住：生产网与 oracle 那两站抽出来的字面量必须与在用的判据一字不差。
@@ -376,8 +514,8 @@ def test_every_hand_copied_drive_rule_is_bound_to_production():
         + "，实点 " + str(sorted(got.items())) + "）：新增一处手抄就把它登记进 `_DRIVE_RULE_SITES`，"
         "删掉一处就连名单一起删；判据换了形状（见 `_LOCK_BLIND_SPOTS`）就正面回来改点名的形状。")
     in_use = {
-        "app/core/pathmask.py": _WIN_PATH.pattern,
-        "tests/test_pathmask.py": _ORACLE.pattern,
+        "backend/app/core/pathmask.py": _WIN_PATH.pattern,
+        "backend/tests/test_pathmask.py": _ORACLE.pattern,
     }
     for rel, literals in sorted(discovered.items()):
         for name, literal in sorted(literals.items()):
@@ -391,14 +529,16 @@ def test_every_hand_copied_drive_rule_is_bound_to_production():
 
 
 def test_the_drive_rule_roster_is_the_whole_scanned_range():
-    """射程锁：`_DRIVE_RULE_SITES` 必须正好等于现扫出来的那一批盘符判据，三个方向分开报。
+    """射程锁：`_DRIVE_RULE_SITES` 必须正好等于现扫出来的那一批盘符判据，不对称的方向分开报。
 
     绑定锁只读名单里列的那几份文件，所以"把名单摘短、一条断言不动"能让它对着变小的射程继续
     宣称全仓手抄逐把同判——名字里那句"全仓"要靠这把射程锁兑现。这里把名单和
-    `_DRIVE_RULE_SCAN_SCOPES` 里现扫的结果放在一起比，红话按不对称的方向分：在册的文件里冒出
-    没登记的常量名 ⇒ 有人新抄了一把（或把在册那把改了名）；扫到的文件整条不在名单里 ⇒ 要么
-    新抄本没登记，要么有人把 `_DRIVE_RULE_SITES` 那一行摘掉了而判据还留在原地；名单登记了却
-    扫不到 ⇒ 那一站的判据被删、改名或换成了点名器认不到的形状，名单陈旧。
+    `_tracked_python_files()`（`git ls-files` 的被跟踪清单）里现扫的结果放在一起比，红话按不对称
+    的方向分：在册的文件里冒出没登记的常量名 ⇒ 有人新抄了一把（或把在册那把改了名）；扫到的文件
+    整条不在名单里 ⇒ 要么新抄本没登记，要么有人把 `_DRIVE_RULE_SITES` 那一行摘掉了而判据还留在
+    原地；名单登记了却扫不到 ⇒ 那一站的判据被删、改名或换成了点名器认不到的形状，名单陈旧。
+    射程的来源是仓库的被跟踪清单而不是本文件里的模式串，所以"只把范围改窄"这一格没有落点：
+    清单缩了而名单没跟着缩 ⇒ 红在"名单登记了、现扫点不到"那个方向上。
     """
     scanned = set(_scanned_drive_rule_sites())
     registered = {(rel, name) for rel, names in _DRIVE_RULE_SITES.items() for name in names}
@@ -418,6 +558,89 @@ def test_the_drive_rule_roster_is_the_whole_scanned_range():
         "名单登记了、现扫点不到 " + str(stale)
         + "：那一站的判据被删了、改了名，或换成了点名器认不到的形状（见 `_LOCK_BLIND_SPOTS`）。"
         "真删了就连名单一起删；换形状就改点名的形状，别让名单比射程长。")
+
+
+def test_the_scanned_range_reaches_both_ends_of_the_binding_lock():
+    """下限锁：现扫射程必须同时够到绑定锁的两头——生产网那一处与本文件 oracle 那一处。
+
+    射程的来源换成被跟踪清单之后，"名单与范围一起缩"还剩三条落点：把 `_GIT_LS_FILES` 那行 argv
+    换成按目录收窄的 pathspec；在 Python 侧把清单按路径过滤；把那一页从跟踪里摘掉
+    （`git rm --cached`，文件仍留在盘上）——再各自删掉 `_DRIVE_RULE_SITES` 里对应的行。名单与
+    扫到集合仍然相等，而 `_ORACLE` 或那几把 endpoint 探测器从此没人比对，绑定锁退化成
+    `_WIN_PATH` 跟自己比。这一枚钉的就是那个下限：两头都必须在被跟踪清单上、且必须在现扫结果里
+    带着自己那份在用的字面量；清单还必须**严格包住**名单（清单若就是从名单取来的，两边一样大，
+    射程的来源又回到了这份文件自己手里）。够不到、或包住关系不成立 ⇒ 红，不管名单被删成什么样。
+    """
+    ends = (("生产网 `_WIN_PATH`", Path(_pathmask.__file__).resolve(), _WIN_PATH.pattern),
+            ("本文件的 oracle `_ORACLE`", Path(__file__).resolve(), _ORACLE.pattern))
+    relative = {}
+    outside_repository = []
+    for label, path, _ in ends:
+        try:
+            relative[label] = path.relative_to(_REPOSITORY).as_posix()
+        except ValueError:
+            outside_repository.append((label, str(path)))
+    assert not outside_repository, (
+        "绑定锁的两头不住在本仓库里 " + str(outside_repository) + "：那射程自证的是另一个检出的"
+        "代码，这句「全仓手抄同判」没有意义 ⇒ 红（`_REPOSITORY` 取自本文件的上上级目录）。")
+    tracked = set(_tracked_python_files())
+    untracked_ends = sorted((label, relative[label]) for label, _path, _ in ends
+                            if relative[label] not in tracked)
+    assert not untracked_ends, (
+        "绑定锁的两头里这些**不在被跟踪清单上**：" + str(untracked_ends)
+        + "。被跟踪清单就是射程的唯一来源，两头都不在清单上 ⇒ 清单被人为收窄了"
+        "（改 `_GIT_LS_FILES` 的 argv、或在 Python 侧过滤 `git ls-files` 的输出都算）；"
+        "这不是放大射程，是把射程摘掉。正面把 argv 恢复成不带 pathspec 的 `git ls-files -z`。")
+    named = set(_DRIVE_RULE_SITES)
+    assert named < tracked, (
+        "被跟踪清单没有**严格包住**名单：名单里不在清单上的那几页 " + str(sorted(named - tracked))
+        + "；清单 " + str(len(tracked)) + " 个 `.py`、名单 " + str(len(named))
+        + " 页。射程必须比名单大得多——清单是仓库的全部 `.py`，名单只是其中确实抄了判据的那几页。"
+        "两个集合一样大（或名单更长）只可能是清单从名单取来的，那射程的来源又回到这份文件自己"
+        "手里，正是这把锁要消灭的东西。")
+    scanned = _scanned_drive_rule_sites()
+    unreachable = []
+    for label, _path, pattern in ends:
+        rel = relative[label]
+        literals = [literal for (found_rel, _name), literal in scanned.items() if found_rel == rel]
+        if pattern not in literals:
+            unreachable.append((label, rel))
+    assert not unreachable, (
+        "两头在被跟踪清单上、现扫却拿不到它那份在用的字面量 " + str(unreachable)
+        + "：要么这一站被从射程里滤掉了，要么这一站的判据换成了点名器认不到的形状"
+        "（见 `_LOCK_BLIND_SPOTS`）。两种都意味着绑定锁正在对着越来越小的射程宣称全仓同判。")
+
+
+def test_the_roster_is_a_hand_copied_literal_not_a_derived_table():
+    """手写钉：`_DRIVE_RULE_SITES` 必须是源码里人手抄出来的字面量，右侧派生就红。
+
+    这张表的全部价值在于每一条都是**人登记的**：写成 `_DRIVE_RULE_SITES = _scanned_drive_rule_sites()`
+    这种派生形状，射程锁那句"名单等于扫到的集合"就变成同一个表达式跟自己比——恒真、不含信息，
+    于是"删名单三行 = 摘锁而全量不红"回来了（本文件 docstring 的锁级清单里那句"这张表的射程不由
+    它自己说"在派生形状下就是假话）。这里只认 `ast.Assign` 绑一个/几个字面量容器、且往下的叶子
+    只有字符串常量；右侧是 Call、Name、推导式、`*`/`**` 展开，或"先手抄、再 `_DRIVE_RULE_SITES.update(...)`
+    原地改写"这种第二处赋值 ⇒ 红。
+    """
+    hits = _roster_assignments()
+    assert len(hits) == 1, (
+        "`_DRIVE_RULE_SITES` 在本文件里被赋值或原地改写了 " + str(len(hits))
+        + " 处（行号 " + str(sorted({node.lineno for node, _ in hits}))
+        + "）：这张表只许被人手写一次。第二处无论是条件里再赋一遍、`.update()` 补几行还是"
+        "先手抄再派生，都让「这张表每一条都是人登记的」这句失真。")
+    node, target = hits[0]
+    assert isinstance(node, ast.Assign), (
+        "`_DRIVE_RULE_SITES` 那一处不是裸赋值（" + type(node).__name__
+        + "）：带注解或增强的赋值会绕开这里对右侧形状的检查，先恢复成 `NAME = ...`。")
+    assert isinstance(target, ast.Name) and target.id == "_DRIVE_RULE_SITES", (
+        "`_DRIVE_RULE_SITES` 被写成了下标或属性赋值（" + ast.dump(target)
+        + "）：那是在原地改写手抄表，不是手抄。")
+    leaves = _literal_string_leaves(node.value)
+    assert leaves, (
+        "`_DRIVE_RULE_SITES` 的右侧不是一张非空的纯字面量表（右侧节点 "
+        + type(node.value).__name__ + "）。只有 `Tuple`/`List`/`Set`/`Dict` 这类字面量容器、"
+        "且往下每片叶子都是字符串常量才算手抄；Call（`_scanned_drive_rule_sites()`）、Name、"
+        "推导式、`*`/`**` 展开一律红——派生出来的名单恒真，不含任何「人登记过这一处」的信息。"
+        "新增一处手抄就把它按现有的形状人肉写全，减一处就手动删那一行。")
 
 
 @pytest.mark.parametrize("case_id,sample,today,why", _STILL_MISSED_SHAPES,
