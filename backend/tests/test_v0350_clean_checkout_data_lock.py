@@ -7,17 +7,22 @@
 本文件量两件事，判据都朝"这份检出里没有 data/"那一句。**两半条认得的形状要正面写清**，
 别把它们读成"这个目录里所有读点都审过了"：
 
-1. **静态**只认这一种读点：路径在**模块级**被绑成一个常量、常量的值里含 `data` 这个字面量
-   （`REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"`），读点写成 `<那个名字>.read_bytes()`
-   这种**属性调用**，而且存在性判据（`exists()` / `is_file()` / `is_dir()`）与读点落在**同一个
-   函数作用域**内、守卫的行号**不晚于**读点那条语句——或者就写在同一条语句里（三元式
-   `x.read_bytes() if x.exists() else None` 是本批既有的写法）。缺文件是一种取值，不是异常。
-2. **动态**只认这一种函数：**模块级**定义、**零参数**、函数体里对上面那个常量**既有读点又有
-   存在性判据**。把它绑到的数据路径换成一条**不存在**的路径（干净检出的形状），它必须回
-   `(None, None)`，不许抛。
+1. **静态**只认这一种读点：路径在**模块级**被绑成一个常量——绑法只认 `ast.Assign` 的**单个
+   `Name` 目标**（`REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"`），带注解的
+   `REPO_DATA_TASKS: Final = …`（AnnAssign）认不出来，把 `data` 那一段拆成另一枚常量再拼进来
+   （`DATA_SUBDIR = "data"`）也认不出来，两格都在清单里；认的条件是**值里含 `data` 这个字面量**，
+   读点写成 `<那个名字>.read_bytes()` 这种**属性调用**，而且存在性判据（`exists()` / `is_file()`
+   / `is_dir()`）与读点落在**同一个函数作用域**内、守卫的行号**不晚于**读点那条语句——或者就写在
+   同一条语句里（三元式 `x.read_bytes() if x.exists() else None` 是本批既有的写法）。缺文件是一种
+   取值，不是异常。
+2. **动态**只认这一种函数：**模块级的 `def`**（`ast.FunctionDef`；`async def` 根本不枚举，那一格
+   在清单里）、**零参数**、函数体里对上面那个常量**既有读点又有存在性判据**。把它绑到的数据路径
+   换成一条**不存在**的路径（干净检出的形状），它必须回 `(None, None)`，不许抛。
 
 认不到的形状逐条记在 `_STILL_MISSED_SHAPES` 那份清单里，每条配一枚"今天必须看不见"的钉子
-（`test_the_declared_blind_spots_are_actually_blind`）：谁把这些形状收进判据而没回来改清单，
+（`test_the_declared_blind_spots_are_actually_blind`；另有两枚把钉子的**落点**钉到机制上——
+间接格认出的名字、async 格的同步对照，防止"看不见"其实是合成源码写坏了）：谁把这些形状收进
+判据而没回来改清单，
 钉子就红；清单不是"已穷尽"，它只覆盖复验过的那几种形状。另有两格与形状无关的边界：静态按
 文本顺序判，会放过"问了却没用上答案"那一种，那种由动态这半条兜；两半条都不覆盖 CI 本身——
 真跑一遍干净检出得在仓库外做克隆（仓库永远带着 `data/`，本文件自己也一样），也不覆盖
@@ -250,6 +255,26 @@ def test_dynamic_ruler_bites_when_the_answer_is_not_used(tmp_path):
 _HDR = 'import os\nfrom pathlib import Path\nREPO_ROOT = Path(".")\n' \
        'REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"\n'
 
+# 间接格：把 `data` 那一段拆成另一枚模块级常量，真路径常量的值里就不再写着 data。
+_DATA_SEGMENT_INDIRECTION = (
+    'import os\nfrom pathlib import Path\nREPO_ROOT = Path(".")\nDATA_SUBDIR = "data"\n'
+    'REPO_DATA_TASKS = REPO_ROOT / DATA_SUBDIR / "tasks.json"\n'
+    'def _repo_data_state():\n'
+    '    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns\n')
+# async 格：同款函数体三种写法——同步对照 / async 带守卫（钉"看不见"用）/ async 不带守卫
+# （量"静态那半条其实认得 async 体里的读点"用）。
+_SYNC_SNAPSHOT_HELPER_TWIN = _HDR + (
+    'def _repo_data_state():\n'
+    '    return (REPO_DATA_TASKS.read_bytes()\n'
+    '            if REPO_DATA_TASKS.exists() else None), None\n')
+_ASYNC_SNAPSHOT_HELPER_GUARDED = _HDR + (
+    'async def _repo_data_state():\n'
+    '    return (REPO_DATA_TASKS.read_bytes()\n'
+    '            if REPO_DATA_TASKS.exists() else None), None\n')
+_ASYNC_SNAPSHOT_HELPER_UNGUARDED = _HDR + (
+    'async def _repo_data_state():\n'
+    '    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns\n')
+
 _STILL_MISSED_SHAPES = (
     ("param-hand-off",
      _HDR + 'def g(p):\n    return p.read_bytes()\n'
@@ -292,6 +317,36 @@ _STILL_MISSED_SHAPES = (
      "它只遍历模块级赋值。动态侧同理，`run_snapshot_helper` 往探针命名空间里塞的也只有模块级"
      "那批名字，函数内绑定的读点在两半条里都是隐形。本批唯一的函数内 data 段绑定是本文件自己的"
      "`target_dir = tmp_path / …`，那是 tmp 下的假数据根，不是仓库路径 ⇒ 无活例"),
+    ("data-segment-indirection",
+     _DATA_SEGMENT_INDIRECTION,
+     "`data` 那一段拆成另一枚模块级常量再拼进路径：`_data_bound_names` 认的是赋值的**值里含 `data` "
+     "字面量**，而 `REPO_ROOT / DATA_SUBDIR / \"tasks.json\"` 的值里只剩 `tasks.json`，于是真路径"
+     "常量整个陌生、名单里躺着的是谁都没被读过的 `DATA_SUBDIR`。两半条同时看不见这一格：静态报不出"
+     "读点、动态连快照函数都枚举不到，于是那条无守卫的读点在干净检出里抛 FileNotFoundError——CI "
+     "照样红，只是红成一串不报 `文件:行号` 的裸异常，这把锁不响，`test_the_ruler_actually_sees_"
+     "this_batch` 也照绿。与 `alias-then-read` 那一格不是同一格：那条是 `ALIAS = "
+     "REPO_DATA_TASKS`（值是 Name，真常量仍被认到、只是换了个陌生名字去读），这条是真常量自己进不了"
+     "名单，所以 `alias-then-read` 盖不住这一格。本批（乃至整个 tests 目录）扫过模块级 `X = \"data\"` 这种段"
+     "常量：零命中 ⇒ 无活例"),
+    ("annotated-assignment",
+     'import os\nfrom pathlib import Path\nREPO_ROOT = Path(".")\n'
+     'REPO_DATA_TASKS: Final = REPO_ROOT / "data" / "tasks.json"\n'
+     'def _repo_data_state():\n'
+     '    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns\n',
+     "带注解的模块级绑定是 `ast.AnnAssign`，`_data_bound_names` 只吃 `ast.Assign` 且单 `Name` 目标 "
+     "⇒ 名单是空的，`unguarded_read_sites` 开头 `if not names: return []` 就直接退了，两半条一起瞎，"
+     "那条读点护没护着根本没人问。正面声明里那句\"模块级被绑成一个常量\"讲的就是这个 `ast.Assign` "
+     "单目标。本批模块级 AnnAssign 零命中（批内有带注解的绑定，都在函数里，那种本来就在 "
+     "`function-scope-binding` 那一格的射程外）⇒ 无活例"),
+    ("async-snapshot-helper",
+     _ASYNC_SNAPSHOT_HELPER_GUARDED,
+     "只漏**动态**那半条：`snapshot_helpers` 只枚举 `ast.FunctionDef`，`async def` 的快照函数进不了"
+     "名单 ⇒ `test_snapshot_helpers_answer_an_absent_data_path` 对它一条判据都不跑，它面对不存在的 "
+     "data/ 抛不抛、回不回 `(None, None)` 没人问。静态那半条**认得** async 函数体里的读点"
+     "（`_enclosing_function` 两种函数都吃），所以这里的合成源码刻意**带守卫**，好让上面那枚钉子只"
+     "钉动态那一格——把守卫摘掉静态就会报读点，那不是这一格的漏（对照量在 "
+     "`test_the_async_gap_is_the_async_not_the_shape`）。本批有 `async def`，但没有一个 async 函数"
+     "同时带 data 读点与存在性判据（= 没有 async 快照函数），识别到的读点全在同步 `def` 里 ⇒ 无活例"),
 )
 
 # 对照组：尺子对"它说它认得"的那个形状是真认得——没有这一枚，上面那一串"看不见"就可能是
@@ -312,3 +367,41 @@ def test_the_declared_blind_spots_are_actually_blind():
             "%s 的动态那半条已经覆盖，清单里该删这一条" % name)
     assert len(unguarded_read_sites(_RECOGNIZED_SHAPE, "<control>")) == 1, (
         "连对照组都判不出读点 ⇒ 上面那一串「看不见」是尺子在空转，不是射程外")
+
+
+def test_the_data_segment_indirection_is_blind_by_name_not_by_accident():
+    """间接格钉到机制上：这一格里尺子认出的名字必须恰是那枚装着 `data` 段的中间常量。
+
+    只判"看不见"不够——看不见也可能是合成源码自己写坏了（值里没有 `data` 段、读点拼错名字），
+    那枚钉子就是假的、绿得没有意义。这里把**为什么**看不见钉住：名单必须正好是 `DATA_SUBDIR`。
+    哪天判据学会顺着名字把段拼回路径（射程收了这一格），名单里就会多出真路径常量、这里红，
+    清单里那条该删；名单空了同样红，红的是"这枚钉子不再指着这一格"。
+    """
+    names = _data_bound_names(ast.parse(_DATA_SEGMENT_INDIRECTION))
+    assert names == {"DATA_SUBDIR"}, (
+        "间接格里尺子认出的名字是 %s，不再是只有那枚中间常量：认出真路径常量说明射程已经收了这一格、"
+        "清单里该删那条；一个都不认说明合成源码与判据脱钩了，这根钉子是假的" % sorted(names))
+    assert unguarded_read_sites(_DATA_SEGMENT_INDIRECTION, "<synth>") == [], (
+        "data 段间接格已经看得见，清单里该删这一条")
+    assert not snapshot_helpers(_DATA_SEGMENT_INDIRECTION, "<synth>")[2], (
+        "data 段间接格的动态那半条已经覆盖，清单里该删这一条")
+
+
+def test_the_async_gap_is_the_async_and_not_the_shape():
+    """async 那一格只漏动态半条：同款函数体写成 `def` 就被枚举、写成 `async def` 就不被枚举。
+
+    少了这组对照，那句"看不见"可能瞎在别处（比如函数体根本不像快照函数、零参数没判上），
+    也没法说清静态那半条其实是**认得** async 函数体里读点的——声明要讲准，就得当场各量一次。
+    """
+    assert [n.name for n in snapshot_helpers(_SYNC_SNAPSHOT_HELPER_TWIN, "<control>")[2]] == [
+        "_repo_data_state"], (
+        "对照组（同步 def 的同款函数体）不再被枚举成快照函数：动态那半条瞎的地方变了，"
+        "上面那枚 async 钉子的落点得重挑")
+    for source, tag in ((_ASYNC_SNAPSHOT_HELPER_GUARDED, "<synth>"),
+                        (_ASYNC_SNAPSHOT_HELPER_UNGUARDED, "<synth-unguarded>")):
+        assert not snapshot_helpers(source, tag)[2], (
+            "async 快照函数已经被枚举了：射程收了这一格，清单里该删那条")
+    assert len(unguarded_read_sites(_ASYNC_SNAPSHOT_HELPER_UNGUARDED, "<synth>")) == 2, (
+        "静态那半条对 async 函数体里的读点不再报两枚：清单里那句「静态认得 async 体里的读点」"
+        "与测量不一致了，改声明或改判据，别留着")
+
