@@ -27,7 +27,9 @@ A4 要交付的第一个真工具，必须在 A4 之前关掉。
 
 ⚠️ 本机作业纪律：这个仓库目录**同时是生产机**。每条用例的任务表都在 `tmp_path` 里
 （`isolated_tasks`），最后一条把 `resolve_all_data_paths()` 逐条量在临时根内，并直接对
-仓库真 `data/tasks.json` 的字节 + mtime 前后对一遍，反例喂的是**手工造的**清单。
+仓库真 `data/tasks.json` 的字节 + mtime 前后对一遍，反例喂的是**手工造的**清单。那份真
+库只在本机才有——干净检出（CI 就是）里没有 `data/`，于是它对 `_repo_data_state()` 是
+`(None, None)`，判据不变：这一趟链路要么一个字都不写，要么写了就被对比逮住。
 """
 import copy
 import json
@@ -717,6 +719,17 @@ def test_control_neutered_trust_check_would_redeliver(t37_tools, stub, monkeypat
 
 # ---------- ⚠️ 本机作业纪律：整个文件只写在自己的临时根里 ----------
 
+def _repo_data_state():
+    """仓库那份真库的（字节, mtime）；它不在时是 (None, None)，不读路径也不建路径。
+
+    这份清单是每条用例自己那份 `tmp_path/tasks.json` 的**旁证**，不是用例的输入，
+    所以干净检出里没有 `data/` 时它必须照样能问——缺文件是一种取值，不是异常。
+    """
+    if not REPO_DATA_TASKS.exists():
+        return None, None
+    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns
+
+
 def _paths_outside(pairs, allowed_roots):
     repo = os.path.realpath(str(REPO_ROOT)) + os.sep
     offenders = []
@@ -731,10 +744,9 @@ def _paths_outside(pairs, allowed_roots):
 
 
 def test_this_file_writes_only_inside_its_own_temp_root(t37_tools, stub, tmp_path):
-    """跑完整条 #37 链路之后，每一个可变数据落点仍在临时根内；真库逐字节 + mtime 未动。"""
+    """跑完整条 #37 链路之后，每一个可变数据落点仍在临时根内；仓库那份真库逐字节 + mtime 未动。"""
     orch = _orchestrator()
-    before_bytes = REPO_DATA_TASKS.read_bytes()
-    before_mtime = REPO_DATA_TASKS.stat().st_mtime_ns
+    before_bytes, before_mtime = _repo_data_state()
 
     task, _ = _park_through_the_breakpoint(orch)
     _fill_freq_gate("t37_gate", _UID)
@@ -753,5 +765,8 @@ def test_this_file_writes_only_inside_its_own_temp_root(t37_tools, stub, tmp_pat
     assert hostile in _paths_outside([hostile], allowed), "尺子没牙：反例都没报出来"
     assert _paths_outside([("任务清单", os.environ["TASKS_DB_PATH"])], allowed) == []
 
-    assert REPO_DATA_TASKS.read_bytes() == before_bytes, "真库的字节被改过"
-    assert REPO_DATA_TASKS.stat().st_mtime_ns == before_mtime, "真库被原样重写过一次"
+    after_bytes, after_mtime = _repo_data_state()
+    assert after_bytes == before_bytes, (
+        f"真库的字节被改过（本机没有那份时，这一句证明这一趟也没**造**出它）："
+        f"before={before_bytes is not None} after={after_bytes is not None}")
+    assert after_mtime == before_mtime, "真库被原样重写过一次"

@@ -711,6 +711,17 @@ def test_the_endpoint_path_resumes_a_failed_breakpoint_without_re_paying(
     assert ts.get_task(b1["task_id"]).user_id == uid
 
 
+def _repo_data_state():
+    """仓库那份真库的（字节, mtime）；它不在时是 (None, None)，不读路径也不建路径。
+
+    这份清单是每条用例自己那份 `tmp_path/tasks.json` 的**旁证**，不是用例的输入，
+    所以干净检出里没有 `data/` 时它必须照样能问——缺文件是一种取值，不是异常。
+    """
+    if not REPO_DATA_TASKS.exists():
+        return None, None
+    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns
+
+
 def _paths_outside(pairs, allowed_roots):
     """这些实际落点里有几条不该要它：不在允许的临时根内，或干脆落在仓库里。"""
     repo = os.path.realpath(str(REPO_ROOT)) + os.sep
@@ -733,11 +744,11 @@ def test_this_file_writes_only_inside_its_own_temp_root(t33_tools, stub, tmp_pat
     绿是没牙的。反例绝不真的把 `TASKS_DB_PATH` 改成仓库路径（本目录同时是生产机，
     那一刻之后任何一次 flush 都会写进真 `data/tasks.json`）。
     最后一句直接对仓库那份文件比字节 + mtime：路径判据说"不在这里"，这句证明"这里
-    没被写过"。
+    没被写过"。那份真库只在本机存在——干净检出里没有 `data/`，此时上面两句量到的都是
+    (None, None)，判据随之变成"这一趟也没凭空造出它"。
     """
     orch = _orchestrator()
-    before_bytes = REPO_DATA_TASKS.read_bytes()
-    before_mtime = REPO_DATA_TASKS.stat().st_mtime_ns
+    before_bytes, before_mtime = _repo_data_state()
 
     task, _ = _park_through_the_breakpoint(orch, uid=_UID)
     _break_after_the_claim(orch, stub, task)
@@ -754,8 +765,11 @@ def test_this_file_writes_only_inside_its_own_temp_root(t33_tools, stub, tmp_pat
     assert _paths_outside([("任务清单", os.environ["TASKS_DB_PATH"])], allowed) == [], \
         "合法那条也被报了，上面那句红就没有区分度"
 
-    assert REPO_DATA_TASKS.read_bytes() == before_bytes, "真库的字节被改过"
-    assert REPO_DATA_TASKS.stat().st_mtime_ns == before_mtime, "真库被原样重写过一次"
+    after_bytes, after_mtime = _repo_data_state()
+    assert after_bytes == before_bytes, (
+        f"真库的字节被改过（本机没有那份时，这一句证明这一趟也没**造**出它）："
+        f"before={before_bytes is not None} after={after_bytes is not None}")
+    assert after_mtime == before_mtime, "真库被原样重写过一次"
 
 
 def resolve_pairs():
