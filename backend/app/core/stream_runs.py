@@ -314,9 +314,13 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
 
 # ---------- 跨属主补帧的隐私边界（v0.29.1） ----------
 
+# 带用户内容的帧必须在**引入它的那一笔**里一起进这个名单：这个名单是按类型名逐条命中的，
+# 不在名单里的帧跨属主补帧时逐字节透出，而"没人记得登记"和"故意公开"在出口上看不出来。
+# 下一笔要走这里的是 waiting_user（它带 question，同样是用户那句话的衍生物）。
 PRIVATE_TRACE_FRAME_TYPES = frozenset({
     stream_events.FRAME_THINKING, stream_events.FRAME_TOOL_CALL,
     stream_events.FRAME_TOOL_RESULT, stream_events.FRAME_SEARCH,
+    stream_events.FRAME_APPROVAL_REQUEST,
 })
 
 
@@ -331,7 +335,7 @@ def scrub_private_trace(frames: Generator[str, None, None]) -> Generator[str, No
     任何 /v1/sessions，逐条路由见 tests/test_cross_owner_replay_scrubs_trace_v0291.py），
     不该由"给同一轮多加了四种帧"顺手扩大。
 
-    只在出口做减法：那三类帧整条不吐（连 `id:` 行一起，序号因此留空档——两个
+    只在出口做减法：名单里的帧整条不吐（连 `id:` 行一起，序号因此留空档——两个
     客户端都按 data 行的 type 分发、按 id 记游标，空档不影响下次续播），done 里
     的 trace 字段删掉，骨架字段一个不动，所以旧客户端照旧拿到完整正文与终帧。
     """

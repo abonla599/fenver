@@ -365,7 +365,9 @@ def test_client_frames_is_exactly_the_names_the_contract_can_build():
     """
     constant_values = {getattr(se, name) for name in dir(se)
                        if name.startswith("FRAME_") and isinstance(getattr(se, name), str)}
-    assert constant_values == FRAME_NAMES, (
+    # NON_CLIENT_FRAMES 是显式豁免：那些名字有常量但没有两端的分发臂（登记它就得同时改壳）。
+    # 豁免不等于没立场——每一条都必须进跨属主隐私名单，那一半由名义上守它的用例钉着。
+    assert constant_values - set(se.NON_CLIENT_FRAMES) == FRAME_NAMES, (
         f"FRAME_* 常量与 CLIENT_FRAMES 对不上：常量侧 {sorted(constant_values)}，"
         f"清单侧 {sorted(FRAME_NAMES)}")
     assert len(se.CLIENT_FRAMES) == len(FRAME_NAMES), f"CLIENT_FRAMES 里有重复项：{se.CLIENT_FRAMES}"

@@ -377,7 +377,8 @@ def check_leak_quarantine(repo_root: str):
       不需要人再数一遍；
     - `probe-undecidable`：某个 ref 的祖先关系判不出来。**判不出来就不是干净**，不放行；
     - `refs-unenumerable`：连 ref 清单都列不出来（这个目录到底是不是仓库都答不上来），
-      那就没有一条判据谈得上"通过"。
+      那就没有一条判据谈得上"通过"；清单列出来了却是**空的**（既无 tag 也无分支头）
+      也在这一档——没扫过任何 ref 的绿灯同样是"通过"这两个字没有依据。
 
     逐个 ref 一次 `merge-base` 是 O(refs) 次 git 调用——一次发版只跑一遍，慢不是问题，
     漏才是。只读，一个字节都不写。
@@ -385,6 +386,12 @@ def check_leak_quarantine(repo_root: str):
     refs, why = pushable_refs(repo_root)
     if refs is None:
         return False, "refs-unenumerable", "列不出可推送的 ref 清单：%s（%s）" % (why, repo_root)
+    if not refs:
+        # 一个 ref 都没列到＝一个都没扫到，而这一格的绿灯说的是"扫过的都干净"。
+        # 空清单给不出这个证明，所以和"列不出来"同一档处理：判不出来，不放行。
+        return False, "refs-unenumerable", (
+            "这份仓库里既没有本地 tag 也没有分支头（%s）——没有任何可推送的 ref 被扫过，"
+            "'没有一个能走到被隔离的提交'这句话就没有依据" % repo_root)
     offenders, offender_commits, undecidable = [], [], []
     for commit in QUARANTINED:
         for ref in refs:
