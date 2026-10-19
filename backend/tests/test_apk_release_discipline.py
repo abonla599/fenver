@@ -8,6 +8,10 @@
 这里还住着全仓共用的那把剥注释尺子（`_strip_java_comments` / `_code`）：Java/Kotlin
 的源码形状锁不许各抄一份正则，尺子只有一把，`test_the_comment_ruler_needs_its_own_test`
 钉着这件事。分文件之后它跟着上线模块走，不跟着退役的壳走。
+
+`tools/*.ps1` 那两处禁字判据不在这把尺子的射程里（`#` 与 `//`、`/* */` 不是同一种散文），它们
+import `test_swap_package_contract_v0291._line_comment_free`——同样是不许另造正则的那条规矩，
+只剥 `(?m)^[ \t]*#.*$` 那一层、行数与原文一一对应。
 """
 
 import os
@@ -16,6 +20,8 @@ import shutil
 from pathlib import Path
 
 import pytest
+
+from tests.test_swap_package_contract_v0291 import _line_comment_free
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -185,8 +191,10 @@ def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
         assert 'storeType "PKCS12"' in signing, \
             f"{mod}：storeType 不再写死：JDK 默认值一改，gradle 就会拿 JKS 去读一把 PKCS12"
 
-    # 两边说的是同一件事：生成脚本也得显式写 PKCS12，不能靠 keytool 的默认值
-    generator = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    # 两边说的是同一件事：生成脚本也得显式写 PKCS12，不能靠 keytool 的默认值。判的是剥掉整行
+    # `#` 注释之后还在的那一行——脚本的注释里合法地在解释"为什么写死格式"，那句话不算实现。
+    generator = _line_comment_free(
+        (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8"))
     assert "-storetype PKCS12" in generator, \
         "生成脚本靠 JDK 默认格式，而 gradle 写死了 PKCS12——两边有一边会先漂"
 
@@ -356,11 +364,37 @@ def test_the_keystore_generator_refuses_to_overwrite():
 
     丢了这把钥匙没有补救办法：从此每个新包都是新签名，所有装过的人都要先卸载。
     一个"顺手再跑一次"就把这件事做掉的脚本，比没有脚本更危险。
+
+    **射程**：三句都吃 `_line_comment_free` 剥过整行 `#` 注释的那一份（母本在
+    test_swap_package_contract_v0291.py，这里 import 它、不另造正则），判的是代码行——原文里
+    注释与代码长得一样，"删掉 `exit 2` 那行、注释里留着这句话"就替真代码答到了。行尾挂的注释与
+    `<# ... #>` 块注释内部仍留在面上，那两条记在 test_v0350_lock_comment_stripping_scope 的清单里。
     """
-    script = (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8")
+    script = _line_comment_free(
+        (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8"))
     assert "REFUSING TO OVERWRITE" in script, "覆盖前不再拦一道"
     assert "exit 2" in script, "拦下来却不以非零退出：脚本照样被下一步当成成功"
     assert "-validity 10000" in script, "证书有效期缩短会让未来的包签不上（Android 要求签名证书有效到 2033 之后）"
+
+
+def test_the_ps1_locks_read_code_lines_not_comment_lines():
+    """**成对夹具**（R9）：同一串只写在 `#` 行里 ⇒ 命中归 0；写在代码行里 ⇒ 命中。
+
+    那两处 `.ps1` 禁字判据迁到 `_line_comment_free` 之后必须仍然绿，而"仍然绿"要有证据才算数：
+    这一组把两个方向各钉一枚——只有注释时判据读不到（旧写法会读到），代码行原样时读得到
+    （尺子没在空转）。行数一一对应也在这里钉：那族判据判的是行号，剥注释不许改行数。
+    """
+    commented = "# -storetype PKCS12\n# REFUSING TO OVERWRITE\n"
+    code_lines = "        -storetype PKCS12\n    Write-Output 'REFUSING TO OVERWRITE'\n"
+    for token in ("-storetype PKCS12", "REFUSING TO OVERWRITE"):
+        assert token in commented and token in code_lines, (
+            "夹具没把这两串写进原文（这一跑作废）")
+        assert token not in _line_comment_free(commented), (
+            "整行 `#` 注释没被剥掉：%s 那处判据又吃回原文，删真行留注释照样绿" % token)
+        assert token in _line_comment_free(code_lines), (
+            "代码行也被剥掉了 ⇒ 尺子在空转，上面那句「读不到」不算证据")
+    assert len(_line_comment_free(commented).splitlines()) == len(commented.splitlines()), (
+        "剥注释改动了行数：所有行号判据从此与原文对不上")
 
 
 def test_the_ci_test_step_names_the_lock_that_went_red(tmp_path):
