@@ -21,6 +21,7 @@
 
 import json
 import os
+import re
 
 OK = "ok"
 DEGRADED = "degraded"
@@ -171,17 +172,52 @@ CHECKS = (
 )
 
 
+_PATH_MASK = "〈路径已隐去〉"
+# 路径里允许出现的字符 = 除空格与中文标点之外的可见字符。边界要卡在这里：
+# 后半句中文说明紧跟着路径，把它一起吃掉就等于"这句话为什么少了一截"没人说得清。
+_SEG = r"[^\s，。；、：\"'（）()<>｜|]"
+_WIN_PATH = re.compile(rf"[A-Za-z]:[\\/]{_SEG}*")
+_UNC_PATH = re.compile(rf"\\\\{_SEG}+")
+# 只认这些首段的 POSIX 路径：`/data/x` 是路径，`/v1/memory` 与 `/health` 是路由名，
+# 把后者也换成掩码等于把"去哪儿看这条接口"这类正常说明改坏。
+_POSIX_ROOTS = ("home|users|usr|var|private|tmp|opt|root|data|mnt|srv|app|"
+                "volumes|workspace|repo")
+_POSIX_PATH = re.compile(rf"/(?:{_POSIX_ROOTS})/{_SEG}*", re.IGNORECASE)
+
+
+def _hide_paths(text: str) -> str:
+    """把绝对路径换成明写的掩码（见 _scrub 的理由与边界）。"""
+    if not text:
+        return text
+    # 盘符路径先走：`C:\\Users\\…` 这种转义写法里也含成对反斜杠，UNC 规则先跑会把
+    # 整个路径从中间截断、把开头的 `C:` 留在外面。
+    out = _WIN_PATH.sub(_PATH_MASK, text)
+    out = _UNC_PATH.sub(_PATH_MASK, out)
+    return _POSIX_PATH.sub(_PATH_MASK, out)
+
+
 def _scrub(detail: str) -> str:
     """出口脱敏。它自己读不动时宁可整条丢掉。
 
     `/health` 免鉴权，而"密钥库读不动"恰恰是本文件要报的那类故障——脱敏依赖
     密钥库，于是它可能正好在报错的那一刻坏掉。这时候把详情原样发出去是失败开放，
     把详情换成一句"说不清"是失败封闭：宁可少说，不可把别人的 key 说给路人听。
+
+    路径这一层为什么也要在出口补一道：详情里最不可控的一句是
+    `memory_init_error`，那是第三方异常原文（chroma 读盘失败会把库路径写进
+    OSError 的 message），不是我们能逐字改写的文案。`scrub_secrets` 挡的是凭据
+    形状，路径既不是凭据也不在它的模式里，于是一句绝对路径能原样走到公开端点上。
+
+    为什么换成一个明写的掩码而不是悄悄删掉，也不用 logsanitizer 登记数据根：
+    删掉会让"这句话为什么少了一截"没人说得清；登记进 logsanitizer 则是把同一段
+    文字在 **server.log 里**一起打码，而运维查"数据到底落在哪"恰恰要看那一句
+    （见 memory_manager 初始化成功那行与 paths 的启动摘要）。出口的网只对
+    公开端点生效，日志那份原样保留。
     """
     from app.core.providers import scrub_secrets
 
     try:
-        return scrub_secrets(detail)
+        return _hide_paths(scrub_secrets(detail))
     except Exception:
         return "（详情无法安全呈现）"
 

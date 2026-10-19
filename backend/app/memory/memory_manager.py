@@ -148,19 +148,31 @@ class MemoryManager:
         stored_dim = stored.get("embedding_dim")
         stored_model = stored.get("embedding_model")
 
+        def private_where(which: str) -> None:
+            """把"是哪两个后端、哪个库"补进日志：这两样都指认得出这台机器和嵌入供应商，
+            而异常原文会随自检出现在免鉴权的 /health 上。运维做判断要的维度数字
+            留在对外那句里，位置与模型名只写这里（server.log 不出公网）。
+            """
+            print(f"⚠️ 记忆库{which}的可定位细节（仅日志）：库路径 {self.persist_dir}、"
+                  f"集合记录 {stored_model or '未知'}/{stored_dim} 维、"
+                  f"当前后端 {self.embed_model}/{self.embed_dim} 维")
+
         if stored_dim and str(stored_dim) != str(self.embed_dim):
-            raise RuntimeError(logsanitizer.redact(
-                f"记忆库嵌入维度冲突：collection '{name}' 以 {stored_dim} 维"
-                f"（模型 {stored_model or '未知'}）建立，当前后端返回 {self.embed_dim} 维"
-                f"（模型 {self.embed_model}）。请固定使用同一嵌入后端，"
-                f"或删除 {self.persist_dir} 重建（会丢失已有记忆）。"
-            ))
+            private_where("嵌入维度冲突")
+            raise RuntimeError(
+                f"记忆库嵌入维度冲突：collection '{name}' 以 {stored_dim} 维建立，"
+                f"当前后端返回 {self.embed_dim} 维。两个后端的向量空间不通用，"
+                "请固定使用同一嵌入后端，或重建记忆库（会丢失已有记忆）；"
+                "库位置与两端模型名见服务端日志。"
+            )
         if stored_model and stored_model != self.embed_model:
-            raise RuntimeError(logsanitizer.redact(
-                f"记忆库嵌入模型冲突：collection '{name}' 由 {stored_model} 建立，当前为 "
-                f"{self.embed_model}。两者维度相同但向量空间不通用，混用会让检索结果失真，"
-                f"请固定使用同一嵌入后端，或删除 {self.persist_dir} 重建（会丢失已有记忆）。"
-            ))
+            private_where("嵌入模型冲突")
+            raise RuntimeError(
+                f"记忆库嵌入模型冲突：collection '{name}' 由较早的另一枚嵌入模型建立，"
+                "当前后端换成了另一枚。两者维度相同但向量空间不通用，混用会让检索结果"
+                "失真，请固定使用同一嵌入后端，或重建记忆库（会丢失已有记忆）；"
+                "具体模型名见服务端日志。"
+            )
         if not stored_model or not stored_dim:
             try:
                 collection.modify(metadata=expected)

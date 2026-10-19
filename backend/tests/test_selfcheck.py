@@ -8,7 +8,10 @@
 所以这里两头都锁：坏东西必须被报出来（各条正向对照），以及**状态码不许跟着判决走**
 （否则"配错了密钥"会变成看门狗每分钟重启一次后端，而重启修不好配置）。
 """
+import getpass
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -224,3 +227,93 @@ def test_no_absolute_paths_leak_into_the_public_answer(client):
     """另一处泄露面：进程目录结构。探针要的判据是 ok/不 ok，不是这台机器长什么样。"""
     body = json.dumps(client.get("/health").json(), ensure_ascii=False)
     assert "Users" not in body and "\\" not in body, body
+
+
+# ------------------------------------------------ 记忆初始化失败也不许报机器长相 --
+
+# collection 元数据里那枚"建库时用的哪款嵌入模型"是探针最想白捡的信息（哪家在替我们
+# 做嵌入），拿一个假名当它的气味探针，真冲突了就知道它有没有跟着异常原文出来。
+CANARY_MODEL = "vendorx-embed-9k"
+REPO_DIR_NAME = Path(__file__).resolve().parents[2].name
+_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+# 模型名的形状：连字符/下划线分隔的三段以上 ASCII 标识符（text-embedding-3-small、
+# all-MiniLM-L6-v2 都是这一族）。单段或两段（user_memories）不算，免得把集合名当模型名。
+_MODEL_SHAPED = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+){2,}", re.IGNORECASE)
+
+
+def _a_real_dimension_conflict(tmp_path):
+    """真的让 MemoryManager 起坏一次，拿它实际抛出的那句原文与库根位置。
+
+    先按 1536 维把 collection 建好（元数据里的模型名换成假名），再拿一枚 3 维的
+    注入向量去开它——走的正是 `_open_collection` 那条维度判据。库根只落在
+    tmp_path，绝不碰仓库里那份 chroma_db。
+    """
+    import chromadb
+
+    from app.memory.memory_manager import MemoryManager
+
+    root = tmp_path / "chroma-conflict"
+    seed = chromadb.PersistentClient(path=str(root))
+    seed.create_collection("user_memories", metadata={
+        "embedding_model": CANARY_MODEL,
+        "embedding_dim": "1536",
+        "hnsw:space": "cosine",
+    })
+    with pytest.raises(RuntimeError) as caught:
+        MemoryManager(persist_dir=str(root), embedding_fn=lambda _text: [0.1, 0.2, 0.3])
+    return str(caught.value), str(root)
+
+
+def test_a_real_memory_init_failure_never_describes_the_machine(client, tmp_path, monkeypatch):
+    """免鉴权端点上唯一一句由异常原文拼出来的详情，必须说不出这台机器长什么样。
+
+    上面那条 `test_no_absolute_paths_leak_into_the_public_answer` 检不到这一格：
+    pytest 下记忆后端恒走内存替身分支，真实的库路径压根没机会出现在详情里。
+    这里把真 manager 起坏一次，再把它抛出的原话摆进 memory_init_error，然后按
+    "任何路人打到 /health 能读到的一切"来断言——序列化整份响应体，不是只看某一句。
+    """
+    from app.memory import memory_router
+
+    message, root = _a_real_dimension_conflict(tmp_path)
+    assert "1536" in message and "3 维" in message, \
+        "冲突的可判断依据被改没了：维度数字是运维唯一需要的部分"
+
+    monkeypatch.setattr(memory_router, "memory_manager", None, raising=False)
+    monkeypatch.setattr(memory_router, "memory_init_error", message, raising=False)
+
+    body = json.dumps(client.get("/health").json(), ensure_ascii=False)
+    item = json.loads(body)["checks"]["记忆后端"]
+    assert item["status"] == BROKEN, item
+    assert "维度冲突" in item["detail"], item
+
+    for forbidden in (root, getpass.getuser(), REPO_DIR_NAME, CANARY_MODEL, "chroma_db"):
+        assert forbidden not in body, f"{forbidden} 被公开端点回显了：{body}"
+    assert not _DRIVE_PATH.search(body), body
+    assert not _MODEL_SHAPED.search(json.dumps(item, ensure_ascii=False)), item
+
+
+def test_the_exit_net_hides_paths_from_error_text_we_did_not_write(client, monkeypatch):
+    """第二层守的是"我们改不动的那句"。
+
+    memory_init_error 是第三方异常的原文：chroma/SQLite 读盘失败会把库路径写进
+    OSError 的 message 里，措辞不在我们手里。scrub_secrets 的模式只认凭据形状，
+    绝对路径压根不在射程内——所以出口这里补一道，且只掩路径那一段：整句吞掉等于
+    把故障说成"说不清"，明写的掩码才让人知道后半句还在、只是位置不能公开。
+    """
+    from app.memory import memory_router
+
+    bs = chr(92)
+    windows = "C:" + bs + "Users" + bs + "someone" + bs + "proj" + bs + "chroma_db"
+    posix = "/home/someone/proj/chroma_db"
+    monkeypatch.setattr(memory_router, "memory_manager", None, raising=False)
+    monkeypatch.setattr(memory_router, "memory_init_error",
+                        f"attempt to write a readonly database（{windows}），另有 {posix} 一处读不动",
+                        raising=False)
+
+    body = json.dumps(client.get("/health").json(), ensure_ascii=False)
+    item = json.loads(body)["checks"]["记忆后端"]
+    assert item["status"] == BROKEN, item
+    assert "readonly database" in item["detail"], "整句被吞了：该隐去的只有路径"
+    assert "〈路径已隐去〉" in item["detail"], item
+    assert windows not in body and posix not in body, body
+    assert not _DRIVE_PATH.search(body), body
