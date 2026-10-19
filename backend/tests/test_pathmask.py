@@ -42,9 +42,15 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
 点名器（`_drive_rule_literals`）认的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现
 `[A-Za-z]` 紧跟 `:` 或 `]:`"；认不到的抄本既不被比对、也不会让绑定锁红。射程锁
 （`test_the_drive_rule_roster_is_the_whole_scanned_range`）把 `_DRIVE_RULE_SITES` 与**现扫**
-出来的盘符判据钉成同一批，而现扫的范围来自 `_tracked_python_files()`——`git ls-files` 的**被跟踪
-清单**（只按其后的 `.py` 后缀取），不是本文件里任何一处手写的目录或模式：这份名单由仓库决定，
-改这个测试文件本身缩不了它。取不到 git、清单为空、这里不是 git 仓库（`git archive` 抽出来的副本
+出来的盘符判据钉成同一批，而现扫的范围来自 `_tracked_python_files()`——`git ls-files` 答话的
+被跟踪清单，再由 Python 侧按 `.py` 后缀取。清单**内容**由仓库答话，不是本文件里手写的目录或模式
+串；可取清单的那行 argv 与做后缀取舍的那段 Python **都住在本文件里**，所以"改这个测试文件本身
+缩不了它"是假话：带目录的 pathspec、排除式 pathspec、不带 pathspec 时改后缀判据、取回后再按路径
+过滤，每一种都是收窄射程的落点。这些落点今天有没有牙要按实测形状分开说，不许笼统写成"拦得住"：
+被排除的那一截里**有**在册判据 ⇒ 两把同红（射程锁的"名单登记了、现扫点不到"方向，加下限锁的
+"清单没严格包住名单"）；射程与名单**同向一起缩** ⇒ 一把都不红；被排除的那一截本来就没在册判据
+⇒ 也不红。后两种连同第一种一起登记在下面那段设计决定里。取不到 git、清单为空、这里不是 git 仓库
+（`git archive` 抽出来的副本
 就是这一形）⇒ 一律响亮报红，不 skip、也不退回手写范围当兜底——那种形态下这把锁**就该红**，
 因为它无法证明自己罩住了全仓。所以"在册的那几处变了形""仓里新抄了一把没登记""把名单摘短而判据
 还在原地"都会红；下限锁（`test_the_scanned_range_reaches_both_ends_of_the_binding_lock`）再兜
@@ -60,13 +66,20 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
 返回 rc=1，带尾斜杠那句命中的是 `.gitignore:179` 那枚**空行**（AGENTS.md 第 3 条记过的 CR 假阳性），
 所以它不在射程里的理由是"仓库里没有这个东西"，不是"射程窄"；哪天真往 `scripts/` 里落了 `.py`
 并 `git add`，它自动进射程。
-还有一格是**设计决定**而不是形状漏，与 `_LOCK_BLIND_SPOTS` 无关：把 `_GIT_LS_FILES` 那行 argv
-换成按目录收窄的 pathspec、在 Python 侧把取回的清单按路径过滤、或把那一页从跟踪里摘掉
-（`git rm --cached`，文件仍留在盘上），**同时**把 `_DRIVE_RULE_SITES` 里对应的行删掉——三选一都
-能让除两头之外的某一把探测器抄本退出比对而全量不红（下限锁只担保绑定锁不退化成自比、清单严格
-包住名单，不担保每一把探测器都在射程内）。不给这一格配牙是有理由的：要配就得在本文件里再手写
-一份"必须够到的那五处"，那正好是这把锁要消灭的手抄名单本身；而这一格要求两处（射程来源与名单）
-同向改动，两处都在 diff 里，不是改一个旋钮就能静默摘锁。
+还有一格是**设计决定**而不是形状漏，与 `_LOCK_BLIND_SPOTS` 无关：射程来源就住在本文件里，所以
+"把范围改窄"有落点，而且落点不止一种写法。下面逐枚登记已实测的形状，每枚说清"谁、怎么做、除两头
+之外的哪一把探测器退出比对而全量不红"。前面几枚是射程与名单**同向一起缩**：把 `_GIT_LS_FILES`
+那行 argv 换成按目录收窄的 pathspec；在 Python 侧把取回的清单按路径过滤；把那一页从跟踪里摘掉
+（`git rm --cached`，文件仍留在盘上）；把 argv 换成排除式 pathspec
+（`git ls-files -z -- :(exclude)backend/tests/test_selfcheck.py`）——这一枚只把 `test_selfcheck`
+那把 endpoint 探测器请出比对，两头仍然都在清单上。这几种都要**同时**删掉 `_DRIVE_RULE_SITES`
+里对应的行：删完名单与扫到集合仍然相等，于是下限锁、射程锁、手写钉一起绿，而那把探测器从此没人
+比对。最后一种连名单都不必动：把 argv 换成 `git ls-files -z -- backend`，射程就从仓库的全部 `.py`
+缩到 `backend/` 底下，名单一字不改也全绿——仓库里 `backend/` 之外那几页跟踪 `.py` 恰好没抄判据，
+于是"全仓手抄同判"这句话悄悄不再为真，而 diff 里只有一行。所以"这一格要求射程与名单两处同向
+改动、不是改一个旋钮就能静默摘锁"也是假话：一枚旋钮就够。不给这一格配牙是有理由的：要配就得在
+本文件里再手写一份"必须够到的那些落点"清单，那正好是这把锁要消灭的手抄名单本身；而下限锁只担保
+绑定锁不退化成自比、清单严格包住名单，从来不担保每一把探测器都在射程内。
 - `copy-not-bound-to-a-module-level-name`：判据内联在调用里（`re.search(r'…', body)`）时点不到名——
   它不挂在模块级 `NAME = re.compile(...)` 上，遍历模块级赋值根本看不见这个判据。
 - `copy-assembled-at-runtime`：另一格，机制不同：名字挂对了，但实参是 `_HEAD + _SEP` 这种运行时
@@ -243,10 +256,13 @@ _LOCK_BLIND_SPOTS = (
 # 对照组：绑定锁对它说"认得"的那个形状是真认得到——没有这一枚，上面那串"点不到名"是尺子在空转。
 _DISCOVERABLE_COPY = "import re\n_DRIVE_PATH = re.compile(r'[A-Za-z]:(?!//)[/]')\n"
 
-# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对仓库根的路径 → 常量名）。这张表的射程不由它
-# 自己说——由 `_scanned_drive_rule_sites()` 拿仓库的被跟踪清单现扫出来跟它比（见
-# `_tracked_python_files` 与 `test_the_drive_rule_roster_is_the_whole_scanned_range`）；而这张表
-# 本身必须是人手抄的字面量，由 `test_the_roster_is_a_hand_copied_literal_not_a_derived_table`
+# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对仓库根的路径 → 常量名）。这张表与它的射程来源
+# （`_GIT_LS_FILES` 那行 argv、`_tracked_python_files` 里的后缀取舍）住在**同一个文件**里，所以它
+# 挡不住"表与射程一起改窄"，也挡不住"射程单独改窄而落点里没有在册判据"——这两格登记在模块
+# docstring 末尾的设计决定段，今天无牙。现扫的比对由 `_scanned_drive_rule_sites()` 拿仓库的被跟踪
+# 清单做（见 `_tracked_python_files` 与 `test_the_drive_rule_roster_is_the_whole_scanned_range`）；
+# 而这张表本身必须是人手抄的字面量，由
+# `test_the_roster_is_a_hand_copied_literal_not_a_derived_table`
 # 钉住（派生出来的表恒真、不含信息）。点名器认不到的形状见 `_LOCK_BLIND_SPOTS`。
 _DRIVE_RULE_SITES = {
     "backend/app/core/pathmask.py": {"_WIN_PATH"},
@@ -256,12 +272,19 @@ _DRIVE_RULE_SITES = {
     "backend/tests/test_apk_self_host_cache.py": {"_DRIVE_PATH"},
 }
 
-# 射程的唯一来源：仓库自己声明的被跟踪清单，whole-repo，不带任何按目录收窄的 pathspec。这一行
-# argv 里没有目录可拧——要收窄射程就得正面改它，而改窄会让下限锁（两头不在清单上、清单没严格
-# 包住名单）与射程锁的"在册却扫不到"方向同时报红。`-z` 让路径按原始字节 NUL 分隔输出（不转义
+# 射程的唯一来源：仓库自己声明的被跟踪清单，当前是 whole-repo、不带 pathspec。这一行 argv 就住在
+# 本文件里，所以它本身就是收窄射程的落点之一（带目录的 pathspec、排除式 pathspec 都写得出），下面
+# 那句后缀取舍与 Python 侧过滤同样是落点。牙只长在一种形状上，别说宽：只有当被排除的那一截里
+# **有**在册判据时改窄才红，实测是两把同红——射程锁红在"在册却扫不到"方向、下限锁红在名单不再被
+# 清单包住；射程与名单同向一起缩、或被排除的那一截本来就没在册判据 ⇒ 一把都不红（实测形状逐枚登记
+# 在模块 docstring 的设计决定段）。`-z` 让路径按原始字节 NUL 分隔输出（不转义
 # 非 ASCII 文件名）。
 # 后缀只按 `.py` 取，因为尺子是 `ast.parse`（非 `.py` 的跟踪文件属结构性够不到，见模块
 # docstring 的锁级看不见清单）。
+# 取清单是一次子进程探询而不是纯内存判据，所以要配超时：git 挂住时不能让整层测试挂在同一行上。
+# 挂了不答话与问不出来是同一格——都算射程的来源取不到，一律走下面那条 fail-closed 红话，不 skip、
+# 也不退回手写范围（形状照 `test_ci_history_depth.py` 的 `_PROBE_TIMEOUT_SECONDS` 先例）。
+_SCAN_TIMEOUT_SECONDS = 60
 _GIT_LS_FILES = ("git", "ls-files", "-z")
 
 # 原地改写手抄表的方式：`_DRIVE_RULE_SITES.update(...)` 这类调用与重新赋值同样让"每一条都是人
@@ -383,19 +406,24 @@ def _literal_string_leaves(node):
 def _tracked_python_files():
     """仓库自己声明的被跟踪 `.py` 清单（相对仓库根）——射程的唯一来源。
 
-    跑的是不带 pathspec 的 `git ls-files -z`：argv 里没有任何目录或模式可拧，这份清单只能由
-    仓库决定，改这个测试文件本身缩不了它。`.py` 的取舍发生在 Python 侧，因为尺子是
-    `ast.parse`——非 Python 的跟踪文件属结构性够不到，已经写进模块 docstring 的锁级看不见清单。
+    跑的是当前不带 pathspec 的 `git ls-files -z`：清单内容由仓库答话，但取清单的那行 argv 与
+    `.py` 后缀的取舍**都住在本文件里**，所以"改这个测试文件本身缩不了它"是假话——带目录的
+    pathspec、排除式 pathspec、不带 pathspec 时改后缀判据、取回后再按路径过滤，每一种都是收窄射程
+    的落点；与被排除那一截里的在册判据无关时（名单同向删行、或被排除的那一截本来没判据）就是静默
+    摘锁，今天无牙，见模块 docstring 的设计决定段。`.py` 的取舍之所以发生在 Python 侧，是因为尺子
+    是 `ast.parse`——非 Python 的跟踪文件属结构性够不到，已经写进模块 docstring 的锁级看不见清单。
+    argv 那行配了 `_SCAN_TIMEOUT_SECONDS`：探询挂住与问不出来同判。
 
     取不到就响亮报红：不 skip、也不退回任何手写范围当兜底。`git archive` 抽出来的副本不是仓库
     （`git ls-files` 在那里退非零），那种形态下这把锁**就该红**——它无法证明自己罩住了全仓。
     """
     try:
         proc = subprocess.run(_GIT_LS_FILES, cwd=str(_REPOSITORY), capture_output=True,
-                              text=True, encoding="utf-8")
-    except OSError as exc:
+                              text=True, encoding="utf-8", timeout=_SCAN_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssertionError(
-            "`git ls-files` 根本跑不起来（" + repr(exc) + "）：射程的来源取不到 ⇒ 红。这把锁不许 "
+            "`git ls-files` 根本跑不起来、或者在 " + str(_SCAN_TIMEOUT_SECONDS)
+            + " 秒内没答话（" + repr(exc) + "）：射程的来源取不到 ⇒ 红。这把锁不许 "
             "skip，也不许退回手写范围——要么在能问出被跟踪清单的形态里跑，要么正面回答射程由谁定。")
     if proc.returncode != 0:
         raise AssertionError(
@@ -537,8 +565,11 @@ def test_the_drive_rule_roster_is_the_whole_scanned_range():
     的方向分：在册的文件里冒出没登记的常量名 ⇒ 有人新抄了一把（或把在册那把改了名）；扫到的文件
     整条不在名单里 ⇒ 要么新抄本没登记，要么有人把 `_DRIVE_RULE_SITES` 那一行摘掉了而判据还留在
     原地；名单登记了却扫不到 ⇒ 那一站的判据被删、改名或换成了点名器认不到的形状，名单陈旧。
-    射程的来源是仓库的被跟踪清单而不是本文件里的模式串，所以"只把范围改窄"这一格没有落点：
-    清单缩了而名单没跟着缩 ⇒ 红在"名单登记了、现扫点不到"那个方向上。
+    射程的来源是仓库的被跟踪清单，可取清单的那行 argv 与 `.py` 后缀的取舍就住在**本文件**里，所以
+    "只把范围改窄"这一格**有落点**，而它今天拦不拦得住要按实测形状分开报：被排除的那一截里确实有
+    在册判据 ⇒ 这把锁红在"名单登记了、现扫点不到"这个方向，下限锁同时红在名单不再被清单包住；
+    名单同向一起缩、或被排除的那一截本来就没在册判据 ⇒ 两把都不红（实测形状逐枚登记在模块 docstring
+    的设计决定段）。
     """
     scanned = set(_scanned_drive_rule_sites())
     registered = {(rel, name) for rel, names in _DRIVE_RULE_SITES.items() for name in names}
@@ -563,9 +594,8 @@ def test_the_drive_rule_roster_is_the_whole_scanned_range():
 def test_the_scanned_range_reaches_both_ends_of_the_binding_lock():
     """下限锁：现扫射程必须同时够到绑定锁的两头——生产网那一处与本文件 oracle 那一处。
 
-    射程的来源换成被跟踪清单之后，"名单与范围一起缩"还剩三条落点：把 `_GIT_LS_FILES` 那行 argv
-    换成按目录收窄的 pathspec；在 Python 侧把清单按路径过滤；把那一页从跟踪里摘掉
-    （`git rm --cached`，文件仍留在盘上）——再各自删掉 `_DRIVE_RULE_SITES` 里对应的行。名单与
+    射程的来源换成被跟踪清单之后，"名单与范围一起缩"仍然有落点——已实测的那几种收窄写法逐枚登记在
+    模块 docstring 末尾的设计决定段，这里不重抄也不数（那种数会腐烂）。成对改动后名单与
     扫到集合仍然相等，而 `_ORACLE` 或那几把 endpoint 探测器从此没人比对，绑定锁退化成
     `_WIN_PATH` 跟自己比。这一枚钉的就是那个下限：两头都必须在被跟踪清单上、且必须在现扫结果里
     带着自己那份在用的字面量；清单还必须**严格包住**名单（清单若就是从名单取来的，两边一样大，
@@ -616,8 +646,8 @@ def test_the_roster_is_a_hand_copied_literal_not_a_derived_table():
 
     这张表的全部价值在于每一条都是**人登记的**：写成 `_DRIVE_RULE_SITES = _scanned_drive_rule_sites()`
     这种派生形状，射程锁那句"名单等于扫到的集合"就变成同一个表达式跟自己比——恒真、不含信息，
-    于是"删名单三行 = 摘锁而全量不红"回来了（本文件 docstring 的锁级清单里那句"这张表的射程不由
-    它自己说"在派生形状下就是假话）。这里只认 `ast.Assign` 绑一个/几个字面量容器、且往下的叶子
+    于是"把名单里那几行删掉 = 摘锁而全量不红"回来了（`_DRIVE_RULE_SITES` 上面那句"这张表与它的
+    射程来源住在同一个文件里"在派生形状下更是雪上加霜）。这里只认 `ast.Assign` 绑一个/几个字面量容器、且往下的叶子
     只有字符串常量；右侧是 Call、Name、推导式、`*`/`**` 展开，或"先手抄、再 `_DRIVE_RULE_SITES.update(...)`
     原地改写"这种第二处赋值 ⇒ 红。
     """
