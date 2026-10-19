@@ -11,7 +11,9 @@
    `Name` 目标**（`REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"`），带注解的
    `REPO_DATA_TASKS: Final = …`（AnnAssign）认不出来，把 `data` 那一段拆成另一枚常量再拼进来
    （`DATA_SUBDIR = "data"`）也认不出来，两格都在清单里；认的条件是**值里含 `data` 这个字面量**，
-   读点写成 `<那个名字>.read_bytes()` 这种**属性调用**，而且存在性判据（`exists()` / `is_file()`
+   读点写成 `<那个名字>.read_bytes()` 这种**属性调用**（方法名必须是挂在 `Attribute` 上的**字面量**：
+   把方法名递进 `getattr` / `methodcaller` 的那一族两半条都看不见，而**根名字正是被认出的那个
+   常量**，那一族也在清单里），而且存在性判据（`exists()` / `is_file()`
    / `is_dir()`）与读点落在**同一个函数作用域**内、守卫的行号**不晚于**读点那条语句——或者就写在
    同一条语句里（三元式 `x.read_bytes() if x.exists() else None` 是本批既有的写法）。缺文件是一种
    取值，不是异常。
@@ -20,8 +22,9 @@
    换成一条**不存在**的路径（干净检出的形状），它必须回 `(None, None)`，不许抛。
 
 认不到的形状逐条记在 `_STILL_MISSED_SHAPES` 那份清单里，每条配一枚"今天必须看不见"的钉子
-（`test_the_declared_blind_spots_are_actually_blind`；另有两枚把钉子的**落点**钉到机制上——
-间接格认出的名字、async 格的同步对照，防止"看不见"其实是合成源码写坏了）：谁把这些形状收进
+（`test_the_declared_blind_spots_are_actually_blind`；另有三枚把钉子的**落点**钉到机制上——
+间接格认出的名字、async 格的同步对照、动态派发格的"根名字就是被认出的那个常量"，
+防止"看不见"其实是合成源码写坏了）：谁把这些形状收进
 判据而没回来改清单，
 钉子就红；清单不是"已穷尽"，它只覆盖复验过的那几种形状。另有两格与形状无关的边界：静态按
 文本顺序判，会放过"问了却没用上答案"那一种，那种由动态这半条兜；两半条都不覆盖 CI 本身——
@@ -275,6 +278,29 @@ _ASYNC_SNAPSHOT_HELPER_UNGUARDED = _HDR + (
     'async def _repo_data_state():\n'
     '    return REPO_DATA_TASKS.read_bytes(), REPO_DATA_TASKS.stat().st_mtime_ns\n')
 
+# 动态派发族：读点的**方法名**是递进 getattr / methodcaller 的字符串，而 `_calls_in` 那一关只吃
+# `func` 是 `ast.Attribute` 的调用 ⇒ 静态报不出读点、动态也枚举不到快照函数，未守卫的那条读点在
+# 干净检出里照样抛 FileNotFoundError。三种拼法同一根因；对照组是同款函数体的静态派发写法
+# （`_SYNC_SNAPSHOT_HELPER_TWIN`）与同一函数体的 getattr 守卫版，落点由
+# `test_the_dynamic_dispatch_family_is_blind_at_the_method_end` 钉住。
+_DYNAMIC_DISPATCH_GETATTR = _HDR + (
+    'def _repo_data_state():\n'
+    '    return getattr(REPO_DATA_TASKS, "read_bytes")(), None\n')
+_DYNAMIC_DISPATCH_METHOD_NAME_IN_VAR = _HDR + (
+    'def _repo_data_state():\n'
+    '    method = "read_bytes"\n'
+    '    return getattr(REPO_DATA_TASKS, method)(), None\n')
+_DYNAMIC_DISPATCH_METHODCALLER = (
+    'import os\nfrom operator import methodcaller\nfrom pathlib import Path\n'
+    'REPO_ROOT = Path(".")\nREPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"\n'
+    'def _repo_data_state():\n'
+    '    return methodcaller("read_bytes")(REPO_DATA_TASKS), None\n')
+# 同一函数体、只把读点换成 getattr 递方法名的**带守卫**版：动态那半条连"既读又问"都枚举不到。
+_DYNAMIC_DISPATCH_GETATTR_GUARDED = _HDR + (
+    'def _repo_data_state():\n'
+    '    return (getattr(REPO_DATA_TASKS, "read_bytes")()\n'
+    '            if REPO_DATA_TASKS.exists() else None), None\n')
+
 _STILL_MISSED_SHAPES = (
     ("param-hand-off",
      _HDR + 'def g(p):\n    return p.read_bytes()\n'
@@ -347,6 +373,26 @@ _STILL_MISSED_SHAPES = (
      "钉动态那一格——把守卫摘掉静态就会报读点，那不是这一格的漏（对照量在 "
      "`test_the_async_gap_is_the_async_not_the_shape`）。本批有 `async def`，但没有一个 async 函数"
      "同时带 data 读点与存在性判据（= 没有 async 快照函数），识别到的读点全在同步 `def` 里 ⇒ 无活例"),
+    ("dynamic-dispatch-getattr",
+     _DYNAMIC_DISPATCH_GETATTR,
+     "方法名是**递进 getattr 的字符串**：`_calls_in` 只吃 `func` 为 `ast.Attribute` 的调用，"
+     "`getattr(REPO_DATA_TASKS, \"read_bytes\")()` 的 func 是 `Name(getattr)` ⇒ 静态报不出读点、"
+     "动态也枚举不到快照函数，那条无守卫的读点在干净检出里抛 FileNotFoundError 而两半条都不响。"
+     "**根名字正是被认出的那个常量**，所以它与 `inline-open`、`os-path-join` 两格不同源：那两格瞎在"
+     "根名字陌生（收进射程得动 `_data_bound_names`），这一族要动的是方法名那一端，那两格的判据一条"
+     "也不会跟着变。本批 `getattr(` 的命中都落在 AST 节点、枚举值与模块属性上，没有一枚挂在 data "
+     "路径常量的读点上 ⇒ 无活例"),
+    ("dynamic-dispatch-method-name-in-var",
+     _DYNAMIC_DISPATCH_METHOD_NAME_IN_VAR,
+     "同一根因的另一种拼法：方法名先存进**局部变量**再 getattr。字符串常量挪了位置不改变缺口"
+     "（判据看不见的方法名仍是方法名）；`function-scope-binding` 那一格讲的是**路径**在函数内绑定，"
+     "而这一格的路径仍是模块级那个被认出的常量，那一格盖不住它。本批扫过：没有把方法名存进变量再 "
+     "getattr 的读点 ⇒ 无活例"),
+    ("dynamic-dispatch-methodcaller",
+     _DYNAMIC_DISPATCH_METHODCALLER,
+     "`methodcaller(\"read_bytes\")(REPO_DATA_TASKS)`：外层调用的 `func` 是一个 `Call`、内层的 attr "
+     "是 `methodcaller`（不在 READ_METHODS）⇒ 两条都过不去 `_calls_in`，而根名字照样是被认出的"
+     "常量。本批 `methodcaller` 零命中 ⇒ 无活例"),
 )
 
 # 对照组：尺子对"它说它认得"的那个形状是真认得——没有这一枚，上面那一串"看不见"就可能是
@@ -404,4 +450,52 @@ def test_the_async_gap_is_the_async_and_not_the_shape():
     assert len(unguarded_read_sites(_ASYNC_SNAPSHOT_HELPER_UNGUARDED, "<synth>")) == 2, (
         "静态那半条对 async 函数体里的读点不再报两枚：清单里那句「静态认得 async 体里的读点」"
         "与测量不一致了，改声明或改判据，别留着")
+
+
+def test_the_dynamic_dispatch_family_is_blind_at_the_method_end(tmp_path):
+    """动态派发那一族：瞎的是**方法名**那一端，不是根名字——这一格必须钉到机制上才敢引用它。
+
+    `inline-open` 与 `os-path-join` 那两格也是"看不见"，但落点完全不同（根名字陌生），所以光靠
+    清单里那条通用钉子分不开这三格与那两格。这里各量一次：
+    ① 三种拼法的合成源码里，`_data_bound_names` 认出的名字必须**恰好**是那条 data 路径常量——
+       名单空了或换成了别的名字都说明源码与判据脱钩，那枚"看不见"是假的；
+    ② 对照组：同款函数体写成静态属性派发必须被枚举成快照函数，写成 getattr 递方法名（带守卫那版）
+       必须不被枚举 ⇒ 两次的差异只剩派发形态，不是"函数体本来就不像快照函数"；
+    ③ 代价当场量一次：把常量指向一条不存在的路径（干净检出的形状）单跑那三种写法，必须真抛
+       `FileNotFoundError`，而同一份源码在两半条判据里各报空——"CI 会红但不报 文件:行号"这句
+       不是相信出来的，是跑出来的。
+    """
+    for source, tag in ((_DYNAMIC_DISPATCH_GETATTR, "<getattr>"),
+                        (_DYNAMIC_DISPATCH_METHOD_NAME_IN_VAR, "<method-in-var>"),
+                        (_DYNAMIC_DISPATCH_METHODCALLER, "<methodcaller>")):
+        names = _data_bound_names(ast.parse(source))
+        assert names == {"REPO_DATA_TASKS"}, (
+            "%s 里尺子认出的名字是 %s，不再是那条 data 路径常量：这一族的落点变了（或合成源码与"
+            "判据脱钩了，那这枚钉子就是假的）" % (tag, sorted(names)))
+        assert unguarded_read_sites(source, tag) == [], (
+            "%s 的读点已经看得见，清单里该删这一条" % tag)
+        assert not snapshot_helpers(source, tag)[2], (
+            "%s 的动态那半条已经覆盖，清单里该删这一条" % tag)
+
+    assert [n.name for n in snapshot_helpers(_SYNC_SNAPSHOT_HELPER_TWIN, "<control>")[2]] == [
+        "_repo_data_state"], (
+        "对照组（静态属性派发的同款函数体）不再被枚举成快照函数：②里剩下的差异就不是派发形态了，"
+        "这枚钉子的落点得重挑")
+    assert not snapshot_helpers(_DYNAMIC_DISPATCH_GETATTR_GUARDED, "<synth>")[2], (
+        "带守卫的 getattr 版已经被枚举成快照函数：射程收了这一格，清单里该删那条")
+
+    # 单跑三种写法：被 exec 的只有那个函数体，源码里那行 `from operator import methodcaller` 不参与，
+    # 所以命名空间里补的是标准库同一个对象；REPO_DATA_TASKS 指向父目录都不在的路径 = 干净检出。
+    missing = tmp_path / "not-checked-out" / "tasks.json"
+    probe_globals = {"__name__": "dispatch_probe", "Path": Path, "os": os,
+                     "REPO_DATA_TASKS": missing,
+                     "methodcaller": __import__("operator").methodcaller}
+    for source, tag in ((_DYNAMIC_DISPATCH_GETATTR, "<getattr>"),
+                        (_DYNAMIC_DISPATCH_METHOD_NAME_IN_VAR, "<method-in-var>"),
+                        (_DYNAMIC_DISPATCH_METHODCALLER, "<methodcaller>")):
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef))
+        namespace = dict(probe_globals)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "<probe>", "exec"), namespace)
+        with pytest.raises(FileNotFoundError):
+            namespace["_repo_data_state"]()
 

@@ -26,9 +26,14 @@ admin 跨属主补帧时逐字节透出，而 `plan_summary` 是用户那句话�
   改成带结构的串时，红的是逐字节那枚（报"线上字节变了"），不是这把报"键集分叉"；
 - 把"取真身"那一段换成手抄一个字典 → 真跑那几枚判据红（假 LLM 的份数没被抽干、流里没有
   tool_result 与 content）；
+- 把逐字节那枚的比较改成"解析后相等"（`json.loads(引擎帧) == json.loads(frozen)`）、把它整枚摘掉、
+  或把它挪到键序那枚后面 → `test_the_byte_assertion_stays_byte_typed_and_stays_first` 红。这一枚
+  读的是**本文件的源码**而不是两份手抄互相咬合的结果：前一种走法在行为侧是全绿的（线上键序真的
+  变了，而解析相等看不出键序），所以牙得钉在写法上；
 - 往 NON_CLIENT_FRAMES 里加名字（哪怕同时补进隐私名单）→ 名单钉子红；
 - 豁免登记里留一条空理由 → 结构锁红（机器只判非空，判不了理由对不对）。
 """
+import ast
 import importlib
 import json
 import re
@@ -269,6 +274,11 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
     # 于是"两份手抄谁都没改键、只是某个值改了"能报成键集分叉——尺子被被判的对象喂了假键。
     # 反过来也不许滑成自证：键序读的是 frozen 这串**手写字节面**，`APPROVAL_FRAME` 一个字符
     # 都没参与拼它；把 frozen 改成从夹具字典 dumps 出来，两份手抄就合成一份，键序漂移再没人逮。
+    # 解析这一路自己也有一格看不见，别把它读成"比正则强所以随便用"：基准里同一把键手抄两遍时
+    # `json.loads` 静默去重，抄几遍在解析结果里都只剩一遍 ⇒ 键集与键序都对得上，这一格只由排在
+    # 它前面、比整串字节的逐字节那枚兜着。退回整串正则反解确实逮得到重复键，但假键能被喂进尺子
+    # （上面那行的理由原样成立），所以既不换写法也不动这两段的顺序——那两样由
+    # `test_the_byte_assertion_stays_byte_typed_and_stays_first` 钉成机器判据。
     baseline_keys = tuple(json.loads(frozen))
     assert tuple(APPROVAL_FRAME) == baseline_keys, (
         "两份手抄的审批帧键集/键序分叉了：夹具 %s vs 基准 %s——键序变了就是线上字节变了"
@@ -278,6 +288,78 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
           / "xyz" / "fenever" / "assistant" / "nativeapp" / "Api.kt").read_text(encoding="utf-8")
     assert '"approval_request"' in js, "网页侧不再认这一帧：老客户端会解析不到"
     assert '"approval_request" ->' in kt, "原生侧不再认这一帧：同上"
+
+
+# ------------------------------------------------ 逐字节那枚的牙（读自己的源码）--
+
+_WIRE_LOCK_FUNC = "test_approval_frame_wire_bytes_and_client_whitelists_unchanged"
+# 两枚的坐标：比较左侧那句"取引擎真身再成串"、键序那枚的等式本体。写法一改（换成解析后相等、
+# 整枚摘掉、合并、挪进 helper）都会让它从某条 Assert 的 test 里消失——坐标先红，比静默失牙好。
+_BYTE_ASSERT_MARK = "sse_data(_frame_the_engine_itself_builds"
+_KEY_ORDER_ASSERT_MARK = "tuple(APPROVAL_FRAME) == baseline_keys"
+
+
+def _wire_lock_node():
+    """从本文件源码里重读那把基准锁的函数节点：判据要看"这份文件怎么写"，不是运行时对象。"""
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    found = [n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name == _WIRE_LOCK_FUNC]
+    assert len(found) == 1, "基准锁不再是一个恰好一处的模块级函数：_WIRE_LOCK_FUNC 的坐标得跟着改"
+    return found[0]
+
+
+def _asserts_containing(node, mark):
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Assert) and mark in ast.unparse(n.test)]
+
+
+def _json_loads_calls(node):
+    """子树里那些 `json.loads(…)` 调用。"""
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "loads"
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "json"]
+
+
+def test_the_byte_assertion_stays_byte_typed_and_stays_first():
+    """逐字节那枚的牙挂在**写法与顺序**上，而这两样本来没有锁管——这里把它们钉成判据。
+
+    行为侧拦不住这一种走法：把 `se.sse_data(引擎帧) == "data: " + frozen + "\\n\\n"` 换成
+    `json.loads(引擎帧) == json.loads(frozen)`（看着更稳健，因为值相等还在），再挪一挪构造处的
+    键序——两份手抄解析完照样相等，这一把里每条行为断言全绿，而线上字节真的变了（老客户端按
+    位置解析就崩）。所以这一枚不比对两份手抄，它读 `Path(__file__)` 的源码，钉三件事：
+
+    ① 两枚都还在（各自恰好一条 Assert 命中坐标）——整枚摘掉、合并成一条、挪进 helper 都在这里红；
+    ② 逐字节那枚的行号**早于**键序那枚：键序那枚读的是解析结果，而 `json.loads` 对"基准里同一把
+       键抄两遍"是静默去重，抄几遍都只剩一遍 ⇒ 兜住这一格的只有先跑、且比整串字节的逐字节那枚；
+    ③ 逐字节那枚的比较对象是字符串：两侧子树里出现 `json.loads` 就是把"字节相等"换成了"解析后的
+       值相等"，键序与转义都不再进比较。
+
+    对照组是键序那一半本身：它**必须**从 `json.loads` 取键序（那正是它不会被假键喂进尺子的原因，
+    见函数体里那几行注释）。所以 ③ 只查逐字节这一枚，不许顺手推广到整把锁——把键序那枚改回正则
+    反解，红的是另一条道理，不是这一条。
+    """
+    fn = _wire_lock_node()
+    byte_hits = _asserts_containing(fn, _BYTE_ASSERT_MARK)
+    key_hits = _asserts_containing(fn, _KEY_ORDER_ASSERT_MARK)
+    assert len(byte_hits) == 1 and len(key_hits) == 1, (
+        "基准锁里这两枚的命中数不是各一枚（逐字节 %d、键序 %d）：坐标漂了或整枚没了，"
+        "先把它们改回各一条，本文件的自我判据才还在指着原来那两枚"
+        % (len(byte_hits), len(key_hits)))
+    byte_assert, key_assert = byte_hits[0], key_hits[0]
+    assert byte_assert.lineno < key_assert.lineno, (
+        "逐字节那枚跑到键序那枚后面了：键序读的是解析结果，基准里同一把键抄两遍会被 json.loads "
+        "静默去重，只有先跑且比整串的逐字节那枚逮得住——顺序也是牙的一部分，别重排这两段")
+    wrapped = _json_loads_calls(byte_assert.test)
+    assert not wrapped, (
+        "逐字节那枚（第 %s 行）的比较对象被包进了 json.loads：%s —— 解析后的相等看不出键序与"
+        "转义，线上字节变了它也会跟着绿；要改就改构造处那一侧，别把这边降级"
+        % (byte_assert.lineno, ast.unparse(byte_assert.test)))
+    key_order_source = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == "baseline_keys"
+                                for t in n.targets)]
+    assert len(key_order_source) == 1 and _json_loads_calls(key_order_source[0].value), (
+        "对照组不成立：键序那一半已经不是从 json.loads 取键序的了——上面 ③ 只查逐字节这一枚的"
+        "不对称没了依据，两枚的分工得重写")
 
 
 # ------------------------------------------------------------------ ④ 结构锁 --
