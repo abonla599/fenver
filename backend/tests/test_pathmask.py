@@ -38,9 +38,14 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
   `_VERBATIM_URLS` 钉着 ⇒ 无活例。
 
 **锁级看不见清单**（与 `_LOCK_BLIND_SPOTS` 同一本账，同样每条一枚钉，全部**今天必须点不到**）：
-绑定锁点名的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现 `[A-Za-z]` 紧跟 `:` 或 `]:`"；
-认不到的抄本既不被比对、也不会让绑定锁红。`_DRIVE_RULE_SITES` 与点名结果必须完全一致，所以
-"在册的那几处变了形"会红，"没登记的新抄本"不会。
+两把锁点名的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现 `[A-Za-z]` 紧跟 `:` 或 `]:`"；
+认不到的抄本既不被比对、也不会让绑定锁红。射程锁
+（`test_the_drive_rule_roster_is_the_whole_scanned_range`）把 `_DRIVE_RULE_SITES` 与
+`_DRIVE_RULE_SCAN_SCOPES` 那两棵子树里现扫出来的盘符判据钉成同一批，所以"在册的那几处变了形"
+和"子树里新抄了一把没登记"、"把名单摘短而判据还在原地"都会红；红不到的只剩下方逐条列出的那几种
+形状，外加 `_DRIVE_RULE_SCAN_SCOPES` 罩不到的文件——即 `backend/app/` 与 `backend/tests/`
+两棵子树之外的一切（`backend/cli.py`、`backend/requirements.txt`、仓库根的 `tools/`、`scripts/`
+与前端壳）。
 - `copy-not-bound-to-a-module-level-name`：判据内联在调用里（`re.search(r'…', body)`）时点不到名——
   它不挂在模块级 `NAME = re.compile(...)` 上，遍历模块级赋值根本看不见这个判据。
 - `copy-assembled-at-runtime`：另一格，机制不同：名字挂对了，但实参是 `_HEAD + _SEP` 这种运行时
@@ -57,6 +62,7 @@ oracle、`test_selfcheck`／`test_update_channel`／`test_apk_self_host_cache` �
 """
 import ast
 import re
+import warnings
 from pathlib import Path
 
 import pytest
@@ -212,8 +218,9 @@ _LOCK_BLIND_SPOTS = (
 # 对照组：绑定锁对它说"认得"的那个形状是真认得到——没有这一枚，上面那串"点不到名"是尺子在空转。
 _DISCOVERABLE_COPY = "import re\n_DRIVE_PATH = re.compile(r'[A-Za-z]:(?!//)[/]')\n"
 
-# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对 backend 的路径 → 常量名）。新增一处判据就把它
-# 登记进来；不登记的那处，绑定锁看不见（见 `_LOCK_BLIND_SPOTS`）。
+# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对 backend 的路径 → 常量名）。这张表的射程不由
+# 它自己说——由 `_scanned_drive_rule_sites()` 现扫出来跟它比（见
+# `test_the_drive_rule_roster_is_the_whole_scanned_range`）；点名器认不到的形状见 `_LOCK_BLIND_SPOTS`。
 _DRIVE_RULE_SITES = {
     "app/core/pathmask.py": {"_WIN_PATH"},
     "tests/test_pathmask.py": {"_ORACLE"},
@@ -221,6 +228,10 @@ _DRIVE_RULE_SITES = {
     "tests/test_update_channel.py": {"_DRIVE_PATH"},
     "tests/test_apk_self_host_cache.py": {"_DRIVE_PATH"},
 }
+
+# 射程锁现扫的范围（相对 backend 的 glob 模式）。要放大射程就正面往这里加一条模式，
+# 别在锁里另写一份范围。
+_DRIVE_RULE_SCAN_SCOPES = ("app/**/*.py", "tests/*.py")
 
 # 点认识的形状：`[A-Za-z]` 后面紧跟 `:`，或先收掉包着它的那枚右括号再跟 `:`
 # （`(?P<drive>[A-Za-z]):` 是 oracle 与探测器的写法）。
@@ -272,6 +283,25 @@ def _discovered_sites():
         for name, literal in _drive_rule_literals(source, rel):
             sites.setdefault(rel, {})[name] = literal
     return sites
+
+
+def _scanned_drive_rule_sites():
+    """不读名单、自己按 `_DRIVE_RULE_SCAN_SCOPES` 现扫，返回 {(相对路径, 常量名): 字面量}。
+
+    用的尺子与绑定锁同一把（`_drive_rule_literals`），所以两把锁对"什么算一盘符判据"没有两套
+    口径；范围也只从 `_DRIVE_RULE_SCAN_SCOPES` 取，名单在这把尺子之外没有任何发言权。
+    """
+    found = {}
+    with warnings.catch_warnings():
+        # 扫到的是别人的源码文本，不是本锁的产物：被点名的模块自带 `\` 转义写法时会往测试输出里
+        # 塞一条 SyntaxWarning，把人的注意力引到"要去改那个模块"上。这里只读字面量，不作答。
+        warnings.simplefilter("ignore", SyntaxWarning)
+        for pattern in _DRIVE_RULE_SCAN_SCOPES:
+            for path in sorted(_BACKEND.glob(pattern)):
+                rel = path.relative_to(_BACKEND).as_posix()
+                for name, literal in _drive_rule_literals(path.read_text(encoding="utf-8"), rel):
+                    found[(rel, name)] = literal
+    return found
 
 # 对照组：这条**在射程内**，所以"看不见"那串必须能和它区分开——尺子要是连它都量不到，
 # 上面那一串绿就只是空转。
@@ -333,8 +363,9 @@ def test_every_hand_copied_drive_rule_is_bound_to_production():
 
     探测器与生产网同构时它瞎在网瞎的同一处，那几把 endpoint 锁就退化成恒绿自证；而"把探测器
     改窄一点（删掉豁免、换个 lookbehind、少一类字符）"这种改动原本全仓没有任何一把锁会红。
-    这里补的就是那把锁：先按名单点名（新增抄本不在册 ⇒ 不一致，在册的抄本变了形 ⇒ 也不一致），
-    再把每把抽出来的字面量编译起来，在 `_DRIVE_EQUIVALENCE_CASES` 上要求它与生产网给同一个答案
+    这里补的就是那把锁：先按名单点名（在册的抄本变了形 ⇒ 不一致；名单本身有没有被人摘短、
+    子树里有没有新抄一把没登记，由下面那把射程锁管），再把每把抽出来的字面量编译起来，
+    在 `_DRIVE_EQUIVALENCE_CASES` 上要求它与生产网给同一个答案
     ——改窄（对 `错误在at-C:\\Users\\a` 失明）与改宽（遇合法 URL 恒红）两个方向都会红。抽取
     fidelity 自己也被钉住：生产网与 oracle 那两站抽出来的字面量必须与在用的判据一字不差。
     """
@@ -357,6 +388,36 @@ def test_every_hand_copied_drive_rule_is_bound_to_production():
                          if bool(copy.search(s)) != bool(_WIN_PATH.search(s))]
             assert not disagreed, (rel + ":" + name + " 与生产网在这些串上分家"
                                    "（改窄=恒绿自证，改宽=遇合法 URL 恒红）：" + str(disagreed))
+
+
+def test_the_drive_rule_roster_is_the_whole_scanned_range():
+    """射程锁：`_DRIVE_RULE_SITES` 必须正好等于现扫出来的那一批盘符判据，三个方向分开报。
+
+    绑定锁只读名单里列的那几份文件，所以"把名单摘短、一条断言不动"能让它对着变小的射程继续
+    宣称全仓手抄逐把同判——名字里那句"全仓"要靠这把射程锁兑现。这里把名单和
+    `_DRIVE_RULE_SCAN_SCOPES` 里现扫的结果放在一起比，红话按不对称的方向分：在册的文件里冒出
+    没登记的常量名 ⇒ 有人新抄了一把（或把在册那把改了名）；扫到的文件整条不在名单里 ⇒ 要么
+    新抄本没登记，要么有人把 `_DRIVE_RULE_SITES` 那一行摘掉了而判据还留在原地；名单登记了却
+    扫不到 ⇒ 那一站的判据被删、改名或换成了点名器认不到的形状，名单陈旧。
+    """
+    scanned = set(_scanned_drive_rule_sites())
+    registered = {(rel, name) for rel, names in _DRIVE_RULE_SITES.items() for name in names}
+    new_in_registered_file = sorted(
+        (rel, name) for rel, name in scanned - registered if rel in _DRIVE_RULE_SITES)
+    new_file = sorted({rel for rel, name in scanned - registered if rel not in _DRIVE_RULE_SITES})
+    stale = sorted(registered - scanned)
+    assert not new_in_registered_file, (
+        "在册文件里冒出没登记的盘符判据 " + str(new_in_registered_file)
+        + "：有人新抄了一把没登记（或把在册那一把改了名）。登记进 `_DRIVE_RULE_SITES`，"
+        "它随即在绑定锁里与生产网比同判。")
+    assert not new_file, (
+        "扫到了名单里没有的文件 " + str(new_file)
+        + "：要么是新抄本没登记，要么是有人把 `_DRIVE_RULE_SITES` 里这几行摘短了而判据还在原地"
+        "（只删名单不删判据就是把射程改窄）。两种都正面回来把那一行加回去。")
+    assert not stale, (
+        "名单登记了、现扫点不到 " + str(stale)
+        + "：那一站的判据被删了、改了名，或换成了点名器认不到的形状（见 `_LOCK_BLIND_SPOTS`）。"
+        "真删了就连名单一起删；换形状就改点名的形状，别让名单比射程长。")
 
 
 @pytest.mark.parametrize("case_id,sample,today,why", _STILL_MISSED_SHAPES,
