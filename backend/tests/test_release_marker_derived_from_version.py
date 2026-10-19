@@ -27,15 +27,15 @@
             ⇒ 照旧红，这条豁免不是"说明领先就不管了"的旁路
     **裸跑（不带 --expect）的 target/scope**：只看 versionName 会把"只换服务端的一版在途"读成
             installer，而那一版的 -Marker 按设计就该领先 versionName（新包里有、线上包里绝没有），
-            于是把正确形状判成红、并把上一版那枚已经躺在装机包里的串印成"该用的那一串"。现在
-            三条同时成立才换 target：最新那份说明领先 versionName、它自己声明
+            于是把正确形状判成红、并把上一版那枚已经躺在装机包里的串印成"该用的那一串"。
+            下面几条同时成立才换 target：最新那份说明领先 versionName、它自己声明
             `scope: server-only`、app.js 里最新那枚标记也领先 versionName ⇒ target=那份说明的
             版本，判据是「app.js 里最新 marker == 那个领先的版本」（等号右边取自说明，所以对不上
             说明的领先标记照旧红）。任何一条不成立 ⇒ 回到原判据（target=versionName、installer
-            那三格一字未改），"有一条 server-only 说明"本身不是放行理由。
+            那一支原有的判据一字未改），"有一条 server-only 说明"本身不是放行理由。
             **这一支的射程**：只读仓库里的 app.js 与那份说明，**不读装机侧那份包**——裸跑在没有
             dist\\ 的机器（CI、新克隆、清过盘）上也要能给出结论，所以"这枚串线上是不是已经有了"
-            只有 `--expect` 那一路判（另有测试钉住同一棵树的两种读法）。判不了的：说明不存在、
+            只有 `--expect` 那一路判（另有测试钉住同一棵树在那一路上的读法）。判不了的：说明不存在、
             说明不领先、scope 行缺失 / 值不认识 / 读不出文本、标记还没补上、装机侧是否已有同一枚
             串、versionName 该不该追平（只换服务端的那一版不追）
     说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），不放行也不许拿 bump 当替代
@@ -149,7 +149,7 @@ def _repo_side_bare_expectation(root: Path):
     """测试自己算一遍"裸跑该给哪一串"：最新那份说明 + 装机无关的仓库文本，字面正则，
     不 import `rm` 的任何函数——否则这条锁只是在复读判据自己的输出。
 
-    返回 `(scope, target)`，其中 target 是不带 v 的三段号。算的过程就是被判据那三条：
+    返回 `(scope, target)`，其中 target 是不带 v 的三段号。算的过程就是被判据那几条：
     最新说明领先 versionName、那份说明自己写着 server-only、app.js 里最新那枚标记也领先
     versionName；任何一条不成立 ⇒ target=versionName、scope=installer。
     """
@@ -720,8 +720,8 @@ def test_marker_ahead_with_bogus_or_unreadable_leading_note_is_refused(tmp_path)
 
 def test_ahead_server_only_note_does_not_exempt_the_installer_checks(tmp_path):
     """反过来的那一格：标记**没领先**（还停在 versionName 上）而领先的那份说明写着 server-only ⇒
-    按原 installer 支照常判，不许因为"有 scope 行"就一律放行。同一形状里换掉标记的内容，三格
-    各自还咬得动。
+    按原 installer 支照常判，不许因为"有 scope 行"就一律放行。同一形状里换掉标记的内容，原有的
+    判据各自还咬得动。
     """
     on_declared = _fake_repo(tmp_path / "on-declared", version_name="0.34.2", markers=("0.34.2",),
                              notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
@@ -749,7 +749,7 @@ def test_bare_marker_ahead_shape_never_reads_the_live_package(tmp_path):
     假日机包删掉 ⇒ 裸跑仍然绿（否则 CI / 新克隆 / 清过盘这些没有 dist\\ 的机器上，常驻锁会当场
     退 2，而这一格恰恰是发版顺序里"本地全量复跑"要跑的那一格）。
     同一棵树里把本版那枚串放进假日机包 ⇒ 裸跑看不见它（红不了也绿不了，射程之外），而带
-    `--expect` 的那一路照样拒绝——两路分工在此钉死，谁也不许替谁放行。
+    `--expect` 的那一路照样拒绝——裸跑与 --expect 的分工在此钉死，谁也不许替谁放行。
     """
     root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
                       notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
