@@ -262,17 +262,17 @@ def test_gate_delegates_the_scope_read_and_copies_no_third_regex():
     第三份一旦长出来，"这一版到底是不是只换服务端"就有了第三种真相——#65/#69/#71 修的正是这个。
 
     **射程**：正向那句（必须 delegate）吃 `strip_py_prose`——判的是剥掉 `#` 注释与 docstring
-    之后还在的那行 import；反向那两句（不许出现 scope 字面量）仍吃原文按三条引号切的那一截，
-    今天读不到 token 因而恒绿，收窄归 #74。两面不是同一把尺子是有意的：把那句 `split` 的输入
-    换成剥层那一份会直接把这一跑变成 IndexError，而那不是判据。
+    之后还在的那行 import；反向那句（不许出现 scope 字面量或正则）仍吃原文按三条引号切出来的
+    那一截，今天读不到 token 因而恒绿，收窄归 #74。正向与反向不是同一把尺子，这是有意的：把那句
+    `split` 的输入换成剥层那一份会直接把这一跑变成 IndexError，而那不是判据。
     """
     src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert "from release_marker import" in src and "note_scope" in src, \
         "第 1 条判据必须吃 release_marker.note_scope 那把尺子（判的是剥掉注释与 docstring 之后" \
         "还在的那一行 import；原文里注释与代码长得一样，抄一句就能替真代码答到）"
-    # 下面两句判的是「不许出现」，吃的是**原文**按三条引号切出来的那一截，与本文件上面那句
-    # 分工不同、也**不能**换成剥层那一份：`strip_py_prose` 把 docstring 的定界符也原位刷空，
-    # 剥完之后 `split('"""')` 只剩一段，这一句会直接 IndexError。而这一截读不到 token
+    # 下面那句判的是「不许出现」，吃的是**原文**按三条引号切出来的那一截，与上面那句分工不同、
+    # 也**不能**换成剥层那一份：`strip_py_prose` 把 docstring 的定界符也原位刷空，剥完之后
+    # `split('"""')` 只剩一段，这一句会直接 IndexError。而这一截读不到 token
     # （`scope:` 与 `<!--` 的首现位置都落在模块 docstring 里、在那一截之外），所以这两句今天
     # 恒绿——那是声明过的盲区（test_v0350_lock_comment_stripping_scope 清单里的
     # rough-triple-quote-slice），把这两句一起收窄归 #74，本单不动它。

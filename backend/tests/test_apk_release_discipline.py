@@ -9,9 +9,9 @@
 的源码形状锁不许各抄一份正则，尺子只有一把，`test_the_comment_ruler_needs_its_own_test`
 钉着这件事。分文件之后它跟着上线模块走，不跟着退役的壳走。
 
-`tools/*.ps1` 那两处禁字判据不在这把尺子的射程里（`#` 与 `//`、`/* */` 不是同一种散文），它们
-import `test_swap_package_contract_v0291._line_comment_free`——同样是不许另造正则的那条规矩，
-只剥 `(?m)^[ \t]*#.*$` 那一层、行数与原文一一对应。
+`tools/*.ps1` 上的禁字判据不在这把尺子的射程里（`#` 与 `//`、`/* */` 不是同一种散文），它们
+import `test_swap_package_contract_v0291._line_comment_free`——同样是不许另造正则的那条规矩：
+只剥「整行（可带行首缩进）以 `#` 开头」那一层，行数与原文一一对应。
 """
 
 import os
@@ -365,10 +365,11 @@ def test_the_keystore_generator_refuses_to_overwrite():
     丢了这把钥匙没有补救办法：从此每个新包都是新签名，所有装过的人都要先卸载。
     一个"顺手再跑一次"就把这件事做掉的脚本，比没有脚本更危险。
 
-    **射程**：三句都吃 `_line_comment_free` 剥过整行 `#` 注释的那一份（母本在
-    test_swap_package_contract_v0291.py，这里 import 它、不另造正则），判的是代码行——原文里
+    **射程**：这里的判据都吃 `_line_comment_free` 剥过整行 `#` 注释的那一份（母本在
+    test_swap_package_contract_v0291.py，import 它、不另造正则），判的是代码行——原文里
     注释与代码长得一样，"删掉 `exit 2` 那行、注释里留着这句话"就替真代码答到了。行尾挂的注释与
-    `<# ... #>` 块注释内部仍留在面上，那两条记在 test_v0350_lock_comment_stripping_scope 的清单里。
+    `<# ... #>` 块注释内部仍留在面上，那两种形状记在 test_v0350_lock_comment_stripping_scope 清单里的
+    `ps-trailing-comment` 与 `ps-block-comment-interior`。
     """
     script = _line_comment_free(
         (REPO_ROOT / "tools" / "make-apk-keystore.ps1").read_text(encoding="utf-8"))
@@ -380,7 +381,7 @@ def test_the_keystore_generator_refuses_to_overwrite():
 def test_the_ps1_locks_read_code_lines_not_comment_lines():
     """**成对夹具**（R9）：同一串只写在 `#` 行里 ⇒ 命中归 0；写在代码行里 ⇒ 命中。
 
-    那两处 `.ps1` 禁字判据迁到 `_line_comment_free` 之后必须仍然绿，而"仍然绿"要有证据才算数：
+    `.ps1` 上那族禁字判据迁到 `_line_comment_free` 之后必须仍然绿，而"仍然绿"要有证据才算数：
     这一组把两个方向各钉一枚——只有注释时判据读不到（旧写法会读到），代码行原样时读得到
     （尺子没在空转）。行数一一对应也在这里钉：那族判据判的是行号，剥注释不许改行数。
     """
