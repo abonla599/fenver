@@ -352,6 +352,30 @@ def _jobs_of(doc, where: str) -> list:
     return out
 
 
+def workflow_run_bodies(path, where: str = "", withs: bool = False) -> str:
+    """一份 workflow 文件里**所有作业**的可执行正文（`safe_load` → `jobs` → `steps` → 剥行首注释）。
+
+    这是 `_run_bodies` 那把母本的目录级出口，别的文件要判 workflow 正文就复用它，不要再各造
+    一把 `read_text()` + `in`——原文里注释与命令长得一样，删真行留注释就判不出来。
+    `uses:` 调用点没有正文可判，跳过；其余认不出的作业形状由 `_jobs_of` 判红。
+    `withs=True` 把 `with:` 的字面值一并拼进来：Actions 会真把它交给那个 action，所以那是
+    **扩大**射程（比只看 `run:` 更宽），不是收窄。
+    """
+    path = Path(path)
+    label = where or path.name
+    doc = _load_doc(path, label)
+    out = []
+    for _job_id, steps in _jobs_of(doc, label):
+        if steps is None:
+            continue
+        out.append(_run_bodies(steps))
+        if withs:
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("with"), dict):
+                    out.extend(v for v in step["with"].values() if isinstance(v, str))
+    return "\n".join(out)
+
+
 def _assert_checkout_fetches_full_history(steps, where: str, markers: list) -> None:
     """形状判据（#90a 整段保留）：恰好一条 checkout，`with.fetch-depth` 必须是整数 0。
 
