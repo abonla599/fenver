@@ -29,6 +29,8 @@ pid=-1，意思是"health 认证在跑、进程列表看不见"，绝不能再�
 import re
 from pathlib import Path
 
+from tests.test_swap_package_contract_v0291 import _line_comment_free
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SWAP_PS1 = REPO_ROOT / "deploy" / "swap-package.ps1"
 
@@ -52,7 +54,12 @@ RECIPE = PS1[PS1.index("function Show-Rollback"):]
 
 
 def _line_of(pattern: str, text: str = None, last: bool = False) -> int:
-    src = PS1 if text is None else text
+    """行号尺：默认源与显式传进来的文本都先过 `_line_comment_free`（剥整行 `#`、行数不动）。
+
+    从前这一把吃 raw `PS1`，注释里留着的那句会被当成真代码命中 ⇒ "删真行留注释"假绿。
+    尺子本体复用 contract_v0291 那一份，不在这里再造第二把。
+    """
+    src = _line_comment_free(PS1 if text is None else text)
     hits = [i for i, ln in enumerate(src.splitlines()) if re.search(pattern, ln)]
     assert hits, f"契约里找不到这一步：{pattern}"
     return hits[-1] if last else hits[0]

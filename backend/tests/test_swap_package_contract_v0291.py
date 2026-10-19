@@ -55,10 +55,28 @@ PS1 = _read(SWAP_PS1)
 CODE = _strip_comments(PS1)
 
 
+def _line_comment_free(text: str) -> str:
+    r"""只剥「整行是 `#` 注释」那一层，**行数与原文一一对应**；`<# ... #>` 块注释不碰。
+
+    这是行号尺专用的读法，与上面 CODE 的分工写在 `_strip_comments` 里：判"某写法绝对不许出现"
+    用 CODE（连块注释一起剥，反正不判行号）；判"哪一句在哪一句之前"必须用这一份，块注释一整段
+    删掉就把换行也删了、行号全盘漂。块注释内部不以 `#` 开头的续行因此留在判据面里，是声明过的
+    盲区（见 test_v0350_lock_comment_stripping_scope 那份清单）。
+    """
+    return re.sub(r"(?m)^[ \t]*#.*$", "", text)
+
+
 def _line_of(pattern: str, text: str = None, last: bool = False) -> int:
     """返回第一个（或最后一个）匹配行号（0 起）；匹配不到直接断言失败——
-    「删掉某一步」与「把某一步挪走」是两种红法，都要红。"""
+    「删掉某一步」与「把某一步挪走」是两种红法，都要红。
+
+    默认源与显式传进来的文本都过 `_line_comment_free` 这一层：从前默认吃 raw `PS1`，于是
+    "删掉 `live-appjs-marker=present` 那一行真代码、注释里留着这句"会让行号尺命中注释——
+    假绿，正是 v0.34.1 那次的病根变体。行号按原文数（剥的是内容、不删行），所以调用方
+    传 raw 还是传 CODE 都不改变与原文的行对应。
+    """
     src = PS1 if text is None else text
+    src = _line_comment_free(src)
     hits = [i for i, ln in enumerate(src.splitlines()) if re.search(pattern, ln)]
     assert hits, f"契约里找不到这一步：{pattern}"
     return hits[-1] if last else hits[0]
