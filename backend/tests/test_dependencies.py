@@ -102,8 +102,11 @@ def test_there_is_exactly_one_dependency_manifest():
     assert "pip install --no-cache-dir -r /app/requirements.txt" in dockerfile, \
         "Docker 装依赖那一步的清单路径被改动了，和上面 COPY 的目标对不上就是空装"
 
-    ci = (root / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-    assert "backend/requirements.txt" in ci, "CI 换了清单，这条锁就管不到它了"
+    from tests.test_ci_history_depth import workflow_run_bodies
+
+    ci = workflow_run_bodies(root / ".github" / "workflows" / "tests.yml",
+                             where="tests.yml 的 run 正文（#94 W 片）")
+    assert "backend/requirements.txt" in ci, "CI 装依赖那一步不再读这份清单，这条锁就管不到它了"
     # 解释器也要一致：容器此前用 3.11，而 CI/venv/打包用的都是 3.12
     assert re.search(r"FROM python:3\.12", dockerfile), \
         "容器的 Python 版本又和 CI/打包那份错开了（chromadb 对上限敏感）"
