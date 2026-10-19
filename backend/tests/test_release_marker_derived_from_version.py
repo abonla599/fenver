@@ -25,6 +25,19 @@
             （#71）：最高那一版自己声明 `scope: server-only` 时，"说明比声明侧新"正是这一形态
             的预期形状（只换服务端的一版不 bump versionName），裸跑必须绿；没声明 / 声明读不出
             ⇒ 照旧红，这条豁免不是"说明领先就不管了"的旁路
+    **裸跑（不带 --expect）的 target/scope**：只看 versionName 会把"只换服务端的一版在途"读成
+            installer，而那一版的 -Marker 按设计就该领先 versionName（新包里有、线上包里绝没有），
+            于是把正确形状判成红、并把上一版那枚已经躺在装机包里的串印成"该用的那一串"。现在
+            三条同时成立才换 target：最新那份说明领先 versionName、它自己声明
+            `scope: server-only`、app.js 里最新那枚标记也领先 versionName ⇒ target=那份说明的
+            版本，判据是「app.js 里最新 marker == 那个领先的版本」（等号右边取自说明，所以对不上
+            说明的领先标记照旧红）。任何一条不成立 ⇒ 回到原判据（target=versionName、installer
+            那三格一字未改），"有一条 server-only 说明"本身不是放行理由。
+            **这一支的射程**：只读仓库里的 app.js 与那份说明，**不读装机侧那份包**——裸跑在没有
+            dist\\ 的机器（CI、新克隆、清过盘）上也要能给出结论，所以"这枚串线上是不是已经有了"
+            只有 `--expect` 那一路判（另有测试钉住同一棵树的两种读法）。判不了的：说明不存在、
+            说明不领先、scope 行缺失 / 值不认识 / 读不出文本、标记还没补上、装机侧是否已有同一枚
+            串、versionName 该不该追平（只换服务端的那一版不追）
     说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），不放行也不许拿 bump 当替代
 
 **为什么不在 `tools/pre_tag_gate.py` 里加第 6 条**：那把闸的第 3 条要求线上 `/health` 的
@@ -49,6 +62,12 @@ CHANGELOG = REPO_ROOT / "tools" / "gen_changelog.py"
 SWAP_PS1 = REPO_ROOT / "deploy" / "swap-package.ps1"
 APP_JS = REPO_ROOT / "backend" / "app" / "web" / "static" / "app.js"
 SCOPE_SERVER_ONLY = "<!-- scope: server-only -->"
+SCOPE_INSTALLER = "<!-- scope: installer -->"
+# 测试自己独立读一遍"最新那份说明"，用**字面**正则，不借 `rm` 的那几把尺子：判据与探针同构
+# 就等于恒绿自证，所以这里连文件名形状、scope 行、标记串都各抄一份自己的读法。
+NOTE_NAME_RE = re.compile(r"^v(\d+\.\d+\.\d+)\.md$")
+SCOPE_LINE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
+NOTE_MARKER_RE = re.compile(r"release-marker-v(\d+\.\d+\.\d+)")
 
 
 def _load(path, name):
@@ -81,11 +100,13 @@ def _gradle_versionname() -> str:
 
 
 def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v0.34.2",),
-               server_only=(), live_markers=None):
+               server_only=(), live_markers=None, installer_only=()):
     """只放判据真正会读的那几样东西，路径形状与仓库一致。
 
     `server_only` 里点名的那份说明会带上机器读的 `<!-- scope: server-only -->`（写在标题之后、
-    第一个小节之前，与仓库里 v0.34.1.md 的位置一致）；不在名单里的说明就是缺省形状（有安装包）。
+    第一个小节之前，与仓库里 v0.34.1.md 的位置一致）；`installer_only` 里点名的那份带上
+    `<!-- scope: installer -->`（安装包形态那一支的机器读法）；两个名单都不含的说明就是缺省
+    形状（没有 scope 行）。
 
     `live_markers` 是**假日机包**里已有的标记（缺省跟着 `markers`，即"仓库和线上是同一版"那种
     已上线状态）：#69 之后只换服务端那一版要读装机侧那一份，所以假树里必须自己带一棵假的
@@ -116,10 +137,49 @@ def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v
     for note in notes:
         if note in server_only:
             text = "# %s\n\n%s\n\n本版只换服务端，安卓包不动。\n" % (note, SCOPE_SERVER_ONLY)
+        elif note in installer_only:
+            text = "# %s\n\n%s\n\n本版有可安装的产物。\n" % (note, SCOPE_INSTALLER)
         else:
             text = "# %s\n" % note
         (releases / ("%s.md" % note)).write_text(text, encoding="utf-8")
     return root
+
+
+def _repo_side_bare_expectation(root: Path):
+    """测试自己算一遍"裸跑该给哪一串"：最新那份说明 + 装机无关的仓库文本，字面正则，
+    不 import `rm` 的任何函数——否则这条锁只是在复读判据自己的输出。
+
+    返回 `(scope, target)`，其中 target 是不带 v 的三段号。算的过程就是被判据那三条：
+    最新说明领先 versionName、那份说明自己写着 server-only、app.js 里最新那枚标记也领先
+    versionName；任何一条不成立 ⇒ target=versionName、scope=installer。
+    """
+    gradle_version = re.search(r'^\s*versionName\s+"([^"]+)"',
+                               (root / "android-native" / "app" / "build.gradle").read_text(
+                                   encoding="utf-8"), re.M).group(1)
+    notes = sorted((NOTE_NAME_RE.match(p.name).group(1)
+                    for p in (root / "docs" / "releases").iterdir()
+                    if NOTE_NAME_RE.match(p.name)), key=_vkey)
+    newest_leads_server_only = False
+    if notes and _vkey(notes[-1]) > _vkey(gradle_version):
+        for raw in (root / "docs" / "releases" / ("v%s.md" % notes[-1])).read_text(
+                encoding="utf-8").splitlines():
+            if raw.startswith("## "):
+                break
+            hit = SCOPE_LINE_RE.match(raw)
+            if hit:
+                newest_leads_server_only = hit.group(1).strip().lower() == "server-only"
+                break
+    markers = sorted((m.group(1) for m in NOTE_MARKER_RE.finditer(
+        (root / "backend" / "app" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"))), key=_vkey)
+    marker_leads = bool(markers) and _vkey(markers[-1]) > _vkey(gradle_version)
+    if newest_leads_server_only and marker_leads:
+        return "server-only", notes[-1]
+    return "installer", gradle_version
+
+
+def _vkey(text):
+    return tuple(int(p) for p in text.split("."))
 
 
 def _run(root, expect=None, live=None):
@@ -552,3 +612,186 @@ def test_unreadable_or_bogus_scope_on_the_newest_note_still_fires(tmp_path):
         assert rc == 1, "%s：读不出 server-only 这个结论却把说明领先放行了：%s" % (name, lines)
         assert any("token=release-note=ahead" in ln for ln in lines), lines
         assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+# ---------------------- 裸跑的「标记领先 + 只换服务端」形状（v0.34.3 落地时的那一棵树）
+def test_bare_run_marker_ahead_with_server_only_note_is_green_and_names_it(tmp_path):
+    """这一版该用的是**领先的那一枚**：说明领先 versionName、它自己声明 server-only、app.js 里
+    最新标记也领先 —— 裸跑（不带 --expect）必须绿，并把那一串原样给出来。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+                      live_markers=("0.34.2",))
+    rc, lines = _run(root)
+    assert rc == 0, "标记领先 + 只换服务端是这一形态的正确形状，却被判红：%s" % lines
+    assert "scope=server-only" in lines[0] and "target=v0.35.0" in lines[0] \
+        and "marker=release-marker-v0.35.0" in lines[0], lines
+    assert any("token=bare-shape=server-only-marker-ahead" in ln and "note=v0.35.0" in ln
+               and "declared=v0.34.2" in ln for ln in lines), \
+        "换了 target 却没在输出里说清为什么换：%s" % lines
+    assert lines[-1].startswith("RELEASE-MARKER verdict=PASS") \
+        and "release-marker-v0.35.0" in lines[-1], lines
+    assert not any("versionname-not-bumped" in ln for ln in lines), lines
+    assert rm.declared_version(str(root)) == "0.34.2", "这一支不许动 versionName"
+    # 这一支只核仓库里的文本：装机侧的计数与时刻 token 都不该出现在裸跑的输出里
+    assert not any("live-lines" in ln for ln in lines), lines
+    assert not any("server-only-moment" in ln for ln in lines), lines
+
+
+def test_bare_run_marker_ahead_beyond_the_note_is_refused(tmp_path):
+    """等号右边取自**说明**而不是取自标记：标记领先到另一枚版本号（说明只写到 v0.35.0，app.js
+    里却躺着 v0.36.0）⇒ 红，并给出说明那一版该用的串。放行它就是把换包标记交给手抖的人。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0", "0.36.0"),
+               notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, "领先却对不上说明的标记被当成这一版放行了：%s" % lines
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.36.0" in ln
+               and "target=v0.35.0" in ln for ln in lines), lines
+    assert any("use-this-marker=release-marker-v0.35.0" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_marker_ahead_without_any_leading_note_is_refused(tmp_path):
+    """缺件之一「说明不存在」：app.js 里领先的那枚标记没有任何发版说明撑着 ⇒ 裸跑不许跟着标记走，
+    照旧按声明侧判，红。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"), notes=("v0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], lines
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.35.0" in ln
+               and "target=v0.34.2" in ln for ln in lines), lines
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_marker_ahead_with_leading_note_lacking_scope_line_is_refused(tmp_path):
+    """缺件之二「说明领先但**没有** scope 行」：那一版是有安装包的形态，标记不许越过还没被声明
+    的 versionName ⇒ 同一个 rc=1，且两条判据（标记错位 + 说明跑在前面）同时报。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+               notes=("v0.34.2", "v0.35.0"))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], lines
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.35.0" in ln
+               and "target=v0.34.2" in ln for ln in lines), lines
+    assert any("token=release-note=ahead" in ln and "v0.35.0" in ln for ln in lines), lines
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), lines
+
+
+def test_marker_ahead_with_installer_scope_note_is_refused(tmp_path):
+    """缺件之三「领先、但 scope 写的是安装包形态」：那一版必须先把 versionName 追平，标记领先
+    就是错位 ⇒ 照旧红，target 不跟着标记走。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+               notes=("v0.34.2", "v0.35.0"), installer_only=("v0.35.0",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], lines
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.35.0" in ln
+               and "target=v0.34.2" in ln for ln in lines), lines
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_marker_ahead_with_bogus_or_unreadable_leading_note_is_refused(tmp_path):
+    """领先那份说明的 scope **读不出结论**（值不认识 / 不是 utf-8）时，不许当成 server-only 换
+    target：读不出就不豁免（沿用装机侧那一条的纪律），红在同一个 token 上。
+    """
+    for name, body in (("unknown-scope", "# v0.35.0\n\n<!-- scope: only-server -->\n"),
+                       ("binary-note", None)):
+        root = _fake_repo(tmp_path / name, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                          notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+        note = root / "docs" / "releases" / "v0.35.0.md"
+        if body is None:
+            note.write_bytes(b"# v0.35.0 \xff\xfe\x00\n")
+        else:
+            note.write_text(body, encoding="utf-8")
+        rc, lines = _run(root)
+        assert rc == 1, "%s：%s" % (name, lines)
+        assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], (name, lines)
+        assert any("token=marker-newest=mismatch" in ln and "newest=v0.35.0" in ln
+                   for ln in lines), (name, lines)
+        assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), (name, lines)
+        assert not any("verdict=PASS" in ln for ln in lines), (name, lines)
+
+
+def test_ahead_server_only_note_does_not_exempt_the_installer_checks(tmp_path):
+    """反过来的那一格：标记**没领先**（还停在 versionName 上）而领先的那份说明写着 server-only ⇒
+    按原 installer 支照常判，不许因为"有 scope 行"就一律放行。同一形状里换掉标记的内容，三格
+    各自还咬得动。
+    """
+    on_declared = _fake_repo(tmp_path / "on-declared", version_name="0.34.2", markers=("0.34.2",),
+                             notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    rc, lines = _run(on_declared)
+    assert rc == 0, "标记还没补行的那一刻（=versionName）判据不该被这条推导挪走：%s" % lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], lines
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), lines
+
+    stale = _fake_repo(tmp_path / "stale", version_name="0.34.2", markers=("0.34.1",),
+                       notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    rc2, lines2 = _run(stale)
+    assert rc2 == 1, "标记落后于声明侧却被放行：%s" % lines2
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.34.1" in ln
+               and "target=v0.34.2" in ln for ln in lines2), lines2
+
+    dup = _fake_repo(tmp_path / "dup", version_name="0.34.2", markers=("0.34.2", "0.34.2"),
+                     notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    rc3, lines3 = _run(dup)
+    assert rc3 == 1, "标记重复却被放行：%s" % lines3
+    assert any("token=marker-lines=count" in ln and "got=2" in ln for ln in lines3), lines3
+
+
+def test_bare_marker_ahead_shape_never_reads_the_live_package(tmp_path):
+    """射程自证：这一支只核仓库里的文本，**没有**读装机侧那份包。
+    假日机包删掉 ⇒ 裸跑仍然绿（否则 CI / 新克隆 / 清过盘这些没有 dist\\ 的机器上，常驻锁会当场
+    退 2，而这一格恰恰是发版顺序里"本地全量复跑"要跑的那一格）。
+    同一棵树里把本版那枚串放进假日机包 ⇒ 裸跑看不见它（红不了也绿不了，射程之外），而带
+    `--expect` 的那一路照样拒绝——两路分工在此钉死，谁也不许替谁放行。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+                      live_markers=("0.34.2",))
+    ok_rc, ok_lines = _run(root)
+    assert ok_rc == 0, ok_lines
+    live_js = root / LIVE_APP_JS
+    live_js.unlink()
+    rc, lines = _run(root)
+    assert rc == 0, "裸跑这一格去读了装机侧，没有 dist\\ 的机器上会当场退 2：%s" % lines
+    assert not any("live-appjs" in ln for ln in lines), lines
+    assert not any("verdict=UNKNOWN" in ln for ln in lines), lines
+    live_js.parent.mkdir(parents=True, exist_ok=True)
+    live_js.write_text("/* 假日机包 */\n/* release-marker-v0.35.0 */\n", encoding="utf-8")
+    blind_rc, blind_lines = _run(root)
+    assert not any("already-present" in ln for ln in blind_lines), \
+        "裸跑这一格读到了装机侧，射程声明就成了假话：%s" % blind_lines
+    assert blind_rc == 0, blind_lines
+    expect_rc, expect_lines = _run(root, expect="v0.35.0")
+    assert expect_rc == 1 and any("token=server-only-marker=already-present" in ln
+                                 and "release-marker-v0.35.0" in ln
+                                 and "live-lines=1" in ln for ln in expect_lines), expect_lines
+
+
+def test_real_repo_bare_run_names_the_marker_of_the_release_in_flight():
+    """真仓库上裸跑给的那一串，必须等于测试**自己独立读一遍**（字面正则、不借判据的尺子）算出来
+    的结果，并且逐字符等于 app.js 里最新那枚标记、在文件里恰好一行。
+    写死的版本号会腐烂，所以这里两个方向都由现场推导：只换服务端的一版在途时报那一版，
+    否则报声明侧。
+    """
+    scope, target = _repo_side_bare_expectation(REPO_ROOT)
+    expected = "release-marker-v%s" % target
+    text = APP_JS.read_text(encoding="utf-8")
+    newest_in_app_js = max((m.group(1) for m in NOTE_MARKER_RE.finditer(text)), key=_vkey)
+    rc, lines = _run(REPO_ROOT)
+    assert rc == 0, "真仓库现状必须绿（这条是常驻锁，红着就是拦路）：%s" % lines
+    assert "scope=%s" % scope in lines[0] and "marker=%s" % expected in lines[0], (
+        "裸跑的 target/scope 与独立推导不符：%s（独立推导=%s/%s）" % (lines[0], scope, target))
+    assert any("verdict=PASS" in ln and expected in ln for ln in lines), lines
+    # 判据与探针同构就是恒绿自证，所以这一格反过来问：**独立推导要是算错版本，这条必须红**。
+    # 现场 v0.34.3 与 app.js 里最新那枚逐字符相同，由下面这句钉住（"恰好一行"那格由
+    # test_real_repo_marker_equals_the_derived_declared_version 钉，那里数过 marker-lines）。
+    assert expected == "release-marker-v%s" % newest_in_app_js, (
+        "独立推导要的是 %r，app.js 里最新那枚却是 v%s：三件套在这里已经错位" % (expected, newest_in_app_js))
+    assert text.count(expected) == 1, "%r 在 app.js 里必须恰好一行" % expected

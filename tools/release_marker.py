@@ -56,6 +56,23 @@
     否则发版准备把说明落下来的那一刻，裸跑会常年红着，还顺手教人去 bump 一个装不上的版本号。
     读不出这一版的 scope（值不认识 / 读不出文本）就**不豁免**，照旧红
 
+    **裸跑（不带 --expect）时 <VERSION> 与形态的来源**：versionName 只是其中一条线索，还要问
+    "这一版正在路上的形状"。下面三条同时成立，target 换成 docs/releases 里最新那份说明的版本，
+    判据随之变成「app.js 里最新 marker == 那个领先的版本」（等号右边取自说明，不是取自标记，
+    所以一枚对不上说明的领先标记照旧红）：
+        · 那份说明的版本号领先 versionName；
+        · 那份说明自己声明 `<!-- scope: server-only -->`（值不认识 / 读不出文本 ⇒ 算没声明）；
+        · app.js 里最新那枚标记也领先 versionName（还没补行的那一刻它不领先 ⇒ 回到原判据，
+          那一刻"该领先的是哪一枚"由 --expect 那一路说）。
+    只换服务端的一版 marker 按设计就该领先（新包里有、线上包里绝没有），而它的 versionName
+    按规矩不动，所以把裸跑的 target 焊死在 versionName 上 = 把这一版的正确形状判成红，还顺手
+    印出上一版那枚已经躺在装机包里的串。
+    这一支的**射程**：只读仓库里的 app.js 与那份说明，**不读装机侧那份包**（裸跑要在没有
+    dist\\ 的机器上——CI、新克隆、清过盘——也能给结论；常驻锁就跑在那种机器上）。
+    "这枚串线上是不是已经有了"只有 `--expect` 那一路判，见上。这一支判不了的：说明不存在、
+    说明不领先 versionName、scope 行缺失或值不认识或读不出文本、标记还没补上、装机侧是否已有
+    同一枚串、versionName 该不该追平（只换服务端的那一版不追）。
+
 发版准备那次一提交说明、一进版本，这里立刻给结论，并把**该用的那一串**直接打在消息里——
 标记于是是抄机器的，不是挑的。说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），
 不放行，也**不许**顺手把 versionName 顶上去当替代判据。
@@ -266,11 +283,39 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         return 2, ["RELEASE-MARKER verdict=UNKNOWN reason=%s —— 判据读不到就是不许" % exc]
 
     target = declared
+    bare_marker_ahead = False
     if expect:
         value = expect.strip()
         if not FULL_TAG_RE.match(value):
             return 1, ["RELEASE-MARKER verdict=FAIL token=expect-must-be-full-tag got=%s" % value]
         target = normalize_version(value)
+    else:
+        # 裸跑（不带 --expect）：target 与 scope 的权威不再只有 versionName。只换服务端的一版
+        # 按规矩不 bump versionName，而它的 -Marker 按设计**就该**领先 versionName（新包里有、
+        # 线上包里绝没有），所以只看 versionName 会把这一版在途的形状读成 installer，进而要求
+        # app.js 里最新那枚标记停在上一版——恰好是把该领先的那一枚判成红。进到下面这一支要
+        # 同时成立，任何一条不成立都回到原有判据、一字未改：
+        #   · docs/releases 里最新那份说明的版本号领先 versionName；
+        #   · 那份说明自己声明 SCOPE_SERVER_ONLY（值不认识、读不出文本都算**没声明**：读不出就
+        #     不豁免，这是"照旧红"，不是"放行"）；
+        #   · app.js 里最新那枚标记也领先 versionName。还没补行的那一刻它不领先，那一刻仓库里
+        #     没有任何机器可读的东西说清"该领先的是哪一枚"，形态判读归 --expect 那一路。
+        # 成立时 target = 那份说明的版本，判据随之变成「app.js 里最新 marker == 那个领先的版本」
+        # ——等号右边取自**说明**而不是取自标记，所以一枚领先却对不上说明的标记（领先到别的版本
+        # 号）在这里仍然是红的。"恰好一行""不得互为子串"由 installer 那一支原样复用。
+        # **射程**：这一支只读仓库里的两份文本（app.js 与那份说明），**不读装机侧那份包**——
+        # "这枚串线上是不是已经有了"只有带 --expect 的那一路判，裸跑在没有 dist\\ 的机器
+        # （CI、新克隆、清过盘）上也必须给得出结论，否则常驻锁在 CI 里就是恒 rc=2。
+        # 这一支判不了的：说明不存在、说明不领先 versionName、scope 行缺失或值不认识或读不出
+        # 文本、标记还没补上、装机侧是否已有同一枚串、以及"versionName 该不该追平"（本版不追）。
+        newest_note = max(notes, key=version_key) if notes else None
+        if newest_note is not None and version_key(newest_note) > version_key(declared):
+            note_is_server_only, _ = note_scope(repo_root, newest_note)
+            newest_marker = max((v for _, v in marker_lines(app_js)), key=version_key, default=None)
+            if note_is_server_only and newest_marker is not None \
+                    and version_key(newest_marker) > version_key(declared):
+                target = newest_note
+                bare_marker_ahead = True
 
     # 形态判读：要切的这一版是不是"只换服务端"，权威是它自己的发版说明，不是 versionName。
     server_only, reason = note_scope(repo_root, target)
@@ -301,10 +346,18 @@ def evaluate(repo_root, expect=None, live_appjs=None):
     lines.append("RELEASE-MARKER declared=v%s target=v%s scope=%s marker=%s"
                  % (declared, target,
                     SCOPE_SERVER_ONLY if server_only else SCOPE_INSTALLABLE, marker))
+    if bare_marker_ahead:
+        # 把"这一支为什么换了 target"写在输出里：裸跑抄一行的人不该自己去猜这一版是不是
+        # 只换服务端的那一形态，也不该猜这一枚串是怎么来的。
+        lines.append("RELEASE-MARKER token=bare-shape=server-only-marker-ahead note=v%s "
+                     "declared=v%s —— 本版按最新那份说明（只换服务端）判：target 取那份说明的版本"
+                     "而不是 versionName（这一版按规矩不 bump 它），所以该用的是 %r，它得在 app.js "
+                     "里恰好一行、且是最新的那枚；这一格只核仓库里的文本，线上是不是已经有这一串"
+                     "要用 --expect v%s 另核" % (newest_note, declared, marker, target))
     problems = []
 
     found = marker_lines(app_js)
-    if server_only:
+    if server_only and not bare_marker_ahead:
         # 只换服务端的一版不 bump versionName，所以"这一枚串能不能把两侧分开"跟开发者手上
         # 那个文件有没有改过无关（#65 把 app.js 里在不在当判据，于是补了行的那一版和该补行的
         # 那一版**都**红——现网不存在绿色状态，而这一刻恰恰是标记必须存在的时刻）。真正分得开的
