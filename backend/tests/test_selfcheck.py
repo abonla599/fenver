@@ -235,12 +235,14 @@ def test_no_absolute_paths_leak_into_the_public_answer(client):
 # 做嵌入），拿一个假名当它的气味探针，真冲突了就知道它有没有跟着异常原文出来。
 CANARY_MODEL = "vendorx-embed-9k"
 REPO_DIR_NAME = Path(__file__).resolve().parents[2].name
-# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字/`+`/`-`/`.`——否则 `https://`
-# 里那枚 `s:/` 会命中。这个边界必须和生产网 `core.pathmask._WIN_PATH` 同步：探测器写成
-# 无边界裸形时它和网瞎在同一处（网先把 URL 咬成 `http〈…〉`，这里便永远看不到 `s:/`），
-# 下面两条断言就退化成恒绿自证；网认了边界、URL 能逐字活着之后，裸形又变成"遇合法 URL
-# 就假红"。判据和被它判的网只有同构，才谈得上互相验得出。
-_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
+# 盘符路径 = 单字母 + `:` + 分隔符。豁免只认 URL scheme 那一形：`scheme 字符` 紧跟
+# `单字母 + ://` 时放过，粘着 `+ - .` / 字母 / 数字却用单反斜杠写的路径（`at-C:\Users\a`）
+# 仍算路径。写成两支是因为探测器只看"有没有"：一支要求路径前不是 scheme 字符，另一支在
+# 前面是 scheme 字符时要求分隔符不是 `//`——两支并起来才和生产网 `core.pathmask._WIN_PATH`
+# 的一支负向前瞻同判。这个同判由 `test_pathmask.py` 的绑定锁按源码点名守住：这里改窄
+# （探测器瞎在生产网瞎的同一处 ⇒ 下面两条断言退化成恒绿自证）或改宽（遇合法 URL 恒红）都会红。
+_DRIVE_PATH = re.compile(r"(?<![A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]"
+                         r"|[A-Za-z0-9+.-][A-Za-z]:(?!//)[\\/]")
 # 模型名的形状：连字符/下划线分隔的三段以上 ASCII 标识符（text-embedding-3-small、
 # all-MiniLM-L6-v2 都是这一族）。单段或两段（user_memories）不算，免得把集合名当模型名。
 _MODEL_SHAPED = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+){2,}", re.IGNORECASE)

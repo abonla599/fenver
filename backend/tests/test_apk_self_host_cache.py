@@ -398,9 +398,13 @@ def test_no_runtime_manifest_means_no_plan(hosted):
 # 都在 `authz.PUBLIC_PATHS` 里点了名——任何路人都读得到。所以这里按"路人能读到的一切"
 # 断言：盘符路径、当前用户名、仓库目录名都不许出现。
 REPO_DIR_NAME = Path(apk_cache.__file__).resolve().parents[3].name
-# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字（否则 `https://` 里那枚
-# `s:/` 会被当成盘符，测试夹具的下载地址全是 https 开头，判据会恒红）。
-_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
+# 盘符路径 = 单字母 + `:` + 分隔符。豁免只认 URL scheme 那一形（`scheme 字符` 紧跟
+# `单字母 + ://`）——测试夹具的下载地址全是 https 开头，认不出 `://` 判据就恒红；反过来只按
+# "前一个字符是哪一类"划界，`at-C:\Users\a` 这类路径就让探测器瞎在生产网瞎的同一处。
+# 两支并起来才与生产网 `core.pathmask._WIN_PATH` 的一支负向前瞻同判，同判由
+# `test_pathmask.py` 的绑定锁按源码点名守住。
+_DRIVE_PATH = re.compile(r"(?<![A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]"
+                         r"|[A-Za-z0-9+.-][A-Za-z]:(?!//)[\\/]")
 
 
 def _no_machine_shape(text: str, where: str, cache_root: str = "") -> None:

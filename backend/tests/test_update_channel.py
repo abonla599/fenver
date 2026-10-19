@@ -437,9 +437,13 @@ def test_the_digest_contract_is_the_same_shape_in_the_workflow_the_backend_and_t
 # `detail` 与卡片的 `reason` 上：每一次手机检查更新，都是任何路人在读这台机器的
 # 磁盘判据。这里断言的是**整份响应体**，不是某一句文案。
 REPO_DIR_NAME = REPO_ROOT.name
-# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字——否则 `https://` 里那枚
-# `s:/` 会命中，而这两条端点的正常载荷里就带着 https 地址（判据会恒红）。
-_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
+# 盘符路径 = 单字母 + `:` + 分隔符。豁免只认 URL scheme 那一形（`scheme 字符` 紧跟
+# `单字母 + ://`）：这两条端点的正常载荷里就带着 https 地址，把 `s://` 当盘符会让判据恒红，
+# 而 `at-C:\Users\a`、`v1C:\data\x` 这种粘着 `+ - .` 或字母数字的路径必须仍然算路径——只按
+# "前一个字符是哪一类"划界时探测器就瞎在生产网瞎的同一处。两支并起来才与生产网
+# `core.pathmask._WIN_PATH` 的一支负向前瞻同判，同判由 `test_pathmask.py` 的绑定锁按源码点名守住。
+_DRIVE_PATH = re.compile(r"(?<![A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]"
+                         r"|[A-Za-z0-9+.-][A-Za-z]:(?!//)[\\/]")
 
 
 def _anonymous_get(*paths):
