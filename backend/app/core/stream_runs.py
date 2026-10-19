@@ -333,7 +333,7 @@ def scrub_private_trace(frames: Generator[str, None, None]) -> Generator[str, No
     也写进了**同一个**缓冲，于是同一条通道开始送模型对用户输入的复述和用户的
     私有参数。这不是既有权限：管理端从来不读任何人的会话内容（/admin 界面不调
     任何 /v1/sessions，逐条路由见 tests/test_cross_owner_replay_scrubs_trace_v0291.py），
-    不该由"给同一轮多加了四种帧"顺手扩大。
+    不该由"往同一个缓冲里添了新帧"顺手扩大。
 
     只在出口做减法：名单里的帧整条不吐（连 `id:` 行一起，序号因此留空档——两个
     客户端都按 data 行的 type 分发、按 id 记游标，空档不影响下次续播），done 里
