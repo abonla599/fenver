@@ -4,19 +4,24 @@
 `data/tasks.json`。一句无守卫的 `read_bytes()` 在那份检出里就是 `FileNotFoundError`，
 而 CI 全绿是发版顺序的第一格——红在这一格，后面每一步都走不到。
 
-本文件量两件事，判据都朝"这份检出里没有 data/"那一句：
+本文件量两件事，判据都朝"这份检出里没有 data/"那一句。**两半条认得的形状要正面写清**，
+别把它们读成"这个目录里所有读点都审过了"：
 
-1. **静态**：`backend/tests/test_v0350_*.py` 里每一个读仓库数据路径的调用点，都要有一条
-   存在性判据（`exists()` / `is_file()` / `is_dir()`）走在它前面，或者写在同一条语句里
-   （三元式 `x.read_bytes() if x.exists() else None` 是这一批既有的写法）。缺文件是一种
-   取值，不是异常。
-2. **动态**：把这批模块里那些"零参数、既问存在又读字节"的快照函数摘出来单跑，把它绑到
-   的数据路径换成一条**不存在**的路径——那正是干净检出的形状。它必须回 `(None, None)`，
-   不许抛。
+1. **静态**只认这一种读点：路径在**模块级**被绑成一个常量、常量的值里含 `data` 这个字面量
+   （`REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"`），读点写成 `<那个名字>.read_bytes()`
+   这种**属性调用**，而且存在性判据（`exists()` / `is_file()` / `is_dir()`）与读点落在**同一个
+   函数作用域**内、守卫的行号**不晚于**读点那条语句——或者就写在同一条语句里（三元式
+   `x.read_bytes() if x.exists() else None` 是本批既有的写法）。缺文件是一种取值，不是异常。
+2. **动态**只认这一种函数：**模块级**定义、**零参数**、函数体里对上面那个常量**既有读点又有
+   存在性判据**。把它绑到的数据路径换成一条**不存在**的路径（干净检出的形状），它必须回
+   `(None, None)`，不许抛。
 
-射程说清楚：静态那半条按文本顺序判，会放过"问了却没用上答案"那一种；那种由动态这半条
-兜。两半条都不覆盖 CI 本身——真跑一遍干净检出得在仓库外做克隆（仓库永远带着 `data/`，
-本文件自己也一样），也不覆盖 `test_v0350_*.py` 之外那些文件读仓库数据的方式。
+认不到的形状逐条记在 `_STILL_MISSED_SHAPES` 那份清单里，每条配一枚"今天必须看不见"的钉子
+（`test_the_declared_blind_spots_are_actually_blind`）：谁把这些形状收进判据而没回来改清单，
+钉子就红；清单不是"已穷尽"，它只覆盖复验过的那几种形状。另有两格与形状无关的边界：静态按
+文本顺序判，会放过"问了却没用上答案"那一种，那种由动态这半条兜；两半条都不覆盖 CI 本身——
+真跑一遍干净检出得在仓库外做克隆（仓库永远带着 `data/`，本文件自己也一样），也不覆盖
+`test_v0350_*.py` 之外那些文件读仓库数据的方式。
 """
 import ast
 import os
@@ -234,3 +239,76 @@ def test_dynamic_ruler_bites_when_the_answer_is_not_used(tmp_path):
         run_snapshot_helper(HOSTILE_ASKED_BUT_UNUSED, "_repo_data_state", tmp_path)
     assert unguarded_read_sites(HOSTILE_ASKED_BUT_UNUSED) == [], (
         "静态那半条按文本顺序判，本来就该放过这一种；这里记下分工，别把它当成漏判")
+
+
+# ---------- 射程外：两半条今天都看不见的形状（清单，不是待办） ----------
+# 每条 = (名字, 喂给判据的源码, 为什么算漏 / 现网有没有活例)。活例口径统一是
+# "对着 backend/tests/test_v0350_*.py 做过 AST 扫描"，扫的是读点根名字的身份：函数参数、
+# 别名、函数内绑定、非属性调用、import 进来的常量——本批一个都不落在这些格里，全部是
+# 模块级常量 + 属性调用（`test_the_ruler_actually_sees_this_batch` 逮到的就是它们），
+# 所以下面每一条都是**前瞻性缺口**：今天没有活例，写出来是为了不许把射程说成比测量宽。
+_HDR = 'import os\nfrom pathlib import Path\nREPO_ROOT = Path(".")\n' \
+       'REPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"\n'
+
+_STILL_MISSED_SHAPES = (
+    ("param-hand-off",
+     _HDR + 'def g(p):\n    return p.read_bytes()\n'
+            'def f():\n    return g(REPO_DATA_TASKS)\n',
+     "读点的根名字是**函数参数**：判据只跟着模块级那个常量名走，路径一过参数边界就追不下去。"
+     "本批的活例检查：把 data 常量当实参递出去的只有 `os.path.realpath(str(...))` / `str(...)` "
+     "这几处，传的是路径字符串、当场不读字节 ⇒ 无活例"),
+    ("inline-open",
+     _HDR + 'def f():\n    return open(REPO_DATA_TASKS).read()\n',
+     "`open(path)` 是**非属性调用**（func 是 Name 不是 Attribute），`_calls_in` 那一关就过不去；"
+     "READ_METHODS 里的 `open` 只逮得到 `Path.open()` 那种写法。本批 grep `open(` 零命中 ⇒ 无活例"),
+    ("unbound-data-literal",
+     'from pathlib import Path\ndef f():\n    return Path("data/tasks.json").read_text()\n',
+     "路径没绑成模块级常量、直接内联字面量：`_data_bound_names` 认的是赋值的**值里含 `data`**，"
+     "内联字面量没有那个名字可认。本批扫过内联的 data 路径字面量（`Path(…` / `open(…` / 裸 "
+     "`data/…` 串）零命中 ⇒ 无活例"),
+    ("os-path-join",
+     _HDR + 'def f():\n    return open(os.path.join(str(REPO_ROOT), "data", "tasks.json")).read()\n',
+     "`os.path.join` 拼出来的字符串没有可认的根名字（并且它本身也是非属性读点）。本批唯一的 "
+     "`os.path.join` 在 `_abspath(*parts)` 里，喂进去的是 tmp_path 下的假路径，不读仓库数据 ⇒ 无活例"),
+    ("imported-constant",
+     'from conftest import REPO_DATA_TASKS\ndef f():\n    return REPO_DATA_TASKS.read_bytes()\n',
+     "常量从别的模块 import 进来：`_data_bound_names` 只遍历本模块 tree.body 上的 Assign，"
+     "import 不产生绑定记录，于是这个名字在读点侧就是陌生名字。本批 `from conftest import` 零命中 ⇒ 无活例"),
+    ("module-level-read-guarded-elsewhere",
+     _HDR + 'def guard():\n    return REPO_DATA_TASKS.exists()\n'
+            'RAW = REPO_DATA_TASKS.read_bytes()\n',
+     "读点在模块级、守卫写在另一个函数里：作用域取的是包住读点的**最小函数**，模块级读点因此"
+     "在整模块里找守卫——`guard()` 那一句行号在前，就被当成护住了（行号比较分不清作用域）。"
+     "本批的模块级读点只有反例字符串常量里的假源码，真读点都在函数里且同函数有守卫 ⇒ 无活例"),
+    ("alias-then-read",
+     _HDR + 'ALIAS = REPO_DATA_TASKS\n'
+            'def _repo_data_state():\n    return ALIAS.read_bytes(), ALIAS.stat().st_mtime_ns\n',
+     "别名行把常量换成另一个名字再读：`ALIAS = REPO_DATA_TASKS` 的值里没有 `data` 字面量，"
+     "于是 ALIAS 进不了认得的名单；那个函数也因为只对陌生名字动手而不满足快照函数定义。"
+     "本批 `X = REPO_DATA_TASKS` 形式的别名行零命中 ⇒ 无活例"),
+    ("function-scope-binding",
+     _HDR + 'def f():\n    p = REPO_ROOT / "data" / "tasks.json"\n    return p.read_bytes()\n',
+     "**函数内**绑定的路径（哪怕值里就写着 data）静态那半条根本看不见——"
+     "它只遍历模块级赋值。动态侧同理，`run_snapshot_helper` 往探针命名空间里塞的也只有模块级"
+     "那批名字，函数内绑定的读点在两半条里都是隐形。本批唯一的函数内 data 段绑定是本文件自己的"
+     "`target_dir = tmp_path / …`，那是 tmp 下的假数据根，不是仓库路径 ⇒ 无活例"),
+)
+
+# 对照组：尺子对"它说它认得"的那个形状是真认得——没有这一枚，上面那一串"看不见"就可能是
+# 尺子在空转（这条文件的反空转规矩）。
+_RECOGNIZED_SHAPE = _HDR + 'def f():\n    return REPO_DATA_TASKS.read_bytes()\n'
+
+
+def test_the_declared_blind_spots_are_actually_blind():
+    """清单里每一条今天都得**看不见**：钉的是"声明与测量一致"，不是把判据收紧。
+
+    两半条各判一次（静态报不出读点、动态认不出快照函数），谁以后把这些形状收进射程而没回来
+    删掉对应那条，这里就红——清单必须越还越少，和本文件的豁免名单同一个方向。
+    """
+    for name, source, _note in _STILL_MISSED_SHAPES:
+        assert unguarded_read_sites(source, "<synth>") == [], (
+            "%s 已经看得见，射程声明该改、清单里该删这一条" % name)
+        assert not snapshot_helpers(source, "<synth>")[2], (
+            "%s 的动态那半条已经覆盖，清单里该删这一条" % name)
+    assert len(unguarded_read_sites(_RECOGNIZED_SHAPE, "<control>")) == 1, (
+        "连对照组都判不出读点 ⇒ 上面那一串「看不见」是尺子在空转，不是射程外")
