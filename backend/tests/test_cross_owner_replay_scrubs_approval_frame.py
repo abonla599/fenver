@@ -22,6 +22,8 @@ admin 跨属主补帧时逐字节透出，而 `plan_summary` 是用户那句话�
 - 动线上形状（键序、增键、删键、类型名）→ test_approval_frame_wire_bytes… 红：它读的是
   stream_chat_events 在审批分支上真造出来的那一帧，不是这份文件手抄的字典；
 - 只改手抄夹具的键集/键序、不动基准 → 同一把里的对齐钉红（两份手抄必须同键同序，值故意不同）；
+  对齐钉的键序是从基准那串**解析**出来的，不是从整串字节正则反解的——所以基准里某个裸槽的值
+  改成带结构的串时，红的是逐字节那枚（报"线上字节变了"），不是这把报"键集分叉"；
 - 把"取真身"那一段换成手抄一个字典 → 真跑那几枚判据红（假 LLM 的份数没被抽干、流里没有
   tool_result 与 content）；
 - 往 NON_CLIENT_FRAMES 里加名字（哪怕同时补进隐私名单）→ 名单钉子红；
@@ -245,17 +247,32 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
     `_a_run_with_approval`），frozen 是"改之前这一帧在线上长什么样"的字节基准。两份的**键集与
     键序**由下面那枚钉子对齐，**值故意不同**——夹具走的是删文件那条工具名，基准读的是引擎在
     `execute_code` 审批分支上真造出来的那一帧；拿夹具的字典当 frozen 的取值底稿会把 tool_name
-    一起漂掉。基准喂给它的必须是引擎真造的帧，否则这份副本改不改都和线上无关。
+    一起漂掉。基准喂给它的必须是引擎真造的帧，否则这份副本改不改都和线上无关。对齐那枚读的
+    是基准那串**解析**出来的键序（`json.loads`），不拿正则去整串反解；frozen 本身仍是手抄的
+    字节面，不从夹具反推——两份手抄合成一份，键序漂移就没人逮了。
     """
     assert se.FRAME_APPROVAL_REQUEST == "approval_request"
     # 改动前的形状，含键序与冒号后的空格：json.dumps 按插入顺序出字节，键序变了就是字节变了。
+    # 两格裸 `%s`（TICKET / _APPROVAL_TOOL）不换写法是刻意的：换成 json.dumps(值) 今天出的字节
+    # 一模一样（两个值都不含要转义的字符），对下面的键序锁一分检测力都不加，动的却是这份"改前
+    # 在线上长什么样"的手抄基准本身。它唯一可疑的走法（值里塞进要转义的字符）归逐字节那枚管——
+    # 引擎侧转义、基准侧不转义，两边当场分叉，报的就是"线上字节变了"。
     frozen = ('{"type": "approval_request", "ticket_id": "%s", "tool_name": "%s", '
               '"plan_summary": %s, "expires_at": 1730000000.0}'
               % (TICKET, _APPROVAL_TOOL, json.dumps(PLAN_SUMMARY)))
-    assert tuple(APPROVAL_FRAME) == tuple(re.findall(r'"([a-z_]+)":', frozen)), (
+    # 逐字节这关**必须排在键序前面**：过了这关，frozen 就是引擎真帧的字节、必然解析得动，
+    # 键序锁才只可能因"键真的变了"而红。
+    assert se.sse_data(_frame_the_engine_itself_builds(monkeypatch)) == "data: " + frozen + "\n\n", (
+        "这一帧的线上字节变了：基准与引擎真造出来的那一帧不再逐字节相同（改键序、增删键、"
+        "改类型名都会落在这里，老客户端按位置解析就会崩）")
+    # 键序从**解析结果**里取，不从整串字节上正则反解：正则会把裸槽里带的 `", "kk": ` 当成键，
+    # 于是"两份手抄谁都没改键、只是某个值改了"能报成键集分叉——尺子被被判的对象喂了假键。
+    # 反过来也不许滑成自证：键序读的是 frozen 这串**手写字节面**，`APPROVAL_FRAME` 一个字符
+    # 都没参与拼它；把 frozen 改成从夹具字典 dumps 出来，两份手抄就合成一份，键序漂移再没人逮。
+    baseline_keys = tuple(json.loads(frozen))
+    assert tuple(APPROVAL_FRAME) == baseline_keys, (
         "两份手抄的审批帧键集/键序分叉了：夹具 %s vs 基准 %s——键序变了就是线上字节变了"
-        % (tuple(APPROVAL_FRAME), tuple(re.findall(r'"([a-z_]+)":', frozen))))
-    assert se.sse_data(_frame_the_engine_itself_builds(monkeypatch)) == "data: " + frozen + "\n\n"
+        % (tuple(APPROVAL_FRAME), baseline_keys))
     js = (BACKEND / "app" / "web" / "static" / "api.js").read_text(encoding="utf-8")
     kt = (BACKEND.parent / "android-native" / "app" / "src" / "main" / "java"
           / "xyz" / "fenever" / "assistant" / "nativeapp" / "Api.kt").read_text(encoding="utf-8")
