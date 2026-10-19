@@ -12,10 +12,14 @@
 4. 免鉴权的代价与缓存：它照样会读盘，所以与卡片端点共用同一份快照（今天 30 秒一换，
    见 `releases.CACHE_SECONDS`）。
 """
+import asyncio
+import getpass
 import os
+import re
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.core import apk_cache, releases
@@ -424,3 +428,116 @@ def test_the_digest_contract_is_the_same_shape_in_the_workflow_the_backend_and_t
     assert '"apk_sha256"' in plan, "壳不再从透传 JSON 读这个字段了"
     assert "length() != 64" in plan, "壳认的长度不再是 64？"
     assert "c < 'a' || c > 'f'" in plan, "壳认的字符集不再是小写十六进制？"
+
+
+# ---------- 9. 免鉴权那两条端点不许说这台机器长什么样 ----------
+
+# `/v1/update/info` 与 `/v1/release/latest` 都在 `authz.PUBLIC_PATHS` 里点了名
+# （登录之前就要能检查更新），而"清单写的安装包不可用"那两句理由一路拼到 502 的
+# `detail` 与卡片的 `reason` 上：每一次手机检查更新，都是任何路人在读这台机器的
+# 磁盘判据。这里断言的是**整份响应体**，不是某一句文案。
+REPO_DIR_NAME = REPO_ROOT.name
+# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字——否则 `https://` 里那枚
+# `s:/` 会命中，而这两条端点的正常载荷里就带着 https 地址（判据会恒红）。
+_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
+
+
+def _anonymous_get(*paths):
+    """真·匿名（不带 Authorization、不带会话 Cookie）连打两条免鉴权端点。
+
+    用 httpx 的 ASGITransport 而不是 `TestClient`（本仓跨请求证据的既有写法）：这两条
+    共用 `releases` 的模块级快照，判据要的正是"第二条读到的就是第一趟攒下的那份理由"，
+    而 `TestClient` 每请求另开一个 portal，跨请求那一半根本观察不到。
+    """
+    from app.main import app
+
+    async def go():
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                base_url="https://ai.fenever.xyz", timeout=60.0) as c:
+            return [await c.get(p) for p in paths]
+    return asyncio.run(go())
+
+
+def _assert_no_machine_shape(responses, cache_root, where):
+    for r in responses:
+        assert r.status_code != 401, f"{where}：免鉴权端点索要凭据了，这条锁没在测匿名"
+        body = r.text
+        hit = _DRIVE_PATH.search(body)
+        assert hit is None, f"{where}：响应体里出现盘符路径 {hit.group(0)!r} → {body}"
+        for forbidden in (cache_root, getpass.getuser(), REPO_DIR_NAME):
+            assert forbidden not in body, f"{where}：响应体回显了 {forbidden!r} → {body}"
+
+
+def test_anonymous_missing_package_answer_carries_no_local_path(enforced, tmp_path):
+    """清单就位、盘上没有那串字节：匿名调用者拿到的两份东西里都没有磁盘位置。
+
+    两条端点一起打：502 的 `detail`（`releases.latest_release_manifest` 那条理由）与
+    卡片的 `reason`（`releases.probe` 的失败分支），背后是同一句 `cached_file_state`。
+    """
+    write_manifest(releases.runtime_manifest_path(), make_manifest())
+    responses = _anonymous_get("/v1/update/info", "/v1/release/latest?have=0.16")
+    info, latest = responses
+    assert info.status_code == 502, info.text
+    assert latest.status_code == 200 and latest.json()["ok"] is False, latest.text
+    _assert_no_machine_shape(responses, str(tmp_path / "apk"), "缺包")
+
+
+def test_anonymous_digest_mismatch_answer_carries_no_local_path(enforced, tmp_path):
+    """盘上有包但摘要对不上：同一句理由的第二格，同样只许说包不许说机器。"""
+    apk_cache.store(VERSION, PKG, SHA)
+    write_manifest(releases.runtime_manifest_path(), make_manifest(sha256=WRONG_DIGEST))
+    responses = _anonymous_get("/v1/update/info", "/v1/release/latest?have=0.16")
+    info, latest = responses
+    assert info.status_code == 502, info.text
+    assert latest.json()["ok"] is False, latest.text
+    _assert_no_machine_shape(responses, str(tmp_path / "apk"), "摘要不符")
+
+
+def test_the_refusal_still_tells_which_package_and_what_is_missing(enforced, tmp_path):
+    """反向证据：隐去位置之后运维仍然查得到"是哪一版、缺的是什么"——不是把句子吞掉。
+
+    读的字段就两格：502 的 `detail`（含包名与问题种类）与卡片的 `latest`（版本号）。
+    把拒绝理由整句删短成"详见日志"会红在这里，而那正是 #112 出口层拒绝的那种做法。
+    """
+    write_manifest(releases.runtime_manifest_path(), make_manifest())
+    detail = _anonymous_get("/v1/update/info", "/v1/release/latest?have=0.16")[0].json()["detail"]
+    assert VERSION + ".apk" in detail, f"看不出缺的是哪个包：{detail}"
+    assert "盘上没有这一版的字节" in detail, detail
+    assert SHA[:8] in detail, f"清单期望的校验值前缀没了：{detail}"
+
+    apk_cache.store(VERSION, PKG, SHA)
+    releases.reset_for_tests()
+    write_manifest(releases.runtime_manifest_path(), make_manifest(sha256=WRONG_DIGEST))
+    info, latest = _anonymous_get("/v1/update/info", "/v1/release/latest?have=0.16")
+    detail = info.json()["detail"]
+    assert VERSION + ".apk" in detail and "摘要" in detail, detail
+    assert WRONG_DIGEST[:8] in detail and SHA[:8] in detail, f"两句前缀至少要在一处读得出：{detail}"
+    # 卡片那一头读的是 `reason` 字段：失败时 `latest` 是空串（三态纪律），所以"缺的是
+    # 哪一版的包"必须仍然写在那句话里，不能只剩"详见日志"。
+    card = latest.json()
+    assert card["ok"] is False and card["has_update"] is None, card
+    assert VERSION + ".apk" in card["reason"], card["reason"]
+
+
+def test_the_exit_net_masks_a_path_in_text_we_did_not_write(enforced, tmp_path, monkeypatch):
+    """第二层守的是"措辞不在我们手里"的那半：磁盘判据将来被别的来源填进路径时也要盖住。
+
+    这里把一句**带盘符路径**的理由直接摆进 `cached_file_state` 的返回值（模拟第三方
+    异常原文或后来新增的判据），断言公开端点上只剩明写的〈路径已隐去〉，句子其余部分
+    照读——整句吞掉是另一种 bug（见 #112 那条拒绝 logsanitizer 登记数据根的理由）。
+    """
+    bs = chr(92)
+    windows = "C:" + bs + "Users" + bs + "someone" + bs + "proj" + bs + "data" + bs + "apk"
+    posix = "/home/someone/proj/data/apk"
+    monkeypatch.setattr(apk_cache, "cached_file_state",
+                        lambda v, s: ("", f"盘上没有这一版的字节（{windows}，另有 {posix}）"))
+    write_manifest(releases.runtime_manifest_path(), make_manifest())
+    responses = _anonymous_get("/v1/update/info", "/v1/release/latest?have=0.16")
+    info, latest = responses
+    assert info.status_code == 502 and latest.status_code == 200, info.text
+    for r in (info, latest):
+        assert windows not in r.text and posix not in r.text, r.text
+    assert "〈路径已隐去〉" in info.json()["detail"], info.text
+    assert "问不到发布信息" in info.json()["detail"], "整句被吞了：该隐去的只有路径"
+    assert "不把对不上号的字节端出去" in info.json()["detail"], info.text
