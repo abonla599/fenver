@@ -40,6 +40,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_machine_read_pointers import strip_py_prose
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE = REPO_ROOT / "tools" / "pre_tag_gate.py"
 SCOPE_READER = REPO_ROOT / "tools" / "release_marker.py"
@@ -258,17 +260,47 @@ def test_gate_delegates_the_scope_read_and_copies_no_third_regex():
 
     仓库里已经有两份：`tools/gen_changelog.py` 与 `tools/release_marker.py`（#68 负责合并）。
     第三份一旦长出来，"这一版到底是不是只换服务端"就有了第三种真相——#65/#69/#71 修的正是这个。
+
+    **射程**：正向那句（必须 delegate）吃 `strip_py_prose`——判的是剥掉 `#` 注释与 docstring
+    之后还在的那行 import；反向那两句（不许出现 scope 字面量）仍吃原文按三条引号切的那一截，
+    今天读不到 token 因而恒绿，收窄归 #74。两面不是同一把尺子是有意的：把那句 `split` 的输入
+    换成剥层那一份会直接把这一跑变成 IndexError，而那不是判据。
     """
-    src = GATE.read_text(encoding="utf-8")
+    src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert "from release_marker import" in src and "note_scope" in src, \
-        "第 1 条判据必须吃 release_marker.note_scope 那把尺子"
-    code = src.split('"""')[2]          # 模块 docstring 之后的那一截（docstring 里引用那一行是给人读的）
+        "第 1 条判据必须吃 release_marker.note_scope 那把尺子（判的是剥掉注释与 docstring 之后" \
+        "还在的那一行 import；原文里注释与代码长得一样，抄一句就能替真代码答到）"
+    # 下面两句判的是「不许出现」，吃的是**原文**按三条引号切出来的那一截，与本文件上面那句
+    # 分工不同、也**不能**换成剥层那一份：`strip_py_prose` 把 docstring 的定界符也原位刷空，
+    # 剥完之后 `split('"""')` 只剩一段，这一句会直接 IndexError。而这一截读不到 token
+    # （`scope:` 与 `<!--` 的首现位置都落在模块 docstring 里、在那一截之外），所以这两句今天
+    # 恒绿——那是声明过的盲区（test_v0350_lock_comment_stripping_scope 清单里的
+    # rough-triple-quote-slice），把这两句一起收窄归 #74，本单不动它。
+    code = GATE.read_text(encoding="utf-8").split('"""')[2]
     assert "<!--" not in code and "scope:" not in code, \
         "闸门代码里不许出现 scope 行的正则或字面量——读法只有 release_marker 那一份"
     mod = _load_gate()
     assert not hasattr(mod, "SCOPE_RE"), "闸门自己不许再定义一条 scope 正则"
     assert mod.note_declares_server_only(str(REPO_ROOT), "v0.34.1")[0] is True, \
         "真树的 v0.34.1 就是 server-only： delegation 必须是活的而不是恒 False"
+
+
+def test_the_delegation_lock_reads_the_import_line_not_the_docstring():
+    """**成对夹具**：同一句 import 只写在 docstring 里时，迁完那句判据必须不认、旧写法必须认。
+
+    没有这一组，上面那次"从原文换到 `strip_py_prose`"就只是一次改写而已，没人看见它真的能报红。
+    反向对照同批钉：真代码行上那行 import 剥完必须还在——不然"不认"可能只是因为尺子整体空转。
+    """
+    docstring_only = ('"""给下一个人的提示：from release_marker import note_scope 才是那把尺子'
+                      '"""\nX = 1\n')
+    assert "from release_marker import" in docstring_only, (
+        "夹具没把这句写进原文（这一跑作废）")
+    assert "from release_marker import" not in strip_py_prose(docstring_only), (
+        "docstring 里抄一句 import 就替真代码答到了——正向那句又吃回原文：删掉真 import、注释里"
+        "留着这句话，判据照样绿")
+    real_import = "from release_marker import note_scope\nX = 1\n"
+    assert "from release_marker import" in strip_py_prose(real_import), (
+        "代码行上的 import 也被剥掉了 ⇒ 尺子在空转，上面那句「不认」不算证据")
 
 
 def test_scope_reader_is_present_in_a_ci_checkout():
