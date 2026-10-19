@@ -228,7 +228,11 @@ def test_ci_runs_this_gate():
     assert len(steps) == 1, f"跑 pytest 的步骤不是恰好一条：{[s.get('name') for s in steps]}"
     script = steps[0]["run"]
     assert "backend/tests/" in script, "CI 必须按目录跑，新增测试文件才自动被覆盖"
-    assert "test_secret_scan" not in text, "别退回点名清单：那会让新写的锁一条都不执行"
+    from tests.test_ci_history_depth import workflow_run_bodies
+    bodies = workflow_run_bodies(REPO_ROOT / ".github" / "workflows" / "tests.yml",
+                                 where="tests.yml 的 run 正文（#94 W 片）")
+    assert "test_secret_scan" not in bodies, (
+        "别退回点名清单：那会让新写的锁一条都不执行")
 
 
 def test_git_add_f_mode_still_lands_in_the_scanned_set(tmp_path):
