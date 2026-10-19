@@ -1,9 +1,10 @@
 r"""出口路径掩码 `core.pathmask` 的判据锁：两个方向都要有人拦。
 
 这道网只有"少掩就红"的牙（`test_selfcheck`、`test_update_channel` 那几把），一句合法 URL
-被掩成半截以前没有任何一把会红。本文件补的就是**过掩**那一方向的锁，另加一枚"生产 ≡ 机制
-不同的 oracle"抽样同构锁：盘符判据的形状一旦和生产网不同判，抽样表当场分家。判据本身是纯
-字符串；同构锁只 `re.search`，不落盘、不起服务、不碰记忆后端。
+被掩成半截以前没有任何一把会红。本文件补的就是**过掩**那一方向的锁，另加两把同构锁：一把把
+生产网的盘符档和一份**机制不同**的 oracle 钉在同一张抽样表上；一把把全仓手抄的盘符判据按源码
+点名，逐把钉到生产网的判定上。掩码判据本身是纯字符串；两把同构锁只 `ast.parse` 兄弟模块的源码
+取字面量，不落盘、不 import 别的测试模块、不起服务、不碰记忆后端。
 
 射程（实测，不是声明）：`_WIN_PATH` 认「单字母 + `:` + 分隔符 + 一串非空白字符」，豁免只认
 URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 认首段列在 `_POSIX_ROOTS`
@@ -12,12 +13,9 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
 生产网的边界写成负向前瞻里嵌定长 lookbehind，而不是消耗型分组：消耗型 `(?:^|[^…])` 会把路径
 前面那个字符（`（`、`与` 前的空格）一起吃进掩码，那是"把后半句一起吃掉"的另一种删话。oracle
 抄的是两支并列的等价写法——机制不同才谈得上互相验得出，抄成同一支就只是同一个错误写两遍。
-同一份盘符判据在本文件的 oracle、以及 `test_selfcheck`／`test_update_channel`／
-`test_apk_self_host_cache` 里的 endpoint 探测器处各写一遍手抄，故意不收成一份：收成一份就没有
-第二判据可对照，那些锁会退化成对生产网的复述。
 
-**仍漏清单**（本文件的钉子每条一枚，全部**今天必须绿**；绿的是"网抓不住它"，不是"它无害"。
-哪天把某条形状收进射程而没回来删掉这里那一条和元组里那一项，那枚钉就红）：
+**网级仍漏清单**（与 `_STILL_MISSED_SHAPES` 同一本账，每条一枚钉，全部**今天必须绿**；绿的是
+"网抓不住它"，不是"它无害"。哪天把某条形状收进射程而没回来删掉这里那一条和元组里那一项，那枚钉就红）：
 - `spaced-drive-path-tail`：`_SEG` 把空白排除在段字符类之外，`C:\Program Files (x86)\x`
   只掩到第一段，尾段 `Files (x86)\x` 原样走出去。现网无活例（本机用户名不含空格，
   记忆后端那句维度冲突也不带路径）。真解方向是源头不往外拼绝对路径（见 `apk_cache`
@@ -38,16 +36,38 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
 - `single-slash-scheme-overmasked`：少一枚斜杠的畸形 URL（`https:/ai.fever`）没有 `://`
   可认，被当盘符路径吃掉，只剩 `http`。这是豁免认 `://` 的对偶代价，规范 URL 逐字活着由
   `_VERBATIM_URLS` 钉着 ⇒ 无活例。
+
+**锁级看不见清单**（与 `_LOCK_BLIND_SPOTS` 同一本账，同样每条一枚钉，全部**今天必须点不到**）：
+绑定锁点名的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现 `[A-Za-z]` 紧跟 `:` 或 `]:`"；
+认不到的抄本既不被比对、也不会让绑定锁红。`_DRIVE_RULE_SITES` 与点名结果必须完全一致，所以
+"在册的那几处变了形"会红，"没登记的新抄本"不会。
+- `copy-not-bound-to-a-module-level-name`：判据内联在调用里（`re.search(r'…', body)`）时点不到名——
+  它不挂在模块级 `NAME = re.compile(...)` 上，遍历模块级赋值根本看不见这个判据。
+- `copy-assembled-at-runtime`：另一格，机制不同：名字挂对了，但实参是 `_HEAD + _SEP` 这种运行时
+  才拼起来的表达式，不是字符串常量，于是这一站整个隐身。与上一条不是同一格——那条连赋值都没有，
+  这条是赋值在、字面量取不出。
+- `copy-spelled-differently`：同一个意思换一种写法就不认识了——字符类写成 `[a-zA-Z]`、`[A-z]`、
+  `[[:alpha:]]`，或把 `:` 挪进另一枚字符类里。点名的判据是字面形状，不是语义。
+
+另有一格是**设计决定**而不是形状漏，它不归 `_LOCK_BLIND_SPOTS` 管：同一份盘符判据在本文件的
+oracle、`test_selfcheck`／`test_update_channel`／`test_apk_self_host_cache` 里的 endpoint 探测器
+处各写一遍手抄，故意不收成一份——收成一份就没有第二判据可对照，那几把锁会退化成对生产网的复述。
+绑定锁只保证这些抄本同判，不保证只有一份；`_ORACLE.pattern != _WIN_PATH.pattern` 那枚断言是这件
+事的报警器，哪天真收成一份，把这段登记与那枚断言一起删掉。
 """
+import ast
 import re
+from pathlib import Path
 
 import pytest
 
-from app.core.pathmask import PATH_MASK, _WIN_PATH, hide_paths
+from app.core.pathmask import PATH_MASK, _SEG, _WIN_PATH, hide_paths
 
 # 掩码字面被 `test_selfcheck.py` 与 `test_update_channel.py` 按字面写死，改这里就是
 # 改公开端点上那句话的形状；本文件其余用例一律引用 PATH_MASK 而不重抄字面。
 MASK = PATH_MASK
+
+_BACKEND = Path(__file__).resolve().parents[1]
 
 # 生产网的盘符档与测试侧 oracle 必须同判、且机制不同。oracle 抄的是两支并列的写法：一支要求
 # 路径前不是 scheme 字符，另一支在前面是 scheme 字符时要求分隔符不是 `//`。只判定"这里有没有
@@ -70,6 +90,8 @@ _VERBATIM_URLS = (
 )
 
 # 句子其余部分必须照读：只盖路径那一段，前后连接词与标点一个都不许跟着消失。
+# 最后两条把 URL 和盘符路径放进同一句：纯 URL 的夹具里没有任何掩码，纯路径的夹具里没有 URL，
+# "已经掩过就再补一刀"这类条件式判据只有在这两条上才露形——补刀会把 `s://` 一起咬掉。
 _SENTENCE_CASES = (
     (r"位置 C:\x\y 后续还有中文说明", "位置 " + MASK + " 后续还有中文说明"),
     (r"盘上没有（C:\Users\a，另有 /home/b/c）", "盘上没有（" + MASK + "，另有 " + MASK + "）"),
@@ -77,6 +99,10 @@ _SENTENCE_CASES = (
     (r"问不到发布信息：清单摘要与盘上字节不符（包名 app.apk，位置 C:\Users\a\b）",
      "问不到发布信息：清单摘要与盘上字节不符（包名 app.apk，位置 " + MASK + "）"),
     (r"错误在at-C:\Users\a 处", "错误在at-" + MASK + " 处"),
+    (r"位置 C:\x 详见 https://ai.fever.xyz/v1/update/info",
+     "位置 " + MASK + " 详见 https://ai.fever.xyz/v1/update/info"),
+    (r"问不到发布信息 https://ai.fever.xyz/v1/release/latest（位置 C:\Users\someone\chroma_db）",
+     "问不到发布信息 https://ai.fever.xyz/v1/release/latest（位置 " + MASK + "）"),
 )
 
 # 路径前面的那个字符是句子的，不是路径的——lookbehind 与消耗型分组就差在这一个字符上。
@@ -105,14 +131,17 @@ _IN_RANGE_CASES = (
     (r"值取自x.C:\p 一处", "值取自x." + MASK + " 一处"),
 )
 
-# 生产盘符档 ≡ oracle 的抽样表：两判在这些串上必须给同一个"有没有盘符路径"。
-# 名单里的 `+ - .` 各占一枚——它们就是"版本号与 URL 里那串不算边界"的理由。
+# 各判据（生产网、oracle、三把探测器）在同一条抽样表上必须给同一个"有没有盘符路径"。
+# `+ - .` 各占一枚、字母紧贴一枚、数字紧贴一枚；`9:\a` 钉的是"盘符档是**单字母**"——字符类
+# 一旦加宽成 `[A-Za-z0-9]`，生产网在这里认出盘符而 oracle 不认，抽样表当场分家；URL 与路径
+# 同句两枚钉的是"同一句里有掩码时不许再补一刀"；`C://x/y` 与 `错误在at-C://p 处` 是豁免的两侧。
 _DRIVE_EQUIVALENCE_CASES = (
     r"C:\Users\someone\proj",
     r"位置 C:\x\y 后续",
     "https://ai.fever",
     "https://ai.fever.xyz/v1/update/info",
     "http://ai.fever",
+    "ms-appx-web://host/p",
     r"（C:\x",
     r"v1是C:\x",
     r"aC:\x",
@@ -121,6 +150,14 @@ _DRIVE_EQUIVALENCE_CASES = (
     r"x-C:\p\q",
     r"x.C:\p",
     r"app=C:\p",
+    r"9:\a",
+    r"错误在at-C:\Users\a 处",
+    r"路径 v1C:\data\x",
+    r"C://x/y",
+    r"错误在at-C://p 处",
+    "https:/ai.fever",
+    r"位置 C:\x 详见 https://ai.fever.xyz/v1/update/info",
+    r"问不到发布信息 https://ai.fever.xyz/v1/release/latest（位置 C:\Users\someone\chroma_db）",
     r"D:\data\x 是问题所在",
     r"\\srv\share",
     "/home/a/b",
@@ -154,6 +191,87 @@ _STILL_MISSED_SHAPES = (
      "http" + MASK,
      "少一枚斜杠就没有 `://` 可认，被当盘符路径吃掉——豁免认 `://` 的对偶代价，规范 URL 由 _VERBATIM_URLS 钉着"),
 )
+
+# 锁级看不见清单：每条 (case_id, 合成源码, 为什么点不到名)。今天必须点不到；点到了就是射程收了
+# 这一格（把 docstring 那条和这里这一项一起删），或者合成源码写坏了（那这枚钉绿得没有意义）。
+_LOCK_BLIND_SPOTS = (
+    ("copy-not-bound-to-a-module-level-name",
+     "import re\nBODY = ''\n"
+     "def _leaked():\n"
+     "    return bool(re.search(r'[A-Za-z]:[/\\\\]', BODY))\n",
+     "判据内联在 `re.search` 的调用里，模块级赋值遍历看不见它"),
+    ("copy-assembled-at-runtime",
+     "import re\n_HEAD = r'[A-Za-z]:'\n_SEP = r'[/\\\\]'\n"
+     "_DRIVE_PATH = re.compile(_HEAD + _SEP)\n",
+     "名字挂对了但实参是 `BinOp`，字符串常量取不出来，这一站整个隐身"),
+    ("copy-spelled-differently",
+     "import re\n_DRIVE_PATH = re.compile(r'[a-zA-Z]:[/\\\\]')\n",
+     "字符类换一种写法就不匹配点名用的字面形状（`[a-zA-Z]`、`[A-z]` 同理）"),
+)
+
+# 对照组：绑定锁对它说"认得"的那个形状是真认得到——没有这一枚，上面那串"点不到名"是尺子在空转。
+_DISCOVERABLE_COPY = "import re\n_DRIVE_PATH = re.compile(r'[A-Za-z]:(?!//)[/]')\n"
+
+# 绑定锁的点名表：全仓手抄的盘符判据住在哪（相对 backend 的路径 → 常量名）。新增一处判据就把它
+# 登记进来；不登记的那处，绑定锁看不见（见 `_LOCK_BLIND_SPOTS`）。
+_DRIVE_RULE_SITES = {
+    "app/core/pathmask.py": {"_WIN_PATH"},
+    "tests/test_pathmask.py": {"_ORACLE"},
+    "tests/test_selfcheck.py": {"_DRIVE_PATH"},
+    "tests/test_update_channel.py": {"_DRIVE_PATH"},
+    "tests/test_apk_self_host_cache.py": {"_DRIVE_PATH"},
+}
+
+# 点认识的形状：`[A-Za-z]` 后面紧跟 `:`，或先收掉包着它的那枚右括号再跟 `:`
+# （`(?P<drive>[A-Za-z]):` 是 oracle 与探测器的写法）。
+_DRIVE_SHAPE = re.compile(r"\[A-Za-z]\)?:")
+
+
+def _drive_rule_literals(source, filename):
+    """点名源码里的盘符判据，返回 [(常量名, 字面量)]。
+
+    认得：模块级 `NAME = re.compile(<一枚字符串字面量>)`（相邻的几枚 raw 字面量在编译期就并成
+    一枚，算一枚）；f-string 只允许 `{_SEG}` 这一种插值（生产网那一枚）。非字符串实参、bytes
+    实参、别的插值一律当认不到——那一站从结果里消失，而消失会在 `_DRIVE_RULE_SITES` 的一致性
+    比对上红，不会静默通过。
+    """
+    found = []
+    for node in ast.parse(source, filename=filename).body:
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        func = node.value.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "compile" and node.value.args):
+            continue
+        arg = node.value.args[0]
+        literal = None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            literal = arg.value
+        elif isinstance(arg, ast.JoinedStr):
+            parts = []
+            for piece in arg.values:
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                    parts.append(piece.value)
+                elif (isinstance(piece, ast.FormattedValue)
+                      and isinstance(piece.value, ast.Name) and piece.value.id == "_SEG"):
+                    parts.append(_SEG)
+                else:
+                    parts = None
+                    break
+            literal = "".join(parts) if parts else None
+        if literal and _DRIVE_SHAPE.search(literal):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            found.append((names[0] if names else "<无名>", literal))
+    return found
+
+
+def _discovered_sites():
+    """按 `_DRIVE_RULE_SITES` 那份名单逐文件点名，返回 {路径: {常量名: 字面量}}。"""
+    sites = {}
+    for rel in _DRIVE_RULE_SITES:
+        source = (_BACKEND / rel).read_text(encoding="utf-8")
+        for name, literal in _drive_rule_literals(source, rel):
+            sites.setdefault(rel, {})[name] = literal
+    return sites
 
 # 对照组：这条**在射程内**，所以"看不见"那串必须能和它区分开——尺子要是连它都量不到，
 # 上面那一串绿就只是空转。
@@ -210,6 +328,37 @@ def test_production_drive_rule_agrees_with_the_two_branch_oracle():
     assert not disagreed, "生产盘符档与两支并列的 oracle 在这些串上分家了：" + str(disagreed)
 
 
+def test_every_hand_copied_drive_rule_is_bound_to_production():
+    """绑定锁：全仓手抄的盘符判据逐把与生产网同判，改窄改宽都红。
+
+    探测器与生产网同构时它瞎在网瞎的同一处，那几把 endpoint 锁就退化成恒绿自证；而"把探测器
+    改窄一点（删掉豁免、换个 lookbehind、少一类字符）"这种改动原本全仓没有任何一把锁会红。
+    这里补的就是那把锁：先按名单点名（新增抄本不在册 ⇒ 不一致，在册的抄本变了形 ⇒ 也不一致），
+    再把每把抽出来的字面量编译起来，在 `_DRIVE_EQUIVALENCE_CASES` 上要求它与生产网给同一个答案
+    ——改窄（对 `错误在at-C:\\Users\\a` 失明）与改宽（遇合法 URL 恒红）两个方向都会红。抽取
+    fidelity 自己也被钉住：生产网与 oracle 那两站抽出来的字面量必须与在用的判据一字不差。
+    """
+    discovered = _discovered_sites()
+    got = {rel: set(names) for rel, names in discovered.items()}
+    assert got == _DRIVE_RULE_SITES, (
+        "点名结果与名单不一致（名单 " + str(sorted(_DRIVE_RULE_SITES.items()))
+        + "，实点 " + str(sorted(got.items())) + "）：新增一处手抄就把它登记进 `_DRIVE_RULE_SITES`，"
+        "删掉一处就连名单一起删；判据换了形状（见 `_LOCK_BLIND_SPOTS`）就正面回来改点名的形状。")
+    in_use = {
+        "app/core/pathmask.py": _WIN_PATH.pattern,
+        "tests/test_pathmask.py": _ORACLE.pattern,
+    }
+    for rel, literals in sorted(discovered.items()):
+        for name, literal in sorted(literals.items()):
+            if rel in in_use:
+                assert literal == in_use[rel], rel + ":" + name + " 抽出来的字面量与在用的判据对不上"
+            copy = re.compile(literal)
+            disagreed = [s for s in _DRIVE_EQUIVALENCE_CASES
+                         if bool(copy.search(s)) != bool(_WIN_PATH.search(s))]
+            assert not disagreed, (rel + ":" + name + " 与生产网在这些串上分家"
+                                   "（改窄=恒绿自证，改宽=遇合法 URL 恒红）：" + str(disagreed))
+
+
 @pytest.mark.parametrize("case_id,sample,today,why", _STILL_MISSED_SHAPES,
                          ids=[c[0] for c in _STILL_MISSED_SHAPES])
 def test_the_declared_still_missed_shapes_are_still_missed_today(case_id, sample, today, why):
@@ -224,19 +373,45 @@ def test_the_declared_still_missed_shapes_are_still_missed_today(case_id, sample
         + "。网变强了就回来把本文件的仍漏清单与这条钉子一起删掉。")
 
 
-def test_the_still_missed_ledger_and_the_teeth_are_one_and_the_same():
-    """清单与本文件 docstring 是同一本账：每条钉子都得在射程段里有一句人话。
+def test_the_still_missed_ledgers_and_the_teeth_are_one_and_the_same():
+    """两本账与本文件 docstring 是同一本账：每条钉子都得在射程段里有一句人话，反之亦然。
 
-    加了钉忘了写账、改了账忘了改钉都会红在这里，于是注释里不必再写条数（那个数会腐烂）。
+    加钉忘写账、改账忘改钉、**把清单里某一条无声删掉**（参数化跟着少跑一条，那才是真正的漏）
+    都会红在这里——两个方向都比，条数就不必写进注释（那个数会腐烂），一致性由这里现算。
+    `_ORACLE.pattern != _WIN_PATH.pattern` 那枚断言住在这里：它是"手抄没收成一份"这件事的报警器。
     """
-    ids = [c[0] for c in _STILL_MISSED_SHAPES]
+    ids = [c[0] for c in _STILL_MISSED_SHAPES] + [c[0] for c in _LOCK_BLIND_SPOTS]
     assert len(set(ids)) == len(ids), "case_id 必须互不相同：参数化 id 会撞车"
-    doc = re.sub(r"\s+", " ", __doc__ or "")
-    unlisted = [i for i in ids if i not in doc]
-    assert not unlisted, "这几条有钉子却没写进 docstring 的仍漏清单：" + str(unlisted)
+    declared = re.findall(r"(?m)^- `([a-z0-9-]+)`", __doc__ or "")
+    assert len(set(declared)) == len(declared), "docstring 的清单里有重名的条目"
+    unlisted = [i for i in ids if i not in declared]
+    unpinned = [d for d in declared if d not in ids]
+    assert not unlisted, "这几条有钉子却没写进 docstring 的清单：" + str(unlisted)
+    assert not unpinned, "docstring 里写了这几条却没有对应的钉子（清单被无声删了一条？）：" + str(unpinned)
     assert _ORACLE.pattern != _WIN_PATH.pattern, (
         "盘符判据在生产网与 oracle 已是同一份字面 ⇒ 副本收成一份 oracle 了，"
         "把 docstring 里那段手抄登记与这枚断言删掉，并把抽样同构锁换成单点判据。")
+
+
+@pytest.mark.parametrize("case_id,source,why", _LOCK_BLIND_SPOTS,
+                         ids=[c[0] for c in _LOCK_BLIND_SPOTS])
+def test_the_declared_lock_blind_spots_are_blind_today(case_id, source, why):
+    """边界钉：锁级看不见清单里每一条**今天都点不到名**，钉的是"声明与测量一致"。
+
+    红了两种可能：点名器学会了这种形状（好消息——把 docstring 那一条和元组里那一项删掉），
+    或者合成源码写坏了（那这枚钉绿得没有意义，先回答它到底还在不在指那一格）。
+    """
+    assert _drive_rule_literals(source, case_id) == [], (
+        "「" + case_id + "」已经点得到名了：" + why + "。射程收了就回来删这条账。")
+
+
+def test_the_binding_lock_actually_sees_a_registered_shape():
+    """对照组：点名器对它说"认得"的那个形状是真认得到。
+
+    连它都点不到 ⇒ 上面那一串"点不到名"是尺子在空转，不是射程外。
+    """
+    found = _drive_rule_literals(_DISCOVERABLE_COPY, "<control>")
+    assert [name for name, _ in found] == ["_DRIVE_PATH"], found
 
 
 def test_the_control_shape_is_actually_caught():
