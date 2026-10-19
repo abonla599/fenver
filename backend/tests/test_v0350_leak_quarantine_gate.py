@@ -346,6 +346,48 @@ def test_fail_closed_a_directory_that_is_not_a_repository_is_not_a_green_light(t
         "一个连是不是仓库都答不上来的目录，闸门回报的是 %r / %r" % (token, detail))
 
 
+def test_fail_closed_a_repository_with_nothing_to_scan_is_not_a_green_light(tmp_path, repo, gate,
+                                                                           monkeypatch):
+    """列得出清单却是**空的** ⇒ 同样 BLOCK。空扫描不叫"扫过且干净"。
+
+    这一档和上一档的区别必须自己成立，否则测的是同一件事：`pushable_refs` 在这里退回的是
+    `[]` 加 `why == "ok"`（git 成功应答、只是没有 tag 也没有分支头），不是 rc≠0。
+    反例两半：换一份「名单清干净、有分支头」的仓库照旧放绿——否则这条是恒红锁。
+    """
+    empty = tmp_path / "no-refs"
+    empty.mkdir()
+    _must(empty, "init", "-q")
+    refs, why = gate.pushable_refs(str(empty))
+    assert refs == [] and why == "ok", (
+        "夹具没造出「列得出来但为空」这一档（%r / %r），下面测的就不是这一件事" % (refs, why))
+
+    ok, token, detail = gate.check_leak_quarantine(str(empty))
+    assert ok is False and token == "refs-unenumerable", (
+        "一个 ref 都没扫到的仓库拿到了绿灯：%r / %r" % (token, detail))
+
+    quarantined = _quarantined_commit(repo)
+    _delete_the_dirty_refs(repo, quarantined)
+    monkeypatch.setattr(gate, "QUARANTINED", (quarantined,))
+    refs2, why2 = gate.pushable_refs(str(repo))
+    assert refs2 and why2 == "ok", "对照组夹具坏了：这份仓库连一个分支头都没有"
+    ok2, token2, detail2 = gate.check_leak_quarantine(str(repo))
+    assert ok2 is True and token2 == "ok", "非空清单照旧放行才是这一格的形状：%s" % detail2
+
+
+def test_fail_closed_the_empty_ref_list_blocks_the_whole_gate(repo, gate, monkeypatch, capsys):
+    """整闸门版本：第 6 格拿到空清单时 `verdict=PASS` 不许出现，退出码走"判不出来"那档（2）。
+
+    这里接掉 `pushable_refs` 是为了把「没有 ref」这件事造在一份**其它条件全绿**的仓库上：
+    真拿空仓库跑 `main()` 会先红在前五格，量不到这一格。
+    """
+    monkeypatch.setattr(gate, "pushable_refs", lambda root_: ([], "ok"))
+    code = _main_at(gate, repo, monkeypatch)
+    out = capsys.readouterr().out
+    assert code == 2, "空清单走的是「判据拿不到」那一档（2），不是已证相反（1）：%s" % out
+    assert "leak-quarantine=REFUSED token=refs-unenumerable" in out, out
+    assert "verdict=PASS" not in out, "空扫描仍然封版了"
+
+
 # --------------------------------------------------------------------------
 # 4) 没有开关：判定是世界事实，不是操作者嘴边的旗
 # --------------------------------------------------------------------------

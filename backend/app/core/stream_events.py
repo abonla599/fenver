@@ -22,9 +22,21 @@ FRAME_SEARCH = "search"
 FRAME_CONTENT = "content"
 FRAME_DONE = "done"
 FRAME_ERROR = "error"
+# 审批请求帧：带 plan_summary（由用户那一句推出来的计划摘要），所以它进
+# stream_runs.PRIVATE_TRACE_FRAME_TYPES。它**刻意不进 CLIENT_FRAMES**——登记进去就等于
+# 要求两个客户端各多一条按登记名分发的臂（test_process_trace_contract.py 逐条核 Api.kt
+# 的 when 臂），而这张卡片两边早就各自认这个名字了，扩注册是另一件事的改动面。
+# "发起者本人要看"与"跨属主不许看"两件事都不取决于它在不在 CLIENT_FRAMES：前者靠它照常
+# 进 run 缓冲，后者靠名单。要注册它就连壳一起改，别只改这一行。
+FRAME_APPROVAL_REQUEST = "approval_request"
 
 CLIENT_FRAMES = (FRAME_START, FRAME_THINKING, FRAME_TOOL_CALL, FRAME_TOOL_RESULT,
                  FRAME_SEARCH, FRAME_CONTENT, FRAME_DONE, FRAME_ERROR)
+
+# 有名字、但**故意不在 CLIENT_FRAMES 里**的帧：豁免不是后门——这张表只说明"两端没有分发臂"，
+# 要不要跨属主抹掉由 stream_runs.PRIVATE_TRACE_FRAME_TYPES 判，而那里必须收录这里的每一条
+# （判据见 tests/test_cross_owner_replay_scrubs_approval_frame.py）。
+NON_CLIENT_FRAMES = (FRAME_APPROVAL_REQUEST,)
 
 # ---------- 预算 ----------
 # 过程帧是给「人看着它一步步推进」用的，不是给模型复述用的，两头都要封顶：

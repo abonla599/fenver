@@ -446,7 +446,7 @@ def stream_chat_events(
                     if rich:
                         # 发一条审批请求帧（客户端据此显示确认卡片）
                         approval_frame = {
-                            "type": "approval_request",
+                            "type": se.FRAME_APPROVAL_REQUEST,
                             "ticket_id": approval_req["ticket_id"],
                             "tool_name": name,
                             "plan_summary": approval_req["plan_summary"],
