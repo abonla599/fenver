@@ -190,8 +190,10 @@ def _scrub(detail: str) -> str:
     为什么换成一个明写的掩码而不是悄悄删掉，也不用 logsanitizer 登记数据根：
     删掉会让"这句话为什么少了一截"没人说得清；登记进 logsanitizer 则是把同一段
     文字在 **server.log 里**一起打码，而运维查"数据到底落在哪"恰恰要看那一句
-    （见 memory_manager 初始化成功那行与 paths 的启动摘要）。出口的网只对
-    公开端点生效，日志那份原样保留。
+    （见 memory_manager 初始化成功那行与 paths 的启动摘要）。这张网的实际射程比
+    "只管响应"宽：本模块是先 `_scrub` 再打印，所以**自己那行启动摘要也被掩**。不经
+    这道网的是 `paths`／`memory_manager`／`apk_cache` 那几行日志——`apk_cache` 的
+    `_private_where` 明写刻意不走出口脱敏。
     """
     from app.core.providers import scrub_secrets
 

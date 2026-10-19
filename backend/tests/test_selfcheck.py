@@ -235,7 +235,12 @@ def test_no_absolute_paths_leak_into_the_public_answer(client):
 # 做嵌入），拿一个假名当它的气味探针，真冲突了就知道它有没有跟着异常原文出来。
 CANARY_MODEL = "vendorx-embed-9k"
 REPO_DIR_NAME = Path(__file__).resolve().parents[2].name
-_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字/`+`/`-`/`.`——否则 `https://`
+# 里那枚 `s:/` 会命中。这个边界必须和生产网 `core.pathmask._WIN_PATH` 同步：探测器写成
+# 无边界裸形时它和网瞎在同一处（网先把 URL 咬成 `http〈…〉`，这里便永远看不到 `s:/`），
+# 下面两条断言就退化成恒绿自证；网认了边界、URL 能逐字活着之后，裸形又变成"遇合法 URL
+# 就假红"。判据和被它判的网只有同构，才谈得上互相验得出。
+_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
 # 模型名的形状：连字符/下划线分隔的三段以上 ASCII 标识符（text-embedding-3-small、
 # all-MiniLM-L6-v2 都是这一族）。单段或两段（user_memories）不算，免得把集合名当模型名。
 _MODEL_SHAPED = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+){2,}", re.IGNORECASE)
