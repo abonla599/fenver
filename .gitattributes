@@ -1,0 +1,15 @@
+# 换包脚本的字节形状门到底在保什么：backend/tests 里 test_swap_package_disable_verify、
+# test_swap_package_post_acceptance_tokens、test_swap_package_data_snapshot 的格式门读的是
+# **工作副本的原始字节**，判「纯 ASCII、无 BOM、行尾统一 CRLF」——它们保的不是"每台机器
+# 的工作副本都必须 CRLF"这个抽象规矩，而是"现网那台 Windows 被 PowerShell/cmd 执行时
+# 读到的字节形状正确"：无 BOM 的 .ps1 一旦带非 ASCII 字节，PS 5.1 会把整脚本错解码成语法
+# 错误；行尾必须统一，`_write_crlf` 落盘的 CRLF 副本才和脚本本体逐字节同形，文件自带的
+# 格式门与行号尺才有共同前提。而"执行机的检出是 CRLF"过去只靠那台机器的
+# core.autocrlf=true 兜着——机器配置是事故，仓库声明才是契约；CI 的 ubuntu-latest 按
+# LF 检出时，这些锁就红在"这台机器根本没人跑 PowerShell"的错误理由上。
+# 这里把约定写成仓库声明：在什么机器上检出都还原成执行字节形状，锁的牙一根不松
+# （混行尾、纯 LF、BOM、非 ASCII 在判据里照旧全红）。
+*.ps1 text eol=crlf
+# start-ai-stack.bat 与 .ps1 同族：shell:startup 直接喂给 cmd.exe 的开机入口脚本，
+# 同样只靠本机 autocrlf 兜着。仓库里没有 .cmd，不写没证据的模式。
+*.bat text eol=crlf
