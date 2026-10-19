@@ -50,8 +50,10 @@ release-apk.yml 的对应那句写的是"参考**本机的** docs-internal/APK�
 """
 
 import ast
+import io
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -132,6 +134,55 @@ def _strip_ps_comments(text: str) -> str:
     text = re.sub(r"<#.*?#>", " ", text, flags=re.S)
     lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
     return "\n".join(lines)
+
+
+def _blank_span(lines: list, start: tuple, end: tuple) -> None:
+    """把 [start, end] 这段坐标区间在**原行原地**刷成空格，行长度与行号都不动。"""
+    (sr, sc), (er, ec) = start, end
+    for row in range(sr, er + 1):
+        raw = lines[row - 1]
+        eol = raw[len(raw.rstrip("\r\n")):]
+        body = raw[: len(raw) - len(eol)]
+        lo = min(sc if row == sr else 0, len(body))
+        hi = min(max(ec if row == er else len(body), lo), len(body))
+        lines[row - 1] = body[:lo] + " " * (hi - lo) + body[hi:] + eol
+
+
+def strip_py_prose(text: str) -> str:
+    """剥掉 `#` 注释与 docstring，**行号与字符偏移都与原文一致**（拿空格原位刷掉）。
+
+    判"某句写法在不在源码里"的那批锁只能用这一份：原文里注释和 docstring 长得和代码一样，
+    把 `argparse` 抄进 docstring 就能替真代码答到，判序的 `src.index(a) < src.index(b)` 也会被
+    注释里的一句假话带偏。原位刷空白而不是删行，所以判序与计数仍然对得上原文的行。
+
+    认得的形状只有两种：tokenize 报出的 COMMENT token（整行与行尾都算）、AST 认出的
+    "模块/类/函数体第一个字符串表达式"（docstring）。字符串字面量里的 `#` 不是注释，
+    `ast` 也不把它当 docstring ⇒ 两者都留着，这是刻意的。
+    """
+    lines = text.splitlines(keepends=True)
+    spans = []
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError) as exc:
+        raise AssertionError("这份源码 tokenize 过不去（%s）：判据读不出代码与散文的分界，"
+                             "红而不是当成'没有注释可剥'继续判" % exc)
+    for tok in toks:
+        if tok.type == tokenize.COMMENT:
+            spans.append((tok.start, (tok.start[0], tok.start[1] + len(tok.string))))
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        raise AssertionError("这份源码 ast.parse 过不去（%s）：同上，判红不判跳过" % exc)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                v = body[0].value
+                spans.append(((v.lineno, v.col_offset), (v.end_lineno, v.end_col_offset)))
+    for start, end in spans:
+        _blank_span(lines, start, end)
+    return "".join(lines)
 
 
 def _py_code_strings(path: Path) -> list:

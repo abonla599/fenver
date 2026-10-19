@@ -36,6 +36,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.test_machine_read_pointers import strip_py_prose
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE = REPO_ROOT / "tools" / "pre_tag_gate.py"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-apk.yml"
@@ -83,8 +85,14 @@ def _stub_side_checks(gate, monkeypatch):
 
 
 def test_gate_script_exists_and_is_the_documented_shape():
+    """闸门的形状：可命令行调用、结论机读。
+
+    射程：`src` 是 `strip_py_prose` 剥掉 `#` 注释与 docstring 的那一份（行号与字符偏移不动）。
+    原来判的是原文，于是往模块 docstring 里抄一句 `argparse` / `verdict=PASS` 就替真代码答到，
+    把这两串从代码里删掉也照样绿。
+    """
     assert GATE.is_file(), "tools/pre_tag_gate.py 必须入库：闸门是脚本，不是文档里的一句话"
-    src = GATE.read_text(encoding="utf-8")
+    src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert "argparse" in src and "--expect" in src, "闸门必须可命令行调用，CI 与本机关用同一份"
     assert "verdict=PASS" in src and "verdict=BLOCK" in src, "结论要机读，人能跳过一步不能跳过一行输出"
 
@@ -307,7 +315,7 @@ def test_the_two_hand_off_checks_still_run_in_the_local_gate(monkeypatch, capsys
     assert "apk-materials-package-missing" in capsys.readouterr().out, (
         "顺序那一格不再让闸门非零：#22 补上的那一格又被放回去了")
 
-    src = GATE.read_text(encoding="utf-8")
+    src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert "live-build-mismatch" in src and "check_announcement_materials" in src, (
         "两格的判据从闸门源码里掉了——上面两条是靠 monkeypatch 跑出来的，这一条兜住『整格删掉』")
 
