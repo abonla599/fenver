@@ -407,7 +407,11 @@ def release_latest(have: str = None):
     读不到时回 `ok:false` 而不是 502：界面据此**不弹**，也不会把"我读不到"报成"你已是最新"。
     """
     from app.core import apk_cache, releases
+    from app.core.pathmask import hide_paths
     out = releases.probe(have)
+    # 出口那道路径网（判据见 core/pathmask）：`reason` 里最不可控的是磁盘判据拼出来的
+    # 那句，而这条端点免鉴权——日志那份原样留着位置，响应里只留判断依据。
+    out["reason"] = hide_paths(out.get("reason") or "")
     if out.get("ok"):
         # 有人打开 App 在问"有没有新版"——正是服务端该把包备到盘上的时刻。
         # 不等网络、按版本去重，判据见 core/apk_cache.prefetch。
@@ -445,9 +449,13 @@ def update_info(request: Request):
     """
     from fastapi.responses import JSONResponse
     from app.core import apk_cache, releases
+    from app.core.pathmask import hide_paths
     manifest, reason = releases.latest_release_manifest(_self_origin(request))
     if manifest is None:
-        return JSONResponse(status_code=502, content={"detail": f"问不到发布信息：{reason}"})
+        # detail 里那句理由来自磁盘/清单判据，任何路人都读得到：路径只留在日志，
+        # 出口换成语义不变的〈路径已隐去〉（判据与被隐掉的东西见 core/pathmask）。
+        return JSONResponse(status_code=502,
+                            content={"detail": hide_paths(f"问不到发布信息：{reason}")})
     # 人主动点了「检查更新」：马上可能就要点「立即更新」。让这一问顺手把包备到
     # 盘上（不等网络、同版本只补一趟），下载那一步就从"替 GitHub 扛可用性"变成
     # 读本地磁盘。判据与纪律在 core/apk_cache.py。

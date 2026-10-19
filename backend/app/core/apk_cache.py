@@ -123,6 +123,13 @@ def cached_file_state(version: str, sha256: str):
     `cached_file` 是它的薄壳（只要路径）。分出这一层是为了让上层（releases）能把
     "为什么没有可用缓存"原样打进日志——P2 那条纪律要求"清单摘要与磁盘字节不符"这件事
     有人喊，而只有这里知道到底是"不符"还是"不在盘上"。
+
+    理由那句话**不许带绝对路径**：它经 `releases._fetch_manifest` 拼进
+    `/v1/update/info` 的 502 detail 与 `/v1/release/latest` 的 `reason`，而这两条端点
+    在 `authz.PUBLIC_PATHS` 里点了名（检查更新发生在人登录之前）。数据根里同时写着
+    这台机器的用户名与目录名，而每次手机检查更新都是任何路人来读这一句。判断要的
+    东西（哪个包、清单期望什么、盘上实际是什么）留在对外那句，"到底是盘上哪一个文件"
+    走 `_private_where` 那行——server.log 不出公网。
     """
     path = path_for(version)
     if not path:
@@ -130,15 +137,36 @@ def cached_file_state(version: str, sha256: str):
     if not (sha256 or ""):
         return "", "这一版没有发布校验值，盘上的字节没有自证能力"
     if not os.path.isfile(path):
-        return "", f"盘上没有这一版的字节（{path}）"
+        _private_where("盘上缺包", version, path, sha256)
+        return "", (f"盘上没有这一版的字节（包名 {os.path.basename(path)}、"
+                    f"清单校验值 {sha256[:8]}…，位置见服务端日志）")
     actual, why = _digest(path)
     if why:
-        return "", f"{why}（{path}）"
+        _private_where("缓存文件读不动", version, path, sha256)
+        return "", f"{why}（包名 {os.path.basename(path)}，位置见服务端日志）"
     if actual != sha256:
         _quarantine(path, f"摘要与清单校验值不符（盘上 {actual[:8]}…≠清单 {sha256[:8]}…）")
-        return "", (f"清单摘要与盘上字节不符（盘上 {actual[:8]}…≠清单 {sha256[:8]}…，"
-                    f"那串字节已隔离保留、未删除）")
+        _private_where("摘要与清单校验值不符", version, path, sha256, actual)
+        return "", (f"清单摘要与盘上字节不符（包名 {os.path.basename(path)}，"
+                    f"盘上 {actual[:8]}…≠清单 {sha256[:8]}…，"
+                    "那串字节已隔离保留、未删除；位置见服务端日志）")
     return path, ""
+
+
+def _private_where(what: str, version: str, path: str, sha256: str = "",
+                   actual: str = "") -> None:
+    """把"是盘上哪一个文件"补进日志——对外那句只留判断依据，位置只写这里。
+
+    沿用本模块既有的 `print(..., flush=True)` 口径（EXE 是隐藏窗口起的，不打印就只剩
+    人猜是哪一层坏了）。这里刻意不走出口脱敏：掩码会把日志里"盘上到底是哪一个文件"
+    一起盖掉，而运维查缺包时查的正是那一处。
+    """
+    bits = [f"{what}", f"版本 {version}", f"盘上位置 {path}"]
+    if sha256:
+        bits.append(f"清单校验值 {sha256[:8]}…")
+    if actual:
+        bits.append(f"盘上摘要 {actual[:8]}…")
+    print("[apk-cache] 可定位细节（仅日志）：" + "、".join(bits), flush=True)
 
 
 def cached_file(version: str, sha256: str) -> str:

@@ -15,11 +15,14 @@
 v0.34 起取数源是**自托管清单**（不再出网）：本文件末尾那一节把那一条链真跑一遍——
 清单在盘上、包也在盘上，`/site/android.apk` 一个字节都不许朝外跑。
 """
+import getpass
 import hashlib
 import json
 import os
+import re
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -386,4 +389,99 @@ def test_no_runtime_manifest_means_no_plan(hosted):
     """运行时清单不在、种子里也没有：download_plan 回 (None, 理由)，端点据此退回官网。"""
     plan, why = releases.download_plan()
     assert plan is None and why
+
+
+# ---------- 磁盘判据那句理由：说清是哪个包，不说清是哪台机器 ----------
+
+# `cached_file_state` 的第二返回值不只在日志里躺着：它经 `releases._fetch_manifest`
+# 拼进 `/v1/update/info` 的 502 detail 与 `/v1/release/latest` 的 `reason`，而那两条
+# 都在 `authz.PUBLIC_PATHS` 里点了名——任何路人都读得到。所以这里按"路人能读到的一切"
+# 断言：盘符路径、当前用户名、仓库目录名都不许出现。
+REPO_DIR_NAME = Path(apk_cache.__file__).resolve().parents[3].name
+# 盘符路径 = 单字母 + `:` + 分隔符，且前面不能再接字母/数字（否则 `https://` 里那枚
+# `s:/` 会被当成盘符，测试夹具的下载地址全是 https 开头，判据会恒红）。
+_DRIVE_PATH = re.compile(r"(?:^|[^A-Za-z0-9+.-])(?P<drive>[A-Za-z]):[\\/]")
+
+
+def _no_machine_shape(text: str, where: str, cache_root: str = "") -> None:
+    assert not _DRIVE_PATH.search(text), f"{where} 里出现盘符路径：{text}"
+    assert getpass.getuser() not in text, f"{where} 回显了当前用户名：{text}"
+    assert REPO_DIR_NAME not in text, f"{where} 回显了仓库目录名：{text}"
+    if cache_root:
+        assert cache_root not in text, f"{where} 回显了数据根位置：{text}"
+
+
+def test_the_missing_package_verdict_names_the_package_not_the_directory(tmp_path, capsys):
+    """盘上什么都没有：那句理由要指得出"哪个包、清单期望什么"，指不出"这台机器在哪"。
+
+    反向证据（不是信息压制）：包名与清单校验值前缀仍在对外那句里，运维读得出到底缺
+    的是哪一版；数据根位置改由 `[apk-cache]` 那行打进 stdout，也就是 server.log。
+    """
+    cache_root = str(tmp_path / "apk")
+    path, why = apk_cache.cached_file_state(_VERSION, _SHA)
+    assert path == "" and why, why
+    _no_machine_shape(why, "缺包那句", cache_root)
+    assert os.path.basename(apk_cache.path_for(_VERSION)) in why, why
+    assert _SHA[:8] in why, f"清单期望的校验值前缀被改没了：{why}"
+
+    logged = capsys.readouterr().out
+    assert "[apk-cache]" in logged and cache_root in logged, \
+        f"位置没进日志，运维只剩包名可查：{logged}"
+
+
+def test_the_digest_mismatch_verdict_names_both_prefixes_without_a_path(tmp_path, capsys):
+    """清单与盘上字节对不上：两句前缀（盘上/清单）+ 包名，同样不许带出磁盘位置。
+
+    这一格是"包被换掉/截断/清单写错"的唯一症状，措辞改坏了就等于出事那天没人看得懂；
+    而"到底是盘上哪一个文件"是运维拿日志查的东西，不是拿手机查的东西。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    cache_root = str(tmp_path / "apk")
+    tampered = b"tampered-bytes"
+    with open(apk_cache.path_for(_VERSION), "wb") as fh:
+        fh.write(tampered)
+
+    path, why = apk_cache.cached_file_state(_VERSION, _SHA)
+    assert path == "" and "摘要" in why, why
+    _no_machine_shape(why, "摘要不符那句", cache_root)
+    assert os.path.basename(apk_cache.path_for(_VERSION)) in why, why
+    assert _SHA[:8] in why and hashlib.sha256(tampered).hexdigest()[:8] in why, why
+    assert "隔离保留" in why, f"「没销毁唯一副本」这句话被改丢了：{why}"
+
+    logged = capsys.readouterr().out
+    assert "[apk-cache]" in logged and cache_root in logged, logged
+
+
+def test_an_unreadable_cache_file_reports_the_error_class_not_its_location(tmp_path,
+                                                                          monkeypatch,
+                                                                          capsys):
+    """`_digest` 读不动那份字节时，异常类型名可以外传，文件位置不行。
+
+    这一格最容易漏：理由取自 `_digest` 的 `why`，本身不含路径，但它被拼进 `（…）`
+    的位置参数时如果被顺手补上 `{path}` 就会走到公开端点上——所以单独钉一条。
+    只挡 `open` 不挡 `os.stat`：后者一并挂掉会让 `os.path.isfile` 也说"没有"，
+    测到的是缺包那一格而不是读不动那一格。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    cache_root = str(tmp_path / "apk")
+    target = apk_cache.path_for(_VERSION)
+
+    import builtins
+
+    real_open = builtins.open
+
+    def guarded(file, *args, **kwargs):
+        if str(file) == target:
+            raise PermissionError(13, "模拟读不动")
+        return real_open(file, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", guarded)
+
+    path, why = apk_cache.cached_file_state(_VERSION, _SHA)
+    monkeypatch.undo()
+    assert path == "" and "读缓存文件失败" in why, why
+    _no_machine_shape(why, "读不动那句", cache_root)
+    assert os.path.basename(target) in why, why
+    assert "PermissionError" in why, f"异常类型名是判据的一部分，不该一起消失：{why}"
+    logged = capsys.readouterr().out
+    assert cache_root in logged, logged
 

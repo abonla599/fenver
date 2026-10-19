@@ -21,7 +21,8 @@
 
 import json
 import os
-import re
+
+from app.core.pathmask import hide_paths
 
 OK = "ok"
 DEGRADED = "degraded"
@@ -172,30 +173,6 @@ CHECKS = (
 )
 
 
-_PATH_MASK = "〈路径已隐去〉"
-# 路径里允许出现的字符 = 除空格与中文标点之外的可见字符。边界要卡在这里：
-# 后半句中文说明紧跟着路径，把它一起吃掉就等于"这句话为什么少了一截"没人说得清。
-_SEG = r"[^\s，。；、：\"'（）()<>｜|]"
-_WIN_PATH = re.compile(rf"[A-Za-z]:[\\/]{_SEG}*")
-_UNC_PATH = re.compile(rf"\\\\{_SEG}+")
-# 只认这些首段的 POSIX 路径：`/data/x` 是路径，`/v1/memory` 与 `/health` 是路由名，
-# 把后者也换成掩码等于把"去哪儿看这条接口"这类正常说明改坏。
-_POSIX_ROOTS = ("home|users|usr|var|private|tmp|opt|root|data|mnt|srv|app|"
-                "volumes|workspace|repo")
-_POSIX_PATH = re.compile(rf"/(?:{_POSIX_ROOTS})/{_SEG}*", re.IGNORECASE)
-
-
-def _hide_paths(text: str) -> str:
-    """把绝对路径换成明写的掩码（见 _scrub 的理由与边界）。"""
-    if not text:
-        return text
-    # 盘符路径先走：`C:\\Users\\…` 这种转义写法里也含成对反斜杠，UNC 规则先跑会把
-    # 整个路径从中间截断、把开头的 `C:` 留在外面。
-    out = _WIN_PATH.sub(_PATH_MASK, text)
-    out = _UNC_PATH.sub(_PATH_MASK, out)
-    return _POSIX_PATH.sub(_PATH_MASK, out)
-
-
 def _scrub(detail: str) -> str:
     """出口脱敏。它自己读不动时宁可整条丢掉。
 
@@ -207,6 +184,8 @@ def _scrub(detail: str) -> str:
     `memory_init_error`，那是第三方异常原文（chroma 读盘失败会把库路径写进
     OSError 的 message），不是我们能逐字改写的文案。`scrub_secrets` 挡的是凭据
     形状，路径既不是凭据也不在它的模式里，于是一句绝对路径能原样走到公开端点上。
+    掩码的判据与边界收在 `core.pathmask`，那张网同时罩着免鉴权的更新通道两条端点
+    （`/v1/update/info` 的 502 detail 与 `/v1/release/latest` 的 `reason`）。
 
     为什么换成一个明写的掩码而不是悄悄删掉，也不用 logsanitizer 登记数据根：
     删掉会让"这句话为什么少了一截"没人说得清；登记进 logsanitizer 则是把同一段
@@ -217,7 +196,7 @@ def _scrub(detail: str) -> str:
     from app.core.providers import scrub_secrets
 
     try:
-        return _hide_paths(scrub_secrets(detail))
+        return hide_paths(scrub_secrets(detail))
     except Exception:
         return "（详情无法安全呈现）"
 
