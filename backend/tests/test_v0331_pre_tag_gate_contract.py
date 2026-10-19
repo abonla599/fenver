@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.test_ci_history_depth import WORKFLOWS_DIR, workflow_run_bodies
 from tests.test_machine_read_pointers import strip_py_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -214,6 +215,66 @@ def _workflow_release_steps() -> list:
     return steps
 
 
+def _gate_token_hits(workflows_dir=None) -> list:
+    """返回**每一格真会被 Actions 执行**的地方里出现了本机闸门命令的文件名清单。
+
+    射程：`.github/workflows/*.yml` 全部文件、全部作业的全部步骤，`run:` 正文（剥掉行首 `#`）
+    与 `with:` 的字面值都算——YAML 注释在 `safe_load` 那一层就不存在了，run 里的行注释由
+    `workflow_run_bodies` 剥掉。所以注释里教人"本机上先跑 `python tools/pre_tag_gate.py …`"
+    与 docs/ 里那两句必抄的命令都不在禁区内；从前这把只取 `release-apk.yml` 的
+    `jobs.release.steps`，其余 workflow 的 run 正文一个都没看过。
+    """
+    root = Path(workflows_dir) if workflows_dir else WORKFLOWS_DIR
+    files = sorted(root.glob("*.yml"))
+    assert files, "%s 里一份 workflow 都没有：这把禁判据在空转，红话得由人来更新" % root
+    return [f.name for f in files
+            if GATE_TOKEN in workflow_run_bodies(f, where=str(f), withs=True)]
+
+
+_SYNTH_YML = """name: Synthetic
+on: [push]
+jobs:
+  synth:
+    runs-on: ubuntu-latest
+    steps:
+      - name: synthetic step
+        run: |
+{body}
+"""
+
+
+def _synth_workflows(dir_, run_lines, name="tests.yml"):
+    """把几行 shell 拼成一份**真 YAML** 放进临时目录，再按禁判据同一条路去读它。"""
+    d = Path(dir_)
+    d.mkdir(parents=True, exist_ok=True)
+    body = "\n".join("          " + ln for ln in run_lines)
+    (d / name).write_text(_SYNTH_YML.replace("{body}", body), encoding="utf-8")
+    return d
+
+
+def test_the_ban_fires_inside_a_workflow_that_is_not_the_release_job(tmp_path):
+    """**应当红**：闸门命令被抄进任何一格 run 正文都要红——从前这把只看 release-apk.yml 的
+    `jobs.release.steps`，tests.yml / gitleaks.yml / build-native-apk.yml 里那几格是没人看的洞。
+    """
+    assert _gate_token_hits(_synth_workflows(
+        tmp_path, ["python tools/pre_tag_gate.py --expect v0.0.0"])) == ["tests.yml"], (
+        "临时 workflow 的 run 正文里明明写着这条命令却没被逮到：这把禁只盯 release-apk.yml")
+
+
+def test_teaching_the_local_gate_command_in_a_comment_is_not_a_violation(tmp_path):
+    """**不该红**：注释里教这句不算违规。真 `release-apk.yml` 今天就带着这句 YAML 注释，
+    它天然是一枚对照；这里再各造一枚"只有注释里有"与"正文里也有"的样本，把**多剥**那一半钉住
+    （把整行含 `#` 的都当注释剥掉，也会得到同一个绿，所以两半都要判）。
+    """
+    d = _synth_workflows(tmp_path, ["# 本机验收：python tools/pre_tag_gate.py --expect v0.0.0"])
+    raw = (d / "tests.yml").read_text(encoding="utf-8")
+    assert GATE_TOKEN in raw, "样本没把这句写进原文（这一跑作废）"
+    assert _gate_token_hits(d) == [], "注释里的一句教学被判成了 CI 里的命令"
+    assert _gate_token_hits(_synth_workflows(
+        tmp_path / "with-command", ["python tools/pre_tag_gate.py --expect v0.0.0"])) == ["tests.yml"], (
+        "去掉那枚 # 之后也不见 ⇒ 上面那句绿是尺子瞎了，不是剥掉了散文")
+
+
 def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     """**改前钉什么**：CI 里有一步在跑全量闸门 `tools/pre_tag_gate.py`，只在 tag 事件跑，
     并且排在 `gh release create` 与签名三步**之前**。
@@ -274,11 +335,12 @@ def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     sign = [i for i, n in enumerate(names) if "SIGNING KEY MISSING" in n]
     assert not sign or at < sign[0], "窄检查排在签名步骤之后：红得不够早，白烧 runner"
 
-    runs = "\n".join((s.get("run") or "") for s in steps)
-    assert GATE_TOKEN not in runs, (
-        f"全量发版闸门又被抄回 CI 的 run 正文：{GATE_TOKEN} 在那次 checkout 里判不到世界事实"
-        "（/health 是对岸进程，data/ 与 version.json 被 .gitignore 排除），每次 tag 必撞 rc=1"
-        " —— #57 记的就是这件事。线上 build 与物料顺序归本机，别在这里复述")
+    hits = _gate_token_hits()
+    assert not hits, (
+        f"全量发版闸门又被抄回 CI 的 run 正文（{hits}）：{GATE_TOKEN} 在那次 checkout 里判不到"
+        "世界事实（/health 是对岸进程，data/ 与 version.json 被 .gitignore 排除），每次 tag 必撞 "
+        "rc=1 —— #57 记的就是这件事。线上 build 与物料顺序归本机，别在任何 workflow 里复述。"
+        "这一把判的是**所有** workflow 的所有 run 正文与 with: 值，不只 release-apk.yml")
 
 
 def test_the_two_hand_off_checks_still_run_in_the_local_gate(monkeypatch, capsys):
