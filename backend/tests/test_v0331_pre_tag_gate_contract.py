@@ -306,7 +306,8 @@ _TOKEN_ONLY_PATH = "tools/pre_tag_gate.py"
 # 应当红：键名在可执行名单（A 层）里 ⇒ 值就是会被交给那个 action 的东西。
 _SYTH_WITH_HITS = (
     ("a-layer-script", "./x", [("script", GATE_VALUE)],
-     "composite action 的 `script` 输入会被原样拿去执行，那句闸门命令写在这里就是写进了 run 正文"),
+     "登记进可执行名单的那个意思就是「那个 action 把这段值当脚本用」：那句闸门命令写在这里，"
+     "与写进 run 正文是同一件事"),
     ("a-layer-script-quoted-comment", "./x", [("script", GATE_VALUE_AS_COMMENT)],
      "`with:` 的值没有「行首 `#` 就不跑」那一层语义：注释前缀挡不住它，剥了就是替 Actions 撒谎"),
 )
