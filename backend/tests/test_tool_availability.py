@@ -183,7 +183,9 @@ def test_the_probe_does_not_keep_its_own_copy_of_the_source_list(monkeypatch):
     "我们用什么搜索"，而真正决定这件事的是 web_search.SEARCH_URL。留着的那天，
     换源的人只会去改 web_search，探测则继续对着一个早就不用的域名点头。
     """
-    src = Path(__file__).resolve().parents[1].joinpath("app/tools/availability.py").read_text(encoding="utf-8")
+    from tests.test_machine_read_pointers import strip_py_prose
+    src = strip_py_prose(Path(__file__).resolve().parents[1]
+                         .joinpath("app/tools/availability.py").read_text(encoding="utf-8"))
     for gone in ("socket.create_connection", "duckduckgo", "SEARCH_PROBE_ENDPOINTS", "import socket"):
         assert gone not in src, f"探测里还留着自己那一套：{gone}"
 

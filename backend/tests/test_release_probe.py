@@ -591,11 +591,18 @@ def test_the_asset_name_is_the_one_the_workflow_publishes():
     * **老壳那一半挪进接口层**：旧名不再是仓库里的文件，而是 /v1/update/info 返回时
       合成的一枚条目，所以这条锁必须同时要求后端源码里有那次合成。断言本体在
       test_update_channel.py（拿真壳判断核跑的台架在 docs 里指认的那两个文件）。
+
+    射程：`wf` 是 `run:` 的**可执行正文**（YAML 结构与行首 `#` 已由 `workflow_run_bodies` 剥掉）。
+    上面每一步的注释都在解释"别名为什么撤了"，里面就带着 `legacy` 这个词——拿原文判串的话，
+    删掉 `$legacy` 那行真代码、注释里留着，锁照样绿；正文这一层没有这个洞。
     """
     from pathlib import Path
 
+    from tests.test_ci_history_depth import workflow_run_bodies
+
     repo = Path(releases.__file__).resolve().parents[3]
-    wf = (repo / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    wf = workflow_run_bodies(repo / ".github" / "workflows" / "release-apk.yml",
+                             where="release-apk.yml 的 run 正文（#94 W 片）")
 
     staged = re.findall(r'cp "\$apk" "([^"]+)"', wf)
     assert staged == [p + "${ver}.apk" for p in releases.PUBLISH_ASSET_PREFIXES], \

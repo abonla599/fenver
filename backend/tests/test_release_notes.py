@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_ci_history_depth import workflow_run_bodies
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # 2026-09-25 起推送版只发原生安卓（android-native/），WebView 壳退役：
 # 版本号的权威来源跟着发布链路一起换过去，工作流的 tag 校验读的是同一个字段。
@@ -82,8 +84,13 @@ def test_the_workflow_reads_the_notes_file_by_tag_not_by_bare_version():
 
     写成 docs/releases/${ver}.md 时脚本去找 0.14.md，永远找不到，于是每次发版都走
     "没有清单"那条兜底分支——而那条分支是静默的。
+
+    射程：判的是 `run:` 的**可执行正文**（`workflow_run_bodies` 已剥掉 YAML 结构与行首 `#`）。
+    那一步上面的注释本来就在解释 `${ver}.md` 这个错写法，拿原文判串就会因为锁自己说的话而红；
+    反过来"删掉真那一行、注释里留着"也不该骗过去，两个方向都由这一层挡。
     """
-    wf = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
-    assert 'notes="docs/releases/${tag}.md"' in wf, (
+    bodies = workflow_run_bodies(REPO_ROOT / ".github" / "workflows" / "release-apk.yml",
+                                 where="release-apk.yml 的 run 正文（#94 W 片）")
+    assert 'notes="docs/releases/${tag}.md"' in bodies, (
         "工作流不再按 tag 找变更清单文件了；若确实换了命名规则，这条和上面那条要一起改")
-    assert 'docs/releases/${ver}' not in wf, "又用回 ${ver} 了：那会去找少一个 v 的文件名"
+    assert 'docs/releases/${ver}' not in bodies, "又用回 ${ver} 了：那会去找少一个 v 的文件名"

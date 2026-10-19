@@ -411,8 +411,15 @@ def test_the_digest_contract_is_the_same_shape_in_the_workflow_the_backend_and_t
 
     三边各认各的形状时，漂移的表现不是报错而是【永远拒装】。这份形状仍是
     GitHub 那条链与壳对账的依据，所以一字不动地继续钉着。
+
+    射程：`wf` 取的是 `run:` 的**可执行正文**（`workflow_run_bodies` 已剥 YAML 结构与行首 `#`）。
+    那一步上面的注释正好在写 `APK-SHA256: <64 位小写十六进制>` 与这条 grep 的来历——拿原文判
+    就成了"注释替真代码答到"的假绿。
     """
-    wf = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    from tests.test_ci_history_depth import workflow_run_bodies
+
+    wf = workflow_run_bodies(REPO_ROOT / ".github" / "workflows" / "release-apk.yml",
+                             where="release-apk.yml 的 run 正文（#94 W 片）")
     assert 'APK-SHA256: %s' in wf and 'sha256sum "$file"' in wf, \
         "发布流不再写（或不再算）那行校验值了"
     assert r"[0-9a-f]\{64\}" in wf, \
