@@ -43,6 +43,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_machine_read_pointers import strip_py_prose
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE = REPO_ROOT / "tools" / "pre_tag_gate.py"
 
@@ -479,14 +481,18 @@ def test_the_check_runs_before_the_one_and_only_green_line():
 
     为什么这里只能按文本：源码里的顺序就是执行顺序；「红的时候 PASS 不出现」已经由行为那条
     覆盖了，这一条兜的是「把这一格整段挪到 PASS 之后」或「把 PASS 多印一份到前面」。
+
+    射程：读的是 `strip_py_prose` 剥掉注释与 docstring 的那一份，坐标（行号、字符偏移）与原文
+    一致，所以判序仍然对得上文件里真实的先后。原文时代有两刀：注释里多印一次 `PRETAG
+    verdict=PASS` 就把"只印一次"那枚钉假红掉；而禁字那圈从前只拿三条引号去 split、取模块
+    docstring 之后的**一小截**，旗名抄在那一截之后照样过，现在禁字扫的是整份可执行代码。
     """
-    src = GATE.read_text(encoding="utf-8")
+    src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert src.count("PRETAG verdict=PASS") == 1, "PASS 行不止一处，那就没有「最后才放行」这回事"
     assert src.index("check_leak_quarantine(root)") < src.index("PRETAG verdict=PASS"), (
         "泄露隔离闸挪到了 `verdict=PASS` 之后：它能被跳过，就不再是闸")
-    body = src.split('"""')[2]          # 模块 docstring 之后的那一截
     for word in ("skip_leak", "SKIP_LEAK", "allow_leak", "ALLOW_LEAK", "warn_only"):
-        assert word not in body, "源码里出现 %r 这一类名字：那是一面旗或一个逃生门的形状" % word
+        assert word not in src, "源码里出现 %r 这一类名字：那是一面旗或一个逃生门的形状" % word
 
 
 def test_no_environment_read_names_this_check():
@@ -495,8 +501,12 @@ def test_no_environment_read_names_this_check():
     行为那一面由 `test_no_environment_variable_turns_the_check_off` 负责；但「没有新读一个
     变量」没法穷举所有可能的变量名，所以这里把源码里真实存在的那几处读点扫一遍——它只可能
     漏在「变量名是拼出来的」那种写法上，而那种写法本身就该在 review 里被拦下。
+
+    射程：扫的是 `strip_py_prose` 那一份（注释与 docstring 原位刷空）。原文里一句"我们不给它留
+    `getenv` 读 `PRETAG_SKIP…` 这种口子"的说明，就会在穷举面上凭空多出一个读点，判据因为自己
+    说的话而红。
     """
-    src = GATE.read_text(encoding="utf-8")
+    src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     names = set(re.findall(r'(?:getenv\(|environ\.get\(|environ\[)\s*"?"?([A-Za-z_]'
                            r'[A-Za-z0-9_]*)', src))
     mod = _load_gate()
