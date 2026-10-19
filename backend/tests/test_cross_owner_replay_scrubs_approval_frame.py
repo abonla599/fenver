@@ -12,21 +12,26 @@ admin 跨属主补帧时逐字节透出，而 `plan_summary` 是用户那句话�
    正文照旧完整——收回的是"顺手看见别人的计划"，不是接上别人 run 这个能力；
 ③ 同一轮由发起者本人续播：这一帧必须在，且内容与属主视图一致——少了这条，"收窄"会
    一路收成功能消失，审批卡片从此不再出现；
-④ 两枚结构锁，防的是"下一帧又漏"：任何在流上出现的类型名都必须先声明立场。
+④ 结构锁：注册帧要先声明立场；豁免名单钉死到具体名字；手写帧字面量的扫描面是
+   `backend/app/` 下所有 *.py，并且**不按已知帧名筛**（按帧名筛正是这一帧当初隐形的原因）。
 
 回退必红自查：
 - 把 FRAME_APPROVAL_REQUEST 从 PRIVATE_TRACE_FRAME_TYPES 摘掉 → ①② 同时红；
 - 把 sse_frames 的属主路径也接上 scrub → ③ 红；
 - 把构造处改回手写字面量 → test_approval_frame_is_registered_by_constant… 红；
-- 动一字节线上形状（键序或类型名）→ test_approval_frame_wire_bytes… 红。
+- 动线上形状（键序、增键、删键、类型名）→ test_approval_frame_wire_bytes… 红：它读的是
+  stream_chat_events 在审批分支上真造出来的那一帧，不是这份文件手抄的字典；
+- 往 NON_CLIENT_FRAMES 里加名字（哪怕同时补进隐私名单）→ 名单钉子红。
 """
+import importlib
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from app.core import authz, stream_events as se, stream_runs
+from app.core import approval, authz, stream_events as se, stream_runs, streaming
 from app.core.authz import Principal
 from app.main import app
 
@@ -39,7 +44,8 @@ PLAN_SUMMARY = "删除 last-month-recordings 目录里的 3 个文件"
 PLAN_MARK = "last-month-recordings"
 BACKEND = Path(__file__).resolve().parents[1]
 
-# 与 streaming.py 构造处逐键同序：json.dumps 按插入顺序出字节，键序变了就是线上字节变了。
+# 喂 run 缓冲用的夹具帧，形状照构造处写；它**不是**线上字节的基准——基准由下面那把
+# 从引擎里取真身的锁判（抄一份字典当基准，正是键序与增删键能一路绿过去的方式）。
 APPROVAL_FRAME = {
     "type": se.FRAME_APPROVAL_REQUEST,
     "ticket_id": TICKET,
@@ -146,14 +152,84 @@ def test_originating_owner_still_receives_the_approval_frame(client):
 
 # ------------------------------------------------------------------ 线上字节没动 --
 
-def test_approval_frame_wire_bytes_and_client_whitelists_unchanged():
-    """换常量不许改一个比特：两个客户端早就各自认这个名字，改字节就是让老包解析崩。"""
+_APPROVAL_TOOL = "execute_code"   # 注册表里唯一标了 requires_approval 的工具（直通的不算）
+_TICKET_FIXTURE = {"ticket_id": TICKET, "tool_name": _APPROVAL_TOOL, "plan_summary": PLAN_SUMMARY,
+                   "created_at": 1730000000.0, "expires_at": 1730000000.0, "user_id": "u_wire"}
+
+
+def _delta(content=None, tool_calls=None):
+    piece = SimpleNamespace(content=content, reasoning_content=None, tool_calls=tool_calls)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=piece, finish_reason=None)], usage=None)
+
+
+def _tool_call(call_id, name, arguments):
+    return SimpleNamespace(index=0, id=call_id,
+                           function=SimpleNamespace(name=name, arguments=arguments))
+
+
+class _RoundStream:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __iter__(self):
+        return iter(self._chunks)
+
+    def close(self):
+        pass
+
+
+class _FakeLLM:
+    """一轮一份假 chunk 列表；引擎要的只是 chat.completions.create(**kwargs)。"""
+
+    def __init__(self, rounds):
+        self.rounds = list(rounds)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **_kwargs):
+        return _RoundStream(self.rounds.pop(0) if self.rounds else [])
+
+
+def _frame_the_engine_itself_builds(monkeypatch):
+    """真跑一轮带审批的 stream_chat_events，取回**产品代码自己写出来**的那一帧。
+
+    先 reload：autouse 的 `_stub_llm_calls` 把 `stream_chat_events` 换成了假身，真引擎要从
+    模块里换回来（先例见 test_streaming_events.py 的 real_engine）。票据工厂也给桩——要钉的
+    是 streaming.py 写出那颗字典的手，ticket_id 与 TTL 的取值不是它；给成常量才谈得上"逐字节
+    相同"，顺带不落盘、不碰 `_tickets`。审批分支本身走真判据（needs_approval / is_round_fused）。
+    """
+    monkeypatch.setattr(approval, "create_approval_request",
+                        lambda name, args, user_id: dict(_TICKET_FIXTURE))
+    assert approval.needs_approval(_APPROVAL_TOOL), \
+        "%s 不再需要审批：审批分支走不到，这一帧就没有真身可读了" % _APPROVAL_TOOL
+    rounds = [[_delta(tool_calls=[_tool_call("c_1", _APPROVAL_TOOL, '{"code": "print(1)"}')])],
+              [_delta(content="已停在确认卡片前")]]
+    importlib.reload(streaming)
+    monkeypatch.setattr(streaming, "build_client", lambda provider: _FakeLLM(rounds))
+    frames = list(streaming.stream_chat_events(
+        "fake-chat", [{"role": "user", "content": "跑一段代码"}], provider_id="fake-model",
+        user_id="u_wire_probe",
+        tools=[{"type": "function", "function": {"name": _APPROVAL_TOOL,
+                                                 "parameters": {"properties": {}}}}],
+        trace_out=[]))
+    importlib.reload(streaming)          # 把模块还给下一个用例
+    built = [f for f in frames if "ticket_id" in f]
+    assert len(built) == 1, "审批分支该造且只造一帧，实际 %d 帧：%s" % (
+        len(built), [f.get("type") for f in frames])
+    return built[0]
+
+
+def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
+    """换常量不许改一个比特：两个客户端早就各自认这个名字，改字节就是让老包解析崩。
+
+    frozen 那两行是"改之前这一帧长什么样"的唯一手抄处——判据喂给它的必须是引擎真造的帧，
+    否则这份副本改不改都和线上无关（键序动了、键删了都照样绿）。
+    """
     assert se.FRAME_APPROVAL_REQUEST == "approval_request"
-    # 改动前的形状，按改动手写在这儿当基准（含键序与冒号后的空格）
-    frozen = ('{"type": "approval_request", "ticket_id": "%s", "tool_name": "delete_files", '
+    # 改动前的形状，含键序与冒号后的空格：json.dumps 按插入顺序出字节，键序变了就是字节变了。
+    frozen = ('{"type": "approval_request", "ticket_id": "%s", "tool_name": "%s", '
               '"plan_summary": %s, "expires_at": 1730000000.0}'
-              % (TICKET, json.dumps(PLAN_SUMMARY)))
-    assert se.sse_data(dict(APPROVAL_FRAME)) == "data: " + frozen + "\n\n"
+              % (TICKET, _APPROVAL_TOOL, json.dumps(PLAN_SUMMARY)))
+    assert se.sse_data(_frame_the_engine_itself_builds(monkeypatch)) == "data: " + frozen + "\n\n"
     js = (BACKEND / "app" / "web" / "static" / "api.js").read_text(encoding="utf-8")
     kt = (BACKEND.parent / "android-native" / "app" / "src" / "main" / "java"
           / "xyz" / "fenever" / "assistant" / "nativeapp" / "Api.kt").read_text(encoding="utf-8")
@@ -163,11 +239,38 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged():
 
 # ------------------------------------------------------------------ ④ 结构锁 --
 
-# 手写帧的既成事实与它们的立场；新增一条必须同时写清"为什么可以裸着进补帧"。
+# 手写 `"type": "…"` 的既成事实与它们的立场，键是 (相对 backend/app/ 的路径, 类型名)——换
+# 个模块再手打同一个名字照样红。新增一条必须同时写清为什么忍；位置空了就删掉那行。
+_SCHEMA_SHAPE_KEYS = {("tools/builtin_tools.py", "string"), ("tools/builtin_tools.py", "object"),
+                      ("tools/registry.py", "function"), ("core/streaming.py", "function"),
+                      ("agents/react_agent.py", "function"), ("core/uploads.py", "text"),
+                      ("core/uploads.py", "image_url")}
+_GUARD_INTERNAL_EVENTS = ("cost_cap_rounds", "cost_cap_tokens", "output_budget_exhausted",
+                          "output_truncated", "duplicate", "suspend", "fail_backoff")
+
 DECLARED_HAND_WRITTEN = {
-    "function": "这不是帧：同一处构造的是给上游 provider 的工具 schema",
-    "cancelled": "带的是本轮正文，与 done 同一立场（跨属主本来就看得见回答本身）",
+    ("core/stream_runs.py", "cannot_resume"):
+        "连接级终帧：不占缓冲序号，只带 run_id 与固定话术——跨属主本来就该知道「接不上」",
+    ("main.py", "cancelled"):
+        "带的是本轮正文，与 done 同一立场（跨属主本来就看得见回答本身）",
+    **{k: "给上游 provider 的 schema / 消息分片，不是流上的帧"
+       for k in _SCHEMA_SHAPE_KEYS},
+    **{("core/guardrails.py", n): "RoundGuard 的内部事件记录（护栏的账），进程内读，不上流"
+       for n in _GUARD_INTERNAL_EVENTS},
 }
+
+
+def test_the_exemption_roster_is_pinned_to_the_name_that_earned_it():
+    """钉的是等式而不是 subset：NON_CLIENT_FRAMES 里只许有 FRAME_APPROVAL_REQUEST 这一个名字。
+
+    为什么 subset 判据不够：那条只问"豁免的有没有进隐私名单"，于是**同时**往两张表里加一个
+    名字它就沉默了——"用豁免跳过两个客户端各多一条分发臂"变成零成本。跳过的代价要说准：那样
+    一帧永远到不了该看它的人手里（客户端没有分发臂），是一个**功能缺口**；不是隐私漏口——这一
+    层只会多剥一帧，不会把别人的内容送出去。要加名字就在这儿一起登记，并答清谁该看见它。
+    """
+    assert set(se.NON_CLIENT_FRAMES) == {se.FRAME_APPROVAL_REQUEST}, (
+        "豁免名单动了：%s。除了补进隐私名单，还要说清这一帧谁该看见、两个客户端为什么不用改。"
+        % sorted(se.NON_CLIENT_FRAMES))
 
 
 def test_every_frame_type_on_the_stream_declares_a_privacy_posture():
@@ -175,6 +278,12 @@ def test_every_frame_type_on_the_stream_declares_a_privacy_posture():
 
     漏了任何一格都不是"少删一帧"，而是跨属主逐字节透出，所以这里判的是**有没有立场**，
     不是立场对不对（对不对由上面三组行为断言判）。
+
+    手写那一半的扫描面是 `backend/app/` 下所有 *.py，且**不按已知帧名筛**：契约那边那份
+    整仓扫描器（test_process_trace_contract.py 的 `_frame_type_literals_in`）拿
+    `value in FRAME_NAMES` 当筛子，全新的名字对它天然隐形——这一帧当初就是这么漏的。
+    判据只认 `"type": "<字面量>"` 这一种形状：变量拼出来的类型名它看不见，那一半没有机器
+    判据（别说成"整个 app/ 都审过了"）。
     """
     registered = {v for k, v in vars(se).items() if k.startswith("FRAME_")}
     declared = set(se.CLIENT_FRAMES) | set(stream_runs.PRIVATE_TRACE_FRAME_TYPES)
@@ -184,17 +293,21 @@ def test_every_frame_type_on_the_stream_declares_a_privacy_posture():
     assert set(se.NON_CLIENT_FRAMES) <= set(stream_runs.PRIVATE_TRACE_FRAME_TYPES), \
         "NON_CLIENT_FRAMES 里有帧没进隐私名单：豁免变成了漏帧的通道"
 
+    app_root = BACKEND / "app"
     handwritten = set()
-    for rel in ("app/core/streaming.py", "app/main.py"):
-        src = (BACKEND / rel).read_text(encoding="utf-8")
-        for found in re.findall(r'"type":\s*"([^"]+)"', src):
+    for path in sorted(app_root.rglob("*.py")):
+        rel = path.relative_to(app_root).as_posix()
+        for found in re.findall(r'"type":\s*"([^"]+)"', path.read_text(encoding="utf-8")):
             handwritten.add((rel, found))
     undeclared = sorted((rel, t) for rel, t in handwritten
-                        if t not in declared and t not in DECLARED_HAND_WRITTEN)
+                        if t not in declared and (rel, t) not in DECLARED_HAND_WRITTEN)
     assert not undeclared, (
         "%s 里手写的类型名 %s 没有任何立场：带用户内容的帧必须在引入它的那一笔里进 "
-        "PRIVATE_TRACE_FRAME_TYPES" % (undeclared[0][0] if undeclared else "?",
-                                       sorted(t for _, t in undeclared)))
+        "PRIVATE_TRACE_FRAME_TYPES；不是帧的就在 DECLARED_HAND_WRITTEN 登记一行并写清为什么忍"
+        % (undeclared[0][0] if undeclared else "?", sorted(t for _, t in undeclared)))
+    stale = sorted(set(DECLARED_HAND_WRITTEN) - handwritten)
+    assert not stale, ("豁免登记里这些位置已经没有手打的类型名了：%s——删掉对应那行，"
+                       "清单只该越还越少" % stale)
 
 
 def test_approval_frame_is_deliberately_not_a_client_frame():

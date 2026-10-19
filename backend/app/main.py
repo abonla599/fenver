@@ -859,7 +859,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
         if run.user_id != principal.user_id:
             # 同权同形的是"能不能接上"，不是"能看见什么"：跨属主补帧时把过程
             # 留痕（思考文本、工具入参与结果、搜索命中、done.trace）整段摘掉。
-            # v0.25 那条通道里只有正文，v0.29 往同一个缓冲多加了四种帧，权限
+            # v0.25 那条通道里只有正文，v0.29 往同一个缓冲添了过程留痕的帧，权限
             # 面不该跟着变大——理由与判据见 stream_runs.scrub_private_trace。
             frames = stream_runs.scrub_private_trace(frames)
         return StreamingResponse(frames, media_type="text/event-stream")
