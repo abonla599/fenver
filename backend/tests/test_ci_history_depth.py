@@ -100,6 +100,14 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 - 只读 `steps[].run`。作业级 `defaults:`、`jobs.<id>.uses:`（可复用 workflow 的调用点）不在
   射程内；今天四份里没有这种形状，而 `_jobs_of` 遇到**既没有 `steps` 也不是 `uses:`** 的作业
   会判红而不是放过——认不出就说认不出，不假装"没有作业要判"。
+- `workflow_run_bodies(..., withs=True)` 多出来的那一格**只收真会被执行的 `with:` 值**：键名
+  落在 `_WITH_KEYS_EXECUTABLE`（Actions 会把这个输入交给那个 action 去执行的那几个名字）里才算
+  面。其余键名先查 `_WITH_KEYS_SEEN_IN_TREE` 那份真树快照——快照里没有、值又不像命令的键名
+  **判红而不是放过**（放过没见过的键名，等于给"下一个 action 恰好把某个输入当命令执行"留一条
+  没人看着的门）。快照由 `test_the_with_key_registry_is_a_snapshot_of_the_real_tree` 现场复量，
+  真树今天的 `with:` 键名无一可执行 ⇒ 这一格在真树上命中 0；名单以那两个元组为准，注释不写条数。
+  作业级 `with:`（可复用 workflow 的调用点）不在面里，由
+  `test_the_surface_carries_no_job_level_with_entry_today` 钉着"今天必须看不见"。
 - **判据认的是"命中标记"，不是"读没读历史"这件事本身**（#92a 修复轮把这句钉死：上一版在两份
   workflow 的注释和参数化锁的 docstring 里写的是"凡 run 正文读仓库历史的 job 都必须
   fetch-depth: 0"，比实测宽——那是本会话第三次同一句错）。准确的说法只有一句：**run 正文命中
@@ -358,8 +366,9 @@ def workflow_run_bodies(path, where: str = "", withs: bool = False) -> str:
     这是 `_run_bodies` 那把母本的目录级出口，别的文件要判 workflow 正文就复用它，不要再各造
     一把 `read_text()` + `in`——原文里注释与命令长得一样，删真行留注释就判不出来。
     `uses:` 调用点没有正文可判，跳过；其余认不出的作业形状由 `_jobs_of` 判红。
-    `withs=True` 把 `with:` 的字面值一并拼进来：Actions 会真把它交给那个 action，所以那是
-    **扩大**射程（比只看 `run:` 更宽），不是收窄。
+    `withs=True` 把 `with:` 里**真会被执行**的那几格值也拼进面（三层判据见 `_with_surface`）：
+    键名不在可执行名单里、又不像命令的字面值就不进面——Actions 读的是那个键的**语义**，不是
+    "with 下任何一段字符串"。
     """
     path = Path(path)
     label = where or path.name
@@ -372,8 +381,113 @@ def workflow_run_bodies(path, where: str = "", withs: bool = False) -> str:
         if withs:
             for step in steps:
                 if isinstance(step, dict) and isinstance(step.get("with"), dict):
-                    out.extend(v for v in step["with"].values() if isinstance(v, str))
+                    out.extend(_with_surface(step["with"], label))
     return "\n".join(out)
+
+
+# `with:` 那一格的三层判据。被复用它的那把 GATE_TOKEN 禁面拿去判（母本在
+# test_v0331_pre_tag_gate_contract.py::_gate_token_hits），所以名单与形状都住在这里。
+# 真树这几份 workflow 出现过的全部 `with:` 键名都**不是**会被执行的字段，于是 A 那一层今天的
+# 命中是 0——它防的是"下一个人把 `script:`/`args:` 写进 `with:`"，不是今天这几份。
+# 两份名单比的都是**归一后的键名**（`_with_key_norm`：`-`→`_`、转小写），所以名单里的串一律写成
+# 归一形态——`fetch_depth` 而不是 `fetch-depth`。这一条不是排版偏好：名单拿归一后的串去查，
+# 登记时抄了 YAML 里带连字符的原名就会**登记失败**，真物反而被 C 层判红。
+# 值那一侧不做归一：值就是会被原样交出去的那串字符。
+_WITH_KEYS_EXECUTABLE = ("arg", "args", "command", "commands", "commandtorun",
+                         "entrypoint", "inlinescript", "script", "scripts", "shell")
+# 真树 `with:` 键名的快照（归一形态，由
+# `test_the_with_key_registry_is_a_snapshot_of_the_real_tree` 现场复量）：登记它才允许出现在面
+# 之外，没登记的键名一律红（C 层）。
+_WITH_KEYS_SEEN_IN_TREE = ("distribution", "fetch_depth", "gradle_version",
+                           "if_no_files_found", "java_version", "name", "path",
+                           "python_version")
+# B 层的值形状：既含被禁的闸门命令串、又像一条会被执行的命令。
+_WITH_TOKEN_SHAPE = "tools/pre_tag_gate.py"
+_WITH_COMMAND_SHAPE = re.compile(r"^\s*(?:python3?|bash|sh|pwsh)\b|--expect")
+
+
+def _with_key_norm(key) -> str:
+    return str(key).replace("-", "_").lower()
+
+
+def _with_surface(step_with: dict, label: str) -> list:
+    """一个步骤的 `with:` 映射里进入判据面的值，三层各回一句**不同的**红话。
+
+    - **A 键名层**：键名在 `_WITH_KEYS_EXECUTABLE` 里 ⇒ 值原样进面。这一层不抛红，命中由调用方
+      的 token 判据报（红话里的键名由 `workflow_with_face` 提供），因为"值被禁"是调用方的事。
+      值**不剥注释**：`with:` 的值没有"行首 `#` 就不执行"这一层语义，把它剥掉就是替 Actions
+      撒谎。
+    - **B 值形状层**：两份名单都不认得的键名，值同时含闸门命令串**且**有命令形状 ⇒ 红。
+    - **C 键名登记层**：两份名单都不认得的键名，值也不像命令 ⇒ 红。
+
+    B 排在 C 前面，于是"键不认识"与"值像命令"是两句不同的话——排查的人一眼分得清是名单该登记
+    一个新键名，还是真的有人把命令塞进了一个没人登记过的输入。
+    """
+    out = []
+    for key in sorted(step_with, key=str):
+        norm = _with_key_norm(key)
+        value = step_with[key]
+        if norm in _WITH_KEYS_EXECUTABLE:
+            if isinstance(value, str):
+                out.append(value)
+            continue
+        if norm in _WITH_KEYS_SEEN_IN_TREE:
+            continue
+        if (isinstance(value, str) and _WITH_TOKEN_SHAPE in value
+                and _WITH_COMMAND_SHAPE.search(value)):
+            raise AssertionError(label + " 的 `with:` 里出现没登记的键名 " + str(key) +
+                                 "，而它的值既含闸门命令串 " + _WITH_TOKEN_SHAPE + " 又带着命令"
+                                 "形状（值首行读到 " + repr(value.splitlines()[0]) +
+                                 "）：B 层不放它过去。要么把 " + str(key) + " 登记进 "
+                                 "_WITH_KEYS_EXECUTABLE（那等于承认 Actions 会执行它，面要跟着"
+                                 "重新声明），要么把这条命令从 `with:` 里拿掉。")
+        raise AssertionError(label + " 的 `with:` 里出现没登记的键名 " + str(key) +
+                             "（读到值 " + repr(value) + "）：C 层认不出这个输入，不许把它静默"
+                             "当成「不会被执行」的那一格——下一个 action 恰好把同名输入当命令跑时，"
+                             "这里就是唯一的入口。登记进 `_WITH_KEYS_SEEN_IN_TREE`（值不进面）或 "
+                             "`_WITH_KEYS_EXECUTABLE`（值进面）二选一，由人来看。")
+    return out
+
+
+def workflow_with_face(path, where: str = "") -> list:
+    """这份 workflow 落在 A 那一层的 `with:` 键名，只读键名、不跑 B/C 所以不会抛。
+
+    调用方用它把红话写实：命中到底是 `run:` 正文还是 `with:` 的哪个可执行字段，两种红的下一步
+    动作不一样（前者是"CI 又去跑本机闸门"，后者是"某个 action 的输入里躺着那条命令"）。
+    """
+    path = Path(path)
+    label = where or path.name
+    doc = _load_doc(path, label)
+    keys = []
+    for _job_id, steps in _jobs_of(doc, label):
+        if steps is None:
+            continue
+        for step in steps:
+            if not isinstance(step, dict) or not isinstance(step.get("with"), dict):
+                continue
+            keys.extend(sorted(str(k) for k in step["with"]
+                               if _with_key_norm(k) in _WITH_KEYS_EXECUTABLE))
+    return keys
+
+
+def _all_step_with_keys(path, where: str = "") -> set:
+    """这份 workflow 里**步骤级** `with:` 出现过的全部键名（归一后），供快照复量用。
+
+    刻意不复用 `workflow_run_bodies(withs=True)`：那份快照判的是"真树出现过哪些键名"，遇到新键名
+    必须能报出"多出的是哪一个"，而不是先被 C 层的红打断。作业级 `with:` 不算在这一格里
+    （它不在面里，见 `test_the_surface_carries_no_job_level_with_entry_today`）。
+    """
+    path = Path(path)
+    label = where or path.name
+    doc = _load_doc(path, label)
+    seen = set()
+    for _job_id, steps in _jobs_of(doc, label):
+        if steps is None:
+            continue
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("with"), dict):
+                seen.update(_with_key_norm(k) for k in step["with"])
+    return seen
 
 
 def _assert_checkout_fetches_full_history(steps, where: str, markers: list) -> None:
@@ -887,3 +1001,61 @@ def test_comment_only_history_prose_never_becomes_a_requirement(case_id, run_lin
     assert "with: 块缺失" in str(excinfo.value), (
         "命令侧夹具「" + case_id + "」命中了标记，作业级判定却没红在「第 0 步的 checkout "
         "**with: 块缺失**」那一句，实得红话：" + str(excinfo.value)[:200])
+
+
+def test_the_with_key_registry_is_a_snapshot_of_the_real_tree():
+    """C 层那份快照必须与真树**逐键相等**，两个方向都判。
+
+    - 真树出现了名单里没有的键名 ⇒ 红（那正是 C 层要拦的形状，只是这一枚给出的是"多出的是哪
+      一个"，比 C 的红话更好定位）；
+    - 名单里登记了真树已经没有的键名 ⇒ 也红。登记表自己也会腐烂：workflow 改了输入名而名单不动，
+      下一个用同名的人就被"已经登记"骗过去。
+    另外钉三件结构事实：两份名单必须各自互不相同、必须互不重叠（重叠时 A 抢在 C 前面，"这个键
+    到底进不进面"取决于判序而不是名单），以及**真树今天的键名无一落在可执行名单里**——那句
+    "面收窄到真会被执行的字段"在真树上的兑现就是这个空集，它哪天不空了必须红着让人重读面。
+    """
+    observed = set()
+    for name in WORKFLOW_NAMES:
+        observed |= _all_step_with_keys(WORKFLOWS_DIR / name, where=str(WORKFLOWS_DIR / name))
+    registered = set(_WITH_KEYS_SEEN_IN_TREE) | set(_WITH_KEYS_EXECUTABLE)
+    unregistered = sorted(observed - registered)
+    stale = sorted(set(_WITH_KEYS_SEEN_IN_TREE) - observed)
+    assert not unregistered and not stale, (
+        "`with:` 键名快照与真树分家：真树里没登记的 " + str(unregistered) + "、名单里真树已经"
+        "没有的 " + str(stale) + "（真树读到 " + str(sorted(observed)) + "）。C 层的牙建立在"
+        "这份快照是真的上面：名单腐烂了，'新键名即红'就退化成'随机键名即红'。")
+    assert len(set(_WITH_KEYS_SEEN_IN_TREE)) == len(_WITH_KEYS_SEEN_IN_TREE), (
+        "`_WITH_KEYS_SEEN_IN_TREE` 里有重复键名：快照当成对，重复就是数错了一遍")
+    assert len(set(_WITH_KEYS_EXECUTABLE)) == len(_WITH_KEYS_EXECUTABLE), (
+        "`_WITH_KEYS_EXECUTABLE` 里有重复键名：A 层的名单当成对")
+    assert not (set(_WITH_KEYS_SEEN_IN_TREE) & set(_WITH_KEYS_EXECUTABLE)), (
+        "两份名单重叠了：" + str(sorted(set(_WITH_KEYS_SEEN_IN_TREE) & set(_WITH_KEYS_EXECUTABLE)))
+        + "。同一个键名既「值不进面」又「值进面」，谁生效取决于判序——面就不再是读得出来的那一份。")
+    executable_in_tree = sorted(observed & set(_WITH_KEYS_EXECUTABLE))
+    assert not executable_in_tree, (
+        "真树的 `with:` 里出现了可执行字段 " + str(executable_in_tree) + "：A 层那一格不再是空集，"
+        "GATE_TOKEN 的禁面从此会在真树上命中，射程声明得跟着重写（先确认那个 action 真会把这个"
+        "输入交给 shell，再把它留在名单里）。")
+
+
+def test_the_surface_carries_no_job_level_with_entry_today():
+    """作业级 `with:`（可复用 workflow 的调用点）今天必须**看不见**——面里没有它，是声明过的。
+
+    `_jobs_of` 对 `uses:` 作业返回 `steps=None`，`workflow_run_bodies` 直接 `continue`，所以作业级
+    `with:` 既不进 `run:` 面也不进 A 层。这一枚钉的是"现状与声明一致"：哪天仓库里出现一个带
+    `with:` 的 workflow 调用点，这里红，由人来决定那一格算不算被执行的面——而不是让面在没人
+    重读的情况下自己变宽。
+    """
+    found = []
+    for name in WORKFLOW_NAMES:
+        path = WORKFLOWS_DIR / name
+        doc = _load_doc(path, str(path))
+        jobs = doc.get("jobs")
+        assert isinstance(jobs, dict) and jobs, str(path) + " 里没有 jobs: 映射：判据读不到世界事实"
+        for job_id, job in sorted(jobs.items()):
+            if isinstance(job, dict) and "with" in job:
+                found.append(name + "::" + str(job_id) + " 键 " + str(sorted(map(str, job["with"]))))
+    assert not found, (
+        "真树出现了作业级 `with:`：" + str(found) + "。调用点传进去的参数会不会被那个 reusable "
+        "workflow 执行，取决于它自己的正文，本锁读不到——要么把面明确扩到那一格并补判据，要么"
+        "改这份 workflow；不许只把本函数改成恒真让声明继续假装成立。")

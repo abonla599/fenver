@@ -36,7 +36,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_ci_history_depth import WORKFLOWS_DIR, workflow_run_bodies
+from tests.test_ci_history_depth import (WORKFLOWS_DIR, workflow_run_bodies,
+                                         workflow_with_face)
 from tests.test_machine_read_pointers import strip_py_prose
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -218,11 +219,14 @@ def _workflow_release_steps() -> list:
 def _gate_token_hits(workflows_dir=None) -> list:
     """返回**每一格真会被 Actions 执行**的地方里出现了本机闸门命令的文件名清单。
 
-    射程：`.github/workflows/*.yml` 全部文件、全部作业的全部步骤，`run:` 正文（剥掉行首 `#`）
-    与 `with:` 的字面值都算——YAML 注释在 `safe_load` 那一层就不存在了，run 里的行注释由
-    `workflow_run_bodies` 剥掉。所以注释里教人"本机上先跑 `python tools/pre_tag_gate.py …`"
-    与 docs/ 里那两句必抄的命令都不在禁区内；从前这把只取 `release-apk.yml` 的
-    `jobs.release.steps`，其余 workflow 的 run 正文一个都没看过。
+    射程：`.github/workflows/*.yml` 全部文件、全部作业的全部步骤的 `run:` 正文（剥掉行首 `#`），
+    加上 `with:` 里**落在可执行字段**的那几格值（键名名单是
+    `test_ci_history_depth._WITH_KEYS_EXECUTABLE`，判序与红话都在 `workflow_run_bodies` 里）——
+    YAML 注释在 `safe_load` 那一层就不存在了，run 里的行注释由 `workflow_run_bodies` 剥掉。
+    所以注释里教人"本机上先跑 `python tools/pre_tag_gate.py …`"与 docs/ 里那两句必抄的命令都不在
+    禁区内；`with: name:` / `with: path:` 那种"只是个名字或一段路径"的字面值也不在禁区内。
+    从前这把只取 `release-apk.yml` 的 `jobs.release.steps`，其余 workflow 的 run 正文一个都没看过；
+    `with:` 那一格从前又是"凡是值都算"，把面铺到根本不会被执行的输入上。两面都不是这格要的形状。
     """
     root = Path(workflows_dir) if workflows_dir else WORKFLOWS_DIR
     files = sorted(root.glob("*.yml"))
@@ -240,15 +244,33 @@ jobs:
       - name: synthetic step
         run: |
 {body}
+{withblock}"""
+
+# `with:` 那一格的反例载体。标量是**已经写好的 YAML 文本**（不是 Python 值），因为这几枚钉子判的
+# 就是 `safe_load` 之后剩下什么：`fetch-depth: 0` 必须是整数 0，`script: "# …"` 必须带引号才不被
+# YAML 当成注释吃掉——写成 Python 字符串再由测试去 quote，判的就不是那个形状了。
+_SYNTH_WITH_STEP = """      - uses: {uses}
+        with:
+{pairs}
 """
 
 
-def _synth_workflows(dir_, run_lines, name="tests.yml"):
-    """把几行 shell 拼成一份**真 YAML** 放进临时目录，再按禁判据同一条路去读它。"""
+def _synth_workflows(dir_, run_lines, name="tests.yml", withs=None,
+                     uses="actions/upload-artifact@v4"):
+    """把几行 shell（可选再加一步带 `with:` 的 action）拼成一份**真 YAML** 放进临时目录。
+
+    `withs` 是 `[(键名, YAML 标量文本)]`；不传就没有 `with:` 那一格，形状与只判 `run:` 的旧用例
+    逐字节相同。拼完之后按这把禁的同一条路去读它，不手搓 dict——手搓的 dict 会替 YAML 撒谎。
+    """
     d = Path(dir_)
     d.mkdir(parents=True, exist_ok=True)
     body = "\n".join("          " + ln for ln in run_lines)
-    (d / name).write_text(_SYNTH_YML.replace("{body}", body), encoding="utf-8")
+    withblock = ""
+    if withs:
+        pairs = "\n".join("          %s: %s" % (key, scalar) for key, scalar in withs)
+        withblock = _SYNTH_WITH_STEP.replace("{uses}", uses).replace("{pairs}", pairs)
+    (d / name).write_text(_SYNTH_YML.replace("{body}", body).replace("{withblock}", withblock),
+                          encoding="utf-8")
     return d
 
 
@@ -275,6 +297,99 @@ def test_teaching_the_local_gate_command_in_a_comment_is_not_a_violation(tmp_pat
         "去掉那枚 # 之后也不见 ⇒ 上面那句绿是尺子瞎了，不是剥掉了散文")
 
 
+# `with:` 那一格的对照组（三张表 = 三种结局：值进面 / 值不进面也不炸 / 当场红）。
+# 每格的值都写成 YAML 标量文本原样，判的是 `safe_load` 之后剩下什么。
+GATE_VALUE = "python tools/pre_tag_gate.py --expect v0.0.0"
+GATE_VALUE_AS_COMMENT = '"# 本机还要跑 python tools/pre_tag_gate.py"'
+_TOKEN_ONLY_PATH = "tools/pre_tag_gate.py"
+
+# 应当红：键名在可执行名单（A 层）里 ⇒ 值就是会被交给那个 action 的东西。
+_SYTH_WITH_HITS = (
+    ("a-layer-script", "./x", [("script", GATE_VALUE)],
+     "composite action 的 `script` 输入会被原样拿去执行，那句闸门命令写在这里就是写进了 run 正文"),
+    ("a-layer-script-quoted-comment", "./x", [("script", GATE_VALUE_AS_COMMENT)],
+     "`with:` 的值没有「行首 `#` 就不跑」那一层语义：注释前缀挡不住它，剥了就是替 Actions 撒谎"),
+)
+
+# 不该红、也不该炸：已登记但根本不被执行的键名，以及名单外的形状。
+_SYTH_WITH_NON_HITS = (
+    ("path-value-not-executed", "actions/upload-artifact@v4",
+     [("name", "gate-log"), ("path", _TOKEN_ONLY_PATH)],
+     "artifact 的 `path:` 是一段路径，Actions 不会执行它——把这种值算进禁面就是把面铺到不会被执行的地方"),
+    ("same-value-under-name", "actions/upload-artifact@v4", [("name", GATE_VALUE)],
+     "与 A 层那一格**同一个值**：不红才证明上面那枚的红来自键名，不是夹具天然带着那个 token"),
+    ("comment-shaped-value-under-name", "actions/upload-artifact@v4",
+     [("name", GATE_VALUE_AS_COMMENT)],
+     "同一串带 `#` 的值挪到不被执行的键名下也不红：红与不红的分界是键名那一层"),
+    ("int-and-str-registered-values", "actions/checkout@v4",
+     [("fetch-depth", "0"), ("if-no-files-found", "error")],
+     "`fetch-depth: 0` 是整数、`if-no-files-found: error` 是枚举串：非字符串的值不许把判据炸掉，"
+     "已登记的键名也不该进面"),
+)
+
+# 当场红，且红话必须点名是哪一层：B 层（值像命令）与 C 层（键不认识）是两句不同的话。
+_SYTH_WITH_RED_MESSAGES = (
+    ("unregistered-key-benign-value", "actions/upload-artifact@v4",
+     [("totally-unregistered-input", "gate-log")], "C 层",
+     "没登记的键名不许被静默当成「不会被执行」——新键名进来要么登记、要么红，由人来看"),
+    ("unregistered-key-command-shaped-value", "actions/upload-artifact@v4",
+     [("totally-unregistered-input", GATE_VALUE)], "B 层",
+     "没登记且值含闸门命令串又像命令：这一格的红话得说「值像命令」，与「键不认识」分得开"),
+)
+
+
+@pytest.mark.parametrize("case_id,uses,pairs,why", _SYTH_WITH_HITS,
+                         ids=[c[0] for c in _SYTH_WITH_HITS])
+def test_the_ban_reaches_a_with_value_that_actions_will_execute(tmp_path, case_id, uses,
+                                                                pairs, why):
+    """**应当红**（A 层）：闸门命令落在可执行字段的 `with:` 值里 = 写进了会被执行的地方。
+
+    成对的两枚各验一面：`workflow_with_face` 必须报出这个键名（红话靠它指认"命中来自 `with:`
+    的哪个可执行字段"，否则读报告的人只会去 grep `run:`），而 `_gate_token_hits` 必须把这份文件
+    列进命中清单。
+    """
+    d = _synth_workflows(tmp_path, ["echo ok"], withs=pairs, uses=uses)
+    assert _gate_token_hits(d) == ["tests.yml"], (
+        "「" + case_id + "」没被逮到：A 层那格不收值了？" + why)
+    assert workflow_with_face(d / "tests.yml") == ["script"], (
+        "「" + case_id + "」命中了，但红话里点不出是哪个可执行字段：读到 "
+        + str(workflow_with_face(d / "tests.yml")) + "。" + why)
+
+
+@pytest.mark.parametrize("case_id,uses,pairs,why", _SYTH_WITH_NON_HITS,
+                         ids=[c[0] for c in _SYTH_WITH_NON_HITS])
+def test_a_with_value_that_is_not_executable_is_not_a_violation(tmp_path, case_id, uses,
+                                                                pairs, why):
+    """**不该红、也不该炸**（过判也红的那一半对照）：收窄之后禁面只认真会被执行的字段。
+
+    这一组里有一枚与上面同值不同键的对照（`same-value-under-name`）——没有它，"A 层那枚红了"
+    什么都证明不了：也许夹具天然就带着 token、也许任何 `with:` 值都会红。
+    """
+    d = _synth_workflows(tmp_path, ["echo ok"], withs=pairs, uses=uses)
+    assert _gate_token_hits(d) == [], "「" + case_id + "」被判成了违规：" + why
+    assert workflow_with_face(d / "tests.yml") == [], (
+        "「" + case_id + "」的键名落在可执行名单里，可这一格的本意是不进面：" + why)
+
+
+@pytest.mark.parametrize("case_id,uses,pairs,layer,why", _SYTH_WITH_RED_MESSAGES,
+                         ids=[c[0] for c in _SYTH_WITH_RED_MESSAGES])
+def test_an_unregistered_with_key_goes_red_with_the_layer_that_caught_it(tmp_path, case_id,
+                                                                         uses, pairs, layer, why):
+    """**应当红**（B/C 层）：没登记的键名当场红，而且红话里点名是哪一层抓住的。
+
+    红话分层的理由与 A 层同一件事：两种红的下一步动作不一样——"键不认识"是名单该登记，
+    "值像命令"是有人把命令塞进了没人认识的输入。合成到一句"with 里有东西不对"就都得回去读代码。
+    """
+    d = _synth_workflows(tmp_path, ["echo ok"], withs=pairs, uses=uses)
+    with pytest.raises(AssertionError) as excinfo:
+        _gate_token_hits(d)
+    message = str(excinfo.value)
+    assert layer in message, (
+        "「" + case_id + "」红了，但红话没写明是 " + layer + " 抓的（读到 " + message[:200] + "）")
+    assert "totally-unregistered-input" in message, (
+        "「" + case_id + "」的红话没点名是哪个键名（读到 " + message[:200] + "）：" + why)
+
+
 def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     """**改前钉什么**：CI 里有一步在跑全量闸门 `tools/pre_tag_gate.py`，只在 tag 事件跑，
     并且排在 `gh release create` 与签名三步**之前**。
@@ -298,12 +413,14 @@ def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     真执行的东西，注释一概不算数（与 test_apk_release_discipline.py 的 `_workflow_step`、
     test_ci_history_depth.py 的"注释不参与判据"同一个口径）。
 
-    **射程（#92a 交付项 ③：只把这句话写清楚，判据一个字没扩）**：末尾那条反向钉
-    （`assert GATE_TOKEN not in runs`）读的是 `WORKFLOW` 这一个常量指着的那份文件，也就是
-    **只有 `release-apk.yml` 的 `run` 正文**在射程内。把 `tools/pre_tag_gate.py` 原样抄进
-    `tests.yml` 或任何别的 workflow，今天**不会红**——这是判据的边界而不是它坏了；#90b 换窄
-    治的是"闸门被搬回 CI 的这一步"，抄到别处属于另一个洞。扩到全 `.github/workflows/*.yml`
-    的 `run:` 集合归 **#92b**，别在本单里顺手做掉（本单只泛化浅克隆哨那一把）。
+    **射程**：末尾那条反向钉读的是 `_gate_token_hits()`，面是 `.github/workflows/*.yml` **每一
+    份**的**每一个作业**的 `run:` 正文（剥掉行首 `#`）加上 `with:` 里落在可执行字段的那几格值。
+    把 `tools/pre_tag_gate.py` 原样抄进 `tests.yml` 或任何别的 workflow 都会红；只写进 YAML 注释、
+    写进 `docs/`、或写进 `with: path:` 那种不被执行的输入都不红——前者是这格要防的东西，后者不是。
+    判不到的一侧也写清楚：作业级 `with:`（可复用 workflow 的调用点）不在面里，今天真树没有这种
+    形状，那枚"必须看不见"的钉在 test_ci_history_depth.py；`jobs.<id>.defaults:` 同样不在面里。
+    `with:` 那一格里没登记的键名是**当场红**（不是放过），分层红话与三层判据的母本都在
+    `test_ci_history_depth.py::_with_surface`。
     """
     steps = _workflow_release_steps()
     names = [s.get("name") or "" for s in steps]
@@ -336,11 +453,15 @@ def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     assert not sign or at < sign[0], "窄检查排在签名步骤之后：红得不够早，白烧 runner"
 
     hits = _gate_token_hits()
+    exec_keys = sorted({k for f in WORKFLOWS_DIR.glob("*.yml")
+                        for k in workflow_with_face(f, where=str(f))})
     assert not hits, (
-        f"全量发版闸门又被抄回 CI 的 run 正文（{hits}）：{GATE_TOKEN} 在那次 checkout 里判不到"
+        f"全量发版闸门又被抄回 CI 真正会被执行的地方（{hits}）：{GATE_TOKEN} 在那次 checkout 里判不到"
         "世界事实（/health 是对岸进程，data/ 与 version.json 被 .gitignore 排除），每次 tag 必撞 "
         "rc=1 —— #57 记的就是这件事。线上 build 与物料顺序归本机，别在任何 workflow 里复述。"
-        "这一把判的是**所有** workflow 的所有 run 正文与 with: 值，不只 release-apk.yml")
+        "这一把判的是**所有** workflow 的 run 正文（剥行首 `#`）与 `with:` 里落在可执行字段的那几格，"
+        "不只 release-apk.yml；真树此刻 `with:` 那面的可执行字段名单是 " + str(exec_keys)
+        + "，空表就是没走那一格，红话别去 grep `with:`。")
 
 
 def test_the_two_hand_off_checks_still_run_in_the_local_gate(monkeypatch, capsys):
