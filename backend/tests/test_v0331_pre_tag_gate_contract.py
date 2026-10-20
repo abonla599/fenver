@@ -104,16 +104,41 @@ def test_gate_script_exists_and_is_the_documented_shape():
     # 文档照写，而 CI 每次都在本文件那句 importlib 加载上撞 "No such file or directory"
     # ——机制退化回一句提醒，而且退化得悄无声息。#90b 起 `release-apk.yml` 不再跑它，
     # 读它的是 backend/tests 这批行为锁（它们真的 exec `main()`），这条前提一个字没变。
-    # 判据走 git 的真实语义（check-ignore 退出码 0 = 被忽略），不搜 .gitignore 文本。
+    #
+    # 问法必须带 `--no-index -v`，两个已知的假判断各躲一枚：
+    # · 已跟踪的路径问 `check-ignore`（不带 --no-index）**恒回 rc=1「没被忽略」**——
+    #   只删掉 `!/tools/pre_tag_gate.py` 而文件照旧 tracked 的变异，那种问法照样绿；
+    # · 带尾斜杠的问法（`... tools/pre_tag_gate.py/`）在 CRLF 的 .gitignore 上会命中
+    #   一枚裸 CR 空行、恒回「被忽略」，看着更红，其实什么都没判。
+    # 所以这里问**文件本身**，`--no-index` 让 git 不看索引，`-v` 让它报出赢下来的那条模式；
+    # `/tools/*` 也回 rc=0，只有模式文本分得开「被挡住」与「被例外放行」。
     res = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--stdin"],
-        input=b"tools/pre_tag_gate.py\n", capture_output=True, timeout=60)
-    assert res.returncode != 0, (
-        "tools/pre_tag_gate.py 被 .gitignore 挡住了：tests.yml 那次 checkout 里没有这个文件，"
-        "本文件这些行为锁连闸门都加载不到，闸门退化回一句提醒。加一行 !/tools/pre_tag_gate.py"
-    )
-    # input 走 bytes：text=True 时 Windows 上 "\n" 会被换成 "\r\n"，git 于是拿带
-    # \r 的路径去匹配，永远"没被忽略"，这条锁就空转了。
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "--no-index", "-v",
+         "--", "tools/pre_tag_gate.py"], capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    assert res.returncode == 0 and report, (
+        "git 没答出 tools/pre_tag_gate.py 命中哪条 .gitignore 规则：rc=%d stderr=%r"
+        % (res.returncode, (res.stderr or b"")[:200]))
+    rule_part, _, path_part = report.partition(chr(9))
+    assert rule_part.endswith(":!/tools/pre_tag_gate.py"), (
+        "tools/pre_tag_gate.py 赢下来的 .gitignore 规则不是 `!/tools/pre_tag_gate.py`，而是 "
+        + repr(rule_part) + "：例外被删或挪到了 `/tools/*` 之前。文件当前被 tracked 并不能替它"
+        "作保——删掉例外、文件照旧 tracked，干净 checkout 里它就再也不出现，本文件这批行为锁"
+        "连闸门都加载不到。加回一行 !/tools/pre_tag_gate.py")
+    assert path_part == "tools/pre_tag_gate.py", (
+        "报告行认不出被问的是哪条路径（%r）：这条锁问错了对象" % report)
+
+    # 负对照：同一把 `--no-index -v` 对一条没有例外的 /tools/ 路径必须报出 `/tools/*`。
+    # 少了这一组，上面那两句可能只是尺子在空转（比如 git 哪天换了输出格式）。
+    probe = "tools/__gitignore_probe_not_exempt__.py"
+    res = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "--no-index", "-v", "--", probe],
+        capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    rule_part, _, _ = report.partition(chr(9))
+    assert res.returncode == 0 and rule_part.endswith(":/tools/*"), (
+        "%s 的负对照没报出 `/tools/*`（rc=%d，报告 %r）：上面那条「例外汇赢」的判据没有牙"
+        % (probe, res.returncode, report))
 
 
 def test_gate_blocks_when_live_build_is_the_previous_version(monkeypatch, capsys):

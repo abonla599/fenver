@@ -23,7 +23,7 @@ r"""#94 迁完的那三把"先剥散文再判串"的尺子：正面写明各自�
 `test_the_blind_spot_list_is_counted_named_and_ledged_against_its_own_docstring` 钉，本段不写条数）：
 `ps-trailing-comment`、`ps-block-comment-interior`、`ps-hash-inside-string`、
 `py-string-that-is-not-a-docstring`、`py-hash-inside-string`、
-`workflow-trailing-shell-comment`、`rough-triple-quote-slice`。
+`workflow-trailing-shell-comment`。
 """
 import inspect
 import re
@@ -79,11 +79,6 @@ _STILL_MISSED_SHAPES = (
      "test_the_workflow_ruler_leaves_trailing_shell_comments_in_the_surface",
      "`run:` 正文里**行尾**挂的 shell 注释留在面上（与 ps-trailing-comment 同一条病，换了文本"
      "种类）。YAML 层的注释不在这一格——那一层由 `safe_load` 直接吃掉"),
-    ("rough-triple-quote-slice", None,
-     "test_v0350_pre_tag_gate_scope_waiver.py",
-     "test_the_rough_slice_blind_spot_still_has_a_live_example",
-     "还有一把锁**没迁**：它按三条引号 split 取「模块 docstring 之后的一小截」判禁字，token 落在"
-     "那一小截之后就看不见。#74 没落地（那两条锁自己站不住），本单不动它 ⇒ 这条是**有活例**的盲区"),
 )
 
 # 对照组：尺子对它说「我认得」的那种形状是真认得——没有这一组，上面那一串「剥不掉」可能只是
@@ -148,7 +143,7 @@ def test_the_blind_spot_list_is_counted_named_and_ledged_against_its_own_docstri
     的注释都只写"以那个元组为准"而**刻意不写条数**，这样"改了清单忘了改声明"就红在这里，而不是让
     声明长成第二份没人维护的真相（口径同 test_ci_history_depth.py 的条数钉）。
     """
-    assert len(_STILL_MISSED_SHAPES) == 7, (
+    assert len(_STILL_MISSED_SHAPES) == 6, (
         "_STILL_MISSED_SHAPES 现在是 " + str(len(_STILL_MISSED_SHAPES)) + " 条，而本文件模块 "
         "docstring 与清单自己的注释都按这一枚条数钉写「以那个元组为准、声明里不写数」。改清单就"
         "同批核那两处散文与编号账；只改一边就是「声明比实测宽」再次复现。")
@@ -235,15 +230,3 @@ def test_every_workflow_file_is_inside_the_token_ban_surface():
     raw = (WORKFLOWS_DIR / "release-apk.yml").read_text(encoding="utf-8")
     assert WF_TOKEN in raw and not per_file, (
         "注释里那句教学命令被当成 CI 里的真命令了（要么多剥了，要么那句注释已经不在了）")
-
-
-def test_the_rough_slice_blind_spot_still_has_a_live_example():
-    """`rough-triple-quote-slice` 声明的是「还有活例」，这一枚钉的就是那个活例还在。
-
-    #74 落地（那两处禁字改吃 `strip_py_prose`）之后这里会红：红了就把清单里那条删掉，
-    而不是把钉子改成随便怎么都绿。
-    """
-    hit = [p.name for p in TESTS_DIR.glob("test_*.py")
-           if re.search(r"split\('\"\"\"'\)", p.read_text(encoding="utf-8"))]
-    assert hit == ["test_v0350_pre_tag_gate_scope_waiver.py"], (
-        "糙切片的活例清单变了（现在是 %s）：射程声明与清单都要跟着改" % hit)
