@@ -116,9 +116,9 @@ LIVE_APP_JS_RELPATH = os.path.join(
     "dist", "run_backend", "_internal", "app", "web", "static", "app.js")
 GRADLE_RELPATH = os.path.join("android-native", "app", "build.gradle")
 RELEASES_RELPATH = os.path.join("docs", "releases")
-# 与 tools/gen_changelog.py 的 _SCOPE_RE / SCOPE_SERVER_ONLY / SCOPE_INSTALLABLE 必须是同一条
-# 尺子（分叉由 backend/tests/test_release_marker_derived_from_version.py 钉住）：适用范围只有
-# 一个声明位置、一套读法，否则"这一版到底是不是只换服务端"会长出第三种真相。
+# 与 tools/gen_changelog.py 的 _SCOPE_RE / SCOPE_SERVER_ONLY / SCOPE_INSTALLABLE 曾是各一份
+# （#68 合并）：现在 `gen_changelog` 直接 import 本文件的常量与 `scope_from_text`，合法值只有
+# 这一个元组、扫描只有这一份实现，否则"这一版到底是不是只换服务端"会长出第三种真相。
 SCOPE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
 SECTION_RE = re.compile(r"^##\s+(.*)$")
 SCOPE_SERVER_ONLY = "server-only"
@@ -206,14 +206,35 @@ def release_note_path(repo_root, version):
     return os.path.join(repo_root, RELEASES_RELPATH, "v%s.md" % normalize_version(version))
 
 
+def scope_from_text(text):
+    """从一段发版说明里读 scope 行：`(found, value)`，`value` 已 strip().lower()。
+
+    只扫标题之后、第一个 `##` 之前的引言区：`##` 小节里的正文（比如 v0.34.1 那句"本版
+    只换服务端"）是给人读的历史叙述，不该被第二次当成机器判据——一份说明有**一个**声明
+    位置就够了。两行 scope 时**第一行**说了算，与两把闸原来的读法一致。
+
+    **全仓只有这一份扫描**（#68）：本文件的 `note_scope` 与 `tools/gen_changelog.py` 的
+    `_parse_scope` 都吃它，同一份说明不会在"换包闸"和"发版说明页"里读出两个结论。
+    这里只负责认出原始值、**不判**它合不合法：调用方拿 `VALID_SCOPES` 判，认不出的值必须
+    各自 fail-closed（本文件退 2，生成器抛 ValueError），不许回落成"有安装包"。
+    """
+    for raw in text.splitlines():
+        if SECTION_RE.match(raw):
+            break
+        match = SCOPE_RE.match(raw)
+        if match:
+            return True, match.group(1).strip().lower()
+    return False, None
+
+
 def note_scope(repo_root, version):
     """这一版声明的是"只换服务端"吗？权威就是它自己那份发版说明的 scope 行。
 
     返回 `(server_only, reason)`：reason 为 None 表示读到了结论；否则是
     `NOTE_MISSING`（没有这份说明）/ 一段"读不到"的说明（不是 utf-8、是目录……）。
-    只扫标题之后、第一个 `##` 之前的引言区，与 gen_changelog._parse_scope 同一口径：正文里
-    那句给人读的"本版只换服务端"不该被第二次当成机器判据。scope 值不认识 = 报错，不当"没标"
-    处理——静默回落成"有安装包"就是把一个装不上的版本号播出去，正是这枚标记要防的事。
+    扫描是 `scope_from_text`（`tools/gen_changelog.py` 吃同一份实现，#68）：只扫标题之后、
+    第一个 `##` 之前的引言区。scope 值不认识 = 报错，不当"没标"处理——静默回落成"有安装包"
+    就是把一个装不上的版本号播出去，正是这枚标记要防的事。
     """
     path = release_note_path(repo_root, version)
     if not os.path.isfile(path):
@@ -222,18 +243,13 @@ def note_scope(repo_root, version):
         text = _read_text(path)
     except MarkerSourceError as exc:
         return False, "release-note-unreadable:%s" % exc
-    for raw in text.splitlines():
-        if SECTION_RE.match(raw):
-            break
-        match = SCOPE_RE.match(raw)
-        if not match:
-            continue
-        value = match.group(1).strip().lower()
-        if value not in VALID_SCOPES:
-            return False, "release-note-scope-unknown:%s=%s（只认 %s）" % (
-                path, match.group(1), " / ".join(VALID_SCOPES))
-        return value == SCOPE_SERVER_ONLY, None
-    return False, None
+    found, value = scope_from_text(text)
+    if not found:
+        return False, None
+    if value not in VALID_SCOPES:
+        return False, "release-note-scope-unknown:%s=%s（只认 %s）" % (
+            path, value, " / ".join(VALID_SCOPES))
+    return value == SCOPE_SERVER_ONLY, None
 
 
 def collisions(marker_a, marker_b):

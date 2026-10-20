@@ -41,10 +41,27 @@ import os
 import re
 import sys
 
+# scope 行的读法只有一处：`tools/release_marker.py`（#68 把这里原来的副本并了过去）。
+# 两个文件同在 `tools/` 下；`!/tools/release_marker.py` 保证它在 CI 那次 checkout 里。
+# 按脚本跑时 sys.path[0] 就是 tools/，被测试用 importlib 加载时不是，所以补一句
+# （与 `tools/pre_tag_gate.py` 的 import 同一手法）。
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+from release_marker import (  # noqa: E402
+    SCOPE_INSTALLABLE,
+    SCOPE_RE,
+    SCOPE_SERVER_ONLY,
+    SECTION_RE,
+    VALID_SCOPES,
+    scope_from_text,
+)
+
 # 每版发版说明的标题形状：`# v0.33.1 更新说明` / `# v0.14（2026-09-20）`。
 _TITLE_RE = re.compile(r"^#\s+(.*)$")
-# 小节标题：`## 修复了什么`。
-_SECTION_RE = re.compile(r"^##\s+(.*)$")
+# 小节标题：`## 修复了什么`。与 scope 行同一处来源（tools/release_marker.py，#68）：
+# 下面这几行是**别名**，不是副本——同一个对象，改一处两边一起变。
+_SECTION_RE = SECTION_RE
 _BULLET_RE = re.compile(r"^[-*+]\s+(.*)$")
 _NUMBERED_RE = re.compile(r"^(\d+)\.\s+(.*)$")
 _VERSION_RE = re.compile(r"^v([0-9]+(?:\.[0-9]+)*)$")
@@ -53,34 +70,31 @@ _VERSION_RE = re.compile(r"^v([0-9]+(?:\.[0-9]+)*)$")
 #   <!-- scope: server-only -->
 # 认这一种形状，别的写法（正文里加粗一句「本版只换服务端」）不算——那正是 v0.34.1
 # 留给人读、但没有任何机器读过的那句话。两侧空白与大小写可以松，`scope:` 后面的值必须
-# 是下面两个之一；写错值不当"没标"处理而是**报错**（见 _parse_scope），因为静默回落到
-# "有安装包"就是把一个装不上的版本播出去，而那正是本标记要防的事。
-_SCOPE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
-SCOPE_SERVER_ONLY = "server-only"      # 只换服务端，没有可安装的产物
-SCOPE_INSTALLABLE = "installer"        # 有可安装的产物（安卓包），也是【缺省】
-_VALID_SCOPES = (SCOPE_SERVER_ONLY, SCOPE_INSTALLABLE)
+# 是 VALID_SCOPES 里那两个之一；写错值不当"没标"处理而是**报错**（见 _parse_scope），因为
+# 静默回落到"有安装包"就是把一个装不上的版本播出去，而那正是本标记要防的事。
+#
+# 读法、合法值、扫引言区的循环都在 tools/release_marker.py（#68）：`scope_from_text` 是
+# **同一份实现**，`SCOPE_SERVER_ONLY` / `SCOPE_INSTALLABLE` / `VALID_SCOPES` 是**同一个
+# 对象**。下面三个别名只为不改本文件既有的读法名字。
+_SCOPE_RE = SCOPE_RE
+_VALID_SCOPES = VALID_SCOPES
 
 
 def _parse_scope(text: str, version: str) -> bool:
     """这份说明声明的是"只换服务端"吗？扫标题之后、第一个 `##` 之前那一段。
 
-    只看引言区而不是整篇：`##` 小节里的正文（比如 v0.34.1 那句"本版只换服务端"）是给
-    人读的历史叙述，不该被第二次当成机器判据——一份说明有**一个**声明位置就够了，
-    两处都认就会长出"到底哪一处算"的第三种真相。
+    扫描本身是 `release_marker.scope_from_text`（#68）：换包闸与发版说明页吃的是同一份
+    实现，同一行不会在这里读出"有安装包"、在那边读出"判据读不出"。这里只保留本工具的
+    错误形状——认不出的值必须当场抛 ValueError，不许静默回落到"有安装包"。
     """
-    for raw in text.splitlines():
-        if _SECTION_RE.match(raw):
-            break                                   # 进了小节，声明区已过
-        m = _SCOPE_RE.match(raw)
-        if not m:
-            continue
-        value = m.group(1).strip().lower()
-        if value not in _VALID_SCOPES:
-            raise ValueError(
-                "docs/releases/v%s.md 的 scope 标记写的是 %r，只认 %s"
-                % (version, m.group(1), " / ".join(_VALID_SCOPES)))
-        return value == SCOPE_SERVER_ONLY
-    return False                                    # 缺省：有安装包（历史各版都是这一形状）
+    found, value = scope_from_text(text)
+    if not found:
+        return False                                # 缺省：有安装包（历史各版都是这一形状）
+    if value not in _VALID_SCOPES:
+        raise ValueError(
+            "docs/releases/v%s.md 的 scope 标记写的是 %r，只认 %s"
+            % (version, value, " / ".join(_VALID_SCOPES)))
+    return value == SCOPE_SERVER_ONLY
 
 
 def _version_key(version: str):

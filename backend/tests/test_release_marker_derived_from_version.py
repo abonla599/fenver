@@ -55,6 +55,8 @@ import importlib.util
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = REPO_ROOT / "tools" / "release_marker.py"
 GATE = REPO_ROOT / "tools" / "pre_tag_gate.py"
@@ -367,17 +369,139 @@ def test_the_scope_line_is_not_a_global_bypass(tmp_path):
         "同一棵树按声明侧核必须是 installer 形态"
 
 
-def test_scope_regex_has_not_drifted_from_gen_changelog():
-    """scope 行只有**一处**声明、一套读法：两把闸读成同一个值，否则"这一版是不是只换服务端"
-    会长出第三种真相（发版说明页与换包闸各点头一次）。与 versionName 正则同源同一条锁法。
+# ------------------------------------------------ #68：scope 的读法只有一把尺子
+# 事故形状（#68）：这里原先只比 `SCOPE_RE.pattern` 两个字符串。往 `gen_changelog._VALID_SCOPES`
+# 里加第三个值（`hotfix`），正则一字未动、四把锁全绿，而换包闸照样对同一份说明退 2
+# `release-note-scope-unknown`——发版说明页说"有安装包"，换包闸说"判据读不出"。字符串相等
+# 证明不了两边读的是同一套值，更证明不了同一份说明会得到同一个结论。
+#
+# 现在分两层钉：
+# 1. 结构层：`gen_changelog` 直接 import `release_marker` 的常量与 `scope_from_text`，
+#    合法值只有**一个对象**（`test_the_scope_value_set_has_exactly_one_source`）；
+# 2. 行为层：同一份语料写进假 `docs/releases/`，分别喂给两个**生产入口**
+#    （`gen_changelog.load_releases` / `release_marker.note_scope`），逐样本断言两边结论
+#    一致、且等于下面这张**冻结**的期望表。期望表是人工观测值，不从任何一侧现算——
+#    两边一起漂移时，"互相一致"本身没有意义。
+SERVER_ONLY = "server-only"
+INSTALLER = "installer"
+UNKNOWN = "unknown-scope"
+NOTE_VERSION = "0.35.0"
+
+# 27 条完整说明：3 条正/负对照 + 21 条形状对抗（reviewer 实测过的 CRLF、BOM、大小写、
+# 空格、全角、位置、两行……都在里面）+ 3 条认不出的值（两边必须同时判失败）。
+# 写盘用 bytes，不用 write_text：Windows 会把 "\n" 换成 "\r\n"，CRLF 那一格就被洗成
+# 普通换行，再也不是它声称的形状了。
+_SCOPE_CORPUS = [
+    # ---- 正/负对照：两种合法形态 + 历史各版的缺省形状（没有 scope 行） ----
+    ("canonical-server-only",
+     "# v0.35.0\n\n<!-- scope: server-only -->\n\n## 修复\n\n- x\n", SERVER_ONLY),
+    ("canonical-installer", "# v0.35.0\n\n<!-- scope: installer -->\n", INSTALLER),
+    ("no-scope-line", "# v0.35.0\n\n## 修复\n\n- x\n", INSTALLER),
+    # ---- reviewer 的对抗形状 ----
+    ("crlf", "# v0.35.0\r\n\r\n<!-- scope: server-only -->\r\n", SERVER_ONLY),
+    ("cr-only", "# v0.35.0\r\r<!-- scope: server-only -->\r", SERVER_ONLY),
+    ("bom-first-line", "\ufeff# v0.35.0\n\n<!-- scope: server-only -->\n", SERVER_ONLY),
+    ("bom-on-scope-line", "# v0.35.0\n\n\ufeff<!-- scope: server-only -->\n", INSTALLER),
+    ("uppercase-key", "# v0.35.0\n\n<!-- SCOPE: server-only -->\n", INSTALLER),
+    ("mixed-case-key", "# v0.35.0\n\n<!-- Scope: server-only -->\n", INSTALLER),
+    ("space-before-colon", "# v0.35.0\n\n<!-- scope : server-only -->\n", INSTALLER),
+    ("space-inside-value", "# v0.35.0\n\n<!-- scope: server only -->\n", INSTALLER),
+    ("missing-space-before-arrow", "# v0.35.0\n\n<!-- scope: server-only-->\n", SERVER_ONLY),
+    ("trailing-tab", "# v0.35.0\n\n<!-- scope: server-only -->\t\n", SERVER_ONLY),
+    ("fullwidth-spaces",
+     "# v0.35.0\n\n<!--\u3000scope:\u3000server-only\u3000-->\u3000\n", SERVER_ONLY),
+    ("nbsp", "# v0.35.0\n\n<!--\u00a0scope:\u00a0server-only\u00a0-->\n", SERVER_ONLY),
+    ("scope-before-title",
+     "<!-- scope: server-only -->\n\n# v0.35.0\n\n## 修复\n", SERVER_ONLY),
+    ("two-scope-lines-server-first",
+     "# v0.35.0\n\n<!-- scope: server-only -->\n<!-- scope: installer -->\n", SERVER_ONLY),
+    ("two-scope-lines-installer-first",
+     "# v0.35.0\n\n<!-- scope: installer -->\n<!-- scope: server-only -->\n", INSTALLER),
+    ("scope-after-first-section",
+     "# v0.35.0\n\n## 修复\n\n<!-- scope: server-only -->\n", INSTALLER),
+    ("uppercase-value", "# v0.35.0\n\n<!-- scope: SERVER-ONLY -->\n", SERVER_ONLY),
+    ("no-spaces-at-all", "# v0.35.0\n\n<!--scope:server-only-->\n", SERVER_ONLY),
+    ("indented", "# v0.35.0\n\n   <!-- scope: server-only -->\n", SERVER_ONLY),
+    ("trailing-comment",
+     "# v0.35.0\n\n<!-- scope: server-only --> <!-- x -->\n", INSTALLER),
+    ("empty-value", "# v0.35.0\n\n<!-- scope: -->\n", INSTALLER),
+    # ---- 认不出的值：两边必须同时判**失败**（#68 的旁路值 hotfix 就在第一条） ----
+    ("unknown-hotfix", "# v0.35.0\n\n<!-- scope: hotfix -->\n", UNKNOWN),
+    ("unknown-camelcase", "# v0.35.0\n\n<!-- scope: serverOnly -->\n", UNKNOWN),
+    ("unknown-backend-only", "# v0.35.0\n\n<!-- scope: backend-only -->\n", UNKNOWN),
+]
+
+
+def _write_scope_note(root: Path, body: str) -> Path:
+    folder = root / "docs" / "releases"
+    folder.mkdir(parents=True, exist_ok=True)
+    note = folder / ("v%s.md" % NOTE_VERSION)
+    note.write_bytes(body.encode("utf-8"))
+    return note
+
+
+def _gen_changelog_scope_verdict(root: Path) -> str:
+    """走生成器的生产入口（读同一棵假树），返回它读出的形态；认不出的值折成 UNKNOWN。"""
+    try:
+        releases = cl.load_releases(str(root / "docs" / "releases"))
+    except ValueError as exc:
+        assert "scope" in str(exc), "生成器抛的不是 scope 判读的错：%r" % (exc,)
+        return UNKNOWN
+    assert len(releases) == 1, releases
+    return SERVER_ONLY if releases[0]["server_only"] else INSTALLER
+
+
+def _release_marker_scope_verdict(root: Path) -> str:
+    """走换包闸的生产入口（同一个 note_scope），返回它读出的形态。"""
+    server_only, reason = rm.note_scope(str(root), NOTE_VERSION)
+    if reason is None:
+        return SERVER_ONLY if server_only else INSTALLER
+    assert reason.startswith("release-note-scope-unknown:"), reason
+    return UNKNOWN
+
+
+@pytest.mark.parametrize("name,body,expected", _SCOPE_CORPUS,
+                         ids=[sample[0] for sample in _SCOPE_CORPUS])
+def test_both_scope_readers_agree_on_the_frozen_corpus(tmp_path, name, body, expected):
+    _write_scope_note(tmp_path, body)
+    from_gen = _gen_changelog_scope_verdict(tmp_path)
+    from_marker = _release_marker_scope_verdict(tmp_path)
+    assert from_gen == from_marker, (
+        "%s：同一份说明两个读者读出两种结论（gen_changelog=%s / release_marker=%s）"
+        % (name, from_gen, from_marker))
+    assert from_marker == expected, (
+        "%s：读者给出 %s，冻结期望是 %s——语义变了要么是有意的（改期望并说明），"
+        "要么是 scope 的读法漂了" % (name, from_marker, expected))
+
+
+def test_the_frozen_corpus_still_covers_every_verdict():
+    """语料本身不许缩水：删样本能让上面那条恒绿，等于把锁拆了。"""
+    outcomes = [expected for _, _, expected in _SCOPE_CORPUS]
+    assert len(_SCOPE_CORPUS) >= 17, "对抗语料少于 17 条：reviewer 实测的形状被删了"
+    assert SERVER_ONLY in outcomes and INSTALLER in outcomes, "两种合法形态必须都有对照"
+    assert outcomes.count(UNKNOWN) >= 3, "认不出的值至少要有三个样本，失败方向才不是单点"
+    names = [name for name, _, _ in _SCOPE_CORPUS]
+    assert len(names) == len(set(names)), "样本名重复：参数化 id 会撞在一起"
+
+
+def test_the_scope_value_set_has_exactly_one_source():
+    """值集合只有一份：`gen_changelog` 必须 import `release_marker` 的元组**本身**。
+
+    这里断的是对象同一，不是字符串/元素相等：`_VALID_SCOPES = VALID_SCOPES + ("hotfix",)`
+    这种"在本模块里加一个值"正是 #68 的旁路，它会让集合在这里当场不等。往共享元组里加值
+    则两边一起变——结构上合法，但下面那条 `unknown-hotfix` 的冻结样本会红，所以也不是
+    一条能悄悄走通的旁路。
     """
-    assert rm.SCOPE_RE.pattern == cl._SCOPE_RE.pattern, (
-        "tools/release_marker.py 与 tools/gen_changelog.py 的 scope 正则分叉了："
-        "%r vs %r" % (rm.SCOPE_RE.pattern, cl._SCOPE_RE.pattern))
-    assert rm.SCOPE_SERVER_ONLY == cl.SCOPE_SERVER_ONLY, "server-only 这个值两边读得不一样"
-    assert rm.SCOPE_INSTALLABLE == cl.SCOPE_INSTALLABLE, "installer 这个值两边读得不一样"
-    assert rm.SECTION_RE.pattern == cl._SECTION_RE.pattern, (
-        "引言区到哪里为止两边读得不一样：正文里那句历史叙述会被当成第二次判据")
+    shared = importlib.import_module("release_marker")   # gen_changelog 刚刚 import 的那一份
+    assert cl._VALID_SCOPES is shared.VALID_SCOPES, (
+        "gen_changelog._VALID_SCOPES 不是 release_marker.VALID_SCOPES 本身："
+        "%r vs %r" % (cl._VALID_SCOPES, shared.VALID_SCOPES))
+    assert cl._SCOPE_RE is shared.SCOPE_RE, "gen_changelog 又抄了一条 scope 正则"
+    assert cl._SECTION_RE is shared.SECTION_RE, "引言区的边界两边不是同一条正则"
+    assert cl._VALID_SCOPES == rm.VALID_SCOPES, (
+        "两个模块认的 scope 值分叉了：%r vs %r" % (cl._VALID_SCOPES, rm.VALID_SCOPES))
+    assert cl.SCOPE_SERVER_ONLY == rm.SCOPE_SERVER_ONLY == "server-only"
+    assert cl.SCOPE_INSTALLABLE == rm.SCOPE_INSTALLABLE == "installer"
 
 
 def test_unreadable_sources_fail_closed_not_green(tmp_path):
