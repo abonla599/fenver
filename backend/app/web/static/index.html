@@ -786,6 +786,10 @@
   <!-- 这一页是哪一版：`__ASSET_TOKEN__` 由服务端在出门前填（app/web/web_router.py 的
        rewritten_html）。HTML 允许缓存 30 秒，所以"旧骨架跑新代码"有一个 30 秒的窗口，
        症状是缺元素、点了没反应；app.js 拿这个值对一次账，不对就自己重载。 -->
+  <!-- CSP（#143）：下面这段内联脚本的 sha256 由 rewritten_html 在**替换掉
+       `__ASSET_TOKEN__` 之后**按最终文本现算（inline_script_hashes），写进同一响应的
+       script-src。改这一句里的任何字节都不必、也不许手工更新哈希；别改成 per-response
+       nonce——HTML 有 30 秒缓存，头与身必须永远来自同一次渲染。 -->
   <script>window.__ASSETS__ = "__ASSET_TOKEN__";</script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>

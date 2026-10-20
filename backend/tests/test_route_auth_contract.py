@@ -738,4 +738,14 @@ def test_app_shell_refuses_frames(client):
         # 先钉状态码：404 的响应本来就没有 CSP 头，不先排除它，"文件被改名"会伪装成
         # "安全头没了"，红到离真凶很远的地方。
         assert res.status_code == 200, f"{path} 拿不到 200（{res.status_code}），先修这个再谈 CSP"
-        assert res.headers.get("content-security-policy") == "frame-src 'none'; object-src 'none'", path
+        # #143 起 CSP 是一整组（多了 default-src/script-src 等），这里只按指令名取值，
+        # 不再钉整串字面量——"整串只有一份"由 test_website 钉 site_headers 那个出口。
+        csp = res.headers.get("content-security-policy") or ""
+        directives = {}
+        for part in csp.split(";"):
+            part = part.strip()
+            if part:
+                name, _, value = part.partition(" ")
+                directives[name] = value.strip()
+        assert directives.get("frame-src") == "'none'", f"{path} 的 frame-src 不是 none: {csp!r}"
+        assert directives.get("object-src") == "'none'", f"{path} 的 object-src 不是 none: {csp!r}"

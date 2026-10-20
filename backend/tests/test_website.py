@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from app.main import app
-from app.web.web_router import IMMUTABLE, asset_token
+from app.web.web_router import IMMUTABLE, asset_token, content_security_policy
 
 client = TestClient(app)
 
@@ -42,9 +42,11 @@ def test_site_assets_are_public_and_uncached():
     fresh = client.get("/site/site.css", params={"v": asset_token()})
     assert fresh.headers["cache-control"] == IMMUTABLE, "官网资源拿不到长缓存：首屏还是每趟回源"
     # 整串相等而不是 in:`/` 那半只用了 in,两边合起来才真正钉住"页面与资源的头
-    # 是同一组",而这一组字面量在 web_router 里只有一份(site_headers)。
-    assert res.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
-    assert fresh.headers["content-security-policy"] == "frame-src 'none'; object-src 'none'"
+    # 是同一组",而这一组字面量在 web_router 里只有一份(content_security_policy)。
+    # 资源没有内联脚本，所以这里取的是不带哈希的底子；HTML 上多出来的 sha256 由
+    # tests/test_v0350_csp_hash.py 按每一页自己的正文钉。
+    assert res.headers["content-security-policy"] == content_security_policy()
+    assert fresh.headers["content-security-policy"] == content_security_policy()
 
 
 def test_unknown_paths_still_get_the_framework_json_404():
