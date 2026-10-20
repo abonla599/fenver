@@ -151,7 +151,7 @@ from app.memory.memory_router import router as memory_router
 # 身份端点：邀请码注册 + 管理面。哪个端点免凭据由 authz.PUBLIC_PATHS 说了算，
 # 这里只负责挂载，不在此处再判一遍凭据。
 from app.core.auth_router import router as auth_router
-from app.core.auth_router import throttle_paid_upstream
+from app.core.auth_router import throttle_orchestrate_attempt, throttle_paid_upstream
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_admin, mount_pwa
@@ -983,12 +983,37 @@ def confirm_approval(request: ApprovalConfirmRequest,
     outcome = execute_tool_detailed(
         ticket.tool_name, ticket.arguments, user_id=ticket.user_id,
         granted_ticket=ticket)
+    if outcome.suspended:
+        # ⭐ 工单 #30：**第三态**。执行器把"停在断点上等人"单独交出来（ok=False 只说
+        # "没有产出结果"，不说是哪一种）；原先这里一律按失败回 executed_with_error，
+        # 于是"要用户一句话"被报成"工具坏了"——用户在 App 上看到的是一张失败卡。
+        # 响应只增不改：既有键（status/ok/result/message）含义一格未动，status 多了
+        # 一个取值 `suspended`，另加 `suspended` 与 `question` 两格。PWA 与原生都
+        # 只读状态码、不解析响应体（api.js / Api.kt），所以双端不需要跟着改。
+        # 审批这一路**不承诺续跑**：票据一次性消费掉了，执行器也不接受"既挂起又需
+        # 审批"的组合（_dispatch 的派发拒绝），这里如实报状态，不给假的 can_resume。
+        approval.record_execution(ticket.ticket_id, outcome.text, False,
+                                  suspended=True)
+        return {
+            "status": "suspended",
+            "ticket_id": request.ticket_id,
+            "tool_name": ticket.tool_name,
+            "ok": False,
+            "result": outcome.text,
+            "suspended": True,
+            "question": str((outcome.suspension or {}).get("prompt") or ""),
+            "message": "已允许并执行到断点：工具停在了需要用户输入的一步，"
+                       "这不是执行失败。票据已消费，这一路不留可续的断点；"
+                       "要接着办请重新发起。",
+        }
     approval.record_execution(ticket.ticket_id, outcome.text, outcome.ok)
     return {
         "status": "executed" if outcome.ok else "executed_with_error",
         "ticket_id": request.ticket_id,
         "tool_name": ticket.tool_name,
         "ok": outcome.ok,
+        # 只增的键：让读侧不必靠"有没有 suspended"猜形状，两种执行结果都能直接读它。
+        "suspended": False,
         "result": outcome.text,
         "message": "已执行" if outcome.ok else "已执行，但工具返回失败",
     }
@@ -1001,7 +1026,12 @@ def get_approval_status(ticket_id: str,
     ticket = approval.get_ticket(ticket_id)
     if ticket is None or ticket.user_id != principal.user_id:
         raise HTTPException(status_code=404, detail="审批票据不存在或已失效")
-    if ticket.decision == "allow" and not ticket.executed:
+    if ticket.decision == "allow" and ticket.suspended:
+        # ⭐ 工单 #30：与 confirm 那一路同一个第三态。顺序在 `executed` 之前是有意的：
+        # suspended 的票据 executed 同样是 True（确实跑到了断点），只看 executed 会
+        # 把它读成"跑完了"。
+        status = "suspended"
+    elif ticket.decision == "allow" and not ticket.executed:
         # allow了但还没跑完/没跑：如实说，别让客户端以为已经执行过
         status = "approved_pending_execution"
     elif ticket.decision == "allow":
@@ -1019,6 +1049,8 @@ def get_approval_status(ticket_id: str,
         "status": status,
         "ok": ticket.ok,
         "result": ticket.result,
+        # 只增的键：第三态在轮询这一侧也读得出来，不必再从 status 字符串反推。
+        "suspended": bool(getattr(ticket, "suspended", False)),
         "expires_at": ticket.expires_at,
     }
 
@@ -1722,7 +1754,15 @@ def orchestrate_task(request: OrchestrateRequest, http: Request,
                      principal: Principal = CurrentPrincipal):
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="编排器模块尚未就绪")
-    throttle_paid_upstream(http, principal)
+    # ⭐ 工单 #38：这一本是**尝试**账（60 秒 60 次），不是钱账。付费那本
+    # （`throttle_paid_upstream`，60 秒 20 次）从这一版起由编排器**至多记一次**：
+    # 新建任务在 `planner.plan()` 之前、续跑在认领成功之后（两个候选时刻见
+    # `orchestrator.run` 的 `charge_upstream`）。
+    # 于是被拒的续跑（`accepted:false` 那一族）不再扣用户自己的聊天额度——原先那种
+    # 写法下，一条 retry 循环能把 20 次预算在 60 秒内吃光，用户只是反复点"重试"。
+    # 但"不扣钱"不等于"免费无限"：每条尝试仍要读任务表、走一遍 HTTP，所以另开这本
+    # 账拦刷。上限比钱账宽三倍，正常人在撞到 429 之前碰不到它。
+    throttle_orchestrate_attempt(http, principal)
     # 身份与解析出的模型服务都必须往下传：以前这一格写的是 `_: Principal`
     # （收下就丢），于是任务建出来不知道属于谁，而"先记着、读的时候再说"
     # 正是这个项目付过账的形状。
@@ -1736,6 +1776,9 @@ def orchestrate_task(request: OrchestrateRequest, http: Request,
         # 这一格不写进日志、不写进游标（里面可能是验证码），也不参与归属判断——
         # 归属在 orchestrator.run 开头那道"是不是你的任务"里已经判完了。
         user_answer=request.user_answer,
+        # ⭐ 工单 #38：付费额度在这里交出去，由编排器决定"哪一刻才真的该记"。
+        # 不在端点里提前记账：那会把"没跑、没花钱"的拒绝也记成一笔。
+        charge_upstream=lambda: throttle_paid_upstream(http, principal),
     )
 
 # ---------- 任务状态 ----------

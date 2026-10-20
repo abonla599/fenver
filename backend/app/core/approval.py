@@ -33,6 +33,14 @@ v0.35 A2 起票据**落盘**（`data/approvals.json`）：提案 §二 把"TTL 6
 POST /v1/approval/confirm
 Body: {"ticket_id": "uuid-v4", "decision": "allow" | "reject"}
 
+确认响应的三态（⭐ 工单 #30：PWA 的 `confirmApproval` 与原生 `Api.confirmApproval`
+都**只读状态码、不解析响应体**，所以这一格是服务端契约，双端不需要跟着改）：
+- allow + 跑出结果      → {"status": "executed" | "executed_with_error", "ok": bool}
+- allow + 停在断点等人  → {"status": "suspended", "ok": false, "suspended": true,
+                            "question": "…"}（不是执行失败；票据已消费，本路不留断点）
+- reject               → {"status": "rejected"}
+老客户端看到的是一个**新增**的 status 取值，既有键的含义一格未动。
+
 双端文案（契约测试钉死，漂一个字就红）：
 - 标题：「执行代码确认」
 - 正文：「模型想要执行一段 {language} 代码」
@@ -95,6 +103,11 @@ class ApprovalTicket:
     result: Optional[str] = None
     ok: Optional[bool] = None         # 执行成功与否，显式存：不去 parse 结果文本里的 ✓
     executed: bool = False            # 是否已执行过（"allow 但执行炸了"与"allow 且跑完"要分得开）
+    # ⭐ 工单 #30：第三态。执行器可能交回"停在断点上等人"（suspended=True, ok=False），
+    # 那不是失败——把它记成 ok=False 就够把"工具坏了"与"要用户一句话"混成同一格，
+    # 客户端只能靠猜。显式一格，默认 False：老记录（盘上那份没有这个键）读回来就是
+    # False，形状只增不改。
+    suspended: bool = False
 
 
 # ---------- 全局票据存储 ----------
@@ -174,6 +187,7 @@ def _from_record(record: dict) -> Optional[ApprovalTicket]:
         result=record.get("result"),
         ok=record.get("ok"),
         executed=bool(record.get("executed", False)),
+        suspended=bool(record.get("suspended", False)),
     )
 
 
@@ -421,7 +435,8 @@ def get_ticket(ticket_id: str) -> Optional[ApprovalTicket]:
         return ticket
 
 
-def record_execution(ticket_id: str, result: str, ok: bool) -> None:
+def record_execution(ticket_id: str, result: str, ok: bool,
+                     *, suspended: bool = False) -> None:
     """回填"批准后真的执行了"的结果，供客户端轮询 GET /v1/approval/{id}。
 
     为什么结果存在票据上而不是返回值里：confirm 端点是 POST/响应即走，真正要给用户
@@ -431,6 +446,12 @@ def record_execution(ticket_id: str, result: str, ok: bool) -> None:
     `ok` 显式存而不是让读侧去 `result.startswith("✓")`：成败是执行器的判定，读侧从
     文本里猜等于把"✓ 前缀是契约"这件事复制一份到第二个文件——改了 ToolResponse 的
     措辞这里就悄悄说反了。
+
+    ⭐ 工单 #30：`suspended` 是**关键字限定**的第三态（默认 False）。它不是 `ok` 的
+    第三种取值——`ok=False` 仍然表示"没有产出结果"，而 suspended 说的是"为什么没有：
+    停在断点上等人，不是坏了"。做成关键字而不是第 4 个位置参数，是因为现网调用点
+    写的是 `record_execution(tid, text, ok)`，位置参数一加就可能有人把布尔读错格。
+    这个键随票据落盘：轮询的人必须能从盘上读到同一句话，否则重启前后两个说法。
 
     回填同样落盘（v0.35 A2）：执行结果落在内存而没落在盘上时，人在任务跑到一半重启后
     轮询会读到 `executed=False`，那是一句谎话。
@@ -442,6 +463,7 @@ def record_execution(ticket_id: str, result: str, ok: bool) -> None:
             ticket.result = result
             ticket.ok = bool(ok)
             ticket.executed = True
+            ticket.suspended = bool(suspended)
             dirty = True
         if dirty:
             _flush_locked()
