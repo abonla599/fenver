@@ -49,6 +49,13 @@ os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 
 # 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
+# 偏好摘要与反馈原文也是导入期算成的模块常量，而且线上那个 300 秒定时器可能在
+# 测试会话中途真的跑起来。只在 per-test monkeypatch 里改模块属性不够：CI 的仓库根
+# 没有 data/preference.txt 时，data_file() 会回退到仓库根，定时器就会删根级
+# preference-u_*.txt（#77 的写现网守卫会当场报红）。必须在 import app 之前把
+# 环境变量也指到测试临时根，让模块级默认值从一开始就不在仓库根。
+os.environ["PREFERENCE_FILE"] = os.path.join(_TEST_DATA_DIR, "preference.txt")
+os.environ["FEEDBACK_FILE"] = os.path.join(_TEST_DATA_DIR, "feedback.json")
 # v0.35 A2：一次性审批票据表现在也落盘（data/approvals.json）。指走之外还有一层要紧：
 # 测试里每确认一次票据都会往这里写一次，而里面装着工具参数与执行结果。
 # 覆盖判据在 test_test_isolation.py（清单从 paths.DATA_PATH_ENV_VARS 派生）。
