@@ -147,6 +147,10 @@ def fake_root(tmp_path, monkeypatch):
     """把项目根换成空目录：这三档优先级只有"两处都还没有文件"时才分得清。"""
     from app.core import paths
 
+    # conftest 为了隔离线上 300 秒定时器，在导入期把这两个环境变量指到测试临时根；
+    # 本组用例要验证 data_file 的回退优先级，必须先把它们摘掉，否则显式 env 永远赢。
+    monkeypatch.delenv("FEEDBACK_FILE", raising=False)
+    monkeypatch.delenv("PREFERENCE_FILE", raising=False)
     root = tmp_path / "root"
     (root / "backend" / "app").mkdir(parents=True)
     (root / "backend" / "app" / "main.py").write_text("", encoding="utf-8")
