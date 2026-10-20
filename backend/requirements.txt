@@ -14,10 +14,11 @@ charset-normalizer==3.4.7
 #   - 桌面版冻结 EXE 里捆绑的同样是 1.5.9（dist/run_backend/_internal/chromadb-1.5.9.dist-info）。
 # 旧写法让 CI(0.5.0) 与本机/EXE(1.5.9) 各跑一套，正是"只在某一边红"的漂移源头。
 # 1.5.9 发的是 cp39-abi3-manylinux wheel，CI 装它不需要编译器。
-# 安全核对(2026-09-29)：PYSEC-2026-311 预认证 RCE 影响 1.0.0~1.5.9，而 PyPI 当前
-# 最新即 1.5.9——上游尚未发布修复版，无法通过升级解决。缓解：默认绑定回环
-# (run_backend.py 127.0.0.1)、鉴权 enforced、authz 的 disabled 远程护栏；
-# 上游发版后再升级。
+# 安全核对(2026-10-20)：CVE-2026-45829（预认证 RCE，影响 1.x 的 Python HTTP server）
+# 与 CVE-2026-92782（SentenceTransformer remote_code）在 PyPI 最新 1.5.9 上都还没有
+# 可装的修复版。本仓只用 PersistentClient（memory_manager.py）、不起 HTTP 服务，且嵌入
+# 模型名硬编码、不接受 remote_code ⇒ 这两条 RCE 面在现用法下不可达。引入 HttpClient
+# 或可配置模型名时要重新评估；上游发版后再升级。
 chromadb==1.5.9
 click==8.3.3
 colorama==0.4.6
