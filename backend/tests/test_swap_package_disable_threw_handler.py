@@ -325,8 +325,9 @@ def _token_line_ok(text: str) -> bool:
         return False
     i = hits[0]
     token = ctx["handler"][i]
-    # $_ 必须在进 catch 的第一时间转成具名变量：嵌套 try 的 catch 会接管 $_，
-    # 之后才拼 token 就会打印错的（或空的）异常——正是运维最需要读的那一行。
+    # $_ 要转成具名变量，且排在 token 那一行之前。不要求它是进 catch 的第一句：
+    # 本机实测 PS 5.1 的 $_ 能穿过下面那个嵌套 try 的 catch（#46），真正的约束
+    # 只是拼 token 时读的是抓下来的那份。
     if _idx(re.escape(_ERROR_CAPTURE), ctx["handler"]) is None:
         return False
     if _idx(re.escape(_ERROR_CAPTURE), ctx["handler"]) > i:

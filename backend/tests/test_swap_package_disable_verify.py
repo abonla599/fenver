@@ -345,20 +345,64 @@ def _restore_ok(text: str) -> bool:
     return True
 
 
+def _restart_if(lines: list):
+    """「旧包要不要重新拉起来」那条 if 的下标；锚在重启动作上，不认条件写法（#51）。
+
+    先框住 `function Stop-AfterFailure` 的体，再找体内恰好那一句
+    `Start-Process -FilePath $LiveExe`。然后在函数体里从前往后扫每一条带块的
+    `if (`，按花括号配平取**最内层**、块范围包含重启动作的那些 if 的最后一条。
+    条件的拼法（`(Get-LiveProcess).Count` / `@(Get-LiveProcess).Count` / 等价改写）
+    完全不参与定位。找不到函数、找不到重启动作、或它不在任何 if 块里，一律 None：
+    调用方按"判据前提不成立"判红，绝不退回一条字面匹配。
+    """
+    start = _idx(r"^function\s+Stop-AfterFailure\s*\{", lines)
+    if start is None:
+        return None
+    depth = 0
+    end = None
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth <= 0 and i > start:
+            end = i
+            break
+    if end is None:
+        return None
+    i_start = _idx(r"^\s*Start-Process -FilePath \$LiveExe\b", lines, start, end)
+    if i_start is None:
+        return None
+    owner = None
+    for i in range(start, i_start):
+        if not re.match(r"^\s*if\s*\(", lines[i]) or "{" not in lines[i]:
+            continue
+        depth = 0
+        j = i
+        while j <= end:
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0 and j > i:
+                break
+            j += 1
+        if j > i and i < i_start <= j:
+            owner = i
+    return owner
+
+
 def _restore_not_nested(text: str) -> bool:
     """(iii) 的另一半，也是这套锁最容易糊过去的地方：恢复代码**在**、却跑不到。
 
     事故二就是这一族的形状：恢复机制整个存在，只是那句 throw 不在它射程里。
     这里判的是"重新启用不嵌在重启旧包那条 if 里"：
-      - `$restore = Restore-WatchdogTask` 的缩进必须不深于 `if ((Get-LiveProcess)...` 那一行；
+      - `$restore = Restore-WatchdogTask` 的缩进必须不深于那条 if 的开行；
       - 而且它不能落在包住那次重启的 try/catch 范围内。
+    那条 if 由 `_restart_if` **结构定位**（#51）：锚在它体内的 `Start-Process
+    -FilePath $LiveExe` 上，不认条件的字面拼法，所以把条件改成 `@(...)` 或调换
+    两个判据的顺序都不会让这条锁以"锚点找不到"的方式误红。
     用缩进层级而不是花括号，是因为 Stop-AfterFailure 里那两句是兄弟语句，一旦被嵌进 if
     体内缩进必然变深——而"嵌进 if"恰好就是那条会静默丢守护的漂移。
     """
     lines, lo, hi = _window(text)
     if lines is None:
         return False
-    i_restart = _idx(r"if \(\(Get-LiveProcess\)\.Count -eq 0", lines)
+    i_restart = _restart_if(lines)
     i_call = _idx(RESTORE_CALL_RE, lines)
     if i_restart is None or i_call is None:
         return False
@@ -703,7 +747,22 @@ def test_mutation_removing_the_re_enable_or_nesting_it_turns_the_restore_red():
                          "            $restore = Restore-WatchdogTask", 1)
     assert nested != PS1, "嵌套样本没生效：$restore = Restore-WatchdogTask 那一行不是一句独立语句"
     assert not _restore_not_nested(nested), (
-        "启用被嵌进 if ((Get-LiveProcess)...) 体内还能过——那条判据是在看字符串而不是看层级")
+        "启用被嵌进重启那条 if 体内还能过——那条判据是在看字符串而不是看层级")
+
+    # #51：锚点换成结构定位之后，条件换一种等价拼法不该让定位失效。不嵌套时这条
+    # 锁必须照旧绿（旧的字面正则会在这里以"找不到锚点"误红），嵌套时照旧红。
+    respelled = PS1.replace(
+        "if (@(Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {",
+        "if ((Test-Path -LiteralPath $LiveExe) -and @(Get-LiveProcess).Count -eq 0) {",
+        1)
+    assert respelled != PS1, "条件改写样本没生效：重启那条 if 的文本形状变了"
+    assert _restore_not_nested(respelled), (
+        "条件换成等价写法后结构锚点找不到了：定位又回到了字面匹配（#51）")
+    nested_respelled = respelled.replace("    $restore = Restore-WatchdogTask",
+                                         "            $restore = Restore-WatchdogTask", 1)
+    assert nested_respelled != respelled, "改写样本上的嵌套没生效"
+    assert not _restore_not_nested(nested_respelled), (
+        "条件改写后把恢复嵌进 if 体内却判绿了：结构锚点没有跟着重启动作走")
 
 
 def test_mutation_logging_inside_an_assigned_helper_turns_it_red():
