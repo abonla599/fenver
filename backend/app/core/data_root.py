@@ -20,7 +20,9 @@ mkstemp 唯一临时名 + fsync + os.replace。但 JSON 存储的写入口径是
 **PyInstaller 打包的桌面版 EXE**（`run_backend.py` 绑 127.0.0.1，`Dockerfile` 是
 备用形态），开发和运行主要在 Windows。锁文件的好处是行为全平台一致、跨网络
 文件系统也生效、并且**能被运维直接看懂**——`<项目根>/.data-root.lock`（`data_root()`
-就是项目根，见 `paths.py`）里写着 pid 和启动时间，出问题时不用推理。
+就是项目根，见 `paths.py`）里写着 pid、进程级随机 nonce 和启动时间，出问题时不用推理。
+nonce 是为了让释放路径能回答"这把锁是不是本进程留下的"：pid 会被复用，单独一个
+pid 分不清"自己"和"抢到同一个 pid 的后来者"。
 
 ## 判据：为什么是启动期而不是运行期
 
@@ -49,15 +51,25 @@ watchdog 会把崩溃进程原样拉起，那是一个**新进程**、新 pid。
 ## 测试
 
 `tests/test_v033_data_root_lock.py`。判据里有"第二个进程 fail-fast"与"陈旧锁可
-接管"两条，各配负向锁。
+接管"两条，各配负向锁。释放路径的持有者校验（pid 相同、nonce 不同也不许删）见
+`tests/test_v0350_dataroot_lock_release_holder.py`。
 """
 import errno
 import json
 import os
 import time
+import uuid
 from typing import Optional
 
 LOCK_NAME = ".data-root.lock"
+
+# 本进程的持有者标识，进程内生成一次、所有本进程拿到的锁共用。
+#
+# **为什么 pid 不够**：pid 只是进程在某一刻的编号，进程退出后系统会把它发给下一个
+# 进程（Windows 上尤其常见）。只比对 pid 时，"后来者抢到同一个 pid"与"自己"长得
+# 一模一样——释放路径就会把别人正持有的锁删掉，两个进程随即同写一份数据根，正是
+# 这把锁要防的事故。nonce 随进程出生、随进程消亡，pid 被复用时它不会跟着复用。
+_PROCESS_NONCE = uuid.uuid4().hex
 
 
 def _lock_path(data_root: str) -> str:
@@ -228,6 +240,7 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
     # 不到——静默 fail-open）。JSON 对运维也更好读，且以后加字段不用改解析。
     payload = json.dumps({
         "pid": os.getpid(),
+        "nonce": _PROCESS_NONCE,
         "service": service,
         "started": time.time(),
     }, ensure_ascii=False)
@@ -314,11 +327,46 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
 
 
 def release_data_root_lock(path: str) -> None:
-    """放掉锁。删不掉不算错——陈旧锁会被下一次的判据接管。"""
+    """放掉**本进程自己拿到的那把**锁；不是自己的就不动。
+
+    释放前读回锁内容，pid 与进程级 nonce 都对得上才删。只对 pid 是不够的：pid
+    会被系统复用，一个抢到同一个 pid 的后来者留下的锁与"自己的"在 pid 上无法区分，
+    删掉它就是让别人正持有的独占记录消失——两个进程从此同写一份数据根。nonce
+    在进程出生时生成，pid 被复用时它不会跟着复用，这才是"这把是不是我的"。
+
+    文件不存在、读不出来、内容坏掉都**不抛**：调用方在 lifespan 的退出路径上，
+    那里没有处理异常的上下文，放锁失败也不该把关闭流程弄挂。这几种情况一律
+    **不删**——看不出来归属的文件，删了就可能删到别人的。真正的遗留锁会由下一次
+    acquire 的陈旧锁判据（pid 确认已死才接管）收拾。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read(512)
+    except FileNotFoundError:
+        return                         # 已经不在了：放锁是幂等的
+    except (OSError, ValueError):
+        # 读不出来（含非 UTF-8 的垃圾字节）——归属未知，保留不删。
+        print("[数据根锁] %s 读不出内容，无法确认是不是本进程的，保留不删。" % path)
+        return
+
+    try:
+        holder = json.loads(text)
+    except ValueError:
+        holder = None
+    if not isinstance(holder, dict):
+        # 坏内容也照旧不删：删掉它等于替别人做了"这把锁作废"的决定。
+        print("[数据根锁] %s 的内容不是合法的持有者记录，保留不删。" % path)
+        return
+
+    if holder.get("pid") != os.getpid() or holder.get("nonce") != _PROCESS_NONCE:
+        print("[数据根锁] %s 不是本进程持有的锁（锁里 pid=%r，本进程 pid=%d），保留不删。"
+              % (path, holder.get("pid"), os.getpid()))
+        return
+
     try:
         os.unlink(path)
     except OSError:
-        pass
+        pass                           # 删不掉不算错：陈旧锁会被下一次的判据接管
 
 
 class DataRootBusyError(RuntimeError):
