@@ -16,10 +16,15 @@
    思考文本可能复述用户隐私，过程步会落进 `sessions.json`。于是 URL 白名单、步数/字数预算、
    "客户端不互信服务端那道过滤"、"谁都不许把过程原文打进日志"都得有可红的判据。
 
-一条例外先说清楚：`main.py` 里 `run.append({"type": "start"/"content"/"error", ...})` 是本
-特性之前就存在的字面量，`test_frame_names_are_never_hand_written_on_the_emit_side` 现在会红
-在那里。**这是有意的**：那三行正是"四处各抄一遍 schema"的现场；红着，比写一份 xfail 或把
-判据放宽成"只查新增帧"诚实。
+一条例外先说清楚（#107 按实测重写）：EMIT 侧那把禁**只按已注册的帧名筛**——`FRAME_NAMES` 过去
+只等于 `CLIENT_FRAMES`，于是 `"type": "approval_request"`（有常量、但不在客户端清单里）手写出来
+也看不见，这正是它上线时漏掉的那一帧。现在过滤器换成所有 `FRAME_*` 常量
+（`REGISTERED_FRAME_NAMES`，含 `NON_CLIENT_FRAMES`），并补上隐式字符串拼接与 `dict(type=…)` /
+`.update(type=…)` 两种手写形状。仍然看不见的一格要正面写在这里：没有任何 `FRAME_*` 常量的
+连接级名字（`main.py` 的 `"cancelled"`、`stream_runs.py` 的 `"cannot_resume"`）不在本锁的
+名字集合里，它们由 `test_cross_owner_replay_scrubs_approval_frame.py` 的
+`DECLARED_HAND_WRITTEN` 逐个登记立场；值由变量拼出来的（`"".join`、f-string）同样看不见。
+别把这条读成"`app/main.py` 一个手写帧名都没有"。
 """
 import ast
 import inspect
@@ -44,6 +49,10 @@ KOTLIN = (REPO_ROOT / "android-native" / "app" / "src" / "main" / "java"
           / "xyz" / "fenever" / "assistant" / "nativeapp")
 
 FRAME_NAMES = set(se.CLIENT_FRAMES)
+# 已注册的全部帧名（含 `NON_CLIENT_FRAMES`）。EMIT 侧那把禁按这一份筛，不按 CLIENT_FRAMES 筛：
+# `approval_request` 有常量、却不在客户端清单里，按旧过滤器手写它永远不可见（#107 的漏）。
+REGISTERED_FRAME_NAMES = {value for name, value in vars(se).items()
+                          if name.startswith("FRAME_") and isinstance(value, str)}
 
 
 # --------------------------------------------------------------------------
@@ -63,12 +72,50 @@ def _string_token(tok):
         return None
 
 
+def _string_run_at(toks, i):
+    """从第 i 个 token 起把**相邻的** STRING 字面量拼成一条，返回整串值。
+
+    `"approval_" "request"` 在 Python 里是同一个字面量，tokenize 却给两个 STRING。只读第一个
+    会把一个手写的 `approval_request` 切成 `approval_`——一个从未注册过的名字，于是锁从这条缝
+    漏过去（#107 补的第二种形状）。
+    """
+    pieces = []
+    while i < len(toks) and toks[i].type == tokenize.STRING:
+        value = _string_token(toks[i])
+        if value is None:
+            return None
+        pieces.append(value)
+        i += 1
+    return "".join(pieces)
+
+
+def _called_name_before(toks, i):
+    """`toks[i]` 是 `(` 或 `,` 时，返回这次调用被调的名字（`dict` / `update` / …）；读不出回 None。"""
+    depth = 0
+    while i >= 0:
+        tok = toks[i]
+        if tok.type == tokenize.OP and tok.string in (")", "]"):
+            depth += 1
+        elif tok.type == tokenize.OP and tok.string in ("(", "["):
+            if depth == 0:
+                if tok.string == "(" and i >= 1 and toks[i - 1].type == tokenize.NAME:
+                    return toks[i - 1].string
+                return None
+            depth -= 1
+        i -= 1
+    return None
+
+
 def _frame_type_literals_in(path: Path):
     """这个文件里**手写成字面量**的帧 `type` 值：[(行号, 帧名)]。
 
-    只认真实代码里的两种形状：`{"type": "start"}` 与 `d["type"] = "start"`。走 tokenize
-    而不是一来：① 注释与 docstring 天然是整块 STRING/COMMENT token，不会被误判成代码
+    只认真实代码里的这几种形状（#107 把后三种补进来）：
+    `{"type": "start"}`、`d["type"] = "start"`、`dict(type="start")`、
+    `d.update(type="start")`、以及用隐式拼接写成的 `"approval_" "request"`。
+    走 tokenize 而不是一来：① 注释与 docstring 天然是整块 STRING/COMMENT token，不会被误判成代码
     （否则"解释为什么不该写字面量"的那句注释会自己把锁喂绿）；② 变量拼出来的值不是字面量。
+    筛子用 `REGISTERED_FRAME_NAMES`（所有 `FRAME_*` 常量），不是 `CLIENT_FRAMES`——后者会漏掉
+    `approval_request` 这种有常量、没有客户端分发臂的帧。
     """
     with path.open("rb") as fh:
         toks = [t for t in tokenize.tokenize(fh.readline)
@@ -77,20 +124,31 @@ def _frame_type_literals_in(path: Path):
     hits = []
     for i in range(len(toks) - 1):
         a, b = toks[i], toks[i + 1]
+        if a.type == tokenize.NAME and a.string == "type" \
+                and b.type == tokenize.OP and b.string == "=":
+            # dict(type="start") / d.update(type="start")：关键字参数也会造一颗 type 键。
+            # 这里 `type` 是标识符 token，不是字符串；只看调用名是 dict / update 的那两族，
+            # 免得把 `Foo(type="x")` 这类与帧无关的构造函数也算进来。
+            if i >= 1 and toks[i - 1].type == tokenize.OP \
+                    and toks[i - 1].string in ("(", ",") \
+                    and _called_name_before(toks, i - 1) in ("dict", "update"):
+                value = _string_run_at(toks, i + 2)
+                if value in REGISTERED_FRAME_NAMES:
+                    hits.append((toks[i + 2].start[0], value))
+            continue
         if a.type != tokenize.STRING or _string_token(a) != "type":
             continue
         if b.type == tokenize.OP and b.string == ":":
-            # {"type": "start"}：值必须在同一行、且是个字符串字面量
-            if i + 2 < len(toks) and toks[i + 2].type == tokenize.STRING:
-                value = _string_token(toks[i + 2])
-                if value in FRAME_NAMES:
-                    hits.append((toks[i + 2].start[0], value))
+            # {"type": "start"}：值在同一行（或下一个 token），可以是隐式拼接的多个 STRING
+            value = _string_run_at(toks, i + 2)
+            if value in REGISTERED_FRAME_NAMES:
+                hits.append((toks[i + 2].start[0], value))
         elif (b.type == tokenize.OP and b.string == "]"
               and i + 3 < len(toks) and toks[i + 2].type == tokenize.OP
-              and toks[i + 2].string == "=" and toks[i + 3].type == tokenize.STRING):
+              and toks[i + 2].string == "="):
             # d["type"] = "start"
-            value = _string_token(toks[i + 3])
-            if value in FRAME_NAMES:
+            value = _string_run_at(toks, i + 3)
+            if value in REGISTERED_FRAME_NAMES:
                 hits.append((toks[i + 3].start[0], value))
     return hits
 
@@ -327,6 +385,34 @@ def test_frame_names_are_never_hand_written_on_the_emit_side():
         + "\n".join(offenders)
         + '\n改法：se.start_frame(...) / se.content_frame(...) / se.error_frame(...)；'
           "要加字段就 {**se.done_frame(...), \"status\": ...} 这样并上去。")
+
+
+def test_the_emit_side_scanner_sees_every_hand_written_shape(tmp_path):
+    """反例（#107）：五种手写形状都必须被点名，尤其 `approval_request` 与隐式拼接。
+
+    改前这条扫描器**按 `CLIENT_FRAMES` 筛**：`"type": "approval_request"` 有常量、却不在客户端
+    清单里，手写出来一个字符都不会报；另外它只认「字典字面量」与「下标赋值」两种形状，
+    `dict(type=…)` / `.update(type=…)` / `"approval_" "request"` 三种写法即使拿客户端帧名也漏。
+    这里把五种形状一次喂进去，缺任何一种都红；同时钉两条负对照——常量构造与未注册名字不许被
+    误报（前者是正确写法，后者没有常量可替，由 DECLARED_HAND_WRITTEN 登记）。
+    """
+    source = (
+        'd = {"type": "approval_request"}\n'
+        'd["type"] = "approval_request"\n'
+        'e = dict(type="approval_request")\n'
+        'f = {}\nf.update(type="approval_request")\n'
+        'g = {"type": "approval_" "request"}\n'
+        'ok = {"type": se.FRAME_APPROVAL_REQUEST}\n'
+        'unknown = {"type": "not_a_registered_frame"}\n'
+    )
+    path = tmp_path / "synthetic_emit_side.py"
+    path.write_text(source, encoding="utf-8")
+    hits = [value for _line, value in _frame_type_literals_in(path)]
+    assert hits.count("approval_request") == 5, (
+        "五种手写形状没有全部被点名（实得 %r）：`{\"type\": \"approval_request\"}` 是 #107 的"
+        "原始漏点（按 CLIENT_FRAMES 筛时它不可见），另外三种是形状漏点" % hits)
+    assert "not_a_registered_frame" not in hits, "未注册的名字被误报：这条锁只按常量集合筛"
+    assert len(hits) == 5, "常量构造 `se.FRAME_APPROVAL_REQUEST` 被当成了字面量：扫描器读到了变量"
 
 
 def test_new_hand_written_frame_literals_have_to_be_declared_in_the_ledger():

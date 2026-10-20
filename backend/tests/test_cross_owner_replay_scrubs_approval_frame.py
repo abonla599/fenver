@@ -26,10 +26,15 @@ admin 跨属主补帧时逐字节透出，而 `plan_summary` 是用户那句话�
   改成带结构的串时，红的是逐字节那枚（报"线上字节变了"），不是这把报"键集分叉"；
 - 把"取真身"那一段换成手抄一个字典 → 真跑那几枚判据红（假 LLM 的份数没被抽干、流里没有
   tool_result 与 content）；
-- 把逐字节那枚的比较改成"解析后相等"（`json.loads(引擎帧) == json.loads(frozen)`）、把它整枚摘掉、
-  或把它挪到键序那枚后面 → `test_the_byte_assertion_stays_byte_typed_and_stays_first` 红。这一枚
-  读的是**本文件的源码**而不是两份手抄互相咬合的结果：前一种走法在行为侧是全绿的（线上键序真的
-  变了，而解析相等看不出键序），所以牙得钉在写法上；
+- 把取真身函数的 `return built[0]` 换成按夹具键序重排的 dict（值仍来自引擎真帧）→ 真跑、逐字节、
+  键序三枚会同时全绿，只有 `test_the_input_port_pin_bites_a_fixture_reordered_dict` 与
+  `test_the_byte_assertion_stays_byte_typed_and_stays_first` 里的进料口那一格红（#127）；
+- 把逐字节那枚的比较改成"解析后相等"（`json.loads(引擎帧) == json.loads(frozen)`，含
+  `from json import loads as _loads` / `_loads = json.loads` 的别名写法）、把它整枚摘掉、
+  或把它挪到键序那枚后面 → `test_the_byte_assertion_stays_byte_typed_and_stays_first` 红。
+  这一枚读的是**本文件的源码**而不是两份手抄互相咬合的结果：前一种走法在行为侧是全绿的（线上
+  键序真的变了，而解析相等看不出键序），所以牙得钉在写法上；坐标按 AST 角色认，
+  rename-all 带不走（`test_the_coordinates_are_rename_proof_and_the_loads_alias_still_reds`）；
 - 往 NON_CLIENT_FRAMES 里加名字（哪怕同时补进隐私名单）→ 名单钉子红；
 - 豁免登记里留一条空理由 → 结构锁红（机器只判非空，判不了理由对不对）。
 """
@@ -245,6 +250,21 @@ def _frame_the_engine_itself_builds(monkeypatch):
     return built[0]
 
 
+def _frozen_approval_wire() -> str:
+    """改动前这一帧在线上长什么样：**唯一一份手抄字节面**（含键序与冒号后的空格）。
+
+    抬到模块级只为一件事：逐字节那枚的**进料口反例**也要用同一份基准，不能再抄第三份。
+    json.dumps 按插入顺序出字节，键序变了就是字节变了。两格裸 `%s`（TICKET / _APPROVAL_TOOL）
+    不换写法是刻意的：换成 json.dumps(值) 今天出的字节一模一样（两个值都不含要转义的字符），
+    对键序锁一分检测力都不加，动的却是这份"改前在线上长什么样"的手抄基准本身。它唯一可疑的走法
+    （值里塞进要转义的字符）归逐字节那枚管——引擎侧转义、基准侧不转义，两边当场分叉，报的就是
+    "线上字节变了"。
+    """
+    return ('{"type": "approval_request", "ticket_id": "%s", "tool_name": "%s", '
+            '"plan_summary": %s, "expires_at": 1730000000.0}'
+            % (TICKET, _APPROVAL_TOOL, json.dumps(PLAN_SUMMARY)))
+
+
 def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
     """换常量不许改一个比特：两个客户端早就各自认这个名字，改字节就是让老包解析崩。
 
@@ -252,19 +272,13 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
     `_a_run_with_approval`），frozen 是"改之前这一帧在线上长什么样"的字节基准。两份的**键集与
     键序**由下面那枚钉子对齐，**值故意不同**——夹具走的是删文件那条工具名，基准读的是引擎在
     `execute_code` 审批分支上真造出来的那一帧；拿夹具的字典当 frozen 的取值底稿会把 tool_name
-    一起漂掉。基准喂给它的必须是引擎真造的帧，否则这份副本改不改都和线上无关。对齐那枚读的
+    一起漂掉。基准喂给它的必须是引擎真造的帧，否则这份副本改不改都和线上无关（进料口由
+    `test_the_byte_assertion_observes_the_raw_engine_frame` 钉住）。对齐那枚读的
     是基准那串**解析**出来的键序（`json.loads`），不拿正则去整串反解；frozen 本身仍是手抄的
     字节面，不从夹具反推——两份手抄合成一份，键序漂移就没人逮了。
     """
     assert se.FRAME_APPROVAL_REQUEST == "approval_request"
-    # 改动前的形状，含键序与冒号后的空格：json.dumps 按插入顺序出字节，键序变了就是字节变了。
-    # 两格裸 `%s`（TICKET / _APPROVAL_TOOL）不换写法是刻意的：换成 json.dumps(值) 今天出的字节
-    # 一模一样（两个值都不含要转义的字符），对下面的键序锁一分检测力都不加，动的却是这份"改前
-    # 在线上长什么样"的手抄基准本身。它唯一可疑的走法（值里塞进要转义的字符）归逐字节那枚管——
-    # 引擎侧转义、基准侧不转义，两边当场分叉，报的就是"线上字节变了"。
-    frozen = ('{"type": "approval_request", "ticket_id": "%s", "tool_name": "%s", '
-              '"plan_summary": %s, "expires_at": 1730000000.0}'
-              % (TICKET, _APPROVAL_TOOL, json.dumps(PLAN_SUMMARY)))
+    frozen = _frozen_approval_wire()
     # 逐字节这关**必须排在键序前面**：过了这关，frozen 就是引擎真帧的字节、必然解析得动，
     # 键序锁才只可能因"键真的变了"而红。
     assert se.sse_data(_frame_the_engine_itself_builds(monkeypatch)) == "data: " + frozen + "\n\n", (
@@ -293,73 +307,346 @@ def test_approval_frame_wire_bytes_and_client_whitelists_unchanged(monkeypatch):
 # ------------------------------------------------ 逐字节那枚的牙（读自己的源码）--
 
 _WIRE_LOCK_FUNC = "test_approval_frame_wire_bytes_and_client_whitelists_unchanged"
-# 两枚的坐标：比较左侧那句"取引擎真身再成串"、键序那枚的等式本体。写法一改（换成解析后相等、
-# 整枚摘掉、合并、挪进 helper）都会让它从某条 Assert 的 test 里消失——坐标先红，比静默失牙好。
-_BYTE_ASSERT_MARK = "sse_data(_frame_the_engine_itself_builds"
-_KEY_ORDER_ASSERT_MARK = "tuple(APPROVAL_FRAME) == baseline_keys"
+_WIRE_HELPER = "_frame_the_engine_itself_builds"
 
 
-def _wire_lock_node():
+def _wire_lock_node(source=None):
     """从本文件源码里重读那把基准锁的函数节点：判据要看"这份文件怎么写"，不是运行时对象。"""
-    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    tree = ast.parse(source if source is not None
+                     else Path(__file__).resolve().read_text(encoding="utf-8"))
     found = [n for n in tree.body
              if isinstance(n, ast.FunctionDef) and n.name == _WIRE_LOCK_FUNC]
     assert len(found) == 1, "基准锁不再是一个恰好一处的模块级函数：_WIRE_LOCK_FUNC 的坐标得跟着改"
     return found[0]
 
 
-def _asserts_containing(node, mark):
-    return [n for n in ast.walk(node)
-            if isinstance(n, ast.Assert) and mark in ast.unparse(n.test)]
+def _call_name(node):
+    """调用节点最末一段被调的名字（`se.sse_data` → `sse_data`）；不是调用/读不出回 None。"""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
 
 
-def _json_loads_calls(node):
-    """子树里那些 `json.loads(…)` 调用。"""
-    return [n for n in ast.walk(node) if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute) and n.func.attr == "loads"
-            and isinstance(n.func.value, ast.Name) and n.func.value.id == "json"]
+def _byte_asserts(node):
+    """**按结构**找逐字节那枚：比较左侧是 `*.sse_data(...)` 调用。
+
+    从前靠源码子串 `_BYTE_ASSERT_MARK` 定位。那类坐标会被 rename-all 一起带走（同名标识符连同
+    字符串里的一份一起改），于是"坐标还在、但指的东西已经换了"不报红。结构定位只认角色
+    （左边必须是成串函数），改名改不动它；函数本身被改名则由 `_WIRE_LOCK_FUNC` 那条红。
+    """
+    out = []
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Assert) or not isinstance(n.test, ast.Compare):
+            continue
+        if _call_name(n.test.left) == "sse_data":
+            out.append(n)
+    return out
+
+
+def _key_order_asserts(node):
+    """**按结构**找键序那枚：比较的一侧是 `tuple(...)` 调用，另一侧是某个名字。"""
+    out = []
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Assert) or not isinstance(n.test, ast.Compare):
+            continue
+        sides = [n.test.left] + list(n.test.comparators)
+        has_tuple = any(_call_name(s) == "tuple" and len(s.args) == 1 for s in sides)
+        has_name = any(isinstance(s, ast.Name) for s in sides)
+        if has_tuple and has_name:
+            out.append(n)
+    return out
+
+
+def _parse_bindings(tree):
+    """这份源码里哪些名字指向 `json.loads`：返回 (json 模块别名集合, loads 别名集合)。
+
+    #127 的 `_loads` 降级：把 `json.loads` 换成 `from json import loads as _loads` 之后，旧判据
+    只认 `Attribute(value=Name('json'), attr='loads')`，于是"解析后相等"的降级变成静默绿。
+    这里把 `import json as _json`、`from json import loads [as _loads]`、`_loads = json.loads`
+    （含 `_json.loads` 那一支）都收进集合；判据按名字身份认，不按字面拼法认。
+    """
+    json_modules = {"json"}
+    loads_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "json":
+                    json_modules.add(alias.asname or "json")
+        elif isinstance(node, ast.ImportFrom) and node.module == "json":
+            for alias in node.names:
+                if alias.name == "loads":
+                    loads_names.add(alias.asname or "loads")
+    changed = True
+    while changed:                      # 别名可以链式赋值，收到不动点
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if not (isinstance(value, ast.Attribute) and value.attr == "loads"
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in json_modules):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in loads_names:
+                    loads_names.add(target.id)
+                    changed = True
+    return json_modules, loads_names
+
+
+def _parse_calls(node, bindings):
+    """子树里指向 `json.loads`（含别名）的解析调用。"""
+    json_modules, loads_names = bindings
+    out = []
+    for n in ast.walk(node):
+        if not isinstance(n, ast.Call):
+            continue
+        func = n.func
+        if isinstance(func, ast.Name) and func.id in loads_names:
+            out.append(n)
+        elif isinstance(func, ast.Attribute) and func.attr == "loads" \
+                and isinstance(func.value, ast.Name) and func.value.id in json_modules:
+            out.append(n)
+    return out
+
+
+def _byte_assertion_problems(node, bindings):
+    """逐字节那枚必须满足的写法；返回问题清单（空 = 合格）。"""
+    problems = []
+    test = node.test
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 \
+            or not isinstance(test.ops[0], ast.Eq):
+        return ["不是单条 == 比较（读到 %s）" % ast.unparse(test)]
+    left, right = test.left, test.comparators[0]
+    if _call_name(left) != "sse_data":
+        problems.append("比较左侧不是 `sse_data(...)`（读到 %s）" % ast.unparse(left))
+    elif len(left.args) != 1 or _call_name(left.args[0]) != _WIRE_HELPER:
+        problems.append(
+            "左侧不是 `sse_data(%s(...))`：进料口被换掉了——产品侧键序不再进比较" % _WIRE_HELPER)
+    if any(isinstance(n, ast.Call) for n in ast.walk(right)):
+        problems.append("比较右侧出现调用（读到 %s）：基准不再是手抄的字节串" % ast.unparse(right))
+    wrapped = _parse_calls(test, bindings)
+    if wrapped:
+        problems.append(
+            "比较里出现解析调用（%s）：字节相等被降级成解析后相等，键序与转义都不再进比较"
+            % ", ".join(sorted({ast.unparse(c) for c in wrapped})))
+    return problems
+
+
+def _key_order_problems(fn, node, bindings):
+    """键序那枚必须满足的写法：tuple(名字) == 名字，且后者由解析调用取键序。"""
+    test = node.test
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 \
+            or not isinstance(test.ops[0], ast.Eq):
+        return ["键序那枚不是单条 == 比较"]
+    sides = [test.left] + list(test.comparators)
+    tuple_side = next((s for s in sides if _call_name(s) == "tuple" and len(s.args) == 1), None)
+    name_side = next((s for s in sides if isinstance(s, ast.Name)), None)
+    if tuple_side is None or name_side is None:
+        return ["键序那枚不是 `tuple(…) == 名字`（读到 %s）" % ast.unparse(test)]
+    assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == name_side.id for t in n.targets)]
+    if len(assigns) != 1:
+        return ["键序基准名 %r 在函数里不是恰好一处赋值（读到 %d 处）"
+                % (name_side.id, len(assigns))]
+    if not _parse_calls(assigns[0].value, bindings):
+        return ["键序基准不是从解析调用取来的（读到 %s）：假键会重新被喂进尺子"
+                % ast.unparse(assigns[0].value)]
+    return []
+
+
+def _input_port_problems(source):
+    """取真身函数必须把**引擎原样产出的那一帧**交出来；返回问题清单（空 = 合格）。
+
+    #127 的进料口：行为判据全部基于"帧是真的"这个前提，而前提本身没有锁。把
+    `return built[0]` 换成 `return {k: built[0][k] for k in APPROVAL_FRAME}`（值仍来自引擎真帧），
+    真跑那几枚一条条照绿、逐字节与键序也照绿——被换掉的只是"产品侧键序"这个被测对象。这里按
+    AST 钉死进料口：恰好一条 return，且返回的是 `built[0]`；`built` 必须是从 `frames` 里筛出来的
+    列表推导；`frames` 必须是 `stream_chat_events(...)` 的产出（允许外面套一层 `list(...)`）；
+    return 里不许出现 `frozen` / `APPROVAL_FRAME` / 解析调用。
+    """
+    tree = ast.parse(source)
+    fns = [n for n in tree.body
+           if isinstance(n, ast.FunctionDef) and n.name == _WIRE_HELPER]
+    if len(fns) != 1:
+        return ["取真身函数不再是模块级恰好一处（读到 %d 处）：进料口没有可判的对象" % len(fns)]
+    fn = fns[0]
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    if len(returns) != 1:
+        return ["取真身函数有 %d 条 return：只能有一条，且必须原样交出引擎那一帧" % len(returns)]
+    value = returns[0].value
+    if not (isinstance(value, ast.Subscript) and isinstance(value.value, ast.Name)
+            and value.value.id == "built"
+            and isinstance(value.slice, ast.Constant) and value.slice.value == 0):
+        return ["返回的不是 `built[0]` 本身（读到 %s）：按夹具键序重排过的 dict 会让产品侧键序"
+                "永远不进比较" % ast.unparse(value)]
+    if any(isinstance(n, ast.Name) and n.id in ("frozen", "APPROVAL_FRAME")
+           for n in ast.walk(value)):
+        return ["返回表达式里引用了 frozen / APPROVAL_FRAME：进料口是手抄基准，不是引擎"]
+    built = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name) and t.id == "built" for t in n.targets)]
+    if len(built) != 1 or not isinstance(built[0].value, ast.ListComp):
+        return ["`built` 不是一条列表推导：从帧流里选帧的那一步变了"]
+    generators = built[0].value.generators
+    if len(generators) != 1 or not isinstance(generators[0].iter, ast.Name) \
+            or generators[0].iter.id != "frames":
+        return ["`built` 不是从 `frames` 里筛出来的：被测对象不再是引擎的帧流"]
+    frames = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "frames" for t in n.targets)]
+    if len(frames) != 1:
+        return ["`frames` 在取真身函数里不是恰好一处赋值（读到 %d 处）" % len(frames)]
+    source_of_frames = frames[0].value
+    call = source_of_frames
+    if _call_name(call) == "list" and call.args:
+        call = call.args[0]
+    if _call_name(call) != "stream_chat_events":
+        return ["`frames` 不是 `stream_chat_events(...)` 的产出（读到 %s）：取真身绕开了引擎"
+                % ast.unparse(source_of_frames)]
+    return []
 
 
 def test_the_byte_assertion_stays_byte_typed_and_stays_first():
-    """逐字节那枚的牙挂在**写法与顺序**上，而这两样本来没有锁管——这里把它们钉成判据。
+    """逐字节那枚的牙挂在**写法、顺序与进料口**上——这三样本来都没有锁管。
 
     行为侧拦不住这一种走法：把 `se.sse_data(引擎帧) == "data: " + frozen + "\\n\\n"` 换成
     `json.loads(引擎帧) == json.loads(frozen)`（看着更稳健，因为值相等还在），再挪一挪构造处的
     键序——两份手抄解析完照样相等，这一把里每条行为断言全绿，而线上字节真的变了（老客户端按
-    位置解析就崩）。所以这一枚不比对两份手抄，它读 `Path(__file__)` 的源码，钉三件事：
+    位置解析就崩）。#127 又补了进料口那一格：把取真身函数的 `return built[0]` 换成按夹具键序
+    重排的 dict，值仍来自引擎真帧 ⇒ 真跑判据、逐字节、键序**同时全绿**，而产品侧键序根本没进
+    比较。所以这一枚不比对两份手抄，它读 `Path(__file__)` 的源码，钉四件事：
 
-    ① 两枚都还在（各自恰好一条 Assert 命中坐标）——整枚摘掉、合并成一条、挪进 helper 都在这里红；
-    ② 逐字节那枚的行号**早于**键序那枚：键序那枚读的是解析结果，而 `json.loads` 对"基准里同一把
-       键抄两遍"是静默去重，抄几遍都只剩一遍 ⇒ 兜住这一格的只有先跑、且比整串字节的逐字节那枚；
-    ③ 逐字节那枚的比较对象是字符串：两侧子树里出现 `json.loads` 就是把"字节相等"换成了"解析后的
-       值相等"，键序与转义都不再进比较。
+    ① 两枚都还在（各自恰好一条 Assert 命中**结构**坐标）——整枚摘掉、合并成一条、挪进 helper
+       都在这里红；坐标按 AST 角色认，不按标识符子串认（rename-all 带不走它）；
+    ② 逐字节那枚的行号**早于**键序那枚：键序那枚读的是解析结果，而解析对"基准里同一把键抄两遍"
+       是静默去重，抄几遍都只剩一遍 ⇒ 兜住这一格的只有先跑、且比整串字节的逐字节那枚；
+    ③ 逐字节那枚的比较对象是字符串，且解析调用按**名字身份**认（`_loads = json.loads` 这类别名
+       降级也逮得住——旧判据只认 `json.loads` 这个字面形状）；
+    ④ 进料口是 `built[0]`，`built` 来自 `frames`、`frames` 来自 `stream_chat_events(...)`——
+       取真身函数不许把引擎帧重排/重建成另一个 dict。
 
-    对照组是键序那一半本身：它**必须**从 `json.loads` 取键序（那正是它不会被假键喂进尺子的原因，
-    见函数体里那几行注释）。所以 ③ 只查逐字节这一枚，不许顺手推广到整把锁——把键序那枚改回正则
-    反解，红的是另一条道理，不是这一条。
+    对照组是键序那一半本身：它**必须**从解析调用取键序（那正是它不会被假键喂进尺子的原因）。
+    所以 ③ 的"不许解析"只查逐字节这一枚，不许顺手推广到整把锁。
     """
-    fn = _wire_lock_node()
-    byte_hits = _asserts_containing(fn, _BYTE_ASSERT_MARK)
-    key_hits = _asserts_containing(fn, _KEY_ORDER_ASSERT_MARK)
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    fn = _wire_lock_node(source)
+    tree = ast.parse(source)
+    bindings = _parse_bindings(tree)
+    byte_hits = _byte_asserts(fn)
+    key_hits = _key_order_asserts(fn)
     assert len(byte_hits) == 1 and len(key_hits) == 1, (
-        "基准锁里这两枚的命中数不是各一枚（逐字节 %d、键序 %d）：坐标漂了或整枚没了，"
-        "先把它们改回各一条，本文件的自我判据才还在指着原来那两枚"
-        % (len(byte_hits), len(key_hits)))
+        "基准锁里这两枚的命中数不是各一枚（逐字节 %d、键序 %d）：结构坐标漂了或整枚没了，"
+        "先把它们改回各一条" % (len(byte_hits), len(key_hits)))
     byte_assert, key_assert = byte_hits[0], key_hits[0]
     assert byte_assert.lineno < key_assert.lineno, (
-        "逐字节那枚跑到键序那枚后面了：键序读的是解析结果，基准里同一把键抄两遍会被 json.loads "
-        "静默去重，只有先跑且比整串的逐字节那枚逮得住——顺序也是牙的一部分，别重排这两段")
-    wrapped = _json_loads_calls(byte_assert.test)
-    assert not wrapped, (
-        "逐字节那枚（第 %s 行）的比较对象被包进了 json.loads：%s —— 解析后的相等看不出键序与"
-        "转义，线上字节变了它也会跟着绿；要改就改构造处那一侧，别把这边降级"
-        % (byte_assert.lineno, ast.unparse(byte_assert.test)))
-    key_order_source = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                        and any(isinstance(t, ast.Name) and t.id == "baseline_keys"
-                                for t in n.targets)]
-    assert len(key_order_source) == 1 and _json_loads_calls(key_order_source[0].value), (
-        "对照组不成立：键序那一半已经不是从 json.loads 取键序的了——上面 ③ 只查逐字节这一枚的"
-        "不对称没了依据，两枚的分工得重写")
+        "逐字节那枚跑到键序那枚后面了：键序读的是解析结果，基准里同一把键抄两遍会被解析静默去重，"
+        "只有先跑且比整串的逐字节那枚逮得住——顺序也是牙的一部分，别重排这两段")
+    problems = _byte_assertion_problems(byte_assert, bindings)
+    assert not problems, (
+        "逐字节那枚（第 %s 行）的写法被降级了：%s —— 原始断言是 %s"
+        % (byte_assert.lineno, "；".join(problems), ast.unparse(byte_assert.test)))
+    problems = _key_order_problems(fn, key_assert, bindings)
+    assert not problems, (
+        "键序那枚（第 %s 行）的对照组不成立：%s——两枚的分工得重写"
+        % (key_assert.lineno, "；".join(problems)))
+    problems = _input_port_problems(source)
+    assert not problems, (
+        "取真身函数的进料口被改了：%s。真跑那几枚会一条条照绿，而产品侧键序从此不进比较"
+        % "；".join(problems))
+
+
+def test_the_input_port_pin_bites_a_fixture_reordered_dict():
+    """反例（#127）：`return built[0]` 换成按夹具键序重排的 dict，进料口判据必须当场点名。
+
+    先把"为什么三枚钉同时全绿"当场演一遍：同一帧的键序变了，`sse_data` 的字节就变；按夹具键序
+    重排回去之后，逐字节那枚比的是夹具顺序、键序那枚读的是夹具顺序——产品侧键序一次都没进比较。
+    行为侧也一样：值全来自引擎真帧，假 LLM 份数、tool_result/content、ticket_id 计数都照旧成立。
+    所以这里只判进料口：改后的源码必须被判据点名，未改的必须干净。
+    """
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    helper = next(n for n in ast.parse(source).body
+                  if isinstance(n, ast.FunctionDef) and n.name == _WIRE_HELPER)
+    return_node = next(n for n in ast.walk(helper) if isinstance(n, ast.Return))
+    lines = source.splitlines(keepends=True)
+    at = return_node.lineno - 1
+    assert lines[at].strip() == "return built[0]", (
+        "取真身函数的返回行不是 `return built[0]`（读到 %r）：反例的替换目标变了，先核源码"
+        % lines[at])
+    mutated_lines = list(lines)
+    mutated_lines[at] = lines[at].replace(
+        "return built[0]", "return {k: built[0][k] for k in APPROVAL_FRAME}")
+    mutated = "".join(mutated_lines)
+    assert mutated != source and "return built[0]" not in mutated_lines[at]
+    problems = _input_port_problems(mutated)
+    assert problems, (
+        "按夹具键序重排的 dict 没有被进料口判据点名：产品侧键序仍然不进比较，三枚钉同时全绿")
+    assert "built[0]" in problems[0], problems
+    assert _input_port_problems(source) == [], (
+        "未改的源码被进料口判据判红：判据指错了对象，上面那枚反例不算证据")
+
+    # 同一帧：产品侧键序变了字节就变；按夹具键序重排回去后与基准逐字节相同。
+    frozen = _frozen_approval_wire()
+    product = json.loads(frozen)
+    product = {"expires_at": product.pop("expires_at"), **product}
+    assert se.sse_data(product) != "data: " + frozen + "\n\n", (
+        "用例本身没造出键序漂移：这一步作废")
+    assert se.sse_data({k: product[k] for k in APPROVAL_FRAME}) == "data: " + frozen + "\n\n", (
+        "按夹具键序重排后不再与基准相同：这份反例演的不是那条缴械路径")
+
+
+def test_the_coordinates_are_rename_proof_and_the_loads_alias_still_reds():
+    """反例（#127）：rename-all 带得走旧坐标，带不走结构坐标；`_loads` 别名降级仍要红。
+
+    合成一份"改过名"的基准锁：`APPROVAL_FRAME`→`WIRE_FIXTURE`、`baseline_keys`→`base_keys`、
+    `frozen`→`WIRE_BYTES`。旧坐标是源码子串（`tuple(APPROVAL_FRAME) == baseline_keys`），
+    rename-all 若把它一起改写，坐标就跟着改动走、不报红；结构定位只认 `sse_data(...)` 与
+    `tuple(...) == 名字` 这两个角色，改名后照样各命中一条。随后把左边换成 `_loads(...)`（别名
+    来自 `from json import loads as _loads` 与 `_loads = json.loads` 两种写法），写法判据必须
+    把"解析后相等"点出来。
+    """
+    faithful = (
+        'from json import loads as _loads\n'
+        'def test_wire(monkeypatch):\n'
+        '    WIRE_FIXTURE = {"type": "approval_request"}\n'
+        '    WIRE_BYTES = "{}"\n'
+        '    assert se.sse_data(_frame_the_engine_itself_builds(monkeypatch)) == '
+        '"data: " + WIRE_BYTES + "\\n\\n", "bytes"\n'
+        '    base_keys = tuple(_loads(WIRE_BYTES))\n'
+        '    assert tuple(WIRE_FIXTURE) == base_keys, "keys"\n'
+    )
+    tree = ast.parse(faithful)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    bindings = _parse_bindings(tree)
+    byte_hits, key_hits = _byte_asserts(fn), _key_order_asserts(fn)
+    assert len(byte_hits) == 1 and len(key_hits) == 1, (
+        "改名后的两枚没有被结构坐标各命中一条：坐标还在依赖标识符子串")
+    assert "tuple(APPROVAL_FRAME) == baseline_keys" not in ast.unparse(fn), (
+        "合成源码没起到改名的作用")
+    assert not _byte_assertion_problems(byte_hits[0], bindings), (
+        "改名后的忠实写法被写法判据误杀：坐标与判据有一边在认名字")
+    assert not _key_order_problems(fn, key_hits[0], bindings), (
+        "改名后的键序对照组不成立：别名解析没有跟着名字身份走")
+
+    for alias_decl in ("from json import loads as _loads\n", ""):
+        downgraded = faithful.replace(
+            "se.sse_data(_frame_the_engine_itself_builds(monkeypatch))",
+            "_loads(_frame_the_engine_itself_builds(monkeypatch))")
+        if alias_decl:
+            downgraded = alias_decl + downgraded
+        elif "_loads = json.loads\n" not in downgraded:
+            downgraded = "_loads = json.loads\n" + downgraded
+        dtree = ast.parse(downgraded)
+        dfn = next(n for n in dtree.body if isinstance(n, ast.FunctionDef))
+        dbindings = _parse_bindings(dtree)
+        byte_assert = next(n for n in ast.walk(dfn)
+                           if isinstance(n, ast.Assert))
+        problems = _byte_assertion_problems(byte_assert, dbindings)
+        assert problems, "别名 `_loads` 降级没有被写法判据点名：解析后相等会静默绿"
+        assert any("解析" in p or "sse_data" in p for p in problems), problems
 
 
 # ------------------------------------------------------------------ ④ 结构锁 --

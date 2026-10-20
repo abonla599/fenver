@@ -2,7 +2,8 @@ r"""#94 迁完的那三把"先剥散文再判串"的尺子：正面写明各自�
 
 分工（一把尺子只管一种文本，别混用）：
 
-- `workflow_run_bodies`（母本在 test_ci_history_depth.py）——判 `.github/workflows/*.yml`：
+- `workflow_run_bodies`（母本在 test_ci_history_depth.py）——判 `.github/workflows/` 下的
+  `*.yml` **与 `*.yaml`**（两种扩展名在 Actions 里等价；只收一种会让另一份永久失明）：
   只认 `safe_load` 解析出来的结构，YAML 注释在这一层天然不存在；`run:` 里再剥**行首**（含缩进）
   是 `#` 的那一行。`withs=True` 那一格只收**真会被执行**的 `with:` 值（键名在可执行名单里才算，
   名单与三层判据都在 `_with_surface`），没登记的键名当场红而不是放过。
@@ -33,11 +34,13 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS_DIR.parent))
 
-from tests.test_ci_history_depth import WORKFLOWS_DIR, workflow_run_bodies  # noqa: E402
+from tests.test_ci_history_depth import (WORKFLOWS_DIR, workflow_files,
+                                         workflow_run_bodies)  # noqa: E402
 from tests.test_machine_read_pointers import strip_py_prose  # noqa: E402
 from tests.test_swap_package_contract_v0291 import (  # noqa: E402
     PS1, _line_comment_free, _line_of)
-from tests.test_v0331_pre_tag_gate_contract import GATE_TOKEN, _synth_workflows  # noqa: E402
+from tests.test_v0331_pre_tag_gate_contract import (  # noqa: E402
+    GATE_TOKEN, _gate_token_hits, _synth_workflows)
 
 WF_TOKEN = "tools/pre_tag_gate.py"
 # 每条样本都埋这一串；钉子问的是「剥完之后它还在不在」。
@@ -98,6 +101,37 @@ _WORKFLOWS_SCANNED_BY_THE_BAN = ("build-native-apk.yml", "gitleaks.yml",
 _TOKEN_HITS_EXPECTED = ()
 
 
+_LEDGER_MARKER = "清单里的编号"
+
+
+def _docstring_blind_spot_names(text: str, marker: str = _LEDGER_MARKER) -> tuple:
+    """从 docstring 那段编号账里取出编号元组（按出现顺序）。
+
+    账在模块 docstring 里是一句以 `：` 引出、反引号包着编号的清单。取不出来就红——那条声明是
+    这份清单的**另一半**，读不出它，"账与判据同源"就退化成一句散文。
+    """
+    at = text.find(marker)
+    assert at >= 0, "模块 docstring 里找不到编号账的标记 %r：账被删了或措辞改了" % marker
+    tail = text[at:]
+    assert "：" in tail, "编号账的标记后面没有 `：` 引出的清单（读到 %r）" % tail[:120]
+    body = tail.split("：", 1)[1].split("\n\n", 1)[0]
+    return tuple(re.findall(r"`([a-z0-9][a-z0-9-]*)`", body))
+
+
+def _ledger_problems(names, ledger) -> dict:
+    """清单与 docstring 编号账的分叉，**两个方向**各一份（#131：旧判据只查 list ⊆ docstring）。
+
+    - `unledgered`：清单里有、docstring 没写——加了一条盲区忘了写账；
+    - `phantom`：docstring 写了、清单里没有——账里留着一条已经删掉的形状，读的人以为还有人判；
+    - `order`：两边都有的条目顺序不同（这份账按序号读，顺序也是声明的一部分）。
+    """
+    return {
+        "unledgered": [n for n in names if n not in ledger],
+        "phantom": [n for n in ledger if n not in names],
+        "order": [n for n in names if n in ledger] != [n for n in ledger if n in names],
+    }
+
+
 def _run_blind_spot_pin(name: str, pin_name: str, tmp_path):
     """表驱动地调用「尺子为 None」那几条盲区的专用钉，并把红话归到条目上。
 
@@ -153,19 +187,36 @@ def test_the_blind_spot_list_is_counted_named_and_ledged_against_its_own_docstri
     pins = [pin for _n, _r, _s, pin, _w in _STILL_MISSED_SHAPES if pin is not None]
     assert len(set(pins)) == len(pins), (
         "两条盲区指着同一枚专用钉：那枚钉只兜得住一条形状，另一条是空的")
-    # 账与判据同源：每条编号都必须出现在模块 docstring 里（换行折叠后再比）。加一条盲区忘了写账、
-    # 或改了账忘了改清单，都在这里红，而不必在声明里再抄一个会腐烂的条数。
-    collapsed = re.sub(r"\s+", " ", __doc__ or "")
-    unledged = [name for name in names if name not in collapsed]
-    assert not unledged, (
-        "清单与模块 docstring 的编号账分家了：这几条在 `_STILL_MISSED_SHAPES` 里、却没写进 "
-        "docstring 那段清单 " + str(unledged) + "。射程只能有一处真相：改清单就把那段一起改。")
+    # 账与判据同源，**两个方向都比**：旧写法只查 `name not in docstring`（list ⊆ 账），于是
+    # docstring 里留着一条清单上已经删掉的编号时照绿——读账的人会以为那条形状还有人判。
+    ledger = _docstring_blind_spot_names(__doc__ or "")
+    problems = _ledger_problems(names, ledger)
+    assert not any(problems.values()), (
+        "清单与模块 docstring 的编号账分家了：unledgered（清单有、账没写）= %s，phantom（账有、"
+        "清单删了）= %s，order=%s。射程只能有一处真相：改清单就把那段一起改"
+        % (problems["unledgered"], problems["phantom"], problems["order"]))
     for name, ruler, _s, pin_name, _w in _STILL_MISSED_SHAPES:
         if pin_name is None:
             continue
         assert ruler is None, (
             "%s 既有尺子又声明了专用钉：两条判据管同一格，将来其中一条被删掉没人知道哪条是真的"
             % name)
+
+
+def test_the_ledger_pin_bites_a_phantom_or_missing_name():
+    """反例（#131）：编号账的判据必须**两个方向**都有牙。
+
+    旧判据只查「清单里的编号有没有出现在 docstring」（list ⊆ 账）。于是账里留着一条已经删掉的
+    形状（phantom）时不报红——读账的人会以为那一格还有人判。这里用合成 docstring 量三件事：
+    两边同序 ⇒ 无问题；清单多一条 ⇒ unledgered；账多一条 ⇒ phantom；顺序不同 ⇒ order。
+    """
+    doc = "清单里的编号（说明）：\n`alpha`、`beta`。\n\n正文"
+    assert _docstring_blind_spot_names(doc) == ("alpha", "beta")
+    assert not any(_ledger_problems(("alpha", "beta"), ("alpha", "beta")).values())
+    assert _ledger_problems(("alpha", "gamma"), ("alpha", "beta"))["unledgered"] == ["gamma"]
+    assert _ledger_problems(("alpha",), ("alpha", "beta"))["phantom"] == ["beta"], (
+        "账里多出来的编号没被点名：旧判据（只查 list ⊆ 账）在这一格恒绿")
+    assert _ledger_problems(("beta", "alpha"), ("alpha", "beta"))["order"] is True
 
 
 def test_the_workflow_ruler_leaves_trailing_shell_comments_in_the_surface(tmp_path):
@@ -208,25 +259,70 @@ def test_every_workflow_file_is_inside_the_token_ban_surface():
     两处比的都是**这个文件自己**算出来的 `per_file`，不再拿 v0331 的返回值当预期——那才是同义反复
     的来源。两个名字（`WF_TOKEN` / `GATE_TOKEN`）必须仍是同一个串，这一条也钉住：串漂了而两处
     名单没跟着改，判据就各判各的。
+
+    #131 补的第三格是**分歧**：串相等只说明没漂移（drift），不说明两把锁判的是同一批位置
+    （divergence）。这里再把本文件的 `per_file` 与 v0331 的 `_gate_token_hits()` 对一遍：任意
+    一侧把 `withs`、扩展名或目录悄悄改窄，两个命中清单就分家。反例
+    `test_the_two_token_surfaces_cannot_diverge_in_silence` 用 `withs=False` 演示这种分家。
     """
     assert WF_TOKEN == GATE_TOKEN, (
         "本文件的 WF_TOKEN 与 test_v0331_pre_tag_gate_contract.GATE_TOKEN 不再是同一个串（读到 "
         + repr(WF_TOKEN) + " / " + repr(GATE_TOKEN) + "）：那把禁与本文件的射程声明说的是两件事")
-    files = sorted(WORKFLOWS_DIR.glob("*.yml"))
+    files = workflow_files()
     assert files, "%s 里没有 workflow：这格面判据在空转" % WORKFLOWS_DIR
     assert tuple(f.name for f in files) == _WORKFLOWS_SCANNED_BY_THE_BAN, (
         "面变窄了/变了：目录里读到的 workflow 清单是 " + str([f.name for f in files])
         + "，与本文件手抄的 " + str(_WORKFLOWS_SCANNED_BY_THE_BAN) + " 分家了。少一份 = 那一份的 "
         "run 正文与 with 再也没人判（多出来的那一份同理，账得跟着真物走）；改这份账之前先确认真"
         "物为什么变了，别把 glob 改宽来凑。")
-    per_file = [f.name for f in files
-                if WF_TOKEN in workflow_run_bodies(f, where=str(f), withs=True)]
+    per_file = _surface_hits(WORKFLOWS_DIR, withs=True)
     assert tuple(per_file) == _TOKEN_HITS_EXPECTED, (
         "命中变了：判据在 " + str([f.name for f in files]) + " 里读到 token 的文件是 "
         + str(per_file) + "，本文件手抄的「应当命中清单」是 " + str(_TOKEN_HITS_EXPECTED)
         + "。今天应当是空表——出现命中说明那条闸门命令又被抄回真会被执行的那一格（run 正文或 "
         "with: 的可执行字段），先按 v0331 那句红话处理真物；只有确认这是合法的新形状时，才由人"
         "来改这份账并同时改射程声明。")
+    # #131 的"漂移 ≠ 分歧"：上面那句只保证两个**串**相同，不保证两把锁**判的是同一批位置**。
+    # 这里让两把锁各算一遍命中：本文件这一侧走 `WF_TOKEN` + `workflow_run_bodies`，v0331 那一侧
+    # 走 `GATE_TOKEN` + `_gate_token_hits`。只要任意一侧把 `withs`、扩展名或目录悄悄改窄，两个
+    # 命中清单就分家——串还相等，面已经不是同一个面。
+    gate_hits = _gate_token_hits(WORKFLOWS_DIR)
+    assert tuple(sorted(per_file)) == tuple(sorted(gate_hits)), (
+        "两把禁在同一个目录上算出了不同的命中清单：本文件 %s，v0331 %s。串相等只说明没漂移，"
+        "这里说的是**分歧**——其中一把的判据面（withs / 扩展名 / 目录）被悄悄改窄了"
+        % (sorted(per_file), sorted(gate_hits)))
     raw = (WORKFLOWS_DIR / "release-apk.yml").read_text(encoding="utf-8")
     assert WF_TOKEN in raw and not per_file, (
         "注释里那句教学命令被当成 CI 里的真命令了（要么多剥了，要么那句注释已经不在了）")
+
+
+def _surface_hits(root, withs: bool) -> list:
+    """用本文件的 token 与 workflow 读法算一遍命中（#131 分歧判据的另一侧）。
+
+    `withs` 是刻意留的参数：反例拿它演"某一侧把 with 面改窄之后，两把锁的命中清单会分家"。
+    """
+    return [p.name for p in workflow_files(root)
+            if WF_TOKEN in workflow_run_bodies(p, where=str(p), withs=withs)]
+
+
+def test_the_two_token_surfaces_cannot_diverge_in_silence(tmp_path):
+    """反例（#131）：两把禁必须命中同一批文件；`withs` 一改窄，分歧判据当场红。
+
+    一对合成 workflow：同一份把命令写进 run 正文、另一份只写进可执行字段 `script:` 的值。
+    两把锁（本文件的 `_surface_hits` 与 v0331 的 `_gate_token_hits`）都必须报出**同一份**文件；
+    把 `_surface_hits` 的 withs 关掉之后只剩 run 那份 ⇒ 两份清单分家。这证明上面那条等式
+    不是恒绿：它真的能看见"串一样、面不一样"。
+    """
+    d = _synth_workflows(tmp_path / "run", ["python tools/pre_tag_gate.py --expect v0.0.0"],
+                         name="run.yml")
+    _synth_workflows(tmp_path / "with", ["echo ok"], name="with.yml",
+                     withs=[("script", "python tools/pre_tag_gate.py --expect v0.0.0")])
+    both = tmp_path / "both"
+    both.mkdir()
+    for src in (d, tmp_path / "with"):
+        for p in workflow_files(src):
+            (both / p.name).write_bytes(p.read_bytes())
+    assert _surface_hits(both, withs=True) == _gate_token_hits(both) == ["run.yml", "with.yml"], (
+        "两把禁在同一批合成文件上没有命中同一批：分歧从第一格就存在")
+    assert _surface_hits(both, withs=False) == ["run.yml"], (
+        "关掉 withs 之后命中没变：这个反例演不出面变窄，上面那条等式没有牙")

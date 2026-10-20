@@ -60,7 +60,20 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOWS = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+_WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+
+
+def _workflow_files(directory: Path) -> list:
+    """目录里所有 workflow：`.yml` 与 `.yaml` 都收（Actions 对两种扩展名等价）。
+
+    只收一种的话，存成另一种的那份永久落在扫描面外（#131 的"`.yaml` permanently toothless"）；
+    `_workflow_files` 单独成函数是为了让反例能在 tmp 目录上量这件事，而不必改动真树。
+    """
+    return sorted({p for p in Path(directory).glob("*.yml")}
+                  | {p for p in Path(directory).glob("*.yaml")})
+
+
+WORKFLOWS = _workflow_files(_WORKFLOW_DIR)
 OPS = sorted(list((REPO_ROOT / "deploy").glob("*.ps1")) + list((REPO_ROOT / "tools").glob("*.py")))
 
 # 路径形状的token：至少一个分隔符 + 白名单扩展名（取舍见上面模块 docstring）。
@@ -104,24 +117,53 @@ def _tokens(text: str) -> list:
     return out
 
 
+def _scalar_leaves(value) -> list:
+    """`with:` 值里的字符串叶子：标量就是它自己，映射/列表递归摊平。
+
+    #131 的"`with:` non-scalar silently skipped"：旧写法只收 `isinstance(value, str)`，于是
+    `with: script: {inline: "…tools/x.py…"}` 这种结构化值里的路径一个都扫不到，而扫描器全绿。
+    摊平是**放宽**而不是另立判据：进面的仍然只有字符串叶子，非字符串标量（整数、布尔）没有路径
+    形状可抽；结构化值不再被静默丢掉。
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _scalar_leaves(item)]
+    if isinstance(value, (list, tuple)):
+        return [leaf for item in value for leaf in _scalar_leaves(item)]
+    return []
+
+
+def _workflow_pairs(wf: Path) -> list:
+    """一份 workflow 里 Actions 真读的位置抽出来的 [(出处, 路径token)]。
+
+    `run:` 正文按行剥行首注释；`with:` 的**每个字符串叶子**都算（含嵌套在映射/列表里的），
+    因为 Actions 把这个输入的语义交给对应 action，路径完全可能藏在一层结构里。抽不出路径的
+    字符串叶子照旧交给 `_tokens` 的形状白名单过滤。
+    """
+    out = []
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    for job in (doc.get("jobs") or {}).values():
+        for i, step in enumerate(job.get("steps") or []):
+            run = step.get("run")
+            if isinstance(run, str):
+                # `run:` 正文里的 YAML 注释行（`# ...`）不算：那是解释，不是命令
+                body = "\n".join(ln for ln in run.splitlines()
+                                 if not ln.lstrip().startswith("#"))
+                out += [(f"{wf.name}#step{i}:{step.get('name')}", t) for t in _tokens(body)]
+            with_ = step.get("with")
+            if isinstance(with_, dict):
+                for value in with_.values():
+                    for leaf in _scalar_leaves(value):
+                        out += [(f"{wf.name}#step{i}:with", t) for t in _tokens(leaf)]
+    return out
+
+
 def _from_workflows() -> list:
     """返回 [(出处, 路径token)]，只取 Actions 真读的正文，不取注释。"""
     out = []
     for wf in WORKFLOWS:
-        doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
-        for job in (doc.get("jobs") or {}).values():
-            for i, step in enumerate(job.get("steps") or []):
-                run = step.get("run")
-                if isinstance(run, str):
-                    # `run:` 正文里的 YAML 注释行（`# ...`）不算：那是解释，不是命令
-                    body = "\n".join(ln for ln in run.splitlines()
-                                     if not ln.lstrip().startswith("#"))
-                    out += [(f"{wf.name}#step{i}:{step.get('name')}", t) for t in _tokens(body)]
-                with_ = step.get("with")
-                if isinstance(with_, dict):
-                    for value in with_.values():
-                        if isinstance(value, str):
-                            out += [(f"{wf.name}#step{i}:with", t) for t in _tokens(value)]
+        out += _workflow_pairs(wf)
     return out
 
 
@@ -430,6 +472,32 @@ def test_the_pointer_scanner_reads_enough_real_pointers():
     assert "data" in tokens, \
         "名单里没有 watchdog 的 data 那一条：$ProjectRoot 拼出来的裸目录名不再被扫到了，" \
         "说明 _ps_joined_pointers 坏了——旧表就是在这条上漏了一个斜杠才让 CI 必红"
+
+
+def test_the_scanner_reads_yaml_workflows_and_nested_with_values(tmp_path):
+    """反例（#131）：`.yaml` 扩展名与 `with:` 里的结构化值都不许落在扫描面外。
+
+    两件旧病各来一枚：① `WORKFLOWS` 只 glob `*.yml`，同一条引用写进 `tests.yaml` 永久没人看；
+    ② `with:` 值只收字符串，`script: {inline: "…路径…"}` 里的字符串叶子被整块跳过。这里用
+    临时目录量 `_workflow_files`（两种扩展名都要收）与 `_workflow_pairs`（嵌套一层的路径要抽出来）。
+    """
+    d = tmp_path / "workflows"
+    d.mkdir()
+    (d / "a.yml").write_text("name: A\non: [push]\njobs: {}\n", encoding="utf-8")
+    (d / "b.yaml").write_text("name: B\non: [push]\njobs: {}\n", encoding="utf-8")
+    assert [p.name for p in _workflow_files(d)] == ["a.yml", "b.yaml"], (
+        "workflow 扫描面只收一种扩展名：另一份永久失明")
+
+    invented = "deploy/this_pointer_was_invented_for_the_yaml_scope.ps1"
+    assert not (REPO_ROOT / invented).exists(), f"反例用的假路径竟然真在：{invented}"
+    wf = d / "nested.yaml"
+    wf.write_text(
+        "name: Nested\non: [push]\njobs:\n  synth:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - uses: some/action@v1\n        with:\n          script:\n"
+        "            inline: \"先看 " + invented + "\"\n", encoding="utf-8")
+    pairs = _workflow_pairs(wf)
+    assert (str(wf.name) + "#step0:with", invented) in pairs, (
+        "`with:` 结构化值里的字符串叶子没有被抽出来：非标量被静默跳过（读到 %r）" % (pairs,))
 
 
 def test_the_exemption_engine_still_has_teeth():
