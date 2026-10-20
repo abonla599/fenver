@@ -118,7 +118,7 @@ cleanup may touch, so a copy meant to outlive the rollback package must sit wher
 does not go. The copies are copies: this step never moves or deletes an original, and a file it
 cannot read is reported unreadable rather than as zero records ("cannot read" and "read zero"
 are different verdicts, same rule as backend-entries=unproven above).
-backend/tests/test_swap_package_rollback_data_snapshot.py runs the WHOLE script against a fake
+backend/tests/test_swap_package_data_snapshot.py runs the WHOLE script against a fake
 project root with Start-Process / Stop-Process / the scheduled-task cmdlets stubbed to a log,
 and requires DATA-SAVED on the observed output BEFORE the first would-start entry - the
 ordering is proven by what this machine did, not by where the line sits.

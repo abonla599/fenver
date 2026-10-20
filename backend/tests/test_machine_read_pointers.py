@@ -509,3 +509,93 @@ def test_the_gradle_project_cache_is_ignored_by_a_rule_that_actually_exists():
     assert rule_part.endswith(":android-native/.gradle/"), (
         f"{probe} 命中的不是那条规则本身，而是 {rule_part!r}——"
         "空模式（一枚裸 CR 的空行）也算命中，而那正是这条锁要挡的假阳性")
+
+
+# ------------------------------------------- deploy 头注释里登记的锁文件名也要真在
+# 规则 2（`_literals`）刻意把注释整段剥掉，头注释正好是它的盲区：swap-package.ps1 的
+# 头 `<# ... #>` 一直在用散文登记"哪个 backend/tests/xxx.py 是这段行为的锁"，而 #61
+# 之前 :121 指着 test_swap_package_rollback_data_snapshot.py——一份从未交付的文件
+# （真正交付的叫 test_swap_package_data_snapshot.py）。读者顺着这句去找锁，永远找不到，
+# 正是模块 docstring 引 AGENTS.md 第 3 条说的那种断链。
+# 本条只管 deploy/*.ps1 的**头注释**：正文 # 注释里的历史叙述是刻意留下的证据，不归这里判。
+_HEAD_TEST_POINTER = re.compile(r"backend/tests/[a-z0-9_]+\.py")
+
+
+def _head_comment_text(text: str) -> str:
+    r"""取 .ps1 开头连续注释区：`<# ... #>` 块与 `#` 行注释，遇到第一行真代码就停。
+
+    "连续"是刻意的窄口径：头注释讲的是"这份脚本依赖什么"，正文注释讲的是历史
+    （"从前住在 X"），后者按本文件模块 docstring 的口径是证据，不判红。
+    块注释没闭合就判红而不是把整篇当注释：读不出头在哪，等于这把尺子没在看。
+    """
+    kept = []
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if in_block:
+            kept.append(line)
+            if "#>" in stripped:
+                in_block = False
+            continue
+        if stripped.startswith("<#"):
+            kept.append(line)
+            in_block = "#>" not in stripped[2:]
+            continue
+        if not stripped or stripped.startswith("#"):
+            kept.append(line)
+            continue
+        break
+    assert not in_block, "deploy 脚本的头 <# 块没有闭合：读不出头注释的边界，判红不判跳过"
+    return "\n".join(kept)
+
+
+def _head_pointers(text: str) -> list:
+    """头注释里出现的 backend/tests/*.py，按出现顺序原样返回。"""
+    return _HEAD_TEST_POINTER.findall(_head_comment_text(text))
+
+
+def _dangling_head_pointers(text: str) -> list:
+    """头注释里点名、而仓库根下不存在的锁文件。"""
+    return [token for token in _head_pointers(text) if not (REPO_ROOT / token).exists()]
+
+
+def _deploy_head_pointers() -> dict:
+    out = {}
+    for script in sorted((REPO_ROOT / "deploy").glob("*.ps1")):
+        out[script.relative_to(REPO_ROOT).as_posix()] = _head_pointers(
+            script.read_text(encoding="utf-8"))
+    return out
+
+
+def test_every_test_file_named_in_a_deploy_head_comment_exists():
+    """deploy 脚本头注释里登记的每份锁文件都必须真在；且名单不许空转。"""
+    found = _deploy_head_pointers()
+    total = sum(len(tokens) for tokens in found.values())
+    assert total >= 2, (
+        f"deploy/*.ps1 的头注释里只抽到 {total} 条 backend/tests/*.py 引用："
+        "扫描本身坏了（头注释剥法、正则、或 deploy 目录形状变了），"
+        "这时'没有断链'和'什么都没看'长得一模一样")
+    dangling = {origin: sorted({t for t in tokens if not (REPO_ROOT / t).exists()})
+                for origin, tokens in found.items()}
+    dangling = {origin: tokens for origin, tokens in dangling.items() if tokens}
+    assert not dangling, (
+        f"deploy 头注释里登记的锁文件不存在：{dangling}——读者会以为那儿有一份锁，"
+        "实际无人守；改指向，别删内容（#61 的判例：swap-package.ps1 :121 曾指着"
+        "从未交付的 test_swap_package_rollback_data_snapshot.py）")
+
+
+def test_the_deploy_head_comment_lock_bites_a_dangling_pointer():
+    """反例：合成一条"头注释里登记了不存在的文件"，判据必须点名它。
+
+    没有这一条，上面那条锁绿着也可能只是没看——#61 的整个判例就是"指针指着一份
+    从未交付的锁文件，而规则 2 把注释剥掉，于是没人看得见"。
+    """
+    invented = "backend/tests/test_this_pointer_was_invented_for_ticket_61.py"
+    assert not (REPO_ROOT / invented).exists(), f"反例用的假文件竟然真在：{invented}"
+    synthetic = "<#\n  " + invented + " is the lock for this behaviour\n#>\n[CmdletBinding()]\n"
+    assert _dangling_head_pointers(synthetic) == [invented], (
+        "合成的头注释里登记了不存在的锁文件，判据却没点名：这条锁没有牙")
+    # 对照一：同一句写进正文注释（代码之后）不归这把尺子管——窄口径是刻意的。
+    assert _dangling_head_pointers("[CmdletBinding()]\n# " + invented + "\n") == []
+    # 对照二：头注释里点名真文件不红，证明上面点名的依据是"缺文件"，不是"凡引用必红"。
+    assert _dangling_head_pointers("<#\n  backend/tests/test_machine_read_pointers.py\n#>\n") == []
