@@ -73,6 +73,17 @@ DEFAULTS = {
     "credit_shadow_daily_limit": 0.0,
 }
 
+# 一个窗口数值能取到的**最大秒数**。下游 `task_store.waiting_deadline()` 会做
+# `waiting_since + timedelta(seconds=window)`，而 datetime 的表达区间是
+# 0001-01-01 ~ 9999-12-31；`timedelta.max` 自己的上限（999999999 天 ≈ 8.64e13 秒）
+# 比日期差宽，所以两条上限里更紧的是日期差：实测
+# `(datetime.max - datetime.min).total_seconds()` = 315537897600.0，而
+# `timedelta(seconds=315537897600.0)` 从 datetime.min 加过去就抛
+# "date value out of range"，315537897599.0 才加得进去。超过这条线的数不是"很长的
+# 窗口"，是一次 `OverflowError` / `date value out of range`（详情端点 500）。
+# 它同时远小于 2**53：线内的整数都能被 float 精确表示，int→float 不会改值。
+MAX_WINDOW_SECONDS = 315_537_897_599.0
+
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
 # 会话存储、供应商地址这类东西上时，忘了改这张表的管理端点就等于开了个任意写口子。
 MUTABLE_KEYS = frozenset(DEFAULTS)
@@ -125,19 +136,24 @@ def _type_ok(value, default) -> bool:
     两种写法——按老的 isinstance 口径，手写的整数秒会被判"类型不对"悄悄回
     默认，正是"我明明改过怎么没生效"那一类配置事故。bool 仍然只收 bool。
 
-    整数还要多一关：**超出 float 范围的 int 不收**。这个文件里每个数字下游都要过
-    `float()`（读数口径与 JSON 响应都是），而 `float(10**400)` 抛 OverflowError。
-    `restore()` 跑在导入期、审批 TTL 又在 `app/core/approval.py` 的模块层被取走，
-    收下这种数就是让现网起不来（不是 500，是 ImportError）；"等读到的时候再兜"也挡
-    不住 `read()`——它会把盘上原值直接交给 `GET /v1/config`。"""
+    数值还要多两关。一关是**超出 float 范围的 int**（`float(10**400)` 抛
+    OverflowError）：`restore()` 跑在导入期、审批 TTL 又在 `app/core/approval.py`
+    的模块层被取走，收下这种数就是让现网起不来（不是 500，是 ImportError）；"等读到
+    的时候再兜"也挡不住 `read()`——它会把盘上原值直接交给 `GET /v1/config`。
+    另一关是**超出 datetime 可用范围**的值：`10**13` 过得了 float，过不了下游
+    `waiting_since + timedelta(seconds=...)`（见 `MAX_WINDOW_SECONDS`）。形状关是
+    唯一能在写缓存前说"这一键没被接受"的地方，放它进去就只剩 500 或静默折值两条
+    坏路。inf 仍然收——它是 float 的形状，非有限值由写缓存前的消毒层折回该格默认。"""
     if isinstance(default, bool):
         return isinstance(value, bool)
     if isinstance(default, (int, float)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return False
         try:
-            float(value)
+            number = float(value)
         except OverflowError:
+            return False
+        if math.isfinite(number) and number > MAX_WINDOW_SECONDS:
             return False
         return True
     return isinstance(value, type(default))
@@ -200,7 +216,8 @@ def update_repo() -> str:
 
 
 def _finite_or_close(value, fallback: float, where: str) -> float:
-    """把任意 JSON 形状归一成**非负有限浮点**；归不出来就折回 `fallback` 并说一句。
+    """把任意 JSON 形状归一成**非负、有限、且不超过 `MAX_WINDOW_SECONDS`** 的浮点；
+    归不出来就折回 `fallback` 并说一句。
 
     为什么 `max(0.0, x)` 不够：它只挡负数，挡不住非有限值。`inf` 比 0 大，会**原样
     穿到出口**；而 `nan` 与任何数比较都是 False，于是被 `max` 吃掉、悄悄落回 0.0。
@@ -234,11 +251,96 @@ def _finite_or_close(value, fallback: float, where: str) -> float:
         print(f"⚠️ {where} 读出来不是有限值（{value!r}），按这一格的默认 {fallback!r} 跑；"
               f"非有限值既不能当窗口用，也不能进响应")
         return fallback
+    if number > MAX_WINDOW_SECONDS:
+        # 上界必须在这里判：环境变量臂不经过 `_type_ok` / `_sanitize_loaded`，
+        # `TASK_WAITING_USER_TIMEOUT_SECONDS=1e18` 是能现读出来的。
+        print(f"⚠️ {where} 读出来超出可用上限（{value!r} > {MAX_WINDOW_SECONDS} 秒）："
+              f"datetime 装不下这么大的窗口，按这一格的默认 {fallback!r} 跑")
+        return fallback
     return max(0.0, number)
 
 
+def _json_safe(value) -> bool:
+    """这个值能不能原样进 `allow_nan=False` 的响应，且不给下游留 `float()` 溢出的雷。
+
+    递归判而不是只看顶层：`{"junk": [Infinity]}` 这种嵌套形状同样会让
+    `json.dumps(..., allow_nan=False)` 当场抛。两件事一起判——`json.dumps` 自己只拦
+    inf/nan，**不拦**任意大的整数（`10**400` 序列化得好好的），而那种整数一进
+    `float()` 就抛 OverflowError。
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return True
+    if isinstance(value, int):
+        try:
+            float(value)
+        except OverflowError:
+            return False
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, (list, tuple)):
+        return all(_json_safe(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _json_safe(v) for k, v in value.items())
+    return False
+
+
+def _sanitize_credit_benchmark(value) -> dict:
+    """把基准价整棵子字典收成"任何一键都进得了 `allow_nan=False` 响应"的形状。
+
+    只修数值子键不够：`currency` 被写成 `Infinity`、或额外多出个 `"junk": Infinity`，
+    同样让 `read()` 整份字典在 `GET /v1/config` 序列化时抛。三条口径：
+    - 字符串键（`currency`）：类型对就留，不对回默认；
+    - 已知数值键：不是有限正数（含 `float()` 溢出）就折回**它自己的**默认，别的键不动；
+    - 额外/未知键：`_json_safe` 不过就**丢掉这一键**并说一句。丢单键而不是整表回默认，
+      因为这些键本模块不读，回默认会把管理员配好的已知键一起抹掉；留下来的额外键则
+      必须证明自己进得了响应、也不会在某天被 `float()` 撞上 OverflowError。
+    """
+    defaults = DEFAULTS["credit_benchmark"]
+    if not isinstance(value, dict):
+        return dict(defaults)
+    out = {}
+    for sub, item in value.items():
+        if sub in defaults:
+            default = defaults[sub]
+            if isinstance(default, str):
+                if isinstance(item, str):
+                    out[sub] = item
+                else:
+                    print(f"⚠️ 配置项 credit_benchmark.{sub} 得是字符串（收到 {item!r}），"
+                          f"落回默认 {default!r}")
+                    out[sub] = default
+                continue
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                print(f"⚠️ 配置项 credit_benchmark.{sub} 不是数（收到 {item!r}），"
+                      f"落回默认 {default!r}")
+                out[sub] = default
+                continue
+            try:
+                number = float(item)
+            except OverflowError:
+                print(f"⚠️ 配置项 credit_benchmark.{sub} 超出 float 范围（{item!r}），"
+                      f"落回默认 {default!r}")
+                out[sub] = default
+                continue
+            if not math.isfinite(number) or number <= 0:
+                print(f"⚠️ 配置项 credit_benchmark.{sub} 得是有限的正数（{item!r}），"
+                      f"落回默认 {default!r}")
+                out[sub] = default
+                continue
+            # 合法 int 原样保型，与顶层数值格同一口径。
+            out[sub] = item
+            continue
+        if _json_safe(item):
+            out[sub] = item
+        else:
+            print(f"⚠️ 配置项 credit_benchmark 的额外键 {sub!r} 里含非有限值或超出 float "
+                  f"范围的数，丢弃这一键：它进不了 allow_nan=False 的响应")
+    return out
+
+
 def _sanitize_loaded(key: str, value):
-    """盘上/管理端送来的值**写进缓存之前**的最后一道：非有限数折回该格默认。
+    """盘上/管理端送来的值**写进缓存之前**的最后一道：坏值折回该格默认、坏子树丢掉。
 
     为什么修在缓存写入层而不是 `read()`：`read()` 在详情端点的热路径上（每次 GET 都经
     `waiting_timeout_info` 现读一次），在它上面再叠一遍消毒，等于每个请求都重算同一件
@@ -248,30 +350,26 @@ def _sanitize_loaded(key: str, value):
     `apply_update()`——都在这里过一遍，于是 `read()`、`GET /v1/config`、
     `POST /v1/admin/config` 的响应以及全部下游读者天然拿到干净字典。
 
-    负数的收口沿用 `_finite_or_close` 的同一条 `max(0.0, ...)`：这四个数值格的 getter
-    本来就把负数读成 0，缓存里存 0 只是让 `read()` 与 getter 看到同一个数。
+    两条数值口径：
+    - **合法整数原样保型**：`3600` 经 `restore()` 后 `read()` 仍是 int 3600，不统一
+      浮点化（getter 出口仍是 float，形状没变）。上界以内、非负的整数都是精确值；
+      超过 `MAX_WINDOW_SECONDS` 的整数过不了 `_type_ok`，走不到这里，真走到了也按
+      默认落，绝不交给 `float()` 静默取整。
+    - 负数的收口沿用 `_finite_or_close` 的同一条 `max(0.0, ...)`：这些数值格的 getter
+      本来就把负数读成 0，缓存里存 0 只是让 `read()` 与 getter 看到同一个数。
     """
     if key == "credit_benchmark":
-        out = dict(value)
-        for sub, default in DEFAULTS["credit_benchmark"].items():
-            if sub == "currency" or sub not in out:
-                continue
-            item = out[sub]
-            if isinstance(item, bool) or not isinstance(item, (int, float)):
-                # 形状不对由 credit_benchmark() 逐键回落；这一层只保证"进得了 JSON"，
-                # 不替它决定字符串该变成什么。
-                continue
-            try:
-                finite = math.isfinite(float(item))
-            except OverflowError:
-                finite = False
-            if not finite:
-                print(f"⚠️ 配置项 credit_benchmark.{sub} 不是有限数或超出 float 范围"
-                      f"（{item!r}），落回默认 {default!r}")
-                out[sub] = default
-        return out
+        return _sanitize_credit_benchmark(value)
     default = DEFAULTS[key]
     if isinstance(default, (int, float)) and not isinstance(default, bool):
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                return 0.0
+            if value > MAX_WINDOW_SECONDS:
+                print(f"⚠️ 配置项 {key} 的整数 {value!r} 超出 datetime 可用上限"
+                      f"（{MAX_WINDOW_SECONDS} 秒），落回默认 {default!r}")
+                return default
+            return value
         return _finite_or_close(value, float(default), f"配置项 {key}")
     return value
 
@@ -425,6 +523,8 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
     界面上"保存"的人想知道的是改成了什么；类型不对同样拒，但只拒那一个键。
     值域不对（_VALUE_CHECKS，目前只有 update_repo 的 owner/repo 白名单）也一样：
     它出站时会拼进服务端要请求的 URL，放行任意字符串等于开一条 SSRF。
+    超出 `MAX_WINDOW_SECONDS` 的数同样拒：`10**18+1` 交给 `float()` 会被静默取整成
+    `1e18`，那是**改值**不是校验，运维在管理端看到的必须是"这一键没被接受"。
     """
     rejected = []
     with _lock:

@@ -31,14 +31,21 @@ test_v0350_a5_timeout_is_suspension.py` 里"窗口坏值"那一族**只喂显式
 - `restore()` / `apply_update()` **写缓存之前**的消毒：盘上（或管理端 JSON 里）的
   `Infinity` / `NaN` / `-Infinity` 收进来之前就折回该格默认，判据是把 `read()` 整份
   交给 `json.dumps(..., allow_nan=False)`——`GET /v1/config` 与 `POST /v1/admin/config`
-  的响应形状就是这一份字典。
-- 超出 float 范围的整数（`10**400`）：`_type_ok` 拒收、导入期子进程、`credit_benchmark`
-  的 `float()`、`_window_seconds` 的显式参数与现读两支。
+  的响应形状就是这一份字典。`credit_benchmark` 按**整棵子字典**收：已知数值键折回
+  各自的默认、`currency` 类型不对回默认、额外键只要含非有限值或超出 float 范围的数
+  （含嵌套容器里的）就丢掉那一键。
+- 超出 float 范围的整数（`10**400`），以及**超出 datetime 可用范围**的数值
+  （`10**13` 以上；边界是 `config_store.MAX_WINDOW_SECONDS`，取
+  `timedelta` 天数上限与 datetime 日期差里更紧的那个）：形状关拒收、导入期子进程、
+  `credit_benchmark` 的 `float()`、`_window_seconds` 的显式参数与现读两支。
 - `task_store._window_seconds` 的 `None` 那一支（现读那一条），以及一个故意绕开配置
   出口的假读数口径（验的是"就算上游漏了，这一层也拦得住"）。
 - 形状只有这些：`("inf","Inf","Infinity","+inf","1e400","  inf ","nan","-inf","","五分钟")`
   喂 env 臂；`(inf, -inf, nan)` 经 `restore()` 喂 config 臂；同一批字符串另走一支
-  绕过 `restore()` 的直写用例；`10**400` 走盘、基准价、管理端与导入期四条路。
+  绕过 `restore()` 的直写用例；`10**400` 走盘、基准价、管理端与导入期这些通道；
+  `10**13` / `10**14` / `10**18` / `10**18+1` 走盘与形状关，`1e18` 走 env 臂；
+  `credit_benchmark` 的 `currency=Infinity`、`junk=Infinity`、`junk=NaN`、
+  `junk=10**400`、`junk=[Infinity]` 各走 `restore()` 与 `apply_update()` 两条路。
 
 ──────── 仍然漏掉的形状（本文件不声称覆盖）────────
 - 直写 `config_store._config` 的路径只有 getter 层那一条锁（`test_绕过形状关直写内存态时
@@ -423,9 +430,9 @@ def test_盘上每种非有限值经restore后read都过得了allow_nan序列化
                                                               monkeypatch):
     """复核员那句原话的复现：`json.dumps(cs.read(), allow_nan=False)` 不许抛。
 
-    四种数值格与基准价的每一个数值键都喂同一个坏值，落点必须仍是各格自己的默认。
+    `CELLS` 表里的每一格与基准价的每一个数值键都喂同一个坏值，落点必须仍是各格自己的默认。
     负向锁：把 `restore()` 里 `_sanitize_loaded(key, data[key])` 摘回 `data[key]`，
-    三行都红，红话是「restore() 把盘上的非有限值收进了缓存，GET /v1/config 会在这里抛」。
+    每个坏值形状那一行都会红，红话是「restore() 把盘上的非有限值收进了缓存，GET /v1/config 会在这里抛」。
     """
     path = tmp_path / "config.json"
     raw = {key: number for _, key, _, _ in CELLS}
@@ -623,3 +630,245 @@ def test_400位整数的TTL在导入期只降级不抛(tmp_path):
     report = [ln for ln in lines if ln.startswith("OK ")][-1].split()
     default = float(config_store.DEFAULTS["approval_ticket_ttl_seconds"])
     assert (float(report[1]), float(report[2])) == (default, default)
+
+
+# ---------- BLOCK ①（二轮）：基准价要消毒**整棵子字典** ----------
+#
+# 复核员实跑：`{"credit_benchmark": {"currency": Infinity}}` 或
+# `{"credit_benchmark": {"junk": Infinity}}` 经 `restore()` 后
+# `json.dumps(cs.read(), allow_nan=False)` 抛；`apply_update` 的返回体同形状。
+# 旧消毒只遍历已知数值键、跳过 currency，且 `out = dict(value)` 保留额外键。
+
+BENCHMARK_BAD_SHAPES = ("currency=Infinity", "junk=Infinity", "junk=NaN",
+                        "junk=10**400", "junk=[Infinity]")
+
+
+def _benchmark_payload(shape: str) -> dict:
+    """在"全默认"的基础上只坏一处，用来证明消毒没有顺手重排其余键。"""
+    payload = dict(config_store.DEFAULTS["credit_benchmark"])
+    if shape == "currency=Infinity":
+        payload["currency"] = float("inf")
+    elif shape == "junk=Infinity":
+        payload["junk"] = float("inf")
+    elif shape == "junk=NaN":
+        payload["junk"] = float("nan")
+    elif shape == "junk=10**400":
+        payload["junk"] = HUGE_INT
+    else:
+        payload["junk"] = [float("inf")]
+    return payload
+
+
+def _assert_benchmark_clean(bench: dict, shape: str) -> None:
+    defaults = config_store.DEFAULTS["credit_benchmark"]
+    for sub, default in defaults.items():
+        if sub == "currency":
+            continue
+        assert bench[sub] == default, f"坏值 {shape} 顺手动了已知键 {sub}：{bench[sub]!r}"
+    if shape.startswith("currency="):
+        assert bench["currency"] == defaults["currency"], (
+            f"currency 喂 {shape} 之后成了 {bench['currency']!r}")
+    else:
+        assert "junk" not in bench, (
+            f"额外键（{shape}）没被丢掉，它会跟着 read() 进响应：{bench.get('junk')!r}")
+
+
+@pytest.mark.parametrize("shape", BENCHMARK_BAD_SHAPES,
+                         ids=[s.replace("**", "^") for s in BENCHMARK_BAD_SHAPES])
+def test_基准价子字典的坏值经盘进来后read与响应都过得了序列化(shape, tmp_path, monkeypatch):
+    """整棵子字典都要消毒，不只是"已知数值键里的非有限数"。
+
+    `currency` 是非数值键（旧消毒跳过它），`junk` 是额外键（旧消毒用 `dict(value)`
+    原样保留）。`junk=10**400` 那一行要单独说：`json.dumps` 对任意大的整数**不抛**，
+    所以只断言"dumps 不抛"会漏掉它——必须断言这一键被丢掉。嵌套 `[Infinity]` 证明
+    判据是递归的，不是只看顶层标量。
+
+    负向锁（实跑）：把 `_sanitize_loaded` 的 credit_benchmark 分支摘回 `dict(value)`，
+    `currency=Infinity` / `junk=Infinity` / `junk=NaN` / `junk=[Infinity]` 红在 dumps，
+    `junk=10**400` 红在"额外键没被丢掉"——五种形状没有一种能混过去。
+    """
+    path = tmp_path / "config.json"
+    _write_config(path, {"credit_benchmark": _benchmark_payload(shape)})
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    config_store.restore()
+    cfg = config_store.read()
+    try:
+        json.dumps(cfg, allow_nan=False)
+    except ValueError as exc:
+        pytest.fail(f"restore() 把基准价子字典里的坏值收进了缓存，GET /v1/config 会抛：{exc}")
+    _assert_benchmark_clean(cfg["credit_benchmark"], shape)
+
+
+@pytest.mark.parametrize("shape", BENCHMARK_BAD_SHAPES,
+                         ids=[s.replace("**", "^") for s in BENCHMARK_BAD_SHAPES])
+def test_基准价子字典的坏值经管理端进来后响应与落盘都过得了序列化(shape, tmp_path,
+                                                              monkeypatch):
+    """`apply_update` 的返回体就是 `POST /v1/admin/config` 的响应，落盘那份是下一次
+    `restore()` 的输入——两份都要干净，且 `rejected` 里不许出现这个键（形状关收下了
+    整棵子树，消毒层负责折值/丢键，不是把整键拒掉）。
+
+    负向锁：同上（摘回 `dict(value)`），返回体与落盘那份各红在 dumps 或额外键断言。
+    """
+    monkeypatch.setenv("CONFIG_DB_PATH", str(tmp_path / "config.json"))
+    config_store.restore()
+    out, rejected = config_store.apply_update(
+        {"credit_benchmark": _benchmark_payload(shape)})
+    assert rejected == [], f"子字典的形状关收下了它，消毒层该折值/丢键：{rejected!r}"
+    try:
+        json.dumps(out, allow_nan=False)
+    except ValueError as exc:
+        pytest.fail(f"apply_update 的返回体带着坏值，管理端响应会抛：{exc}")
+    _assert_benchmark_clean(out["credit_benchmark"], shape)
+    with open(tmp_path / "config.json", encoding="utf-8") as f:
+        disk = json.load(f)
+    try:
+        json.dumps(disk, allow_nan=False)
+    except ValueError as exc:
+        pytest.fail(f"消毒后的字典仍把坏值落了盘，下一次 GET /v1/config 会抛：{exc}")
+    _assert_benchmark_clean(disk["credit_benchmark"], shape)
+
+
+# ---------- BLOCK ②（二轮）：float 范围内、datetime 范围外的数 ----------
+#
+# 复核员实跑：10**18 过得了 `_type_ok`（read 可序列化），却让
+# `timedelta(seconds=...)` 抛 "Python int too large to convert to C int"；
+# 10**13 抛 "date value out of range"；10**14 抛
+# "days=...; must have magnitude <= 999999999"。边界常量是实测出来的，
+# 两条上限（timedelta 自己的天数上限、datetime 的日期差）里取更紧的那个。
+
+DATETIME_OVERRANGE_INTS = (10 ** 13, 10 ** 14, 10 ** 18, 10 ** 18 + 1)
+
+
+def test_窗口上限常量卡在datetime能表达的最大边界上():
+    """常量不是拍的：上限那一秒从 datetime.min 加得进去，再加一秒就出界。
+
+    负向锁：把 `MAX_WINDOW_SECONDS` 放宽到 `sys.float_info.max`，第二句不再抛
+    OverflowError，这条红；同一变异下 10**13 那一族也全红——这正是复核员说的
+    "只挡 float 范围不够"。
+    """
+    edge = config_store.MAX_WINDOW_SECONDS
+    assert datetime.datetime.min + datetime.timedelta(seconds=edge) <= datetime.datetime.max
+    with pytest.raises(OverflowError):
+        datetime.datetime.min + datetime.timedelta(seconds=edge + 1)
+    assert datetime.timedelta.max.total_seconds() > edge, (
+        "边界取了更紧的那条：datetime 的日期差，不是 timedelta 自己的天数上限")
+
+
+def test_超出datetime范围的数被形状关拒收而inf仍然收():
+    """形状关是唯一能在写缓存前说"这一键没被接受"的地方。
+
+    inf 不在这一关拒：它是 float 的形状，由写缓存前的消毒层折回该格默认（既有用例
+    `test_管理端写入非有限值后的响应…` 钉着 `rejected == []`）。
+
+    负向锁：把 `_type_ok` 里那条上界判据摘掉，第一族断言红；只放宽常量也一样。
+    """
+    for value in DATETIME_OVERRANGE_INTS:
+        assert config_store._type_ok(value, 0.0) is False, (
+            f"{value} 过得了形状关——它会在 timedelta 里炸")
+    assert config_store._type_ok(3600, 0.0) is True
+    assert config_store._type_ok(float("inf"), 0.0) is True
+
+
+@pytest.mark.parametrize("value", DATETIME_OVERRANGE_INTS,
+                         ids=[str(v) for v in DATETIME_OVERRANGE_INTS])
+def test_超出datetime范围的整数经盘进来时详情响应不炸(value, isolated_tasks,
+                                                    tmp_path, monkeypatch):
+    """走盘的那一族：形状关拒收 → 缓存里是该格默认 0 → 详情 dict 可序列化。
+
+    这里**不传** `timeout_seconds`：复现的就是 `waiting_timeout_info` 自己现读那一支。
+
+    负向锁（实跑）：把 `MAX_WINDOW_SECONDS` 放宽到 float 极限（两层上界一起失效），
+    10**13/10**14/10**18 三行红在 `waiting_timeout_info` 里的 OverflowError，
+    10**18+1 那一行还多一条"read() 里不是默认 0"的断言。只摘 `_type_ok` 一层不红
+    （`_sanitize_loaded` 的上界分支接着折回默认）——两层是纵深。
+    """
+    path = tmp_path / "config.json"
+    _write_config(path, {"task_waiting_user_timeout_seconds": value})
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    monkeypatch.delenv("TASK_WAITING_USER_TIMEOUT_SECONDS", raising=False)
+    config_store.restore()
+    cfg = config_store.read()
+    json.dumps(cfg, allow_nan=False)
+    assert cfg["task_waiting_user_timeout_seconds"] == 0.0, (
+        f"{value} 没在写缓存前折回默认：{cfg['task_waiting_user_timeout_seconds']!r}")
+    info = ts.waiting_timeout_info(_parked_task())
+    assert info["waiting_timeout_seconds"] == 0.0, (
+        f"{value} 被收成了一个会炸的窗口：{info['waiting_timeout_seconds']!r}")
+    json.dumps(info, allow_nan=False)
+
+
+@pytest.mark.parametrize("text", ("1e13", "1e14", "1e18"), ids=["1e13", "1e14", "1e18"])
+def test_环境变量里的超范围窗口也不让详情响应炸(text, isolated_tasks, monkeypatch):
+    """env 臂不经过 `_type_ok` / `_sanitize_loaded`：`1e18` 是有限浮点，只能在
+    getter 出口（以及 `_window_seconds` 的第二层）折回 0。
+
+    负向锁：把 `_finite_or_close` 与 `_window_seconds` 两处上界判据**同时**摘掉，
+    这条红在 `waiting_timeout_info` 里的 OverflowError；只摘一处不红（另一层接着）。
+    """
+    monkeypatch.setenv("TASK_WAITING_USER_TIMEOUT_SECONDS", text)
+    info = ts.waiting_timeout_info(_parked_task())
+    assert info["waiting_timeout_seconds"] == 0.0, (
+        f"env {text} 被收成了一个会炸的窗口：{info['waiting_timeout_seconds']!r}")
+    json.dumps(info, allow_nan=False)
+
+
+def test_起点本身已经很晚时到期时刻封顶在datetimemax(isolated_tasks, monkeypatch):
+    """窗口在上限以内，起点却晚到"再加就出界"（tasks.json 被手改 / 时钟跳到 9999 年）。
+
+    `waiting_deadline` 那次加法同样不许变成详情端点的 500：封顶到 `datetime.max`
+    仍然表达"远到看不见"，而不是抛 `date value out of range`。
+    负向锁：把 `waiting_deadline` 里那次 OverflowError 捕获摘掉，这条红在加法上。
+    """
+    monkeypatch.setenv("TASK_WAITING_USER_TIMEOUT_SECONDS", "3600")
+    task = _parked_task()
+    task.waiting_since = datetime.datetime.max.isoformat()
+    deadline = ts.waiting_deadline(task, timeout_seconds=3600.0)
+    assert deadline == datetime.datetime.max, f"到期时刻没封顶：{deadline!r}"
+    info = ts.waiting_timeout_info(task)
+    assert info["waiting_expires_at"] == datetime.datetime.max.isoformat()
+    json.dumps(info, allow_nan=False)
+
+
+# ---------- BLOCK ③（二轮）：合法 int 保型；超范围整数明确拒绝 ----------
+
+def test_合法整数经restore后read原样保型(tmp_path, monkeypatch):
+    """`3600` 进、`3600` 出，类型也是 int——不统一浮点化。
+
+    值没变只是类型变了也算一种静默改写（`10**18+1` 那种是真改值，另有一条）。
+    getter 出口的形状不变：仍是 float。
+
+    负向锁：把 `_sanitize_loaded` 里保型那一支摘掉（回到 `_finite_or_close`），
+    `type(...) is int` 这一句红，拿到的是 3600.0。
+    """
+    path = tmp_path / "config.json"
+    _write_config(path, {"stream_no_reader_grace_seconds": 3600})
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    config_store.restore()
+    got = config_store.read()["stream_no_reader_grace_seconds"]
+    assert got == 3600 and type(got) is int, (
+        f"restore 把整数 3600 改写成了 {got!r}（{type(got).__name__}）")
+    assert config_store.stream_no_reader_grace_seconds() == 3600.0
+
+
+def test_管理端写入超出datetime范围的整数被明确拒绝而不是静默取整(tmp_path, monkeypatch):
+    """复核员实跑：`10**18+1` 被收下并静默落成 `1e18`、`rejected=[]`。
+
+    判据三处：`rejected` 点名这一键、返回值与**落盘值**都是该格默认（不是 1e18）、
+    响应可序列化。负向锁：把 `_type_ok` 的上界判据摘掉（常量保持），
+    `rejected == []` 红——它会走 `_sanitize_loaded` 的上界分支静默折成默认；
+    两层都摘掉时落盘值变成 1e18，还是红。
+    """
+    monkeypatch.setenv("CONFIG_DB_PATH", str(tmp_path / "config.json"))
+    config_store.restore()
+    out, rejected = config_store.apply_update(
+        {"stream_no_reader_grace_seconds": 10 ** 18 + 1})
+    assert rejected == ["stream_no_reader_grace_seconds"], (
+        f"超范围整数被静默收下了：rejected={rejected!r}")
+    default = float(config_store.DEFAULTS["stream_no_reader_grace_seconds"])
+    assert out["stream_no_reader_grace_seconds"] == default, (
+        f"返回值被静默改成了 {out['stream_no_reader_grace_seconds']!r}")
+    with open(tmp_path / "config.json", encoding="utf-8") as f:
+        disk = json.load(f)
+    assert disk["stream_no_reader_grace_seconds"] == default, (
+        f"落盘值被静默改成了 {disk['stream_no_reader_grace_seconds']!r}")
+    json.dumps(out, allow_nan=False)
