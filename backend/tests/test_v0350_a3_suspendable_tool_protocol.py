@@ -1245,19 +1245,18 @@ def test_an_answer_whose_breakpoint_was_just_taken_does_not_rerun_the_subtask(
     assert gate["spent"] == spent_now, "被挡下的那一趟不该再花一笔"
 
 
-def test_a_cancel_landing_mid_run_does_not_500_the_orchestrate_endpoint(
-        race_tools, isolated_tasks, client, enforced, monkeypatch, capsys):
-    """⚠️ 审查员那枚飘出端点的 `IllegalTaskTransition`：抛点就在失败处理器**里面**。
+def test_a_cancel_racing_an_in_flight_answer_is_refused_not_silently_dropped(
+        race_tools, isolated_tasks, client, enforced, monkeypatch):
+    """⭐⭐ 工单 #34：答案正在被接回去时，`/v1/tasks/{id}/cancel` 必须 409。
 
-    构造是确定的：一条答案走进断点并停住，测试在这期间从 `/v1/tasks/{id}/cancel` 把任务
-    取消掉，再放行。放行之后编排器在循环顶部看到 `task.cancelled` → `mark_cancelled()`，
-    而任务此刻已是 CANCELLED（终态不出边）→ 抛 IllegalTaskTransition → 落进
-    `orchestrator.py:306` 那个兜底 → 兜底自己那句 `set_status(FAILED)`（:317）在终态上
-    又抛一次 → 改动前这一枚从 `run()` 飘出去 = 客户端 500。
+    改动前的形状正是审查员量到的那一格：答案已经走进断点（任务 RUNNING、执行权在
+    `_EXECUTING` 里），另一个标签页/管理员打取消，端点只看终态名单 → 200，把状态改成
+    CANCELLED。编排循环下一步读到 `task.cancelled` 就收工，用户刚递进去的验证码随任务
+    一起被丢掉，且按既有口径不退钱。
 
-    判据：200；响应与日志都说清"想写 failed 被状态机拒了，任务此刻是 cancelled"；
-    并且**终态记录一个字都不改**（error 不落、不降级成 failed）——已经花掉的与已经
-    定论的都不许被一次没跑成的续写抹掉。
+    修好之后判据反过来：取消拿到 409、任务一格不改；放行后那枚答案照常跑完
+    （completed、断点只接一次、结果只有一条）。这条在旧实现上红在 409 那句——旧实现
+    回 200，响应体是 `status=cancelled`。
     """
     gate = race_tools
     _patch_llm_for_race(monkeypatch, gate)
@@ -1272,26 +1271,34 @@ def test_a_cancel_landing_mid_run_does_not_500_the_orchestrate_endpoint(
             won = await _await_event(gate["inside_breakpoint"])
             assert won, "前提没成立：答案没走到断点，这条就是空测"
             cancelled = await c.post(f"/v1/tasks/{tid}/cancel", headers=ha)
-            assert cancelled.status_code == 200, cancelled.text
             gate["release"].set()
-            return await first
+            return cancelled, await first
 
     try:
-        res = asyncio.run(scenario())
+        cancelled, res = asyncio.run(scenario())
     finally:
         gate["release"].set()
-    out = capsys.readouterr().out
+
+    assert cancelled.status_code == 409, (
+        f"答案在飞时取消竟然落下来了：{cancelled.status_code} {cancelled.text[:300]}")
+    detail = cancelled.json()["detail"]
+    assert "执行中" in detail and "取消未被接受" in detail, detail
+
     assert res.status_code == 200, (
-        f"失败处理器里那一跳又飘出端点了：{res.status_code} {res.text[:300]}")
+        f"答案那一路被取消带崩了：{res.status_code} {res.text[:300]}")
     body = res.json()
-    assert body["status"] == "cancelled", body
-    assert body.get("accepted") is not False
-    assert "被状态机拒" in body["message"], f"响应要说清那一跳被拒了：{body['message']}"
-    assert "被状态机拒" in out, f"日志里没留话：{out!r}"
-    assert "IllegalTaskTransition" in out, f"日志要点名是哪一类跳转被拒：{out!r}"
+    assert body["status"] == "completed", body
+    assert body.get("accepted") is not False, body
     task = ts.get_task(tid)
-    assert task.status is ts.TaskStatus.CANCELLED
-    assert task.error is None, "被拒的那一跳不许把原因写进终态记录（内存与盘会分家）"
+    assert task.status is ts.TaskStatus.COMPLETED, task.status
+    assert task.cancelled is False, "被拒的取消不许在任务上留下 cancelled 标志"
+    assert len(gate["resumed"]) == 1, f"断点没接或接了两次：{gate['resumed']}"
+    assert len(task.results) == 1, f"一条子任务却攒了 {len(task.results)} 条结果"
+    assert task.error is None, task.error
+    # 执行权在 finally 里还干净了：下一次取消该走正常路（这里任务已终态 → warning）。
+    again = client.post(f"/v1/tasks/{tid}/cancel", headers=ha)
+    assert again.status_code == 200 and again.json()["status"] == "warning", again.text
+    assert tid not in orch_mod._EXECUTING, "执行权没还：这条任务以后谁也进不来"
 
 
 def test_the_failure_handler_cannot_raise_even_when_the_table_refuses_failed(

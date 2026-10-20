@@ -100,7 +100,8 @@ class IllegalTaskTransition(ValueError):
 # - `running → running` 自环合法：被重启打断的进行中任务续跑时正是这个形状
 #   （见 restore() 里的 interrupted_by_restart），禁掉它等于让每次续跑先炸一次。
 # - 终态不出边。注意这份表答的是"能不能跳"，**不是** `/v1/tasks/{id}/cancel` 那句
-#   "要不要取消"（main.py 那边把 failed 也算作无需取消的终态，两问不同，不合并）。
+#   "要不要取消"（取消端点经 `cancel_task` 把 failed 也算作无需取消的终态，两问不同，
+#   不合并；那一格还多一道执行权的闸，见工单 #34）。
 ALLOWED_TRANSITIONS = {
     TaskStatus.PENDING: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
     TaskStatus.RUNNING: frozenset({TaskStatus.RUNNING, TaskStatus.WAITING_USER,
@@ -205,10 +206,13 @@ class Task:
     def mark_cancelled(self) -> None:                   # ⭐ 新增方法
         """标记任务为已取消。走状态机（v0.35 A1）：终态上的"再取消一次"现在会抛。
 
-        两个调用点本来就不在终态上调它（main.py 的取消端点先用
-        `task.status in [COMPLETED, FAILED, CANCELLED]` 挡了一道，
-        orchestrator.py:110 是在 RUNNING 的循环里），所以这不是行为变化，是把
-        "只有非终态能被取消"这句一直存在的口头约定变成代码里的判据。
+        两个调用点本来就不在终态上调它（`/cancel` 端点先经 `cancel_task` 那道
+        **同锁**的终态 + 执行权判据，orchestrator.py:110 是在 RUNNING 的循环里），
+        所以这不是行为变化，是把"只有非终态能被取消"这句一直存在的口头约定变成
+        代码里的判据。
+
+        ⚠️ 工单 #34：本方法**不看执行权**——直接调它取消一条正在被接答案的任务，
+        正是这张票要挡的丢答案形状。凡是从任务面外部发起的取消，走 `cancel_task`。
         """
         self.cancelled = True
         self.set_status(TaskStatus.CANCELLED)
@@ -411,6 +415,53 @@ def save(task: "Task") -> "Task":
     if task.task_id in task_store:
         task_store[task.task_id] = task
     return task
+
+
+# ---------- ⭐⭐ 工单 #34：执行权是公共状态，/cancel 与编排器看同一张表 ----------
+#
+# 这张表原先住在 `orchestrator` 模块里（`_EXECUTING`），只有编排器看得见。后果是：
+# 一条 `waiting_user` 任务正在把用户刚递进来的答案接回去时，另一个标签页 / 管理员
+# / 清扫线程打 `/v1/tasks/{id}/cancel` 依然能落下去——`cancel_task` 只看终态名单，
+# 看不到"这一刻有人正占着它跑"。取消落下后编排循环在下一步读到 `task.cancelled`
+# 就整条收工，答案（验证码、收货地址）随任务一起被丢掉，而且按既有口径不退钱。
+#
+# 所以表搬到这里，并提供公共的占位/归还/查询三件套；判"能不能取消"与写状态必须在
+# **同一把锁**里（见下面 `cancel_task` 那段）。表跟着进程一起清空、不落盘：把"有人在
+# 跑"写进 tasks.json，一次崩溃就留下一个永远被占着的假案（谁也叫不动它），而状态字段
+# 本来也答不出"本进程这一秒有没有人在跑"——被重启打断的 running 与正在执行的 running
+# 长得一模一样（`restore()` 用 `interrupted_by_restart` 区分的是"上次被打断"，不是
+# "此刻在飞"）。
+#
+# 边界：这张表管的是**本进程**。多 worker 各持一份，跨进程的同一枚停点还抢得动
+# （现网是 `run_backend.py` 那句不带 workers 的 `uvicorn.run`，单进程）；真要多进程，
+# 得换一把跨进程的锁（文件锁或 sqlite），不在这一格里，已作为 follow-up 上报。
+_EXECUTING: set = set()
+
+
+def is_executing(task_id: str) -> bool:
+    """这条任务此刻有没有人占着执行权（本进程）。与编排器认领、/cancel 同一张表。"""
+    with _lock:
+        return task_id in _EXECUTING
+
+
+def claim_execution(task_id: str) -> bool:
+    """占住一条任务的执行权。True = 占到；False = 本进程已有另一趟占着。
+
+    只占位、不碰状态：认领要连 `→ running` 那一跳一起做才是原子的，那一跳的判据
+    （断点是不是这趟读到的那一个、failed 游标还可不可信）留在编排器里，
+    与这里共用的仍是同一把 `_lock`——调用方必须持着它把两件事一起做完。
+    """
+    with _lock:
+        if task_id in _EXECUTING:
+            return False
+        _EXECUTING.add(task_id)
+        return True
+
+
+def release_execution(task_id: str) -> None:
+    """还执行权。与认领同一把锁，免得认领方正读表时这里正在改。"""
+    with _lock:
+        _EXECUTING.discard(task_id)
 
 
 # ---------- ⭐ v0.35 A5：超时是"还在挂"，不是失败 ----------
@@ -822,6 +873,37 @@ def delete_task(task_id: str) -> bool:
             del task_store[task_id]
             return True
         return False
+
+
+def cancel_task(task: "Task") -> str:
+    """原子地尝试取消一条任务，返回端点该读的那个结论。
+
+    三个取值都是机器可读的，调用方不再自己重判一遍：
+    - ``"cancelled"``：这一跳落了盘（状态 → cancelled、`cancelled` 标志置位）；
+    - ``"terminal"``：它已经在终态（completed / failed / cancelled），无需取消——
+      与改动前 `/cancel` 那句"已处于终态"名单**同一个口径**（failed 也算终态），
+      只是判据从端点挪进了这把锁；
+    - ``"executing"``：本进程正有一趟执行占着它（工单 #34）。这一格**一格不改**，
+      调用方回 409。
+
+    ⭐ 为什么必须同锁：改动前的顺序是"端点判终态 → `mark_cancelled()`"，两步之间
+    编排器可以刚好认领（→ running）并开始把用户的答案递进工具；于是取消照样落下去，
+    编排循环在下一步读到 `task.cancelled` 就收工——刚递进去的验证码/收货地址随任务
+    一起被丢掉，而且不退钱。同锁之后只剩两种顺序，两种都有实话：
+    - 取消先：状态是 cancelled，编排器的 `→ running` 被状态机拒，答案拿到
+      `accepted=False`（没跑、没花钱）；
+    - 认领先：表里有 id，这一格回 ``"executing"``，端点 409，答案照常跑完。
+    终态优先于执行权：编排器写完 completed 到 `finally` 还权的这一瞬，取消该拿到
+    "已处于终态"那句既有回答，而不是一个"正在执行"的 409。
+    """
+    with _lock:
+        if _status_of(task) in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                                TaskStatus.CANCELLED):
+            return "terminal"
+        if task.task_id in _EXECUTING:
+            return "executing"
+        task.mark_cancelled()
+        return "cancelled"
 
 
 restore()

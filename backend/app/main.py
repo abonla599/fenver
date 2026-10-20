@@ -83,12 +83,16 @@ except ImportError as e:
 
 try:
     from app.agents.task_store import (task_store, get_task, tasks_of, TaskStatus,
-                                       waiting_timeout_info)
+                                       waiting_timeout_info,
+                                       # 工单 #34：取消要看执行权，判与落同一跳。
+                                       # 这里换个名字，免得撞上本文件的端点函数。
+                                       cancel_task as cancel_task_atomic)
 except ImportError:
     task_store = {}
     get_task = None
     TaskStatus = None
     waiting_timeout_info = None
+    cancel_task_atomic = None
 
     def tasks_of(user_id):                # 模块未就绪时按人过滤空表——绝不返回全量
         return [t for t in task_store.values()
@@ -1828,13 +1832,26 @@ async def list_all_tasks(principal: Principal = CurrentPrincipal):
 async def cancel_task(task_id: str, principal: Principal = CurrentPrincipal):
     task = _task_for_principal(task_id, principal.user_id,
                                principal.role == "admin")
-    if TaskStatus and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+    if cancel_task_atomic is None:
+        raise HTTPException(status_code=503, detail="任务存储模块尚未就绪")
+    # ⭐ 工单 #34：判"有没有人正占着它跑"与写取消状态是 task_store 里的**同一跳**
+    # （同一把锁）。以前这里只看终态名单然后 mark_cancelled()，两步之间编排器可以
+    # 刚好认领并把用户的答案递进工具——取消落下后那枚答案就被静悄悄丢掉了。
+    # 三格结论与端点三种回答一一对应，端点不再自己重判：
+    outcome = cancel_task_atomic(task)
+    if outcome == "executing":
+        # 落败的取消拿到一句可判的话，而不是 200 里藏一个"其实没取消"。
+        # 用 409：请求本身合法，只是与任务此刻的状态冲突（正在被另一趟占着）。
+        raise HTTPException(
+            status_code=409,
+            detail=("任务正在执行中，取消未被接受：这一趟不会丢下已经递进去的答案。"
+                    "等它跑完（或停在新问题上）再取消。"))
+    if outcome == "terminal":
         return {
             "status": "warning",
             "task_id": task_id,
             "message": f"任务已处于终态: {task.status.value}，无需取消"
         }
-    task.mark_cancelled()
     return {
         "status": "cancelled",
         "task_id": task_id,
