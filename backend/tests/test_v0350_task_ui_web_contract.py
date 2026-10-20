@@ -1097,3 +1097,28 @@ def test_this_feature_grew_no_new_static_file():
     for name in ("index.html", "app.js", "api.js", "style.css"):
         assert name in listed, f"{name} 不在 SW 的外壳清单里：离线时它要回源，新旧混发"
         assert (STATIC / name).is_file()
+
+
+def test_after_auth_reloads_an_open_task_page_after_the_epoch_bump():
+    """#151：A→B→A 之后，旧在途结果被 epoch 丢掉；回到 A 时若任务页还开着，必须补读。
+
+    行为侧的“旧结果不许落地”由上面的 A→B→A 用例钉住；这一条只钉“回来会补一次读”这条
+    接线，并配一枚合成反例证明判据不是恒真。别把它写成“已经证明浏览器会刷新”——
+    真实点击/渲染仍要换包后自证。
+    """
+    src = _app_source()
+    after = _js_function(src, "afterAuth")
+    helper = _js_function(src, "tasksPageOpen")
+    marker = "if (tasksPageOpen()) loadTasks();"
+
+    def reloads(code: str) -> bool:
+        if marker not in code or "resetViewForIdentity();" not in code:
+            return False
+        return code.index("resetViewForIdentity();") < code.index(marker)
+
+    assert reloads(after), "afterAuth 没有在换身份复位之后补读任务页——A→B→A 会停在空壳"
+    assert not reloads(after.replace(marker, "")), "判据没牙：删掉补读那一行它还说有"
+    # 触发条件必须同时看“设置层没关”和“任务页没被别的二级页换掉”；只看一层会在
+    # 设置页已关/已切到别的页时白打一枪。
+    assert '$("settings")' in helper and 'data-page="tasks"' in helper \
+        and "hidden" in helper, f"tasksPageOpen 的可见性判据不完整：{helper}"
