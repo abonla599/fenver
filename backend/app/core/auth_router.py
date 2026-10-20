@@ -17,6 +17,7 @@ from collections import defaultdict
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.core import authz, usage
@@ -32,7 +33,7 @@ from app.core import providers
 from app.core import audit
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
-from app.core.auth import AuthError, hash_secret
+from app.core.auth import AuthError, DEVICE_SECRET_INACTIVE_SECONDS, hash_secret
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -384,16 +385,27 @@ def throttle_paid_upstream(request: Request, principal) -> None:
     note_chat(ip, principal.user_id)
 
 
+def _cookie_secure() -> bool:
+    """Cookie 的 Secure 开关：默认开，只有显式 AUTH_COOKIE_SECURE=0 才降级。
+
+    会话 Cookie 与续命凭据 Cookie 共用这一个判据，理由与 _attach_session 相同：
+    忘配 env 的方向必须是 Secure=on，降级只能是本机/测试主动做的事。
+    """
+    return os.getenv("AUTH_COOKIE_SECURE", "1").strip() != "0"
+
+
 def _attach_session(response: Response, token: str) -> None:
     """把一枚刚被请求头出示过的凭据写进 httpOnly 会话 Cookie。
 
-    全服务端**只有 /v1/auth/adopt 一个调用方**——登录与注册刻意不设 Cookie：
+    全服务端**只有 /v1/auth/adopt 一个调用方**——登录与注册刻意不设**会话**
+    Cookie：
     ① 那几个公开端点的响应体契约（token 字段）一个字都不动，限流/枚举那套
        按来源计费的判据也不跟着漂移；
-    ② 更要紧的是挡会话固定：若跨站的 login 响应能直接 Set-Cookie，攻击者就能
-       在自己页面上用**他自己的**账号把受害者浏览器钉在攻击者的会话上。Cookie
+    ② 更要紧的是挡会话固定：若跨站的 login 响应能直接种会话 Cookie，攻击者就能
+       在自己页面上用**他自己的**账号把受害者浏览器钉在攻击者的会话上。会话 Cookie
        只从 adopt 出来，而 adopt 要求请求头里那枚凭据——跨站表单发不出
-       Authorization 头，这条缝就是死的。
+       Authorization 头，这条缝就是死的。（v0.35.0 #143② 的续命凭据 Cookie
+       走 _store_device_secret，那是另一类凭据、另一道生命周期，不在这里。）
 
     secure 默认开（现网只走 cloudflared HTTPS）；本机 http 直连与测试用
     AUTH_COOKIE_SECURE=0 显式降级——降级必须是主动行为，忘配不会 fail-open。
@@ -401,7 +413,37 @@ def _attach_session(response: Response, token: str) -> None:
     response.set_cookie(
         key=authz.SESSION_COOKIE, value=token,
         httponly=True, samesite="lax", path="/v1",
-        secure=os.getenv("AUTH_COOKIE_SECURE", "1").strip() != "0")
+        secure=_cookie_secure())
+
+
+def _store_device_secret(response: Response, secret: str) -> None:
+    """把一枚刚签发的续命凭据种进 httpOnly Cookie（v0.35.0 #143②）。
+
+    与 _attach_session 的会话固定论证不冲突：这里种的不是会话，攻击者把自己的
+    device_secret 钉到受害者浏览器上，只能让受害者在下次自愈时登进**攻击者的**
+    账号——而这把凭据本身来自 register/login 的成功响应，跨站发不出 JSON 登录
+    请求（也没有 CORS），所以"别人的登录响应替我种 Cookie"这条信道不成立。
+
+    调用点只有三处：注册、登录、reauth 成功（轮换）。adopt/renew 不碰这一格——
+    前者已经由登录/注册种过，后者不换凭据，只换会话。
+    """
+    response.set_cookie(
+        key=authz.DEVICE_SECRET_COOKIE, value=secret,
+        httponly=True, samesite="strict",
+        path=authz.DEVICE_SECRET_COOKIE_PATH,
+        secure=_cookie_secure(),
+        max_age=DEVICE_SECRET_INACTIVE_SECONDS)
+
+
+def _clear_device_secret(response: Response) -> None:
+    """刮掉浏览器里的续命凭据 Cookie。
+
+    删除必须按 域名+path 定位，path 与 _store_device_secret 用同一个常量；
+    写死字面量会在下次改路径时留下一条删不掉的死 Cookie。
+    """
+    response.delete_cookie(
+        key=authz.DEVICE_SECRET_COOKIE, path=authz.DEVICE_SECRET_COOKIE_PATH,
+        samesite="strict", secure=_cookie_secure())
 
 
 class RegisterRequest(BaseModel):
@@ -449,7 +491,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 @router.post("/v1/auth/register")
-def register(req: RegisterRequest, request: Request):
+def register(req: RegisterRequest, request: Request, response: Response):
     """开放注册：用户名 + 自设密码，成功即发一枚会话令牌（注册即登录）。
 
     路由挂在精确路径上——authz.PUBLIC_PATHS 也是精确匹配，带斜杠的变体在
@@ -459,6 +501,10 @@ def register(req: RegisterRequest, request: Request):
     （开源版是"给你自己用的"，管理员建号）。闸门放在限流检查**之前**：
     关着的门口不收失败预算——不然探测一句"注册关了"也要攒账，攒满之后
     重新开放注册的头一个人会莫名其妙吃 429。
+
+    v0.35.0 #143②：响应里同时种续命凭据 Cookie。它与会话 Cookie 是两回事：
+    这里仍然不种 session（会话固定论证见 _attach_session），只种那把 400 天寿命、
+    Path 收口在 reauth 上的钥匙；老客户端无视它、读响应体里的字段，照样能用。
     """
     if not config_store.registration_open():
         raise HTTPException(status_code=403,
@@ -478,10 +524,12 @@ def register(req: RegisterRequest, request: Request):
         raise _register_error(e, ip)
     _note_registration(ip)
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
+    _store_device_secret(response, device_secret)
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role,
             # v0.34.0：续命凭据与会话令牌一起发——明文只在这一次出现（与 token
-            # 同一条纪律，见文件头第 3 条）。库里只留 sha256 摘要。
+            # 同一条纪律，见文件头第 3 条）。库里只留 sha256 摘要。浏览器侧由
+            # 上面的 Set-Cookie 收编；原生/老 web 仍读这个字段。
             "device_secret": device_secret}
 
 
@@ -500,8 +548,12 @@ def _register_error(e: AuthError, ip: str) -> HTTPException:
 
 
 @router.post("/v1/auth/login")
-def login(req: LoginRequest, request: Request):
-    """用户名 + 密码换一枚新的会话令牌；旧令牌继续有效（多设备并存）。"""
+def login(req: LoginRequest, request: Request, response: Response):
+    """用户名 + 密码换一枚新的会话令牌；旧令牌继续有效（多设备并存）。
+
+    v0.35.0 #143②：登录也种续命凭据 Cookie（Path 收口在 reauth），与会话 Cookie
+    的签发门仍然分着——这里不种 session，adopt 仍是唯一会话 Cookie 出口。
+    """
     ip = _client_ip(request)
     if _throttled(ip):
         raise _too_many(FAILURE_WINDOW_SECONDS)
@@ -513,6 +565,7 @@ def login(req: LoginRequest, request: Request):
         # 401 而不是 403：这里没有"身份是真的但角色不够"这一说，只有"没认出来"。
         raise HTTPException(status_code=401, detail=e.reason)
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
+    _store_device_secret(response, device_secret)
     return {"token": token, "user_id": principal.user_id,
             "username": principal.username, "role": principal.role,
             # v0.34.0：登录是"发续命凭据"的两个时刻之一（另一个是 reauth 的轮换）。
@@ -531,9 +584,10 @@ def renew(request: Request, principal: Principal = CurrentPrincipal):
     ① **无请求体**：不接受任何"期望有效期"入参。让客户端自己许愿要多久，等于把
        服务端唯一的到期判据交给最不可信的那一端。
     ② 要正常会话凭据：这条**绝不进** authz.PUBLIC_PATHS（判据 10 的负向锁）。
-    ③ 不种 Cookie：全服务端发 Cookie 的门仍然只有 /v1/auth/adopt 一扇
+    ③ 不种 Cookie：全服务端发**会话** Cookie 的门仍然只有 /v1/auth/adopt 一扇
        （tests/test_cookie_auth.py 钉着）。浏览器侧要接手轮换后的新令牌，走
-       "拿着新 token 再 adopt 一次"这条既有路，不另开一条 Set-Cookie 信道。
+       "拿着新 token 再 adopt 一次"这条既有路，不另开一条 Set-Cookie 信道。续命
+       凭据 Cookie 是 v0.35.0 #143② 的另一扇门，renew 不碰它。
 
     失败一律 401 且不签发任何东西；措辞只有一句（见 auth.RENEW_FAIL）。
     """
@@ -547,11 +601,14 @@ def renew(request: Request, principal: Principal = CurrentPrincipal):
 
 class ReauthRequest(BaseModel):
     # 字段名就是它的语义：这里只接受续命凭据，不接受会话令牌，也不接受口令。
-    device_secret: str
+    # v0.35.0 #143②：body 变成可选——浏览器把凭据放在 httpOnly Cookie 里，
+    # 它的请求体是空的；原生与老 web 仍走这条 JSON 回落。
+    device_secret: Optional[str] = None
 
 
 @router.post("/v1/auth/reauth")
-def reauth(req: ReauthRequest, request: Request):
+def reauth(request: Request, response: Response,
+           req: Optional[ReauthRequest] = None):
     """用续命凭据开一段全新会话：免会话凭据，但**不是**免凭据（PRD 第三节）。
 
     这条端点在 authz.PUBLIC_PATHS 里点了名——它必须免**会话**凭据才能被一个已经
@@ -561,26 +618,47 @@ def reauth(req: ReauthRequest, request: Request):
     ④ 绝对不认会话令牌：会话令牌打进来算不出 device_secrets 里的命中，401
        （判据 5 的反向半边）。
 
+    v0.35.0 #143②：凭据来源先看 Cookie，再看 JSON body（原生无 Cookie 通道，
+    老 web 也仍带着 body）。两条一起出现时 **Cookie 优先**，并且只要 Cookie 在，
+    就必须声明 X-CSRF——否则跨站请求可以拿受害者的 Cookie 换会话，body 是不是
+    攻击者自己写的都改变不了这一点。这条端点在公开名单里，authz 中间件的 CSRF
+    闸门不会经过它，所以这道检查必须在这里自己做（用的是同一套头与文案）。
+
     状态码走存储层带上来的显式标记，不靠 e.reason 等于哪句文案判（与 taken/
     charge/reauth 同一条纪律，终审 F4）：401 = 不认这把，410 = 太久没用了。
+    410 同时把浏览器里的死 Cookie 刮掉；401 不刮（账号停用/服务端抖动都可能是
+    暂时的，客户端历史上也刻意保留这一格）。
     """
+    cookie_secret = request.cookies.get(authz.DEVICE_SECRET_COOKIE, "").strip()
+    body_secret = ((req.device_secret if req else None) or "").strip()
+    if cookie_secret and not request.headers.get(authz.CSRF_HEADER, "").strip():
+        raise HTTPException(status_code=403, detail=authz.CSRF_DETAIL)
+    secret = cookie_secret or body_secret
     ip = _client_ip(request)
-    digest = hash_secret(req.device_secret or "")
+    digest = hash_secret(secret)
     if _reauth_throttled(ip, digest):
         raise _too_many(FAILURE_WINDOW_SECONDS)
     try:
-        principal, token, new_secret, payload = _store().reauth(req.device_secret)
+        principal, token, new_secret, payload = _store().reauth(secret)
     except AuthError as e:
         _note_reauth_failure(ip, digest)
         # 审计只记"有人拿续命凭据试过并被拒"，不记那把值：audit.jsonl 是明文日志。
         audit.log(None, "auth.reauth.denied", target=_reauth_secret_key(digest))
-        raise HTTPException(status_code=410 if e.gone else 401, detail=e.reason)
+        if getattr(e, "gone", False):
+            # 410 要同时刮掉浏览器里的死 Cookie。不能先往注入的 Response 上
+            # delete_cookie 再 raise：异常路径会另建一个 JSONResponse，注入
+            # Response 上的头会被丢掉（实测过，Set-Cookie 不见了）。
+            gone = JSONResponse(status_code=410, content={"detail": e.reason})
+            _clear_device_secret(gone)
+            return gone
+        raise HTTPException(status_code=401, detail=e.reason)
     audit.log(principal, "auth.reauth", target=principal.user_id)
+    _store_device_secret(response, new_secret)     # 单次使用：每次 reauth 都轮换 Cookie
     return {"token": token, "device_secret": new_secret, **payload}
 
 
 @router.post("/v1/auth/reset")
-def reset(req: ResetRequest, request: Request):
+def reset(req: ResetRequest, request: Request, response: Response):
     """三题全答对就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。
 
     这里没有"先把问题念给你听"那一步：三题是全站常量，前端自己渲染，服务器不为
@@ -622,11 +700,14 @@ def reset(req: ResetRequest, request: Request):
         # 改好的，不计费
         raise HTTPException(status_code=422, detail=e.reason)
     _note_reset(ip)
+    # 改密会清掉这个人全部 device_secrets（auth.reset_password）；这台浏览器里的
+    # 那一枚 Cookie 也就成了死钥匙，响应顺手刮掉（v0.35.0 #143②）。
+    _clear_device_secret(response)
     return {"status": "password_reset"}
 
 
 @router.post("/v1/auth/change-password")
-def change_password(req: ChangePasswordRequest, request: Request,
+def change_password(req: ChangePasswordRequest, request: Request, response: Response,
                     principal: Principal = CurrentPrincipal):
     """本人改密（v0.24 T3.1 首登闭环）：出示当前会话 + 原口令，换掉口令并清旗标。
 
@@ -643,6 +724,8 @@ def change_password(req: ChangePasswordRequest, request: Request,
             keep_token=authz._credential(request))
     except AuthError as e:
         raise HTTPException(status_code=401 if e.reauth else 422, detail=e.reason)
+    # 改密会清掉这个人全部 device_secrets（判据 6）；这台浏览器里的 Cookie 跟着刮掉。
+    _clear_device_secret(response)
     return {"status": "password_changed",
             "must_change_password": bool(record.get("must_change_password"))}
 
@@ -661,8 +744,9 @@ def adopt(request: Request, response: Response,
 
     前端拿到登录/注册响应体里的 token 后调用它一次，此后浏览器侧一切请求只靠
     Cookie，token 明文在页面里存都不存；管理页粘贴 bootstrap 口令、手动录令牌
-    走的也是这同一条路。它同时是服务端**唯一**发 Cookie 的地方（见
-    _attach_session 那一段的会话固定论证）。
+    走的也是这同一条路。它同时是服务端**唯一发会话 Cookie**的地方（见
+    _attach_session 那一段的会话固定论证）；续命凭据 Cookie 由 register/login/
+    reauth 三处走 _store_device_secret，与本端点无关。
 
     只认请求头凭据：一个只剩 Cookie 的会话没有可收编的新东西，再 adopt 一次
     只是把同一枚 Cookie 原样重写，没有意义还多一个岔路，所以直接 400。
@@ -718,6 +802,12 @@ def logout(request: Request, response: Response,
     # path 必须与 _attach_session 一致，否则删不掉（Cookie 按 域名+path 定位）。
     response.delete_cookie(key=authz.SESSION_COOKIE, path="/v1",
                            samesite="lax")
+    # v0.35.0 #143②：退出会清掉这个人**全部** device_secrets，浏览器里这一枚
+    # 也成了死钥匙。只在"退的是本浏览器自己的会话"时刮：带 Authorization 的
+    # 那一形是替清单里的另一个人撤销，他的凭据不在这台浏览器的 Cookie 里，
+    # 顺手刮掉只会把当前用户的静默重登能力一起误伤。
+    if not authz._header_credential(request):
+        _clear_device_secret(response)
     return {"status": "logged_out"}
 
 

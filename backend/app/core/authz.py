@@ -55,6 +55,24 @@ SESSION_COOKIE = "session"
 # 值不校验内容，只要求非空：它是"我在 JS 里"的声明位，不是秘密。
 CSRF_HEADER = "x-csrf"
 
+# v0.35.0 #143②：Web 端的续命凭据（device_secret）从 localStorage 收编进 Cookie。
+# 它与 SESSION_COOKIE 是两类凭据、两道生命周期：会话 30 天滑动 / 180 天绝对上限；
+# 续命凭据 400 天不活动才失效（auth.DEVICE_SECRET_INACTIVE_SECONDS），换来的是
+# "网页在绝对上限之后也能免口令爬起来"。属性逐条都是有理由的：
+# - HttpOnly：JS 读不到这把 400 天寿命的钥匙，XSS 能重放会话也偷不走它；
+# - Secure 默认开：现网只走 cloudflared HTTPS，本机 http 与测试要显式
+#   AUTH_COOKIE_SECURE=0 降级（与 SESSION_COOKIE 同一个开关、同一条 fail-closed 方向）；
+# - SameSite=Strict：页面与 API 同源，唯一消费方是同源 fetch；这把钥匙不服务任何
+#   顶层跳转，比 Lax 更紧，跨站请求连带都带不出去；
+# - Path 精确到 /v1/auth/reauth：它只在这一条端点上被需要。指向业务面（/v1）会让
+#   一枚 400 天凭据随每一次请求出门，多一份代理/日志暴露面；
+# - Max-Age 由 auth_router 写成 400 天：与会话 Cookie 不同，它必须跨浏览器重启活着，
+#   否则"绝对上限之后自愈"在用户关一次浏览器后就失效了。
+# 原生没有 Cookie 通道（Prefs.kt / SecretStore.kt），服务端保留 JSON body 回落；
+# 浏览器这一侧不再往 body 里放它。
+DEVICE_SECRET_COOKIE = "device_secret"
+DEVICE_SECRET_COOKIE_PATH = "/v1/auth/reauth"
+
 # v0.34.0：这枚会话令牌还剩几秒（滑动期与会话绝对上限里更近的那个）。
 # 名字带 Expires-In 而不叫 Expires-At：值是**秒数**不是时刻，客户端不需要拿
 # 服务器时钟和自己的时钟做减法——那正是"提前 5 天续期"和"晚 5 天才发现要续"
