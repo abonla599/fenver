@@ -32,7 +32,7 @@ sys.path.insert(0, str(BACKEND))
 import pytest
 
 from app.core import selfcheck
-from app.core.selfcheck import BROKEN, OK, run
+from app.core.selfcheck import BROKEN, NOT_CONFIGURED, OK, run
 from app.core.uploads import IMAGE_EXTS, UploadError, detect_kind
 
 
@@ -401,11 +401,11 @@ def test_health_response_shape_is_unchanged_for_the_probes(monkeypatch, client):
 
     body = client.get("/health").json()
     assert set(body) >= {"build", "status", "checks"}, body.keys()
-    assert body["status"] in (OK, "degraded", BROKEN)
+    assert body["status"] in (OK, "degraded", NOT_CONFIGURED, BROKEN)
     assert body["checks"], "checks 空了：watchdog 的 foreach 会静默空转"
     for label, item in body["checks"].items():
         assert set(item) >= {"status", "detail"}, (label, item)
-        assert item["status"] in (OK, "degraded", BROKEN), (label, item)
+        assert item["status"] in (OK, "degraded", NOT_CONFIGURED, BROKEN), (label, item)
         assert item["detail"], f"{label} 报了状态却没说为什么"
 
 

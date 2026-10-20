@@ -37,6 +37,17 @@ def _default_persist_dir() -> str:
     return os.path.join(data_root(), "chroma_db")
 
 
+class EmbeddingDimConflict(RuntimeError):
+    """collection 记录的向量维度与当前后端不一致。
+
+    `dim_conflict` 是给 `/health` 自检看的判据，不靠文案：没配嵌入的机器会落到
+    384 维伪嵌入，撞上 1536 维旧库是预期形状，自检据此报 not_configured 而不是
+    broken。字符串匹配在这里不成立——同一句"维度冲突"将来可能从别处冒出来，而
+    "这次失败是不是配置缺失"本来就不在异常文案里。
+    """
+    dim_conflict = True
+
+
 class MemoryManager:
     """记忆管理器：负责存储和检索用户记忆"""
 
@@ -159,7 +170,7 @@ class MemoryManager:
 
         if stored_dim and str(stored_dim) != str(self.embed_dim):
             private_where("嵌入维度冲突")
-            raise RuntimeError(
+            raise EmbeddingDimConflict(
                 f"记忆库嵌入维度冲突：collection '{name}' 以 {stored_dim} 维建立，"
                 f"当前后端返回 {self.embed_dim} 维。两个后端的向量空间不通用，"
                 "请固定使用同一嵌入后端，或重建记忆库（会丢失已有记忆）；"
