@@ -57,6 +57,14 @@ r"""换包脚本**验收之后那段尾巴**的两处裸出口：step 8 的确�
 与 `Enable-ScheduledTask`，写任务的那批 cmdlet 名逐条断言不在探针源码里），**不**碰
 `127.0.0.1:8000`（探针里没有 `Invoke-RestMethod` / `127.0.0.1` / `http://`）；**不**碰 `dist\`。
 只有一档 `live-identity` 探针**只读**问真任务的属性（票面允许 read-only `Get-ScheduledTask`）。
+
+路径本身还有一条**值级**锁（不只是"源码里没有这串字"）：探针把交给 `Clear-BackendBudget`
+的那条路径用 `GetFullPath` 打回来，`_run_budget` 在启动探针**之前**校验要传的账本、
+运行**之后**再校验探针实际收到的值，两次都断言它不是生产 `data\watchdog-state.json`
+且落在测试 tmp 根下；反例见
+`test_the_ledger_path_gate_rejects_the_live_state_file_and_paths_outside_tmp`
+（把真路径交给同一把尺必须红）。这把尺只做路径运算，从不打开那个文件。
+
 生成的 .ps1 一律 ASCII + CRLF，跑在 `tmp_path`（仓库外）。牙印样本一律落**仓库外**的副本
 （`_write_crlf`），并经 `test_under_test_copy_runs_the_whole_file_locks` 在落盘副本上复跑整文件。
 
@@ -167,6 +175,8 @@ _PROBE_MARK = "t47-fake-state.json"
 _FAKE_TASK_PATH = "\\t47-fake-path\\"
 _FAKE_TASK_NAME = "t47-fake-task"
 _REAL_PATH_MARK = "watchdog-state.json"
+# 生产账本的**真**落点：值级卫生锁只做路径比对，绝不打开它。
+REAL_WATCHDOG_STATE = (REPO_ROOT / "data" / "watchdog-state.json").resolve()
 _NETWORK_MARKS = ("Invoke-RestMethod", "127.0.0.1", "http://")
 _TASK_WRITES = ("Disable-ScheduledTask", "Unregister-ScheduledTask", "Register-ScheduledTask",
                 "Set-ScheduledTask", "New-ScheduledTask", "Start-ScheduledTask",
@@ -570,6 +580,9 @@ function Restore-WatchdogTask { return 'RESTORE-STUB-CALLED' }
 # PROBE_END disappear, which is the red we want.
 __STOP__
 __REGION__
+# Report the value about to be handed to the script's own function. The test side
+# resolves it and refuses to run if it is the live ledger (value-level gate).
+'STATE_PATH=' + [System.IO.Path]::GetFullPath($statePath)
 Clear-BackendBudget -StatePath $statePath
 'CALL_RETURNED'
 # The script's own next line: the run must still land here after a degraded budget step.
@@ -973,15 +986,56 @@ def _unlock(path: Path) -> None:
         os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
 
 
+def _same_path(left, right) -> bool:
+    """Windows 大小写不敏感、分隔符可能混用：按规范化后的绝对路径比较。"""
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+        os.path.abspath(str(right)))
+
+
+def _state_path_problem(received, allowed_root) -> str:
+    """值级卫生判据：把**探针实际交给 `Clear-BackendBudget` 的路径**解析出来，
+    断言它不是生产账本、且落在测试 tmp 根下（票面"resolve the path passed"那一条）。
+
+    只做路径运算，绝不打开任何文件：真路径在这里也只会被比对，不会被读写。
+    """
+    if received is None or not str(received).strip():
+        return "探针没有回报它实际收到的账本路径"
+    resolved = Path(os.path.abspath(str(received))).resolve()
+    if _same_path(resolved, REAL_WATCHDOG_STATE):
+        return "账本路径解析后就是生产账本：%s" % resolved
+    root = Path(os.path.abspath(str(allowed_root))).resolve()
+    if resolved != root and root not in resolved.parents:
+        return "账本路径不在测试 tmp 根 %s 下：%s" % (root, resolved)
+    return ""
+
+
+def _assert_safe_ledger_path(received, allowed_root) -> None:
+    problem = _state_path_problem(received, allowed_root)
+    assert problem == "", (
+        "值级卫生锁：传给 Clear-BackendBudget 的账本路径必须是测试 tmp 下的手搓假账，"
+        "绝不可指向生产 data\\watchdog-state.json（只比路径，不打开文件）。" + problem)
+
+
 def _run_budget(text: str, case: str, work: Path, region: str = None, name: str = None):
     src = _budget_probe_text(text, region=region)
     assert src is not None, "探针源码生不出来：Clear-BackendBudget 或 Stop-AfterFailure 抄不出原文"
+    assert "Clear-BackendBudget -StatePath $statePath" in src, \
+        "探针里那次调用不再吃命令行给的路径：值级判据量到的会是别的东西"
     path = _write_crlf(work, name or ("probe-budget-" + case + ".ps1"), src)
     assert path.read_text(encoding="utf-8") == src, "探针没落盘：牙齿咬的是内存而不是文件"
     ledger = _make_fake_ledger(work, case)
+    # 值级门（启动前）：先证明要交给 PowerShell 的这条路径是 tmp 下的假账，
+    # 硬编码真路径的样本在**启动那一刻**就红，根本到不了生产账本。
+    _assert_safe_ledger_path(ledger, work)
     rc, out, err = _run_powershell(path, case, ledger)
     _unlock(ledger)
-    return rc, _parse(out), err, out
+    got = _parse(out)
+    # 值级门（运行后）：探针自己回报它实际拿到的路径，再解析、再证明一次。
+    received = got["kv"].get("STATE_PATH")
+    _assert_safe_ledger_path(received, work)
+    assert _same_path(received, ledger), \
+        "探针收到的账本路径与测试传的不一致：%r vs %r" % (received, ledger)
+    return rc, got, err, out
 
 
 def _run_enabled(text: str, case: str, work: Path, region: str = None,
@@ -1107,6 +1161,29 @@ def test_the_two_catches_never_delete_truncate_or_retry_the_live_ledger():
     assert probe is not None
     assert "$args[1]" in probe and _REAL_PATH_MARK not in probe, \
         "假账路径必须由命令行给，探针源码里不许出现真账本路径"
+
+
+def test_the_ledger_path_gate_rejects_the_live_state_file_and_paths_outside_tmp(tmp_path):
+    """反例（值级，票面要求）：把生产账本的绝对路径交给同一把尺，必须红。
+
+    只解析 / 比对路径，**不打开、不写** `data\\watchdog-state.json`。`_run_budget`
+    在生成探针之后、启动 PowerShell **之前**就过这把尺，所以"测试里硬编码真路径"
+    到不了现网；运行后再用探针回报的 `STATE_PATH` 二次核对。
+    """
+    fake = tmp_path / _PROBE_MARK
+    assert _state_path_problem(fake, tmp_path) == ""
+    _assert_safe_ledger_path(fake, tmp_path)
+    bad_paths = (
+        str(REAL_WATCHDOG_STATE),                              # 生产账本本身
+        str(REPO_ROOT / "data" / "watchdog-state-copy.json"),  # 仓库里换了个名字
+        str(tmp_path.parent / "outside-tmp.json"),             # tmp 根之外
+    )
+    for bad in bad_paths:
+        problem = _state_path_problem(bad, tmp_path)
+        assert problem, "反例没红（值级锁是装饰）：%s" % bad
+        with pytest.raises(AssertionError):
+            _assert_safe_ledger_path(bad, tmp_path)
+    assert _state_path_problem(None, tmp_path), "探针没回报路径也必须红，不许默认放行"
 
 
 def test_the_under_test_file_stays_ascii_crlf_and_bom_free():

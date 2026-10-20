@@ -18,8 +18,11 @@ v0.34.2 收尾时，自托管更新通道被指向一个当时在盘上还验不
 
 反例一律用**手搭的假路径**：`RELEASE_MANIFEST_PATH` 与 `APK_CACHE_DIR` 两个口子在
 每个用例里都被钉在 `tmp_path` 下（`data/version.json` 是**线上那句公开宣告**，写它
-等于告诉所有手机有新版本；`data/apk/` 是线上正在代管的字节）。钉住这件事本身也有一条
-锁，见 `test_pinned_paths_never_point_at_the_real_repo_data`。
+等于告诉所有手机有新版本；`data/apk/` 是线上正在代管的字节）。钉住这件事本身也有锁：
+`test_pinned_paths_never_point_at_the_real_repo_data` 判运行时输出，夹具则直接读
+`os.environ` 的**当前值**并与真落点比对（反例见
+`test_env_pin_gate_goes_red_when_the_environment_points_at_repo_data`：把变量真指进
+仓库必须红）。
 """
 import hashlib
 import importlib.util
@@ -55,6 +58,44 @@ def _abspath(*parts) -> str:
     return os.path.join(*[str(p) for p in parts])
 
 
+# 两个环境变量口子各自对应的**真**落点。值级卫生锁只拿它们做路径比较，绝不打开文件。
+ENV_PINS = (("RELEASE_MANIFEST_PATH", REAL_MANIFEST), ("APK_CACHE_DIR", REAL_APK_DIR))
+
+
+def _same_path(left, right) -> bool:
+    """Windows 大小写不敏感、斜杠可能混用：按规范化后的绝对路径比较。"""
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+        os.path.abspath(str(right)))
+
+
+def _env_pin_problem(environ, tmp_root, require_set=False) -> str:
+    """值级卫生判据：读**环境变量当下的值**（不是夹具里的局部变量），解析后与仓库
+    真落点比对。返回空串表示干净；否则返回一句可复核的违规说明。
+
+    只做路径运算，不打开任何文件：即便值真指到仓库，这里也只会比对、不会读写。
+    `require_set=True` 时"没被钉住"也算违规——缺省落点正是仓库的 `data/version.json`
+    与 `data/apk`，那恰好是夹具要挡住的那条路。
+    """
+    root = Path(os.path.abspath(str(tmp_root))).resolve()
+    for var, real in ENV_PINS:
+        raw = environ.get(var)
+        if raw is None or not str(raw).strip():
+            if require_set:
+                return "%s 没有被钉住（缺省落点就是仓库真实数据）" % var
+            continue
+        resolved = Path(os.path.abspath(str(raw))).resolve()
+        if _same_path(resolved, real):
+            return "%s 解析后落在仓库真实数据上：%s" % (var, resolved)
+        if resolved != root and root not in resolved.parents:
+            return "%s 不在测试 tmp 根 %s 下：%s" % (var, root, resolved)
+    return ""
+
+
+def _assert_env_pins(environ, tmp_root) -> None:
+    problem = _env_pin_problem(environ, tmp_root, require_set=True)
+    assert problem == "", "测试把环境变量指向了仓库真实数据路径：%s" % problem
+
+
 @pytest.fixture
 def materials(tmp_path, monkeypatch):
     """把宣告侧与包侧的两个环境变量口子钉在 tmp_path 下，返回三把假路径。
@@ -69,11 +110,15 @@ def materials(tmp_path, monkeypatch):
     seed = tmp_path / "fake-seed" / "version.json"
     monkeypatch.setenv("RELEASE_MANIFEST_PATH", str(manifest))
     monkeypatch.setenv("APK_CACHE_DIR", str(apk_dir))
-    # 钉不住就是事故现场：断言的是"绝不等价于真路径"，不是"看起来不像"。
-    for value, real in ((manifest, REAL_MANIFEST), (apk_dir, REAL_APK_DIR), (seed, REAL_SEED)):
-        resolved = Path(os.path.abspath(str(value)))
-        assert str(resolved) != str(real), "测试把环境变量指向了仓库真实数据路径：%s" % resolved
-        assert tmp_path in resolved.parents or resolved == tmp_path, "假路径必须落在 tmp 下"
+    # 钉不住就是事故现场：判据读的是**环境变量本身**（os.environ 的当前值），不是上面
+    # 那几个局部变量——否则这条锁只是在重抄 setenv 那两行，环境真指到仓库也照样绿。
+    _assert_env_pins(os.environ, tmp_path)
+    seed_resolved = Path(os.path.abspath(str(seed))).resolve()
+    assert not _same_path(seed_resolved, REAL_SEED), \
+        "种子路径指到了仓库真实种子：%s" % seed_resolved
+    root = Path(os.path.abspath(str(tmp_path))).resolve()
+    assert seed_resolved != root and root in seed_resolved.parents, \
+        "种子假路径必须落在 tmp 下：%s" % seed_resolved
     return {"root": fake_root, "manifest": manifest, "apk_dir": apk_dir, "seed": seed}
 
 
@@ -336,6 +381,33 @@ def test_pinned_paths_never_point_at_the_real_repo_data(materials, monkeypatch, 
     assert code == 0
     for real in (str(REAL_MANIFEST), str(REAL_APK_DIR), str(REAL_SEED)):
         assert real not in out, "闸门的路径判据落到了真仓库数据上：%s" % real
+
+
+def test_env_pin_gate_goes_red_when_the_environment_points_at_repo_data(materials, monkeypatch):
+    """反例：把两个变量真指进仓库（只改值，不打开、不写任何文件），卫生锁必须当场红。
+
+    这条回答的是"夹具里那几行 assert 到底在判谁"：判的是 `os.environ` 当下的值，不是
+    刚刚 setenv 的那几个局部变量。指到真仓库仍然绿，就等于夹具根本没在钉。
+    """
+    tmp_root = materials["root"].parent
+    assert _env_pin_problem(os.environ, tmp_root, require_set=True) == "", \
+        "夹具自己的环境就被指进了仓库：下面的反例没有意义"
+    pinned = {var: os.environ[var] for var, _ in ENV_PINS}
+    for var, real in ENV_PINS:
+        monkeypatch.setenv(var, str(real))
+        problem = _env_pin_problem(os.environ, tmp_root, require_set=True)
+        assert problem, "%s=%s 时卫生锁仍然判绿：它读的不是环境变量" % (var, real)
+        with pytest.raises(AssertionError, match=var):
+            _assert_env_pins(os.environ, tmp_root)
+        monkeypatch.setenv(var, pinned[var])   # 每轮只把**一个**口子指进仓库
+    # 变量缺失也必须红：缺省落点会回落到仓库 data/ 下，夹具钉不住就毫无意义。
+    monkeypatch.delenv("RELEASE_MANIFEST_PATH")
+    assert "没有被钉住" in _env_pin_problem(os.environ, tmp_root, require_set=True)
+    # 仓库里另一个路径（不是真落点，但仍在仓库里）也必须红：判据不是"名字像不像"。
+    monkeypatch.setenv("RELEASE_MANIFEST_PATH",
+                       str(REPO_ROOT / "data" / "not-the-real-version.json"))
+    assert _env_pin_problem(os.environ, tmp_root, require_set=True), \
+        "仓库内的非真落点竟被判绿：夹具会让测试把假清单写进仓库 data/"
 
 
 def test_the_materials_gate_is_on_by_default(materials, monkeypatch, capsys):
