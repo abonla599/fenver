@@ -25,7 +25,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # 签名产物需要可复现的执行环境：这条 lane 钉 24.04；测试/扫描/原生构建仍用
+    # latest，以便尽早发现镜像漂移（#141）。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
