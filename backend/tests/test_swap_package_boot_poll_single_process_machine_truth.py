@@ -34,14 +34,14 @@ r"""**机器形状锁**（ticket #50）：问这台机器——「换包轮询�
 $null 而 `@($running).Count` 是 1）——反例不读脚本，讲的全是机器事实，作用与那份
 「裸 `.Enabled`」对照一样：有人把写法改回去时，红的是判决锁，而这条把为什么红当场说给他听。
 
-顺带钉住 `:493`（本票之前是 `:474`）那句 `Stop-AfterFailure` 里的重启判决：它**今天三种
-进程数都对**（0/1/2 → True/False/False），但对的原因是一次事故——一个进程时 `.Count` 是
-$null，而 `$null -eq 0` 是 False，于是分支不开，恰好是要的结果。本票**没有改**那一行的文本
-（改成 `@(...)` 形状行为等价，但那句原文正是 `test_swap_package_disable_verify.py` 用来定位
-「重新启用没嵌进这条 if」的锚点，动它就等于动别人的锁——票面规定这种情况停下来报告），
-改由本文件的机器锁把那条真值表钉住：抽**那一行自己的条件**，在三种形状下必须得
-True/False/False，并且与「包一层 `@()`」的写法逐形状相同（这才叫「改了也一样，所以不改」），
-而 `if (-not (Get-LiveProcess).Count -eq 0 ...)` 这种「顺手简化」必须被抓住——这台机器答的是
+顺带钉住 `Stop-AfterFailure` 里那句重启判决（票面写作 `:493`，本文件从 `:474` 时代起盯它）：
+#51 之前它是裸 `.Count` 写法，三种进程数**碰巧**都对（0/1/2 → True/False/False）——一个进程时
+`.Count` 是 $null，而 `$null -eq 0` 是 False，于是分支不开。#51 把它改成
+`@(Get-LiveProcess).Count` 的 honest 形式（行为逐形状不变），同时把
+`test_swap_package_disable_verify.py` 的定位改成了结构锚点（锚在 if 体内的 `Start-Process`
+上），所以文本形状不再牵动别人的锁。本文件继续抽**那一行自己的条件**，在三种形状下必须得
+True/False/False，并且与固定在探针里的裸写法逐形状相同；而
+`if (-not (Get-LiveProcess).Count -eq 0 ...)` 这种「顺手简化」必须被抓住——这台机器答的是
 FALSE/FALSE/TRUE：零进程时不再重启（包静默躺在地上），两个进程时反倒再拉一个（两个后端写
 同一批 data\\ 文件）。这张表是探针答给本文件的，不是本文件推出来的：写这份锁时按运算符结合
 性猜的那一版（FALSE/TRUE/TRUE）被这台机器当场拒了，所以文件里留下的是读数。
@@ -115,8 +115,9 @@ _POLL_EXPECT = {
     "bare": {"zero": "FALSE", "one": "FALSE", "two": "TRUE"},
     "wrapped": {"zero": "FALSE", "one": "TRUE", "two": "TRUE"},
 }
-# 重启判决：只许「真的一个进程都没有」时开门。今天这条靠 $null -eq 0 是 False 侥幸对，
-# 包一层 @() 与之逐形状相同，`-not` 那种写法在一个进程时会开门（危险方向：双起后端）。
+# 重启判决：只许「真的一个进程都没有」时开门。#51 已把脚本那一行改成 @() 形式；
+# 裸 .Count 与 @() 在 0/1/2 上逐形状相同（所以那次改动行为中性），而 `-not` 那种
+# 写法在**两个**进程时会开门（危险方向：双起后端，写同一批 data\ 文件）。
 _STOP_EXPECT = {
     "extracted": {"zero": "TRUE", "one": "FALSE", "two": "FALSE"},
     "bare": {"zero": "TRUE", "one": "FALSE", "two": "FALSE"},
@@ -593,12 +594,12 @@ def test_machine_positive_control_and_the_counter_example_show_why_zero_and_two_
 
 
 def test_machine_the_restart_condition_fires_only_when_nothing_runs(script_tables):
-    """机器判据·`:493`（本票之前 `:474`）：那条重启判决只在零进程时开门，且与包一层 @() 同答。
+    """机器判据（票面 `:493`）：那条重启判决只在零进程时开门，且裸写法与 @() 逐形状同答。
 
-    这条是本票第 2 项的**证据而不是说法**：那一行今天对，但对的原因是一次事故（一个进程时
-    `.Count` 是 $null，而 $null -eq 0 是 False）。逐形状与 `@(...)` 写法相同 → 不改它行为
-    一样；而 `test_mutation_*` 会证明 `-not` 那种「顺手简化」在同一个位置开门（真危险：
-    两个后端写同一批 data\\ 文件），锁抓得住。
+    #51 把那一行从裸 `.Count` 改成了 `@(...)` 的 honest 形式：旧写法的真值表是对的，
+    但靠的是"一个进程时 .Count 是 $null、$null -eq 0 为 False"这个巧合；新写法真的在数
+    元素。两种拼法在 0/1/2 上逐形状相同，所以这次改动行为中性；而 `test_mutation_*` 会证明
+    `-not` 那种「顺手简化」在同一个位置开门（真危险：两个后端写同一批 data\\ 文件），锁抓得住。
     """
     v = script_tables["v"]
     for shape, want in _STOP_EXPECT["extracted"].items():
@@ -655,36 +656,37 @@ def test_mutation_unwrapping_the_poll_predicate_goes_red_on_the_machine(tmp_path
         "真文件必须先绿，否则上一条的红证明不了任何事")
 
 
-def test_mutation_rewrapping_the_restart_site_is_neutral_while_the_not_spelling_is_caught(tmp_path):
-    """牙印二（本票第 2 项的两面）：`@()` 那种改法行为**一样**，`-not` 那种「简化**不一样**。
+def test_mutation_the_restart_site_spellings_are_neutral_while_the_not_spelling_is_caught(tmp_path):
+    """牙印二（#51 之后的两面）：`@()` 与裸 `.Count` 行为**一样**，`-not` 那种「简化」**不一样**。
 
-    左半边是本票「不改 :493」的机器论证：抽改后副本的条件去问机器，三种形状逐档相同 →
-    改了也白改，而不改的代价（动 `test_swap_package_disable_verify.py` 的锚点）是真的。
-    右半边是这条锁的牙齿：`if (-not (Get-LiveProcess).Count -eq 0 -and ...)` 这种顺手简化，
-    在这台机器上答的是 FALSE/FALSE/TRUE（`-not` 先结合，见下面那条断言里的逐档推算）——
-    零进程时不再重启（包静默躺在地上），两个进程时反倒再拉一个（两个后端写同一批
-    data\\ 文件）。这条真值表是这台机器答的，不是本文件推的：本文件原本按 `-eq` 先结合猜的
-    是 FALSE/TRUE/TRUE，探针当场拒了那一次，所以这里记的是读数而不是想法。
+    左半边：脚本那一行现在是 `@(Get-LiveProcess).Count`（#51 的 honest 形式）。把它反向摘掉
+    那层 `@()` 去问机器，三种形状逐档相同——这就是那次改动行为中性的证据。右半边是这条锁的
+    牙齿：`if (-not (Get-LiveProcess).Count -eq 0 -and ...)` 这种顺手简化，在这台机器上答的是
+    FALSE/FALSE/TRUE（`-not` 先结合，见下面那条断言里的逐档推算）——零进程时不再重启（包静默
+    躺在地上），两个进程时反倒再拉一个（两个后端写同一批 data\\ 文件）。这条真值表是这台机器
+    答的，不是本文件推的：本文件原本按 `-eq` 先结合猜的是 FALSE/TRUE/TRUE，探针当场拒了那一次，
+    所以这里记的是读数而不是想法。
     """
     stop = _stop_predicate(PS1)
     assert stop is not None
-    old_line = "if (" + stop["cond"] + ") {"
-    wrapped = PS1.replace(old_line,
-                          "if (@(Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {",
-                          1)
-    assert wrapped != PS1, "包一层样本没生效"
-    copy_w = _write_crlf_copy(tmp_path, "swap-package-stop-rewrapped.ps1", wrapped)
-    tables_w = _machine_tables(copy_w.read_text(encoding="utf-8"), tmp_path, "stop-wrapped")
-    assert tables_w is not None
-    assert tables_w["v"]["stop"]["extracted"] == _STOP_EXPECT["extracted"], (
-        f"包一层之后 :493 的行为不再是 True/False/False（{tables_w['v']['stop']}）："
-        "那「不改它」的论证需要重写")
+    wrapped_line = "if (" + stop["cond"] + ") {"
+    assert stop["cond"].startswith("@(Get-LiveProcess).Count"), (
+        f"#51 之后这句应当是包了一层 @() 的写法，实得 {stop['cond']!r}：这条牙印没有对象")
+    bare_line = "if ((Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {"
+    bare = PS1.replace(wrapped_line, bare_line, 1)
+    assert bare != PS1, "摘掉 @() 的样本没生效"
+    copy_b = _write_crlf_copy(tmp_path, "swap-package-stop-bare-spelling.ps1", bare)
+    tables_b = _machine_tables(copy_b.read_text(encoding="utf-8"), tmp_path, "stop-bare")
+    assert tables_b is not None
+    assert tables_b["v"]["stop"]["extracted"] == _STOP_EXPECT["extracted"], (
+        f"摘掉 @() 之后这句的行为不再是 True/False/False（{tables_b['v']['stop']}）："
+        "那 #51「两种拼法等价」的论证需要重写")
     here = _machine_tables(PS1, tmp_path, "stop-control-tables")
     assert here is not None
-    assert tables_w["v"]["stop"]["extracted"] == here["v"]["stop"]["extracted"], (
-        "包一层与仓库里那一行不同答：本票「改了也一样」这句话没有证据")
+    assert tables_b["v"]["stop"]["extracted"] == here["v"]["stop"]["extracted"], (
+        "裸写法与仓库里那一行不同答：@() 的改动就不是行为中性的")
 
-    negated = PS1.replace(old_line,
+    negated = PS1.replace(wrapped_line,
                           "if (-not (Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {",
                           1)
     assert negated != PS1, "反例样本没生效"

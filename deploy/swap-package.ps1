@@ -324,9 +324,13 @@ function Clear-BackendBudget {
     #
     # Scope is deliberately the smallest thing that is safe: remove ONLY the
     # 'backend' key. Every other entry (tunnel records, the seen:* throttle
-    # markers) is left byte-for-byte as the watchdog wrote it. Touching them
-    # would hide a pre-existing condition, and the seen:* markers are what keep
-    # the log from repeating the same warning every minute.
+    # markers) is preserved by key and value. Touching them would hide a
+    # pre-existing condition, and the seen:* markers are what keep the log from
+    # repeating the same warning every minute. "Preserved" is NOT "byte-for-byte":
+    # the whole document is re-serialized below, so ConvertTo-Json may normalize
+    # formatting and escapes (non-ASCII comes back as \uXXXX - see the note at the
+    # write) while no key or value changes meaning. Do not compare the ledger
+    # byte-for-byte after a swap.
     #
     # Shape constraints, each learned the hard way in this repo:
     #   - BOM preserved: watchdog.ps1 writes this file with Set-Content -Encoding
@@ -397,16 +401,23 @@ function Clear-BackendBudget {
     # all, measured 2026-10-17). The fix is a manual edit of that one key, or letting
     # the hour roll - re-running the swap with -KeepBackendBudget would NOT help, that
     # switch keeps a spent ledger on purpose, it does not hand credits back.
+    # The three early exits (state=absent just above; state=empty-file /
+    # state=unparsable below) deliberately omit budget-returned=: none of them ever
+    # owed a return. absent has no ledger to clear; empty-file has no keys in which
+    # a backend entry could live; unparsable refuses to rewrite a file it could not
+    # parse, so all three say "skipped" instead of borrowing the failure grammar.
+    # Only the two catch handlers, which did attempt a read/write, carry
+    # budget-returned=false together with backend-entries=.
     # Do not "fix" a throw on this path by retrying the write in a loop: this is
     # bookkeeping, and a bounded retry that also fails would still need this token.
     $bytes = $null
     try {
         $bytes = [System.IO.File]::ReadAllBytes($StatePath)
     } catch {
-        # $_ captured first, before anything else can take it over - the same reason
-        # the disable handler spells `$disableError = $_.Exception.Message` as its
-        # first statement: a token built from $_ after a nested call prints somebody
-        # else's failure exactly when an operator needs to read what failed.
+        # Captured into a named variable before the token is built: the same shape
+        # the disable handler uses. The order is a cheap convenience, not a
+        # guarantee - measured on PS 5.1, $_ survives a nested catch - so do not
+        # cite this line as the reason the printed message is correct (#46).
         $budgetReadError = $_.Exception.Message
         Write-Output ('BUDGET state=read-threw budget-returned=false backend-entries=unproven error=' + $budgetReadError)
         return
@@ -781,26 +792,23 @@ function Stop-AfterFailure {
     # states what was done and not what was intended.
     $package = 'intact-no-restart-needed'
     try {
-        # MEASURED, NOT DERIVED - and correct here only by an accident worth naming.
-        # With exactly ONE process running, this call unwraps to a bare CimInstance
-        # (the shape the boot poll documents below), a bare CimInstance answers
-        # .Count as $null, and $null -eq 0 is False, so the branch stays shut while
-        # a backend is up - the wanted verdict, but not one this line computes from
-        # a count. This box (PS 5.1.26100.9549), 0/1/2 processes: as written it
-        # answers True/False/False, and wrapping the call in @() before .Count
-        # answers the same True/False/False, so the two spellings behave alike
-        # today. The wrap is deliberately NOT applied here: this predicate's exact
-        # text is the locator that test_swap_package_disable_verify.py uses to prove
-        # the guard restore is not nested inside this if, so re-shaping the line
-        # would move another ticket's lock. The truth table is pinned by the machine
-        # probe instead (backend/tests/
+        # MEASURED, THEN MADE HONEST (#51). With exactly ONE process running, the
+        # bare form `(Get-LiveProcess).Count` lands on a bare CimInstance (the shape
+        # the boot poll documents below) whose .Count is $null, and $null -eq 0 is
+        # False - so the branch stays shut while a backend is up. That is the wanted
+        # verdict, but computed by accident. @(...) counts elements: on this box
+        # (PS 5.1.26100.9549) 0/1/2 processes answer True/False/False, the same table
+        # as the bare spelling, now for a reason the reader can see. Do NOT "tidy"
+        # this into `-not (Get-LiveProcess).Count -eq 0`: measured FALSE/FALSE/TRUE -
+        # zero processes would stop restarting a dead package (silently left down)
+        # and two processes would start another backend over the same data\ files.
+        # The truth table is pinned by the machine probe (backend/tests/
         # test_swap_package_boot_poll_single_process_machine_truth.py), which
         # evaluates THIS line's own condition for 0/1/2 processes and requires
-        # True/False/False - so a future edit that turns the accident into a real
-        # count, or into a branch that fires while a backend is up (two backends
-        # writing the same data\ files), is caught by the machine and not by a
-        # reader's guess.
-        if ((Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
+        # True/False/False. Re-spelling the condition no longer moves another lock:
+        # test_swap_package_disable_verify.py locates this if structurally, by the
+        # Start-Process call in its body.
+        if (@(Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
             # do not double-start: two backends would write the same data\ files
             Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
             $package = 'old-package-restarted'
@@ -1028,9 +1036,12 @@ try {
 Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
 $script:watchdogDisabled = $true
 } catch {
-    # Captured first, before anything else can own $_: the nested read below has its
-    # own catch block, and a token built from $_ after it would print the wrong
-    # exception - or none - exactly when an operator needs to read what failed.
+    # Captured before the DISABLE-THREW token is built; the lock in
+    # test_swap_package_disable_threw_handler.py pins that order. It is NOT
+    # load-bearing that this is the first statement (measured 2026-10 for #46,
+    # PS 5.1.26100.9549: $_ survives the nested/inline catch below, and moving this
+    # assignment after the read turns no lock red). Kept first because it is a cheap
+    # convenience - one line, and the handler reads top-down.
     $disableError = $_.Exception.Message
     # ONE read, the same helper the verify loop uses. It catches its own failures and
     # returns, so the outer try here is only there to keep "the read could not even
