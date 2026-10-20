@@ -79,20 +79,32 @@ GAP_NO_RESUME_PARAM = "函数接不住 resume 关键字参数"
 def _takes_resume_kwarg(func) -> bool:
     """这条函数能不能被 `func(resume=...)` 叫动。
 
-    按关键字传参的口径判（执行器就是这么递的，见 `_dispatch` 里那次注入），不看位置：
-    多一个位置形参不代表它愿意接断点。`**kwargs` 算接得住。拿不到签名（C 实现之类）
-    按接不住处理——判不出就当作不合格，方向与 `_resume_refusal` 一致。
+    判据是**预演一次真实的绑参**，不是读 `inspect.signature` 默认报出来的那张脸：
+    后者会沿着 `__wrapped__` 往下走，而执行器调用的是最外层那个对象。`functools.wraps`
+    包过的包装器就是反例——`wrapper(text)` 包着 `inner(resume=None)` 时，默认签名报
+    `(text, resume=None)`、判成"接得住"，可真叫 `wrapper(resume=...)` 是 TypeError，
+    于是一次续跑白跑（今天仓里 `functools.wraps` 是 0 处，这一条是防将来）。
+
+    口径与执行器一致（见 `_dispatch` 里那次注入）：全关键字、`resume` 按名传。所以这里
+    `follow_wrapped=False` 取**真正会被调用那个对象**的签名，补上其余必填具名形参的
+    占位值，再 `sig.bind(...)` 一次：`**kwargs` 在这一步自然算接得住，位置限定
+    （positional-only）的 `resume` 在这一步自然绑不上。拿不到签名（C 实现之类）按
+    接不住处理——判不出就当作不合格，方向与 `_resume_refusal` 一致。
     """
     try:
-        params = inspect.signature(func).parameters
+        sig = inspect.signature(func, follow_wrapped=False)
     except (TypeError, ValueError):
         return False
-    for p in params.values():
-        if p.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-    target = params.get("resume")
-    return target is not None and target.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    call = {p.name: None for p in sig.parameters.values()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                           inspect.Parameter.KEYWORD_ONLY)}
+    call["resume"] = None
+    try:
+        sig.bind(**call)
+    except TypeError:
+        return False
+    return True
 
 
 def suspend_config_gaps(tool_name: str) -> list:

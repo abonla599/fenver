@@ -18,6 +18,8 @@
 模型在 `arguments` 里塞的那份假断点就会被白名单放行，"答案由服务端存着"这条纪律当场作废。
 """
 from collections import defaultdict
+import functools
+import inspect
 import json
 
 import pytest
@@ -85,12 +87,55 @@ def test_missing_tier_hides_the_tool_and_shouts_once(monkeypatch, capsys):
 # ---------- #40：声明了 suspends 就得接得住 resume ----------
 
 def test_every_tool_declaring_suspends_accepts_resume(monkeypatch):
-    """全表扫，不看名字不看注释，只看能不能被 `func(resume=...)` 叫动。"""
+    """全表扫，不看名字不看注释，只看能不能被 `func(resume=...)` 叫动。
+
+    射程边界（这句话的覆盖面比"任何声明 suspends 的工具"窄）：扫的是
+    `registry.tools_registry` 这张进程内表，而它今天只由 `builtin_tools` 里那 6 处
+    `register_tool` 在导入期写入（本模块 `import app.tools.builtin_tools` 就是为了让
+    这 6 处都进表）。运行期动态注册的工具、以及第三方绕过 `builtin_tools` 直接注入的
+    表项，这把锁看不见——它保证的是"这 6 处里凡是声明了 suspends 的都接得住 resume"，
+    不是"任何声明 suspends 的工具都被它兜住"。
+    """
     declared = _suspendable_names()
     assert declared, "注册表里没有任何工具声明 suspends——这把锁就成了空转"
     offenders = [n for n in declared
                  if not ex._takes_resume_kwarg(tools_registry[n]["function"])]
     assert offenders == [], f"这些工具声明了 suspends 却接不住 resume：{offenders}"
+
+
+def test_a_functools_wraps_wrapper_is_judged_by_the_function_that_actually_runs():
+    """`functools.wraps` 把 inner 的签名贴到 wrapper 上，但真正被调用的是 wrapper。
+
+    陷阱形状（今天仓里 `functools.wraps` 是 0 处，这条锁是防将来）：
+        @functools.wraps(inner)          # inner(text="", resume=None)
+        def wrapper(text=""): ...        # 自己的签名只有 (text)
+    `inspect.signature(wrapper)` 跟着 `__wrapped__` 报出 `(text="", resume=None)`，
+    按"签名里有 resume"判就会把这条工具判成接得住；真叫 `wrapper(resume=...)` 却是
+    TypeError——执行器续跑进来才发现，那次挂起就是白等的。
+    """
+    def inner(text: str = "", resume: dict = None):
+        return {"text": text, "resume": resume}
+
+    @functools.wraps(inner)
+    def wrapper(text: str = ""):
+        return inner(text)
+
+    # 先钉住陷阱本身成立，免得这条锁在测空气：默认签名有 resume，真调用绑不上。
+    assert "resume" in inspect.signature(wrapper).parameters, \
+        "这条负例的前提没了：inspect.signature 不再跟随 __wrapped__"
+    with pytest.raises(TypeError):
+        wrapper(resume={"state": {}, "answer": "答"})
+
+    assert ex._takes_resume_kwarg(wrapper) is False, \
+        "签名跟着 __wrapped__ 走了：这条工具会被判接得住，续跑时却 TypeError"
+
+
+def test_a_plain_resume_keyword_parameter_is_still_accepted():
+    """配对的正例：普通 `def f(resume=None)` 不能被上一条的收紧误伤。"""
+    def takes_resume(text: str = "", resume: dict = None):
+        return "ok"
+
+    assert ex._takes_resume_kwarg(takes_resume) is True
 
 
 def test_the_pairing_check_says_which_half_is_missing(monkeypatch):
