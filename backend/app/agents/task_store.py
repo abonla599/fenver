@@ -453,11 +453,17 @@ def _status_of(task: "Task") -> Optional[TaskStatus]:
 
 
 def _window_seconds(timeout_seconds=None) -> float:
-    """把"要用的作废窗口"归成一个**非负有限**秒数。坏值一律收成 0（= 关）。
+    """把"要用的作废窗口"归成一个**非负、有限、且不超过 datetime 可用上限**的秒数。
+    坏值一律收成 0（= 关）。
 
     `None` = 现读 `config_store.task_waiting_user_timeout_seconds()`。这一格与 TTL 那
-    两格方向相反，所以兜底也相反：那两格的坏值会倒向"更严"，而这里的任何不确定都
-    不许倒向"销毁"——0 是"永不做废"，是这里唯一安全的兜底。
+    两格方向相反，所以兜底也相反：那两格的坏值会倒向"更严"，而这里的不确定一律落到
+    0（永不做废）。这是**取舍**，不是"安全"的同义词：0 只对"不销毁断点"这一侧是安全的
+    （销毁用户手里还能续的 `waiting_user` 断点不可逆），对"停点行数无界"这一侧是
+    **fail-open**——不销毁等于不回收。后者是 #36 单独跟踪的风险，本格选择先不丢数据；
+    所以坏值绝不倒向某个猜出来的正窗口：猜对了没人知道，猜错了就是一次没人授权的销毁。
+    上界见 `config_store.MAX_WINDOW_SECONDS`：超过它的数不是窗口，是 datetime 装不下
+    的秒数（`timedelta(seconds=...)` / 日期加法会抛），这一支同样落回 0。
     """
     if timeout_seconds is None:
         # 现读那一支**也**要过下面那道 isfinite，不许在这里提前 return：配置出口已经
@@ -479,7 +485,21 @@ def _window_seconds(timeout_seconds=None) -> float:
         return 0.0
     if not math.isfinite(value):        # inf / nan：比较起来恒 False，不能让它穿过判据
         return 0.0
+    limit = _max_window_seconds()
+    if value > limit:
+        print(f"⚠️ 停点作废窗口 {value!r} 超出 datetime 可用上限（{limit} 秒），按不作废跑")
+        return 0.0
     return max(0.0, value)
+
+
+def _max_window_seconds() -> float:
+    """`config_store.MAX_WINDOW_SECONDS` 的现读。
+
+    函数内导入（不在文件头 import config_store）：`paths.resolve_all_data_paths()` 会在
+    函数内导入 task_store，模块级互相引用会把导入顺序变成一份债。与下面那支同理由。
+    """
+    from app.core import config_store
+    return config_store.MAX_WINDOW_SECONDS
 
 
 def task_waiting_user_timeout_seconds() -> float:
@@ -545,7 +565,13 @@ def waiting_deadline(task: "Task", timeout_seconds=None,
     start = parse_waiting_since(getattr(task, "waiting_since", None))
     if start is None:
         return None
-    return start + timedelta(seconds=window)
+    try:
+        return start + timedelta(seconds=window)
+    except OverflowError:
+        # 窗口本身在上限以内，起点却可能已经很晚（tasks.json 被手改、系统时钟跳到
+        # 9999 年）：从起点再加就跳出 datetime 的表达范围。封顶到 datetime.max 仍然
+        # 表达"远到看不见"，而 `timedelta` 那一次溢出绝不许变成详情端点的 500。
+        return datetime.max
 
 
 def is_waiting_timed_out(task: "Task", now: datetime = None,
