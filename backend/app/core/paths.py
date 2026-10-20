@@ -113,6 +113,13 @@ DATA_PATH_ENV_VARS = {
     "审计流水": "AUDIT_LOG_PATH",
     "搜索源密钥": "SEARCH_KEYS_DB_PATH",
     "搜索用量账本": "SEARCH_USAGE_DB_PATH",
+    # v0.34.3 补墙（#114）：发版物料的两只口子此前不在任何隔离清单里。它们与上面
+    # 那批同属"可变、可被环境变量指走"的运行时落点——清单是"告诉所有手机有新版本"
+    # 的那句公开宣告，包缓存是本机正在代管的字节——漏了指走时测试会写到线上 data/。
+    # 放进这张表而不是另起一份：隔离锁、/health 的落点数、启动摘要、文档覆盖锁
+    # 全从这一处派生，加口子只改这里一处。
+    "发布清单": "RELEASE_MANIFEST_PATH",
+    "安装包缓存": "APK_CACHE_DIR",
 }
 
 
@@ -142,6 +149,7 @@ def resolve_all_data_paths() -> list:
     from app.core.usage import _default_path as usage_path
     from app.core.search_keys import path as search_keys_path
     from app.core.search_usage import _default_path as search_usage_path
+    from app.core import apk_cache, releases
     from app.session.session_store import _default_path as sessions_path
 
     resolved = {
@@ -161,6 +169,8 @@ def resolve_all_data_paths() -> list:
         "审计流水": audit_path(),
         "搜索源密钥": search_keys_path(),
         "搜索用量账本": search_usage_path(),
+        "发布清单": releases.runtime_manifest_path(),
+        "安装包缓存": apk_cache.cache_dir(),
     }
     # 按 DATA_PATH_ENV_VARS 的顺序出：日志行序稳定，两份日志才比得出差别
     return [(label, resolved[label]) for label in DATA_PATH_ENV_VARS]

@@ -228,7 +228,12 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
                  "搜索源密钥": "search_keys.json", "搜索用量账本": "search_usage.json",
                  # v0.35 A2：审批票据表落盘，这份清单跟着长——这条锁的意义就是
                  # "加一份存储而忘了补这里，红的是这一条"（判据原文见上面那段注释）。
-                 "审批票据": "approvals.json"}
+                 "审批票据": "approvals.json",
+                 # v0.34.3 补墙（#114）：发版物料的两只口子。它们此前谁都没登记，
+                 # 于是测试的隔离锁看不见它们，真落点（线上那句公开宣告与正在代管
+                 # 的字节）就在射程内。文件名只用于造假路径，判的是环境变量优先级。
+                 "发布清单": "version.json",
+                 "安装包缓存": "apk"}
     # 反馈、意见反馈与偏好是导入期算好的模块常量，指不走运行时环境变量（conftest 在
     # import 前把它指到临时目录），所以不在 FILENAMES 里
     assert set(FILENAMES) | {"反馈原文", "意见反馈", "偏好摘要"} == set(DATA_PATH_ENV_VARS), \

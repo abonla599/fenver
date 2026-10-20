@@ -37,6 +37,14 @@ URL scheme 那一形；`_UNC_PATH` 认 `\\服务器\共享\…`；`_POSIX_PATH` 
 - `single-slash-scheme-overmasked`：少一枚斜杠的畸形 URL（`https:/ai.fever`）没有 `://`
   可认，被当盘符路径吃掉，只剩 `http`。这是豁免认 `://` 的对偶代价，规范 URL 逐字活着由
   `_VERBATIM_URLS` 钉着 ⇒ 无活例。
+- `mixed-slash-unc-unrecognized`：`//srv\\share` 三档都不认——盘符档没有盘符、UNC 档只认
+  开头的 `\\`、POSIX 档要求 `/srv/` 后面还是正斜杠而这里是 `\\`。要收它就得把 UNC 档放宽成
+  "任意混用的两种分隔符"，而那会把协议相对 URL（`//cdn…`）与 `https://` 里的 `//` 一并
+  吃掉——所以今天只登记、不修。现网文案里没有这种混写 ⇒ 无活例。
+- `forward-slash-unc-half-masked`：`//srv/share` 只掩掉从第二个斜杠起的 `/srv/share`，
+  开头那枚 `/` 原样走出去。根因是 POSIX 档没有起点边界（见
+  `posix-has-no-start-boundary`）；收它要么给 POSIX 档补左边界、要么把 `//` 开头当
+  UNC——两条都会把合法 URL 的路径或协议相对地址牵连进来，所以今天同样只登记。
 
 **锁级看不见清单**（与 `_LOCK_BLIND_SPOTS` 同一本账，同样每条一枚钉，全部**今天必须点不到**）：
 点名器（`_drive_rule_literals`）认的形是"模块级 `NAME = re.compile(字面量)`，且字面量里出现
@@ -131,6 +139,10 @@ _VERBATIM_URLS = (
     "ms-appx-web://host/p",
     "s3://bucket/key",
     "ftp://ai.fever.xyz/v1/update/info",
+    # 协议相对地址：`//cdn…` 与 `\\srv` 只差一枚斜杠的方向。把 UNC 档放宽成
+    # `//`+任意字符的第一个受害者就是它（`https:` 会被留下、主机名被整段掩掉），
+    # 所以它必须逐字活着——#129 明确不许为两条漏形状去换这张网。
+    "//cdn.fever.xyz/app.js",
 )
 
 # 句子其余部分必须照读：只盖路径那一段，前后连接词与标点一个都不许跟着消失。
@@ -147,6 +159,11 @@ _SENTENCE_CASES = (
      "位置 " + MASK + " 详见 https://ai.fever.xyz/v1/update/info"),
     (r"问不到发布信息 https://ai.fever.xyz/v1/release/latest（位置 C:\Users\someone\chroma_db）",
      "问不到发布信息 https://ai.fever.xyz/v1/release/latest（位置 " + MASK + "）"),
+    # #129：混写 UNC 今天三档都不认——同一句里的合法 URL 必须毫发无伤。这条不是
+    # "它无害"，而是把漏的形状钉在句子里：谁哪天把 UNC 档放宽成 `//`+任意字符，
+    # 这里会先红在 URL 被吃掉那一半。
+    (r"位置 //srv\share 详见 https://ai.fever.xyz/v1/update/info",
+     r"位置 //srv\share 详见 https://ai.fever.xyz/v1/update/info"),
 )
 
 # 路径前面的那个字符是句子的，不是路径的——lookbehind 与消耗型分组就差在这一个字符上。
@@ -205,6 +222,11 @@ _DRIVE_EQUIVALENCE_CASES = (
     r"D:\data\x 是问题所在",
     r"\\srv\share",
     "/home/a/b",
+    # #129：混写 UNC 与正斜杠 UNC 都不是盘符路径——盘符档与 oracle 都必须说"没有"。
+    # 谁把 UNC 的识别塞进盘符档（或反过来），这两串就是第一处报警器。
+    r"//srv\share",
+    "//srv/share",
+    "//cdn.fever.xyz/app.js",
 )
 
 # 仍漏清单的钉子（与模块 docstring 那段是同一本账）。每条 (case_id, 喂进去的句子,
@@ -234,6 +256,17 @@ _STILL_MISSED_SHAPES = (
      "https:/ai.fever",
      "http" + MASK,
      "少一枚斜杠就没有 `://` 可认，被当盘符路径吃掉——豁免认 `://` 的对偶代价，规范 URL 由 _VERBATIM_URLS 钉着"),
+    # #129：两条 UNC 变体此前既不在射程也不在账上。放宽 UNC 档会先咬掉协议相对
+    # URL 与 `https://` 的 `//`，所以这里只登记"今天抓不住"，并让 `_VERBATIM_URLS`
+    # 与句级语料把"不许为了它们换网"钉住。
+    ("mixed-slash-unc-unrecognized",
+     r"//srv\share",
+     r"//srv\share",
+     "盘符档没有盘符、UNC 档只认开头的 `\\\\`、POSIX 档要求 `/srv/` 后仍是正斜杠——三档都不认"),
+    ("forward-slash-unc-half-masked",
+     "//srv/share",
+     "/" + MASK,
+     "POSIX 档从第二个斜杠的 `/srv/` 起匹配，开头那枚 `/` 原样走出去；补起点边界会牵连合法 URL"),
 )
 
 # 锁级看不见清单：每条 (case_id, 合成源码, 为什么点不到名)。今天必须点不到；点到了就是射程收了
