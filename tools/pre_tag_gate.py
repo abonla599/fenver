@@ -32,6 +32,10 @@ v0.28.1"——事后谁也说不清用户装的是哪一版，而这恰好是最
 那就别打 tag。确实要在离线环境放行，必须显式带 `--allow-unreachable`，脚本会把
 这件事打印成一条 WARNING 留痕，而不是安静地放行。
 
+这面旗的射程只有"线上（与本机）build 取不到"这一种状态：**发版说明缺失不是"取不到"**
+（#75）。`docs/releases/<tag>.md` 不在树里时，带不带 `--allow-unreachable` 都红——
+否则一棵连说明都没有的树也能拿到 `verdict=PASS`，而 Release 正文是空的。
+
 ## 发版物料顺序（第 5 条判据，#22）
 
 **清单宣告在前、包落盘在后 = 不发版。** v0.34.2 收尾那次出的正是这个形状：自托管
@@ -100,19 +104,42 @@ scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 
 判据的定义本身——届时唯一的出路是把那一项从清单里显式删掉（一次代码改动、一次 review），
 而不是给闸门补一面旗。
 
+## 构建前的产源预检（`--pre-build`，#113）
+
+包里的版本戳是构建时烘进去的，所以"包上写着 vX"与"包里的字节来自 vX 那一笔"是两件事：
+在一棵脏树或一个落后于 tag 的 HEAD 上构建，产出的包照样自称 vX。打 tag 只保证那个 ref
+存在，不保证**正在构建的这棵树**就是它。
+
+    python tools/pre_tag_gate.py --expect v0.35.0 --pre-build
+
+判据两条，都问 git 要：`git rev-parse HEAD` 必须等于 `git rev-parse v<tag>`（annotated
+tag 按 `^{commit}` 剥到提交），并且 `git status --porcelain` 必须为空（含未跟踪文件）。
+它只跑这一格——线上 build 与发版物料那几格在换包之后才有意义；而这一格必须在构建
+**之前**跑，换包窗口里再发现已经晚了。
+
+**没有跳过开关**：不接受与 `--allow-unreachable` / `--backend-only` / `--check-local` /
+`--no-versionname-check` 合用（argparse 当场退 2），也没有"忽略脏树"之类的旗。判不出来
+（不是 git 仓库、git 读不出 HEAD/状态）退 2；证明是反的（tag 不存在、HEAD 不在 tag 上、
+工作树脏）退 1。
+
 ## 用法
 
 本机（打 tag 之前，推荐连本地 8000 一起核）：
 
     python tools/pre_tag_gate.py --expect v0.33.1 --check-local
 
+构建之前（打本地 tag 之后、构建 staging 之前）：
+
+    python tools/pre_tag_gate.py --expect v0.33.1 --pre-build
+
 CI —— **#90b 起不再由 `release-apk.yml` 跑这把全量闸门**：那一步换窄成只核本版发版说明
 `docs/releases/<tag>.md` 在不在。线上 build 与物料顺序这两格 CI 判不到（#57：`/health` 是对岸
 进程，`data/` 与 `version.json` 被 .gitignore 排除），**这两格只剩上面那条本机命令这一道闸**。
 
 退出码：0 放行；1 已经证明它是反的（versionName 与 tag 不符、清单宣告跑在了落盘的包前面、
-某个可推送 ref 的祖先链上躺着被隔离的提交）；2 判据拿不到（fail-closed，含"祖先关系判不
-出来"与"连 ref 清单都列不出来"）。
+某个可推送 ref 的祖先链上躺着被隔离的提交；`--pre-build` 下则是 tag 不存在 / HEAD 不在
+tag 上 / 工作树脏）；2 判据拿不到（fail-closed，含"祖先关系判不出来"、"连 ref 清单都
+列不出来"与"git 读不出 HEAD/状态"）。
 """
 import argparse
 import hashlib
@@ -387,6 +414,73 @@ def _git_lines(repo_root: str, args, timeout: float = 30):
     return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()], "ok"
 
 
+def _git_probe(repo_root: str, args, timeout: float = 30):
+    """跑一条只读 git，带回 (stdout.strip(), 退出码 | None, stderr 摘要)。
+
+    产源预检要分 `rev-parse --verify` 的 0/1/128 三档（`_git_lines` 把它们折成
+    "有/没有"），所以这里单独留一份不折的返回值。
+    """
+    try:
+        out = subprocess.run(["git", "-C", repo_root] + list(args),
+                             capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return None, None, "%s:%s" % (type(exc).__name__, exc)
+    err = (out.stderr or "").strip().replace("\n", " ")
+    return (out.stdout or "").strip(), out.returncode, err[:180]
+
+
+def check_build_provenance(repo_root: str, tag: str):
+    """**这棵树是不是就是要打 tag 的那一笔？** 回 (可以, 记号, 说明)。
+
+    构建只把 `version.txt` 里的版本号烘进包里，它不会去问 git"这段字节来自哪一笔"。
+    于是脏树、或 HEAD 停在 tag 之前的提交上时，包照样自称 `tag`——版本号是真的，内容
+    不是。判据因此只问两个世界事实：
+
+    1. `git rev-parse HEAD` == `git rev-parse v<tag>^{commit}`（`^{commit}` 让 annotated
+       tag 也剥到提交；`--verify --quiet` 的 1 与 128 必须分开：前者是"没有这个 tag"，
+       后者是"这份目录答不上来"，后者属于判不出来）；
+    2. `git status --porcelain` 为空——**含未跟踪文件**：PyInstaller 会把树里的东西收进
+       包，一个没提交的新文件同样会变成"包里有、tag 里没有"的字节。
+
+    这一格**没有开关**，也没有降级档：脏树不是"取不到"，它就是反的。
+    """
+    head, rc, err = _git_probe(repo_root, ["rev-parse", "--verify", "HEAD^{commit}"])
+    if rc != 0 or not head:
+        return False, "git-unreadable", (
+            "git 读不出 HEAD（rc=%s%s，%s）——判不出这棵树是哪一笔，就不许构建"
+            % (rc, (" %s" % err if err else ""), repo_root))
+
+    tag_sha, rc, err = _git_probe(repo_root, ["rev-parse", "--verify", "--quiet",
+                                              "refs/tags/%s^{commit}" % tag])
+    if rc == 1 or (rc == 0 and not tag_sha):
+        return False, "tag-missing", (
+            "本地没有 %s 这个 tag（%s）——tag 必须先于构建存在，先打 tag（见 AGENTS.md §5）"
+            % (tag, repo_root))
+    if rc != 0:
+        return False, "git-unreadable", (
+            "git 解析不了 %s（rc=%s%s）——判不出来就不许构建" % (tag, rc, (" %s" % err if err else "")))
+
+    if head != tag_sha:
+        return False, "head-not-at-tag", (
+            "HEAD %s… 不是 %s（%s…）指向的提交——现在构建出的包会把 HEAD 上的字节烘进去，"
+            "却顶着 %s 的版本号。先把工作区切到/对齐到 tag 那一笔" % (head[:12], tag, tag_sha[:12], tag))
+
+    dirty, rc, err = _git_probe(repo_root, ["status", "--porcelain"])
+    if rc != 0 or dirty is None:
+        return False, "git-unreadable", (
+            "git 读不出工作树状态（rc=%s%s）——判不出树干不干净，就不许构建"
+            % (rc, (" %s" % err if err else "")))
+    if dirty:
+        entries = dirty.splitlines()
+        shown = " / ".join(entries[:10])
+        more = "" if len(entries) <= 10 else " …另有 %d 条" % (len(entries) - 10)
+        return False, "tree-dirty", (
+            "%d 处改动没提交：%s%s —— 构建会把这些字节收进包里，而包上写着 %s"
+            % (len(entries), shown, more, tag))
+
+    return True, "ok", "HEAD %s… == %s（%s…），工作树干净" % (head[:12], tag, tag_sha[:12])
+
+
 def pushable_refs(repo_root: str):
     """这一次可能被封存出去的 ref 集合：**所有本地 tag + 所有分支头**。
 
@@ -577,7 +671,12 @@ def main(argv=None) -> int:
                          "step; use this only in a local checkout that genuinely lacks android-native/)")
     ap.add_argument("--allow-unreachable", action="store_true",
                     help="downgrade 'cannot read the live verdict' to a WARNING. Off by "
-                         "default and should stay off: not-proven means do-not-tag.")
+                         "default and should stay off: not-proven means do-not-tag. 只降级"
+                         "线上/本机 build 的『取不到』，不降级发版说明缺失（#75）。")
+    ap.add_argument("--pre-build", action="store_true",
+                    help="构建之前的产源预检（#113）：HEAD 必须正好是本地 tag v<expect> 指向的"
+                         "提交、工作树必须干净；只跑这一格（线上与发版物料那几格在换包之后才"
+                         "有意义），且没有跳过开关。")
     ap.add_argument("--backend-only", action="store_true",
                     help="本版不发新 APK（纯后端版，v0.35.x 就可能是）：显式跳过第 5 条"
                          "发版物料顺序闸中『清单没宣告这一版』那一格。闸门**不会自己推断**"
@@ -591,6 +690,30 @@ def main(argv=None) -> int:
         return _fail("expect-must-be-a-full-tag-like-vX.Y.Z (got %s)" % tag)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 0) 构建之前的产源预检（#113）：只跑这一格，且**没有任何降级旗**。把它与那几面旗
+    #    一起带上不是"多跑一面判据"，而是操作者以为那面旗能在这里起作用——按本仓库的
+    #    既有口径（一个不生效的开关不许看起来像一条判据），当场拒掉。
+    if args.pre_build:
+        degraded = [name for name, on in (
+            ("--allow-unreachable", args.allow_unreachable),
+            ("--backend-only", args.backend_only),
+            ("--check-local", args.check_local),
+            ("--no-versionname-check", args.no_versionname_check),
+        ) if on]
+        if degraded:
+            ap.error("--pre-build 只跑产源预检，不能与 %s 合用：这一格没有降级开关"
+                     % "、".join(degraded))
+        print("PRETAG expect=%s branch=%s mode=pre-build" % (tag, git_branch(root)))
+        ok, token, detail = check_build_provenance(root, tag)
+        if ok:
+            print("PRETAG pre-build=ok %s" % detail)
+            return 0
+        print("PRETAG pre-build=REFUSED token=%s %s" % (token, detail))
+        return _fail("release-provenance-%s —— 构建之前这棵树必须正好是 %s 指向的那一笔、"
+                     "且工作树干净；这一格没有跳过开关"
+                     % (token, tag), 2 if token == "git-unreadable" else 1)
+
     print("PRETAG expect=%s branch=%s health=%s" % (tag, git_branch(root), args.health_url))
 
     # 1) 声明侧：仓库里写的 versionName 必须等于这个 tag——**除非这一版自己声明只换服务端**。
@@ -628,13 +751,15 @@ def main(argv=None) -> int:
         else:
             print("PRETAG versionname=ok declared=%s" % declared)
 
-    # 2) 发版说明必须已经在树里
+    # 2) 发版说明必须已经在树里。**这一格不接受任何降级**（#75）：说明缺失不是"取不到"，
+    #    而是"这棵树里确实没有这份说明"——`--allow-unreachable` 只降级线上/本机的可达性，
+    #    否则一棵连说明都没有的树也能拿到 verdict=PASS，而 Release 正文是空的。
     if release_note_exists(root, tag):
         print("PRETAG release-note=ok docs/releases/%s.md" % tag)
     else:
         print("PRETAG release-note=MISSING docs/releases/%s.md" % tag)
-        if not args.allow_unreachable:
-            return _fail("release-note-missing: %s" % tag)
+        return _fail("release-note-missing: %s —— 发版说明必须与 tag 一起在场；"
+                     "--allow-unreachable 只降级『线上取不到』，不放过这一格" % tag)
 
     # 3) 现实侧：**线上**自报的 build 必须就是这个 tag
     live, why = fetch_build(args.health_url, args.timeout)

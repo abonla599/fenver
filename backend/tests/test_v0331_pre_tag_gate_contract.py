@@ -219,6 +219,30 @@ def test_gate_requires_the_release_note_for_this_tag(monkeypatch, capsys):
     assert "release-note-missing" in capsys.readouterr().out
 
 
+def test_allow_unreachable_cannot_silence_a_missing_release_note(monkeypatch, capsys):
+    """#75 的反例：`--allow-unreachable` 不许连「发版说明不存在」一起降级。
+
+    旧写法把第 2 格的放行条件与第 3 格共用同一面旗：一棵没有 `docs/releases/<tag>.md`
+    的树，只要线上取不到（离线、或根本没换包），带上这面旗就能拿到 `verdict=PASS`
+    ——Release 正文是空的。这里把其余判据全部 stub 成绿，证明红**只**来自缺说明这一件事。
+    """
+    gate = _load_gate()
+    monkeypatch.setattr(gate, "release_note_exists", lambda root, tag: False)
+    monkeypatch.setattr(gate, "fetch_build", lambda url, timeout: (None, "unreachable:URLError"))
+    monkeypatch.setattr(gate, "check_announcement_materials",
+                        lambda root, ver: (True, "ok", "stubbed：本用例只核发版说明那一格"))
+    monkeypatch.setattr(gate, "check_leak_quarantine",
+                        lambda root: (True, "ok", "stubbed：本用例只核发版说明那一格"))
+
+    code = gate.main(["--expect", "v0.33.1", "--no-versionname-check", "--allow-unreachable"])
+    out = capsys.readouterr().out
+    assert code != 0, (
+        "缺发版说明的树带着 --allow-unreachable 拿到了 PASS：这面旗只能管可达性，"
+        "而说明缺失等于这一版对外什么都没说")
+    assert "release-note-missing" in out, "拒绝的理由不是缺发版说明：%s" % out
+    assert "verdict=PASS" not in out, "BLOCK 与 PASS 同时出现 = 这一格被写成了两段话"
+
+
 def test_gate_checks_declared_versionname_against_the_tag(monkeypatch, capsys):
     """声明侧：versionName 还没涨就打上 tag，Release 名字和 APK 里的不一致。
 
