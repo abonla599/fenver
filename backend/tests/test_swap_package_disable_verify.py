@@ -16,7 +16,7 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
 找到它、`Enable-ScheduledTask` 才回到 Ready。也就是说同一次中止里有**两个**缺陷，
 第二个还是静默的：任何后来在那一行中止的换包都会再丢一次守护。
 
-本文件钉三件事（对应 ticket 的三条判据）：
+本文件钉五件事（前三条是 2026-10-16 事故的原判据，#155 补 (iv)/(v)）：
 (i)  disable 之后的判决读的是任务的 `Settings.Enabled`（真问题：这段窗口里它还能不能把 exe 拉起来；
      2026-10-18 又红过一次：这一句原本写「读 Enabled」，而本机任务对象上**没有** Enabled 成员，
      真值在 Settings 那一层——见 tests/test_swap_package_watchdog_enabled_machine_truth.py），
@@ -27,6 +27,15 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
      不是拿正则碰运气）；
 (iii) 恢复路径真的重新启用任务，而且那次启用**不嵌**在「要不要重启旧包」的分支里
      （嵌进去就等于"进程还没停的那条中止路上看守不回来"——恰好是事故二那条路）。
+(iv) 恢复路径的 `re-enabled` 只在**启用后的回读**证明开关真上来之后才准出现（ticket #155）：
+     `Enable-ScheduledTask` 不抛不等于开关动了——它可以正常返回而任务仍停用，旧恢复路径
+     就是拿"没抛"当成功打了绿灯。所以启用之后必须经 `Get-WatchdogTaskState` 再读一次
+     `Settings.Enabled`；回读答不出、via 不是 `settings-enabled`、或 Enabled=false 一律
+     `re-enable-FAILED`，并把回读的原始字段写进错误详情。`_restore_readback_ok` 判这条。
+(v)  看守**从没被按下去**时不许报 `re-enabled`（同一张票的另一半）：`disable-did-not-take`
+     中止会带着"这次运行拥有停用"的登记进入恢复函数，可开关明明还开着。恢复函数在启用前
+     先读一次；开关亲口答 Enabled=true（via=settings-enabled）时报 `already-enabled`，
+     不碰任务。`_restore_already_enabled_ok` 判这条。
 
 判位置用行号、判可执行部分先剥整行注释，尺子从 test_swap_package_contract_v0291.py 借
 （本仓规矩：一把尺子只有一份）。`_code_lines()` 是它的一个变体：只剥「整行 #」，
@@ -35,11 +44,16 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
 
 为什么没有行为层：这一步只有真把生产任务停用下来才跑得进去，而本次票面明令禁止
 （不许对现网任务动 Disable/Enable/Unregister/Register，也不许跑 swap-package.ps1，带
--DryRun 也不行——DryRun 在 disable 之前就 return 了，证明不了任何事）。所以这三条**全是
+-DryRun 也不行——DryRun 在 disable 之前就 return 了，证明不了任何事）。所以这些判据**全是
 静态锁，下一次换包就是它们的第一次实跑**：盯 `DISABLED enabled=... via=... state=... instances=`、
-`WAIT`、`READFAIL`、`ABORT stage=... moved=... watchdog=...` 四行 token。牙印在文件末尾
-六条 `test_mutation_*`：旧判据回来、裸 throw 回来、恢复被删、恢复被嵌进 if、被赋值的
-helper 里漏一行日志、塞进一个非 ASCII 字节——每一种都必须红。
+`WAIT`、`READFAIL`、`ABORT stage=... moved=... watchdog=...` 四行 token。ticket #155 另加了
+一层**可跑的行为排练**（`deploy/rehearse-watchdog-restore.ps1`）：用脚本自己创建的一次性任务
+`\AIAssistantSwapRehearsal-*` 真跑 disable → `Stop-AfterFailure` → `Restore-WatchdogTask`，
+并造一个"启用调用静默无效"的回读失败样本；排练全程不碰现网 `AI助手-崩溃守护`，结束时注销
+一次性任务并核对真任务的 Enabled 未变。pytest 里不放这条行为测试（测试进程不该创建计划
+任务），行为证据由那次排练的输出承担。牙印在本文件末尾：旧判据回来、裸 throw 回来、恢复
+被删、恢复被嵌进 if、被赋值的 helper 里漏一行日志、塞进一个非 ASCII 字节，再加上 #155
+的两条（摘掉启用后回读、把从没停过的看守说成 re-enabled）——每一种都必须红。
 
 静态锁的射程要说在前面（这是 2026-10-18 那次红的直接教训）：本文件判的是「代码里写了什么」，
 判不了「那样写在这台机器上读不读得到」。`a5d37bde` 把判决从 `State` 换成裸 `$fresh.Enabled`，
@@ -82,6 +96,9 @@ SWAP_PS1 = _target_ps1()
 
 PS1 = SWAP_PS1.read_text(encoding="utf-8")
 
+# ticket #155 的行为排练脚本（只动一次性任务；本文件只判它的形状与安全门）
+REHEARSAL_PS1 = REPO_ROOT / "deploy" / "rehearse-watchdog-restore.ps1"
+
 
 # ------------------------------------------------------------------ 读法（行号保真）
 def _code_lines(text: str) -> list:
@@ -112,6 +129,9 @@ DISABLE_RE = r"^Disable-ScheduledTask -TaskPath"
 BACKUP_FLAG_RE = r"^\$script:backupDone = \$true"
 RESTORE_CALL_RE = r"^\s*\$restore = Restore-WatchdogTask\b"
 SAFETY_RE = r"^\s*Stop-AfterFailure\s+'"
+# 启用后的回读：`$<var> = Get-WatchdogTaskState -TaskToRead $task`（#155）
+READBACK_RE = re.compile(
+    r"^\s*\$(?P<var>[A-Za-z_][A-Za-z0-9_]*) = Get-WatchdogTaskState -TaskToRead \$task\s*$")
 
 
 def _window(text: str):
@@ -352,6 +372,104 @@ def _restore_not_nested(text: str) -> bool:
     return True
 
 
+def _restore_readback_ok(text: str) -> bool:
+    """(iv) `re-enabled` 只许由**启用后的回读**放行；回读不成立一律 FAILED。
+
+    判的是顺序与内容，不是"代码里出现过 Get-WatchdogTaskState"：
+      1. 启用那一句之后恰好一次 `$<var> = Get-WatchdogTaskState -TaskToRead $task`；
+      2. 回读之后有一条 `if (` 同时看 `.ReadError` / `.EnabledSource` / `-not .Enabled`；
+      3. 失败分支先写 `$status = 're-enable-FAILED'`，并让 `$failDetail` 带上回读字段；
+      4. `$status = 're-enabled'` 排在失败分支之后，且回读（含失败分支）之前不许
+         把 `$script:watchdogDisabled` 放下——开关还没证明回来就宣布完成，正是旧形状。
+    旧锁 `_restore_ok` 只判"有没有 Enable 那一句"，对"启用后有没有回读"无感；牙印会
+    证明摘掉回读后旧锁照旧绿、本条红。
+    """
+    restore = _func_body(text, "Restore-WatchdogTask")
+    if restore is None:
+        return False
+    lines = restore
+    i_enable = _idx(
+        r"^\s*Enable-ScheduledTask -TaskPath \$task\.TaskPath -TaskName \$task\.TaskName \| Out-Null\s*$",
+        lines)
+    if i_enable is None:
+        return False
+    reads = [(i, m.group("var")) for i, m in
+             ((i, READBACK_RE.match(lines[i])) for i in range(i_enable + 1, len(lines))) if m]
+    if len(reads) != 1:
+        return False
+    i_read, var = reads[0]
+    i_fail = _idx(r"^\s*\$status = 're-enable-FAILED'\s*$", lines, i_read + 1)
+    if i_fail is None:
+        return False
+    i_ok = _idx(r"^\s*\$status = 're-enabled'\s*$", lines, i_fail + 1)
+    if i_ok is None:
+        return False
+
+    cond = "\n".join(lines[i_read + 1:i_fail])
+    if not re.search(r"(?m)^\s*if \(", cond):
+        return False
+    for piece in ("$" + var + ".ReadError", "$" + var + ".EnabledSource",
+                  "-not $" + var + ".Enabled"):
+        if piece not in cond:
+            return False
+
+    detail = "\n".join(lines[i_fail:i_ok])
+    if "$failDetail = " not in detail:
+        return False
+    for piece in ("$" + var + ".Enabled", "$" + var + ".EnabledSource"):
+        if piece not in detail:
+            return False
+
+    # 回读之前（含失败分支）把归属放开 = 还没证明开关回来就宣布完成
+    if any(re.match(r"^\s*\$script:watchdogDisabled = \$false\s*$", ln)
+           for ln in lines[i_enable:i_ok]):
+        return False
+    if _idx(r"^\s*\$script:watchdogDisabled = \$false\s*$", lines, i_ok + 1) is None:
+        return False
+    return True
+
+
+def _restore_already_enabled_ok(text: str) -> bool:
+    """(v) 开关亲口答"看守从没被按下去"时，恢复路径不许碰任务、也不许报 re-enabled。
+
+    `disable-did-not-take` 中止到达恢复函数时登记还挂着，但开关明明 Enabled=true：
+    再调一次 Enable 是空动作，随后按"没抛 = 成功"打 `re-enabled` 就是在说一次从未发生的
+    重新启用。恢复函数必须先读一次，且只在 `EnabledSource -eq 'settings-enabled'` 时
+    认这个答案（fail-closed 的 Enabled=true 不算回答，仍要走启用+回读）。
+    """
+    restore = _func_body(text, "Restore-WatchdogTask")
+    if restore is None:
+        return False
+    lines = restore
+    i_flag = _idx(r"^\s*if \(\$script:watchdogDisabled\) \{\s*$", lines)
+    if i_flag is None:
+        return False
+    i_enable = _idx(
+        r"^\s*Enable-ScheduledTask -TaskPath \$task\.TaskPath -TaskName \$task\.TaskName \| Out-Null\s*$",
+        lines, i_flag)
+    if i_enable is None:
+        return False
+    reads = [(i, m.group("var")) for i, m in
+             ((i, READBACK_RE.match(lines[i])) for i in range(i_flag + 1, i_enable)) if m]
+    if len(reads) != 1:
+        return False
+    i_before, var = reads[0]
+    pre = "\n".join(lines[i_before + 1:i_enable])
+    if not re.search(r"(?m)^\s*if \(" + re.escape("$" + var + ".Enabled") + r" -and ", pre):
+        return False
+    if "$" + var + ".EnabledSource -eq 'settings-enabled'" not in pre:
+        return False
+    if _idx(r"^\s*\$status = 'already-enabled'\s*$", lines, i_before, i_enable) is None:
+        return False
+    # 从没停过的那条恢复同样要把归属放开，否则下一条恢复路径会再“启用”一次
+    if _idx(r"^\s*\$script:watchdogDisabled = \$false\s*$", lines, i_before, i_enable) is None:
+        return False
+    # 预读结论之前已经写过后面的成功 token = 又回到“先打绿灯再看机器”
+    if _idx(r"^\s*\$status = 're-enabled'\s*$", lines, i_flag, i_enable) is not None:
+        return False
+    return True
+
+
 def _single_value_helpers_ok(text: str) -> bool:
     """被赋值捕获的两个 helper 必须**只**产出那一个对象。
 
@@ -435,6 +553,50 @@ def test_guard_restore_is_not_nested_behind_the_package_restart():
     assert _restore_not_nested(PS1), (
         "重新启用被嵌进了「要不要重启旧包」那条 if 里：disable-verify 那条中止路上进程还没停，"
         "于是看守不回来——这正是事故二的形状")
+
+
+def test_restore_re_enabled_requires_a_fresh_enabled_readback():
+    assert _restore_readback_ok(PS1), (
+        "恢复路径又在 Enable-ScheduledTask 没抛之后直接打 re-enabled，或回读失败没有走 "
+        "re-enable-FAILED：#155 的现场就是「命令没抛 = 开关动了」，而任务可以正常返回却仍停用")
+
+
+def test_restore_does_not_claim_re_enabled_when_the_guard_was_never_down():
+    assert _restore_already_enabled_ok(PS1), (
+        "disable-did-not-take 中止会把「这次运行拥有停用」的登记带进恢复函数，但开关还开着；"
+        "恢复路径没有先读一次（或没要求 via=settings-enabled）就 Enable，ABORT token 会把"
+        "一次从没发生的停用说成 re-enabled")
+
+
+def test_restore_rehearsal_harness_is_disposable_and_uses_the_real_helpers():
+    """#155 的行为证据必须是一份"只动一次性任务"的可跑脚本，不是一句口述。
+
+    这里只判形状与安全门（不需要 PowerShell）：脚本存在、纯 ASCII/CRLF、从 swap-package.ps1
+    里抽的是**真函数**、会创建/注销 `AIAssistantSwapRehearsal-*` 一次性任务、按 action 认
+    现网看守、并且包含回读失败的样本。真跑一次的证据由排练脚本自己的输出承担。
+    """
+    assert REHEARSAL_PS1.is_file(), (
+        "deploy/rehearse-watchdog-restore.ps1 不在：ticket #155 要求的行为证据（一次性任务"
+        "真跑 disable → abort → restore）没有可复跑的载体")
+    raw = REHEARSAL_PS1.read_bytes()
+    assert _ascii_ok(raw), "排练脚本出现非 ASCII 字节或 BOM：PS 5.1 会把整脚本错解码成语法错误"
+    assert raw.count(b"\r\n") == raw.count(b"\n"), "排练脚本必须是 CRLF（与本仓 .ps1 一致）"
+    text = raw.decode("ascii")
+    for needle in (
+        "AIAssistantSwapRehearsal-",
+        "FunctionDefinitionAst",
+        "Restore-WatchdogTask",
+        "Get-WatchdogTaskState",
+        "Stop-AfterFailure",
+        "Unregister-ScheduledTask",
+        "watchdog-hidden.vbs",
+        "re-enable-FAILED",
+        "already-enabled",
+    ):
+        assert needle in text, f"排练脚本缺 {needle!r}：安全门或回读样本不在，证据不可信"
+    assert "finally" in text, "一次性任务必须在 finally 里注销"
+    assert "X:\\qoder-155-rehearsal-no-such-package" in text, (
+        "排练必须把 LiveExe 指向不存在的路径：Stop-AfterFailure 的旧包重启分支不许真跑")
 
 
 def test_assigned_helpers_cannot_leak_extra_output():
@@ -567,3 +729,74 @@ def test_mutation_non_ascii_byte_turns_the_ascii_gate_red():
     assert not _ascii_ok(with_bad), "加了中文日志行，ASCII 门必须红"
     with_bom = b"\xef\xbb\xbf" + raw
     assert not _ascii_ok(with_bom), "BOM 也要门住：PS 5.1 的解码坑与 BOM 有关"
+
+
+def _drop_restore_readback(text: str):
+    """把启用后的回读与失败分支整段摘掉，还原成 #155 之前"没抛就是成功"的形状。"""
+    lines = text.splitlines()
+    start = _idx(r"^function\s+Restore-WatchdogTask\s*\{", lines)
+    if start is None:
+        return None
+    depth = 0
+    end = None
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth <= 0 and i > start:
+            end = i
+            break
+    if end is None:
+        return None
+
+    i_enable = None
+    for i in range(start, end + 1):
+        if re.match(r"^\s*Enable-ScheduledTask -TaskPath \$task\.TaskPath -TaskName \$task\.TaskName "
+                    r"\| Out-Null\s*$", lines[i]):
+            i_enable = i
+            break
+    if i_enable is None:
+        return None
+    i_read = None
+    for i in range(i_enable + 1, end + 1):
+        if READBACK_RE.match(lines[i]):
+            i_read = i
+            break
+    if i_read is None:
+        return None
+    i_catch = None
+    for i in range(i_read + 1, end + 1):
+        if re.match(r"^\s*\}\s*catch\s*\{\s*$", lines[i]):
+            i_catch = i
+            break
+    if i_catch is None:
+        return None
+    # 旧形状：启用、放下归属、直接打 re-enabled；catch 保留（旧锁要求 re-enable-FAILED 还在）
+    old = ["            $script:watchdogDisabled = $false",
+           "            $status = 're-enabled'"]
+    return "\n".join(lines[:i_read] + old + lines[i_catch:])
+
+
+def test_mutation_dropping_the_restore_readback_turns_only_the_new_lock_red():
+    """牙印七（#155）：把启用后的回读摘掉，旧锁照旧绿、回读锁必须红。
+
+    这条就是本次 review 指出的洞：`_restore_ok` 只判"有没有 Enable 那一句"，于是
+    "Enable 没抛 → 打 re-enabled"能一路绿到下一次换包。红绿分工在这里是证据本身：
+    旧锁看不见的射程，才需要新锁。
+    """
+    assert _restore_readback_ok(PS1), "真文件必须先绿"
+    old = _drop_restore_readback(PS1)
+    assert old is not None, "样本构造失败：Restore-WatchdogTask 的形状与摘取假设不一致了"
+    assert old != PS1, "漂移样本没生效"
+    assert _restore_ok(old), (
+        "旧锁对摘掉回读的样本应当照旧绿：它管的是“有没有启用”，管不了“启用有没有生效”——"
+        "这正是 #155 的洞能活下来的原因")
+    assert not _restore_readback_ok(old), "回读被摘掉，新锁必须红"
+
+
+def test_mutation_claiming_re_enabled_for_an_already_enabled_guard_turns_it_red():
+    """牙印八（#155）：把从没停过的看守说成 re-enabled，归属锁必须红。"""
+    assert _restore_already_enabled_ok(PS1), "真文件必须先绿"
+    drifted = PS1.replace("$status = 'already-enabled'", "$status = 're-enabled'", 1)
+    assert drifted != PS1, "样本没生效：already-enabled 这个 token 不在文件里"
+    assert _restore_ok(drifted), "旧锁对这条语义无感，应当照旧绿"
+    assert not _restore_already_enabled_ok(drifted), (
+        "开关亲口答 Enabled=true 时仍报 re-enabled：那是一次从未发生的重新启用，新锁必须红")

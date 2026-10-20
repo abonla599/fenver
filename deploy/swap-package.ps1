@@ -702,18 +702,61 @@ function Restore-WatchdogTask {
     # restore was needed is exactly how a guard goes missing while the code that
     # re-enables it still reads as present.
     #
+    # A returned Enable-ScheduledTask call is NOT evidence that the switch moved.
+    # The cmdlet can come back without raising while the task stays disabled, and
+    # the old body then printed re-enabled from the mere absence of an exception -
+    # a green line about a guard that was still down. So the switch is READ BACK
+    # through Get-WatchdogTaskState after the call, and re-enabled is emitted only
+    # when that fresh read answers Enabled=true from Settings.Enabled. A read that
+    # cannot answer, a source other than settings-enabled, or Enabled=false is
+    # re-enable-FAILED with the raw read in Error, and the ownership flag stays
+    # set: the guard is not proven up, so a later restore must try again instead
+    # of believing this run is done.
+    #
+    # The pre-enable read answers the other half: the disable-did-not-take abort
+    # arrives here with the ownership flag set but the switch never flipped down.
+    # Enabling an already-enabled task would make the ABORT token claim a re-enable
+    # that never happened, so when the switch itself answers Enabled=true the
+    # status is already-enabled and this run does not touch the task at all.
+    #
     # Returns one object and prints nothing, for the same pipeline-capture reason
     # as Get-WatchdogTaskState; the caller prints the tokens.
     $status = 'never-disabled'
     $failDetail = ''
     if ($script:watchdogDisabled) {
+        $before = Get-WatchdogTaskState -TaskToRead $task
+        if ($before.Enabled -and $before.EnabledSource -eq 'settings-enabled') {
+            # The switch itself says UP: nothing is left down by this run. Calling
+            # Enable here would only manufacture the false token re-enabled that
+            # the disable-did-not-take abort used to print.
+            $script:watchdogDisabled = $false
+            $status = 'already-enabled'
+        } else {
+        # The try and the Enable line are indented one level LESS than this else on
+        # purpose: test_swap_package_disable_verify.py locates that exact line by
+        # this indentation to prove the re-enable was not deleted, so re-indenting
+        # it would silently turn that existing tooth green. PowerShell does not
+        # care; readers should not "fix" it.
         try {
             Enable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
-            $script:watchdogDisabled = $false
-            $status = 're-enabled'
+            $after = Get-WatchdogTaskState -TaskToRead $task
+            if ($after.ReadError -or $after.EnabledSource -ne 'settings-enabled' -or -not $after.Enabled) {
+                # The call returned but the switch did not follow it: the exact
+                # failure the old body could not see. Keep the ownership flag set
+                # because the guard is NOT proven up.
+                $status = 're-enable-FAILED'
+                $failDetail = ('read-back after Enable-ScheduledTask did not prove the guard is up: enabled=' +
+                               $after.Enabled + ' via=' + $after.EnabledSource + ' state=' + $after.State +
+                               ' instances=' + $after.Instances +
+                               $(if ($after.ReadError) { ' read-error=' + $after.ReadError } else { '' }))
+            } else {
+                $status = 're-enabled'
+                $script:watchdogDisabled = $false
+            }
         } catch {
             $status = 're-enable-FAILED'
             $failDetail = $_.Exception.Message
+        }
         }
     }
     return [pscustomobject]@{ Status = $status; Error = $failDetail }
