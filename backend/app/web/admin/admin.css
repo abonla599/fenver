@@ -105,11 +105,27 @@ td.acts button { margin: 0 2px 2px 0; }
   overflow-wrap: anywhere; }
 .task .tm span { display: block; font-size: 12px; color: var(--text-3);
   font-family: ui-monospace, Consolas, monospace; }
+.task .tm .tq { color: var(--text-2); font-family: inherit; white-space: normal;
+  overflow-wrap: anywhere; }
+/* 读到问题之前、或读不到时标红：那一行此刻不该被读成「没有人在等」。 */
+.task .tm .tq.warn { color: var(--danger); }
 .task .st { font-size: 11.5px; flex: none; border: 1px solid var(--line);
   border-radius: 999px; padding: 1px 8px; color: var(--text-2); }
 .task .st.run { color: var(--accent); border-color: var(--accent); }
+.task .st.wait { color: var(--accent); border-color: var(--accent);
+  background: var(--accent-soft); }
 .task .st.bad { color: var(--danger); border-color: var(--danger); }
 .task .ops { display: flex; gap: 2px; flex: none; flex-wrap: wrap; }
+
+/* 任务详情的结构化只读投影（目标/状态/在等什么/结果）。这一块不是给机器读的
+   JSON：等宽字体与 break-all 会把一整句问题折成碎字，读的人先失去判断力。 */
+.task-detail { font-size: 13px; line-height: 1.6; }
+.task-detail .dline { margin: 6px 0; display: flex; gap: 8px; align-items: baseline; }
+.task-detail .dline b { flex: none; color: var(--text-2); font-weight: 500; }
+.task-detail .dline span { overflow-wrap: anywhere; white-space: pre-wrap; }
+.task-detail .dhead { margin: 12px 0 4px; font-weight: 600; }
+.task-detail .danswer span { color: var(--accent); }
+.task-detail .dwarn span { color: var(--danger); }
 textarea.req { width: 100%; border: 1px solid var(--line); background: var(--bg-soft);
   border-radius: 10px; padding: 10px 12px; resize: vertical; outline: none;
   font: inherit; margin-bottom: 10px; }

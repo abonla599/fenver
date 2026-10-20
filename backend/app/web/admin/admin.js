@@ -189,13 +189,6 @@
     if (r) r(answer);
   }
 
-  function showDetail(title, value) {
-    $("detailTitle").textContent = title;
-    $("detailText").textContent = typeof value === "string"
-      ? value : JSON.stringify(value, null, 2);
-    $("detail").classList.remove("hidden");
-  }
-
   function reveal(secret) {
     $("revealText").textContent = secret;
     $("reveal").classList.remove("hidden");
@@ -691,6 +684,23 @@
 
   /* ---------- 任务 ---------- */
 
+  // 状态字与 PWA / 原生两端同一套说法。管理页是只读观察面，这里不猜后端没给的新态：
+  // 认不出的状态原样摆出来（运维看得见机器字面量），但 waiting_user 必须翻成
+  // 「需要你输入」——它不是一个错误，也不是「执行中」。
+  const TASK_STATUS = {
+    pending: "排队中",
+    running: "执行中",
+    waiting_user: "需要你输入",
+    completed: "办完了",
+    failed: "没办成",
+    cancelled: "已停止",
+  };
+
+  function taskStatusText(status) {
+    const key = String(status || "");
+    return TASK_STATUS[key] || key || "—";
+  }
+
   async function loadTasks() {
     const box = $("taskList");
     box.textContent = "";
@@ -700,23 +710,61 @@
       box.appendChild(cell("p", "任务表是空的。这条进程起来之后没跑过编排。", "pane-note"));
       return;
     }
-    tasks.forEach((t) => box.appendChild(taskRow(t)));
+    // 问题原文只在详情接口里（列表刻意不铺这类原文，里面可能是验证码/收货地址）。
+    // 所以只为 waiting_user 的行各补一次 GET，等它们填完再算这一节刷新结束；
+    // 其余状态一次详情都不打。
+    const fills = [];
+    tasks.forEach((t) => {
+      const row = taskRow(t);
+      box.appendChild(row);
+      if (t.status === "waiting_user" && row._question) {
+        fills.push(fillTaskQuestion(t.task_id, row._question));
+      }
+    });
+    await Promise.all(fills);
+  }
+
+  // 一条 waiting_user 行上的「在等什么」。读不到就说读不到，绝不拿「没有问题」
+  // 冒充——后者会让管理员以为这条任务不用人管。
+  async function fillTaskQuestion(taskId, holder) {
+    try {
+      const d = await req("/v1/tasks/" + encodeURIComponent(taskId));
+      const cursor = (d && d.resume_cursor) || {};
+      const question = String(cursor.question || "").trim();
+      holder.textContent = question ? "问题：" + question : "服务端没给问题原文";
+      holder.classList.toggle("warn", !question);
+    } catch (e) {
+      holder.textContent = "问题没读到：" + (e && e.message ? e.message : "未知原因");
+      holder.classList.add("warn");
+    }
   }
 
   function taskRow(t) {
     const row = cell("div", undefined, "task");
     const meta = cell("div", undefined, "tm");
     meta.appendChild(cell("b", t.goal));
-    meta.appendChild(cell("span", t.task_id + " · " + fmtTime(t.created_at)));
+    const owner = nameById[t.user_id] || t.user_id || "（无归属）";
+    meta.appendChild(cell("span", t.task_id + " · " + fmtTime(t.created_at)
+      + " · " + owner));
+    const waiting = t.status === "waiting_user";
+    if (waiting) {
+      // 占位先摆上：列表接口不带问题原文，问题由 loadTasks 用详情接口补。
+      // 读到之前标成 warn，免得「问题读取中…」被读成「没问题」。
+      const q = cell("span", "问题读取中…", "tq");
+      q.classList.add("warn");
+      meta.appendChild(q);
+      row._question = q;
+    }
     row.appendChild(meta);
-    row.appendChild(cell("span", (t.status || "—") + " " + (t.progress || ""), "st"
+    row.appendChild(cell("span", taskStatusText(t.status) + " "
+      + (t.progress || ""), "st"
       + (t.status === "running" || t.status === "pending" ? " run" : "")
-      + (t.status === "failed" ? " bad" : "")));
+      + (t.status === "failed" ? " bad" : "")
+      + (waiting ? " wait" : "")));
 
     const ops = cell("div", undefined, "ops");
     ops.appendChild(btn("eye", "详情", "btn btn-small btn-ghost",
-      (e) => busy(e.currentTarget, async () => showDetail("任务 " + t.task_id,
-        await req("/v1/tasks/" + encodeURIComponent(t.task_id))))));
+      (e) => busy(e.currentTarget, () => showTaskDetail(t))));
     ops.appendChild(btn("stop", "取消", "btn btn-small btn-ghost",
       (e) => busy(e.currentTarget, async () => {
         const yes = await ask("取消任务「" + (t.goal || t.task_id) + "」？",
@@ -730,7 +778,9 @@
     ops.appendChild(btn("trash", "移出", "btn btn-small btn-ghost",
       (e) => busy(e.currentTarget, async () => {
         const yes = await ask("把任务 " + t.task_id + " 移出这张表？",
-          "删的是进程内这一条记录：结果、子任务、最终答案从这里消失。它本来也不落盘，重启即空。",
+          "删的是这一条任务记录：中间结果、子任务、最终答案一起消失，并且当场写回 "
+          + "data/tasks.json，重启也不会回来。挂起中的任务，断点也一并没了——先确认"
+          + "没有人在等它回答。",
           "移出", "trash", true);
         if (!yes) return;
         await req("/v1/tasks/" + encodeURIComponent(t.task_id), { method: "DELETE" });
@@ -739,6 +789,99 @@
       })));
     row.appendChild(ops);
     return row;
+  }
+
+  /* ---------- 任务详情：只读投影 ----------
+   *
+   * 服务端已经把「谁能看」判完了：非属主与不存在是同一个 404，详情里的 results
+   * 只在 status=completed 时非空。管理页是 admin 视角，读得到任何一条，但**不**
+   * 因此多出一格 results 可见性：前端照服务端的口径显示，完成前明说「不返回」，
+   * 不画一个空列表让人读成「没有结果」。
+   *
+   * 这里也刻意没有回答入口：续跑只认任务属主（orchestrator 的归属校验），
+   * 管理员代答拿到的会是一个「不属于你」的 404。问题原文只读出来给人看。
+   */
+  function taskDetailView(d) {
+    const detail = d || {};
+    const status = String(detail.status || "");
+    const cursor = detail.resume_cursor || {};
+    const waiting = status === "waiting_user";
+    const done = status === "completed";
+    const results = done && Array.isArray(detail.results) ? detail.results : [];
+    const subtasks = Array.isArray(detail.subtasks) ? detail.subtasks : [];
+    return {
+      statusRaw: status,
+      status: taskStatusText(status),
+      goal: String(detail.goal || "（没写目标）"),
+      owner: nameById[detail.user_id] || detail.user_id || "（无归属）",
+      created: fmtTime(detail.created_at),
+      progress: subtasks.length
+        ? (Number(detail.current_subtask) || 0) + " / " + subtasks.length
+        : "",
+      question: waiting ? String(cursor.question || "").trim() : "",
+      canResume: waiting && !!detail.can_resume,
+      waitingSince: waiting ? fmtTime(detail.waiting_since) : "",
+      results: results,
+      resultsHidden: !done,
+      finalAnswer: String(detail.final_answer || ""),
+      error: String(detail.error || ""),
+      endReason: String(detail.end_reason || ""),
+    };
+  }
+
+  function paintTaskDetail(view) {
+    const box = $("detailText");
+    box.textContent = "";
+    const line = (label, text, cls) => {
+      const p = cell("p", undefined, "dline" + (cls ? " " + cls : ""));
+      p.appendChild(cell("b", label + "："));
+      p.appendChild(cell("span", text || "—"));
+      box.appendChild(p);
+    };
+
+    line("目标", view.goal);
+    line("状态", view.status + "（" + (view.statusRaw || "—") + "）"
+      + (view.progress ? " · 第 " + view.progress + " 步" : ""));
+    line("归属", view.owner);
+    line("创建", view.created);
+    if (view.statusRaw === "waiting_user") {
+      line("在等什么", view.question || "服务端没给问题原文");
+      line("等待起点", view.waitingSince);
+      line("可续跑", view.canResume ? "是" : "否（这条断点接不回去，需人工处理）",
+        view.canResume ? "" : "dwarn");
+      box.appendChild(cell("p",
+        "只有这条任务的发起人能在 App / 网页里回答：续跑只认任务属主，"
+        + "管理员这里只读，不提供代答入口。", "pane-note"));
+    }
+
+    if (view.resultsHidden) {
+      box.appendChild(cell("p",
+        "中间结果只在「办完了」的任务详情里返回（服务端把其余状态的 results 置空）；"
+        + "这里不显示成空列表，免得读成「一条结果都没有」。", "pane-note"));
+    } else {
+      box.appendChild(cell("p", "中间结果（" + view.results.length + " 条）", "dhead"));
+      if (!view.results.length) {
+        box.appendChild(cell("p", "这条已完成的任务没有中间结果。", "pane-note"));
+      }
+      view.results.forEach((r, i) => {
+        line("第 " + (i + 1) + " 条", typeof r === "string" ? r : JSON.stringify(r));
+      });
+    }
+    if (view.finalAnswer) line("最终答案", view.finalAnswer, "danswer");
+    if (view.error) line("错误", view.error, "dwarn");
+    if (view.endReason === "cancelled_by_timeout") {
+      box.appendChild(cell("p", "这次取消是等回复等太久被系统作废，不是任务自己失败。",
+        "pane-note warn"));
+    } else if (view.endReason === "cancelled_by_user") {
+      box.appendChild(cell("p", "这次取消是人按的「取消任务」。", "pane-note"));
+    }
+  }
+
+  async function showTaskDetail(t) {
+    const d = await req("/v1/tasks/" + encodeURIComponent(t.task_id));
+    $("detailTitle").textContent = "任务 " + (d.task_id || t.task_id);
+    paintTaskDetail(taskDetailView(d));
+    $("detail").classList.remove("hidden");
   }
 
   /* ---------- 智能体 ---------- */
