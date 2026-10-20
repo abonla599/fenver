@@ -183,8 +183,9 @@ def _flush_locked() -> None:
     这把是 threading.Lock（不可重入），所以这里绝不再进一次锁——task_store 那把是
     RLock，两处的写法不能互相抄。改表与落盘在同一次持锁里做完，判据同 task_store
     的审查 #12：一边遍历一边有人改表就是"dictionary changed size during iteration"。
-    写法复用 core/atomic_write（mkstemp + fsync + os.replace，权限在建文件那一次就
-    收成 0600），不自己写第二套。
+    写法复用 core/atomic_write（mkstemp + fsync + os.replace；POSIX 上建文件即
+    0600，Windows 上 POSIX 权限位不生效，隔离来自 data/ 的 NTFS ACL 继承：
+    SYSTEM / Administrators / 属主，不含 BUILTIN\\Users），不自己写第二套。
     """
     payload = {"tickets": {tid: _to_record(t) for tid, t in _tickets.items()}}
     write_json_atomic(_default_path(), payload)

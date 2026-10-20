@@ -10,11 +10,15 @@
 3. **失败时说什么**。503 的 detail 直接拼了底层异常原话，上游那句
    `Error code: 401 - ... sk-xxx` 就顺着响应体回到调用方手里。
 
-外加两条不碰请求形状的：可变 JSON 一律 0600 落盘，两个安卓壳都关掉备份导出。
+外加两条不碰请求形状的：可变 JSON 在 POSIX 上 0600 落盘，Windows 上权限位不生效、
+按 NTFS ACL 继承判定（SYSTEM / Administrators / 属主，不含 BUILTIN\\Users），
+两个安卓壳都关掉备份导出。
 """
 import json
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -190,31 +194,107 @@ def test_a_storage_failure_detail_is_scrubbed_and_short(client, monkeypatch):
 
 # ---------- 4. 盘上留什么权限 ----------
 
-@pytest.mark.skipif(os.name != "posix", reason="Windows 不实现 POSIX 权限位")
+def _icacls_text(path: str) -> str:
+    """取 icacls 的原文。Windows 上没有别的可判对象：POSIX 模式位实测恒是 0666。"""
+    proc = subprocess.run(["icacls", str(path)], capture_output=True,
+                          text=True, errors="replace")
+    assert proc.returncode == 0, f"icacls 读不了 {path}：{proc.stderr or proc.stdout}"
+    return proc.stdout
+
+
+def _acl_is_owner_only(acl_text: str) -> bool:
+    """SYSTEM / Administrators / 属主在，BUILTIN\\Users 与 Everyone 都不在。
+
+    属主那一格在 `data/` 下显示成 `机器名\\用户`，在 pytest 的 mkdtemp 目录下显示成
+    `OWNER RIGHTS`（同一个"所有者"概念的另一种呈现），两种都算属主在。用名字而不是
+    SID 是因为 icacls 的清单不带 SID；这套判据写在英文安全组名的 Windows 上，它的
+    牙齿由负对照（给副本加 *S-1-5-32-545:R 后必须变红）当场证明。
+    """
+    text = acl_text.lower()
+    owner = (os.environ.get("USERNAME") or "").strip().lower()
+    owner_present = "owner rights:" in text or (
+        bool(owner) and f"\\{owner}:" in text)
+    return (
+        "nt authority\\system:" in text
+        and "builtin\\administrators:" in text
+        and owner_present
+        and "builtin\\users:" not in text
+        and "everyone:" not in text
+    )
+
+
+def _assert_users_grant_turns_it_red(path: str, tmp_path: Path) -> None:
+    """负对照：同一判据在副本多一条 BUILTIN\\Users:(R) 之后必须变红。
+
+    只加 ACL、不改内容：若判据其实只认"文件存在/是 JSON"，这里会仍然是绿的，
+    那它就挡不住"同机任何账号可读"这件事。
+    """
+    copy = str(tmp_path / (Path(path).name + ".users-granted"))
+    shutil.copy2(path, copy)
+    before = _icacls_text(copy)
+    assert _acl_is_owner_only(before), (
+        "负对照的前置不成立：副本在加 BUILTIN\\Users 之前就不满足判据。\n" + before)
+    proc = subprocess.run(
+        ["icacls", copy, "/grant", "*S-1-5-32-545:R"],
+        capture_output=True, text=True, errors="replace")
+    assert proc.returncode == 0, (
+        f"icacls 给副本加 BUILTIN\\Users 失败：{proc.stderr or proc.stdout}")
+    granted = _icacls_text(copy)
+    assert "builtin\\users:" in granted.lower(), (
+        "icacls 说成功，但副本的 ACL 里没有 BUILTIN\\Users：\n" + granted)
+    assert not _acl_is_owner_only(granted), (
+        "负对照失效：副本多了 BUILTIN\\Users:(R)，判据仍然是绿的。\n" + granted)
+
+
 def test_mutable_json_lands_read_only_by_owner(tmp_path):
-    """providers.json 里是明文密钥、users.json 里是口令摘要：0644 等于交给同机任何账号。"""
+    """providers.json 里是明文密钥、users.json 里是口令摘要：0644 等于交给同机任何账号。
+
+    POSIX 判 0600。Windows 上 os.chmod 不映射 ACL（实测仍是 0666），真正生效的是
+    NTFS ACL 继承（SYSTEM / Administrators / 属主，不含 BUILTIN\\Users），所以这一支
+    改判 ACL；负对照给副本加一条 BUILTIN\\Users:(R)，同一判据必须变红。
+    """
     from app.core.atomic_write import write_json_atomic
     path = str(tmp_path / "providers.json")
     write_json_atomic(path, {"api_key": "sk-secret"})
+    if os.name == "nt":
+        acl = _icacls_text(path)
+        assert _acl_is_owner_only(acl), (
+            "Windows 上落盘文件对非属主可读（或缺少 SYSTEM/Administrators/属主）：\n"
+            + acl)
+        _assert_users_grant_turns_it_red(path, tmp_path)
+        return
     mode = stat.S_IMODE(os.stat(path).st_mode)
     assert mode == 0o600, oct(mode)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Windows 不实现 POSIX 权限位")
 def test_the_temporary_file_is_not_world_readable_either(tmp_path):
-    """只 chmod 最终文件会留一个窗口：.tmp 那几百毫秒正是 0644。"""
+    """只 chmod 最终文件会留一个窗口：.tmp 那几百毫秒正是 0644。
+
+    Windows 上 os.replace 之后那个路径就没了，所以在 spy 里趁 tmp 还在取 icacls
+    原文，判据与上一条相同；负对照同样给旁路副本加 BUILTIN\\Users:(R)。
+    """
     from app.core.atomic_write import write_json_atomic
     captured = {}
     real_replace = os.replace
 
     def spy(src, dst):
-        captured["mode"] = stat.S_IMODE(os.stat(src).st_mode)
+        if os.name == "nt":
+            captured["acl"] = _icacls_text(src)
+        else:
+            captured["mode"] = stat.S_IMODE(os.stat(src).st_mode)
         return real_replace(src, dst)
     os.replace = spy
+    target = str(tmp_path / "usage.json")
     try:
-        write_json_atomic(str(tmp_path / "usage.json"), {"a": 1})
+        write_json_atomic(target, {"a": 1})
     finally:
         os.replace = real_replace
+    if os.name == "nt":
+        assert _acl_is_owner_only(captured["acl"]), (
+            "Windows 上 replace 前的 .tmp 对非属主可读（或缺少 SYSTEM/"
+            "Administrators/属主）：\n" + captured["acl"])
+        _assert_users_grant_turns_it_red(target, tmp_path)
+        return
     assert captured["mode"] == 0o600, oct(captured["mode"])
 
 
