@@ -679,6 +679,13 @@ async function submitRecovery() {
 
 function hideAuth() { clearAuthPending(); $("authModal").classList.add("hidden"); }
 
+/** 任务页此刻是不是真的开着（#151）：设置层与二级页都不 hidden 才算。 */
+function tasksPageOpen() {
+  const page = document.querySelector('.set-page[data-page="tasks"]');
+  return !!page && !$("settings").classList.contains("hidden")
+    && !page.classList.contains("hidden");
+}
+
 /** 拿到令牌之后的固定动作：明文当场收编成 httpOnly Cookie、落地人名册、重取身份
  *  与数据、收起这层。adopt 是全页面对 res.token 唯一的一次消费——它失败就等
  *  失败，让异常冒到调用处：没有 Cookie 的"登录成功"是假的，绝不能继续渲染。
@@ -705,6 +712,9 @@ async function afterAuth(res) {
   $("registerHint").textContent = `已登录为 ${res.username}，正在载入…`;
   await loadWho();
   await loadServerData();
+  // #151：换身份把 taskEpoch +1 并清空任务面；若此刻任务页正开着，回来必须补读一次，
+  // 否则 A→B→A 之后 A 的在途结果被 epoch 丢掉，页面停在空壳，只能手点刷新。
+  if (tasksPageOpen()) loadTasks();
   renderMessages();
   $("registerHint").textContent = `已登录为 ${res.username}`;
 }
