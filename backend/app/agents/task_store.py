@@ -460,7 +460,11 @@ def _window_seconds(timeout_seconds=None) -> float:
     不许倒向"销毁"——0 是"永不做废"，是这里唯一安全的兜底。
     """
     if timeout_seconds is None:
-        return task_waiting_user_timeout_seconds()
+        # 现读那一支**也**要过下面那道 isfinite，不许在这里提前 return：配置出口已经
+        # 收过一层非有限值，这一格是纵深防御——读侧还有 `waiting_timeout_info` 会把
+        # 窗口原样塞进 JSON 响应，非有限值一旦穿出去就是序列化当场抛（详情端点 500），
+        # 而那条路上没有人再判第二次。判据与显式参数那一支共用同一条，不另写一套。
+        timeout_seconds = task_waiting_user_timeout_seconds()
     try:
         value = float(timeout_seconds)
     except (TypeError, ValueError):

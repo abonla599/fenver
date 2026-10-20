@@ -12,6 +12,7 @@ releases.py、注册开关的口径只存在于文档。这个模块把它们收
   文件被误删时"注册关着"这个安全默认不会因为读不到文件而翻成开。
 """
 import json
+import math
 import os
 import re
 import threading
@@ -186,6 +187,31 @@ def update_repo() -> str:
     return repo or DEFAULTS["update_repo"]
 
 
+def _finite_or_close(value: float, fallback: float, where: str) -> float:
+    """先挡非有限值，再做非负收口。
+
+    为什么 `max(0.0, x)` 不够：它只挡负数，挡不住非有限值。`inf` 比 0 大，会**原样
+    穿到出口**；而 `nan` 与任何数比较都是 False，于是被 `max` 吃掉、悄悄落回 0.0。
+    两种穿出都不是"有人配过的值"，而下游每一处都当真：`inf` 进 JSON 响应会让序列化
+    当场抛（`allow_nan=False`），进窗口判据则让那一格永不过期；`nan` 悄悄变 0 更是把
+    "读不懂"伪装成一个有语义的策略值——配置面里 0 是配得出、且有含义的。
+
+    折回哪一档由**调用点那一格自己说**（`fallback`），这里不替全文件发号施令：本文件
+    每一支 getter 出口的坏值落点都是它那一格的默认值，也就是"读不懂就按默认跑"这条
+    既有纪律的同一档。必须逐个给、不许统一折成 0.0，因为这些数字里 0 的方向不一致：
+    作废窗口与影子护栏的 0 是"关"，宽限期与审批 TTL 的 0 是"不留窗口"（最严档），
+    拿后者兜坏值等于凭空执行一次运维没做过的收紧。
+
+    零 raise，只 print 一行：这一族的读数在**导入期**就会被取用（审批 TTL 住在
+    `app/core/approval.py` 的模块层），在这里抛出去就是现网起不来的 ImportError。
+    """
+    if not math.isfinite(value):
+        print(f"⚠️ {where} 读出来不是有限值（{value!r}），按这一格的默认 {fallback!r} 跑；"
+              f"非有限值既不能当窗口用，也不能进响应")
+        return fallback
+    return max(0.0, value)
+
+
 def stream_no_reader_grace_seconds() -> float:
     """流式"没有活读者"的宽限期（秒）——全场唯一读数口径，默认 120（省钱的是轮次边界钱闸，不是这个窗口）。
 
@@ -197,14 +223,18 @@ def stream_no_reader_grace_seconds() -> float:
     raw = os.getenv("STREAM_NO_READER_GRACE_SECONDS", "").strip()
     if raw:
         try:
-            return max(0.0, float(raw))
+            return _finite_or_close(float(raw),
+                                    float(DEFAULTS["stream_no_reader_grace_seconds"]),
+                                    "宽限期（环境变量 STREAM_NO_READER_GRACE_SECONDS）")
         except ValueError:
             print(f"⚠️ 环境变量 STREAM_NO_READER_GRACE_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("stream_no_reader_grace_seconds",
                             DEFAULTS["stream_no_reader_grace_seconds"])
     try:
-        return max(0.0, float(value))
+        return _finite_or_close(float(value),
+                                float(DEFAULTS["stream_no_reader_grace_seconds"]),
+                                "宽限期（data/config.json）")
     except (TypeError, ValueError):
         return float(DEFAULTS["stream_no_reader_grace_seconds"])
 
@@ -220,14 +250,18 @@ def approval_ticket_ttl_seconds() -> float:
     raw = os.getenv("APPROVAL_TICKET_TTL_SECONDS", "").strip()
     if raw:
         try:
-            return max(0.0, float(raw))
+            return _finite_or_close(float(raw),
+                                    float(DEFAULTS["approval_ticket_ttl_seconds"]),
+                                    "审批票据有效期（环境变量 APPROVAL_TICKET_TTL_SECONDS）")
         except ValueError:
             print(f"⚠️ 环境变量 APPROVAL_TICKET_TTL_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("approval_ticket_ttl_seconds",
                             DEFAULTS["approval_ticket_ttl_seconds"])
     try:
-        return max(0.0, float(value))
+        return _finite_or_close(float(value),
+                                float(DEFAULTS["approval_ticket_ttl_seconds"]),
+                                "审批票据有效期（data/config.json）")
     except (TypeError, ValueError):
         return float(DEFAULTS["approval_ticket_ttl_seconds"])
 
@@ -248,14 +282,19 @@ def task_waiting_user_timeout_seconds() -> float:
     raw = os.getenv("TASK_WAITING_USER_TIMEOUT_SECONDS", "").strip()
     if raw:
         try:
-            return max(0.0, float(raw))
+            # 兜回 0.0 = 这一格的"关"：坏值绝不许倒向"到点销毁用户手里那个还能续的断点"。
+            return _finite_or_close(float(raw),
+                                    float(DEFAULTS["task_waiting_user_timeout_seconds"]),
+                                    "停点作废窗口（环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS）")
         except ValueError:
             print(f"⚠️ 环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("task_waiting_user_timeout_seconds",
                             DEFAULTS["task_waiting_user_timeout_seconds"])
     try:
-        return max(0.0, float(value))
+        return _finite_or_close(float(value),
+                                float(DEFAULTS["task_waiting_user_timeout_seconds"]),
+                                "停点作废窗口（data/config.json）")
     except (TypeError, ValueError):
         return float(DEFAULTS["task_waiting_user_timeout_seconds"])
 
@@ -279,9 +318,14 @@ def credit_benchmark() -> dict:
             if text:
                 out["currency"] = text
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) <= 0:
+        # 这一支的坏值落点与前面那些 getter 不同：逐键各自退回**它自己的默认**（下面那句
+        # `continue`），不是某个全表统一的数。判据也要比"是不是正数"多一格——
+        # `float(nan) <= 0` 是 False，nan 与 inf 都能从"正数"这一关放行到出口，
+        # 而它们进锚价等于把整张倍率表算成不可复现的鬼话（inf 还会把响应带崩）。
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value)) or float(value) <= 0):
             if value is not None and value != default:
-                print(f"⚠️ 基准价 {key} 得是正数（收到 {value!r}），按默认 {default} 跑")
+                print(f"⚠️ 基准价 {key} 得是有限的正数（收到 {value!r}），按默认 {default} 跑")
             continue
         out[key] = float(value) if not isinstance(default, int) else value
     return out
@@ -292,12 +336,16 @@ def credit_shadow_daily_limit() -> float:
 
     优先级与宽限期同一套路：环境变量 CREDIT_SHADOW_DAILY_LIMIT 显式设了说话
     （每次现读，改了不必重启），否则 data/config.json 说了算。负数按 0 收——
-    "负的额度"不是"倒贴"，是写错了，别让它把每一轮都拦死。
+    "负的额度"不是"倒贴"，是写错了，别让它把每一轮都拦死。非有限值也收进 0：
+    这一格的 0 同时是默认与"关"（只算不拦），坏值落在这里不新造第二个方向；
+    换成别的数就不行，`inf` 穿出去是一扇永远合不上的闸，`nan` 穿出去会崩响应。
     """
     raw = os.getenv("CREDIT_SHADOW_DAILY_LIMIT", "").strip()
     if raw:
         try:
-            return max(0.0, float(raw))
+            return _finite_or_close(float(raw),
+                                    float(DEFAULTS["credit_shadow_daily_limit"]),
+                                    "影子护栏（环境变量 CREDIT_SHADOW_DAILY_LIMIT）")
         except ValueError:
             print(f"⚠️ 环境变量 CREDIT_SHADOW_DAILY_LIMIT 不是数（{raw!r}），按下面的口径跑")
     with _lock:
@@ -307,7 +355,8 @@ def credit_shadow_daily_limit() -> float:
         number = float(value)
     except (TypeError, ValueError):
         return float(DEFAULTS["credit_shadow_daily_limit"])
-    return max(0.0, number)
+    return _finite_or_close(number, float(DEFAULTS["credit_shadow_daily_limit"]),
+                            "影子护栏（data/config.json）")
 
 
 def apply_update(partial: dict) -> Tuple[dict, list]:
