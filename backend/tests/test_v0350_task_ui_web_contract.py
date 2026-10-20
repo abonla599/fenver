@@ -27,6 +27,7 @@
 
 - `switch (evt.type) { case "waiting_user": … }`：不是 `===` 比较，扫不到；
 - `evt["type"] === "…"`、先 `const t = evt.type` 再比：名字不是 `evt.type`；
+- `evt?.type === "…"`（可选链）与 `(evt).type === "…"`（括号包裹）：不是 `evt.type` 字面形状，扫不到；
 - `const { type } = evt`：解构出来的名字不在正则里；
 - 把帧转给 helper（`onUnknown` / `onStatus` / 自定义函数）再由它认：只看 `onEvent` 体；
 - `list.forEach(paintTaskCard)`、`const f = paintTaskCard; f(...)`：不是 `name(` 直呼；
