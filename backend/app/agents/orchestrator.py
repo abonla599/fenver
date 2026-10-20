@@ -5,13 +5,17 @@
 """
 from typing import List, Optional, Dict, Any, Tuple
 from .task_store import (IllegalTaskTransition, Task, TaskStatus, can_transition,
-                         expire_parked_task, is_waiting_timed_out, save,
+                         claim_execution, expire_parked_task, is_executing,
+                         is_waiting_timed_out, release_execution, save,
                          sweep_timed_out_parks, waiting_timeout_info, task_store)
 # 认领那一跳要用的锁就是那份存储自己那把（改表与落盘同锁，task_store.py:274）。
 # 跨模块引一个下划线开头的名字在本仓有先例（`app/web/web_router.py:24` 引
 # `auth_router._client_ip`），而这里的理由更硬：判"这条任务在不在等人"与写它的那一跳
 # 必须在**同一把**锁里，另起一把只是把窗口从一处搬到两处。
 from .task_store import _lock as _store_lock
+# `_EXECUTING` 这个名字留给既有消费方（A3 的并发用例直接往这张表里塞 id）：它现在是
+# task_store 里那一张表的**别名**，不是第二份。生产代码判占位请走公共函数。
+from .task_store import _EXECUTING as _EXECUTING  # noqa: F401
 from .planner import Planner
 from .executor import Executor
 from .task_agent import TaskNeedsUser
@@ -27,7 +31,10 @@ from app.tools.registry import tools_registry
 TOOL_SUSPENSION_KIND = "tool_suspension"
 
 # ⭐⭐ 本进程里"已经有人在跑"的任务清单（独立审查员复现出来的那一格，见 A3 测试文件
-# 末尾那族用例）。
+# 末尾那族用例）。工单 #34 起这张表搬进了 `task_store`（公共 API：`claim_execution` /
+# `release_execution` / `is_executing`），因为它不再只归编排器看：`/v1/tasks/{id}/cancel`
+# 必须问同一张表，否则一条取消能在答案正被接回去的那一秒落下来，把用户刚递进去的
+# 验证码/收货地址连同任务一起丢掉。上面引的那个 `_EXECUTING` 只是同一张表的兼容别名。
 #
 # 为什么状态不够、必须另有一张表：一个 RUNNING 的任务有两种截然不同的下场——
 #   ① 上一次进程被打断留下的（`restore()` 给它 `interrupted_by_restart`）：再进来的人
@@ -40,13 +47,8 @@ TOOL_SUSPENSION_KIND = "tool_suspension"
 # 那一笔钱，而两个响应还互相矛盾（一个说还在等人，一个说办完了）。
 # 把 ① 与 ② 分开的唯一诚实信息是"这条任务在我这个进程里有没有人占着"，那就是一张
 # 进程内的表，不是状态字段：字段会随 tasks.json 落盘，一次崩溃就留下一个永远"有人在跑"
-# 的假案（谁也叫不动它），而这张表跟着进程一起清空。
-#
-# 边界要说实话：这张表管的是**本进程**。多个 worker 各持一份，跨进程的同一枚停点还抢
-# 得动（现网是本机 `127.0.0.1:8000` 单进程：`run_backend.py:63` 那句
-# `uvicorn.run(app, host="127.0.0.1", port=8000)` 不带 workers，换包脚本也按这一份起）；
-# 真要多进程，得换一把跨进程的锁（文件锁或 sqlite），不在这一格里，已作为 follow-up 上报。
-_EXECUTING: set = set()
+# 的假案（谁也叫不动它），而这张表跟着进程一起清空。边界（只在本进程内有效）与
+# 为什么换包脚本单进程起得来，见 `task_store` 里那张表自己的注释。
 
 
 def _suspension_cursor(suspension: Dict[str, Any], subtask_index: int) -> Dict[str, Any]:
@@ -547,7 +549,7 @@ class Orchestrator:
         回 None 之外还顺手把 `_EXECUTING` 那一格留着；调用方必须在 finally 里还。
         """
         with _store_lock:
-            if task.task_id in _EXECUTING:
+            if is_executing(task.task_id):
                 return self._answer_not_accepted(task, "already_in_flight")
             if claims_breakpoint:
                 # 只认**这一趟在锁外读到的那一个**断点态。#33 之后带可信游标的 failed 也
@@ -565,22 +567,25 @@ class Orchestrator:
                     _, code = _trusted_failed_breakpoint(task)
                     if code != "resumable":
                         return self._refuse_rerun(task, code)
-            _EXECUTING.add(task.task_id)
+            # 公共占位 API（工单 #34）：判占位与占位本身都在 task_store 那把锁里，
+            # 而外层这一把是同一个 RLock——判断点、占位、`→ running` 仍是同一批。
+            if not claim_execution(task.task_id):
+                return self._answer_not_accepted(task, "already_in_flight")
             try:
                 task.set_status(TaskStatus.RUNNING)
             except Exception as e:
-                # 跳转被拒（终态在这一瞬间被 /cancel 抢先落下来）或落盘坏了（OSError）：
+                # 跳转被拒（终态在这一瞬间被 /cancel 抢先落下来——工单 #34 之后取消
+                # 也要先看这张表，所以这条是纵深防御）或落盘坏了（OSError）：
                 # 占位当场还回去，并把话回给调用方而不是抛出去。抛的症状是 500，
                 # 而这件事实本可以是一句"这条任务此刻是什么"。
-                _EXECUTING.discard(task.task_id)
+                release_execution(task.task_id)
                 return self._answer_not_accepted(task, "transition_refused", detail=e)
         return None
 
     @staticmethod
     def _release_execution(task_id: str) -> None:
         """还执行权。与认领同一把锁，免得认领那一方正读表时这里正在改。"""
-        with _store_lock:
-            _EXECUTING.discard(task_id)
+        release_execution(task_id)
 
     def _answer_not_accepted(self, task: Task, reason: str,
                              detail: Optional[BaseException] = None) -> Dict[str, Any]:
@@ -821,9 +826,10 @@ class Orchestrator:
                 task.set_status(TaskStatus.FAILED)
                 return TaskStatus.FAILED.value
             except IllegalTaskTransition as jump:
-                # 上面那一问与这一跳之间的窗口：另一条线程（`/v1/tasks/{id}/cancel`
-                # 的判据在锁外）抢先把终态落了进来。同一句纪律——半个跳转不许留下，
-                # 刚写的那一格 error 也吐回去。
+                # 上面那一问与这一跳之间的窗口：另一条线程抢先把终态落了进来
+                # （工单 #34 之后 `/cancel` 也走同一把锁、且先看执行权，所以这一格
+                # 现在是纵深防御；直接改 store 的测试与将来的写入方仍走得到）。
+                # 同一句纪律——半个跳转不许留下，刚写的那一格 error 也吐回去。
                 task.error = previous_error
                 print(f"[Orchestrator] 任务 {task.task_id} 的 failed 那一跳被状态机拒了"
                       f"（{type(jump).__name__}：{jump}）：任务此刻是"
