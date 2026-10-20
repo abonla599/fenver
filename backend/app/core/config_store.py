@@ -123,11 +123,23 @@ def _env_registration_open():
 def _type_ok(value, default) -> bool:
     """键的形状判定。数字对数字是宽容的：JSON 里 30 与 30.0 是同一个东西的
     两种写法——按老的 isinstance 口径，手写的整数秒会被判"类型不对"悄悄回
-    默认，正是"我明明改过怎么没生效"那一类配置事故。bool 仍然只收 bool。"""
+    默认，正是"我明明改过怎么没生效"那一类配置事故。bool 仍然只收 bool。
+
+    整数还要多一关：**超出 float 范围的 int 不收**。这个文件里每个数字下游都要过
+    `float()`（读数口径与 JSON 响应都是），而 `float(10**400)` 抛 OverflowError。
+    `restore()` 跑在导入期、审批 TTL 又在 `app/core/approval.py` 的模块层被取走，
+    收下这种数就是让现网起不来（不是 500，是 ImportError）；"等读到的时候再兜"也挡
+    不住 `read()`——它会把盘上原值直接交给 `GET /v1/config`。"""
     if isinstance(default, bool):
         return isinstance(value, bool)
     if isinstance(default, (int, float)):
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            float(value)
+        except OverflowError:
+            return False
+        return True
     return isinstance(value, type(default))
 
 
@@ -155,12 +167,12 @@ def restore(path: str = None) -> int:
         count = 0
         for key in DEFAULTS:
             if key in data and _type_ok(data[key], DEFAULTS[key]):
-                _config[key] = data[key]
+                _config[key] = _sanitize_loaded(key, data[key])
                 count += 1
             elif key in data:
                 # 形状不对的一条不入库，但要说出来：静默吞掉会让人以为
-                # "我改过了怎么没生效"，其实是那行 JSON 写坏了类型。
-                print(f"⚠️ 配置项 {key} 的类型不对，按默认值跑")
+                # "我改过了怎么没生效"，其实是那行 JSON 写坏了类型或数值范围。
+                print(f"⚠️ 配置项 {key} 的类型或数值范围不对，按默认值跑")
         return count
 
 
@@ -187,8 +199,8 @@ def update_repo() -> str:
     return repo or DEFAULTS["update_repo"]
 
 
-def _finite_or_close(value: float, fallback: float, where: str) -> float:
-    """先挡非有限值，再做非负收口。
+def _finite_or_close(value, fallback: float, where: str) -> float:
+    """把任意 JSON 形状归一成**非负有限浮点**；归不出来就折回 `fallback` 并说一句。
 
     为什么 `max(0.0, x)` 不够：它只挡负数，挡不住非有限值。`inf` 比 0 大，会**原样
     穿到出口**；而 `nan` 与任何数比较都是 False，于是被 `max` 吃掉、悄悄落回 0.0。
@@ -204,12 +216,64 @@ def _finite_or_close(value: float, fallback: float, where: str) -> float:
 
     零 raise，只 print 一行：这一族的读数在**导入期**就会被取用（审批 TTL 住在
     `app/core/approval.py` 的模块层），在这里抛出去就是现网起不来的 ImportError。
+
+    射程就是下面这条捕获面，不写裸 `except Exception`：`float()` 对 JSON 能表示的
+    每一种形状只会抛三类——`TypeError`（`null`、列表、字典这类没有数值语义的）、
+    `ValueError`（字符串不是数）、`OverflowError`（整数超出 float 范围，例如盘上一个
+    400 位整数）。裸 `except Exception` 会把调用点自己的 bug（拼错的变量、属性名写错）
+    也一起吞成"按默认跑"，那才是真正的静默。同一句话的另一半：它不承诺接住任意对象
+    `__float__` 里抛出的自定义异常——配置面只装 JSON 值，没有那种东西。
     """
-    if not math.isfinite(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        print(f"⚠️ {where} 读不出一个数（{value!r}，{type(exc).__name__}），"
+              f"按这一格的默认 {fallback!r} 跑")
+        return fallback
+    if not math.isfinite(number):
         print(f"⚠️ {where} 读出来不是有限值（{value!r}），按这一格的默认 {fallback!r} 跑；"
               f"非有限值既不能当窗口用，也不能进响应")
         return fallback
-    return max(0.0, value)
+    return max(0.0, number)
+
+
+def _sanitize_loaded(key: str, value):
+    """盘上/管理端送来的值**写进缓存之前**的最后一道：非有限数折回该格默认。
+
+    为什么修在缓存写入层而不是 `read()`：`read()` 在详情端点的热路径上（每次 GET 都经
+    `waiting_timeout_info` 现读一次），在它上面再叠一遍消毒，等于每个请求都重算同一件
+    在写入时就该定下来的事；而且 `read()` 返回的本来就是 `_config` 的浅副本（env 覆盖
+    与默认值合并都发生在读侧），调用方对它的期待是"当前生效的配置"而不是"盘上原值"，
+    在写入层收口不改变任何调用方拿到的语义。真正的写入口只有两个——`restore()` 与
+    `apply_update()`——都在这里过一遍，于是 `read()`、`GET /v1/config`、
+    `POST /v1/admin/config` 的响应以及全部下游读者天然拿到干净字典。
+
+    负数的收口沿用 `_finite_or_close` 的同一条 `max(0.0, ...)`：这四个数值格的 getter
+    本来就把负数读成 0，缓存里存 0 只是让 `read()` 与 getter 看到同一个数。
+    """
+    if key == "credit_benchmark":
+        out = dict(value)
+        for sub, default in DEFAULTS["credit_benchmark"].items():
+            if sub == "currency" or sub not in out:
+                continue
+            item = out[sub]
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                # 形状不对由 credit_benchmark() 逐键回落；这一层只保证"进得了 JSON"，
+                # 不替它决定字符串该变成什么。
+                continue
+            try:
+                finite = math.isfinite(float(item))
+            except OverflowError:
+                finite = False
+            if not finite:
+                print(f"⚠️ 配置项 credit_benchmark.{sub} 不是有限数或超出 float 范围"
+                      f"（{item!r}），落回默认 {default!r}")
+                out[sub] = default
+        return out
+    default = DEFAULTS[key]
+    if isinstance(default, (int, float)) and not isinstance(default, bool):
+        return _finite_or_close(value, float(default), f"配置项 {key}")
+    return value
 
 
 def stream_no_reader_grace_seconds() -> float:
@@ -231,12 +295,8 @@ def stream_no_reader_grace_seconds() -> float:
     with _lock:
         value = _config.get("stream_no_reader_grace_seconds",
                             DEFAULTS["stream_no_reader_grace_seconds"])
-    try:
-        return _finite_or_close(float(value),
-                                float(DEFAULTS["stream_no_reader_grace_seconds"]),
-                                "宽限期（data/config.json）")
-    except (TypeError, ValueError):
-        return float(DEFAULTS["stream_no_reader_grace_seconds"])
+    return _finite_or_close(value, float(DEFAULTS["stream_no_reader_grace_seconds"]),
+                            "宽限期（data/config.json）")
 
 
 def approval_ticket_ttl_seconds() -> float:
@@ -258,12 +318,8 @@ def approval_ticket_ttl_seconds() -> float:
     with _lock:
         value = _config.get("approval_ticket_ttl_seconds",
                             DEFAULTS["approval_ticket_ttl_seconds"])
-    try:
-        return _finite_or_close(float(value),
-                                float(DEFAULTS["approval_ticket_ttl_seconds"]),
-                                "审批票据有效期（data/config.json）")
-    except (TypeError, ValueError):
-        return float(DEFAULTS["approval_ticket_ttl_seconds"])
+    return _finite_or_close(value, float(DEFAULTS["approval_ticket_ttl_seconds"]),
+                            "审批票据有效期（data/config.json）")
 
 
 def task_waiting_user_timeout_seconds() -> float:
@@ -291,12 +347,8 @@ def task_waiting_user_timeout_seconds() -> float:
     with _lock:
         value = _config.get("task_waiting_user_timeout_seconds",
                             DEFAULTS["task_waiting_user_timeout_seconds"])
-    try:
-        return _finite_or_close(float(value),
-                                float(DEFAULTS["task_waiting_user_timeout_seconds"]),
-                                "停点作废窗口（data/config.json）")
-    except (TypeError, ValueError):
-        return float(DEFAULTS["task_waiting_user_timeout_seconds"])
+    return _finite_or_close(value, float(DEFAULTS["task_waiting_user_timeout_seconds"]),
+                            "停点作废窗口（data/config.json）")
 
 
 def credit_benchmark() -> dict:
@@ -322,12 +374,23 @@ def credit_benchmark() -> dict:
         # `continue`），不是某个全表统一的数。判据也要比"是不是正数"多一格——
         # `float(nan) <= 0` 是 False，nan 与 inf 都能从"正数"这一关放行到出口，
         # 而它们进锚价等于把整张倍率表算成不可复现的鬼话（inf 还会把响应带崩）。
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(float(value)) or float(value) <= 0):
+        # `float(10**400)` 抛的 OverflowError 必须进 except：盘上一个 400 位整数就能
+        # 让 `GET /v1/config` 与这段读数一起 500，而它不是"小于 0"也不是"非有限"。
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             if value is not None and value != default:
                 print(f"⚠️ 基准价 {key} 得是有限的正数（收到 {value!r}），按默认 {default} 跑")
             continue
-        out[key] = float(value) if not isinstance(default, int) else value
+        try:
+            number = float(value)
+        except OverflowError:
+            if value != default:
+                print(f"⚠️ 基准价 {key} 超出 float 范围（整数过大），按默认 {default} 跑")
+            continue
+        if not math.isfinite(number) or number <= 0:
+            if value is not None and value != default:
+                print(f"⚠️ 基准价 {key} 得是有限的正数（收到 {value!r}），按默认 {default} 跑")
+            continue
+        out[key] = number if not isinstance(default, int) else value
     return out
 
 
@@ -351,11 +414,7 @@ def credit_shadow_daily_limit() -> float:
     with _lock:
         value = _config.get("credit_shadow_daily_limit",
                             DEFAULTS["credit_shadow_daily_limit"])
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return float(DEFAULTS["credit_shadow_daily_limit"])
-    return _finite_or_close(number, float(DEFAULTS["credit_shadow_daily_limit"]),
+    return _finite_or_close(value, float(DEFAULTS["credit_shadow_daily_limit"]),
                             "影子护栏（data/config.json）")
 
 
@@ -379,7 +438,10 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
             if not _value_ok(key, value):
                 rejected.append(key)
                 continue
-            _config[key] = value
+            # 校验过了也要过消毒：JSON 的 `1e400` / `Infinity` 会被解析成 inf，
+            # `_type_ok` 收（它判的是形状，inf 是 float），原样存进缓存就是让
+            # `POST /v1/admin/config` 的响应与下一次 `GET /v1/config` 一起 500。
+            _config[key] = _sanitize_loaded(key, value)
         _write()
         out = dict(_config)
     env_open = _env_registration_open()
