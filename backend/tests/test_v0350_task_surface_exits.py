@@ -23,6 +23,10 @@
   由 `test_waiting_user_exits_to_every_allowed_state` 钉着），
    拿游标在不在当判据，就会给一条已经定论的任务画输入框。
 
+本笔的保证只有两条：① 真挂起时帧与模型文本是**同一个串**、不重复加前缀（模型会看到
+`⏸`——那是 A3 起 `response.to_string()` 的既有前缀；要"模型绝不看到"是 A3 的独立票，
+不在本笔）；② 帧不带任何任务身份（task_id / 问题 / 游标），卡片的真相读 GET。
+
 `pipeline.py` 那条非流式 trace 的形与流式同构；这里只跑流式那一支（`stream_chat_events`），
 因为它是 `tool_result` 帧的唯一生产者，另一支产的是落盘步，不产帧。
 """
@@ -168,13 +172,17 @@ def test_a_suspended_tool_result_speaks_by_value_and_carries_no_task_identity(
         "七键判据没牙：多一个键它也说相等"
 
 
-def test_the_marker_is_added_for_the_frame_and_never_to_the_model_text(
+def test_the_marker_is_added_only_when_the_outcome_text_lacks_it(
         monkeypatch, park_tool):
-    """`⏸ ` 是**帧/步**的取值，不是给模型的输入。
+    """`⏸ ` 自 A3 起就在 `response.to_string()` 里，帧与模型看到的是**同一个串**。
+
+    实跑（`c68b711c` 与 `cd1e0522` 各一次）：帧的 `summary` 与回灌给模型的 tool content
+    都是 `'⏸ 需要用户输入：…〔执行已经停在断点：…〕'`，各 215 bytes、两版逐字节相同
+    ——本笔没新增污染，本笔新增的只有"outcome 文本缺前缀时补上"这一件事。
 
     做法是把执行器那一层换成一份"挂着但文本没带前缀"的结果（将来某条工具或中间层
     改了文本投影，就是这个形状）：帧必须仍按 `outcome.suspended` 补回记号，而回灌给
-    模型的 content 一个字节都不许动——给模型加展示前缀，等于把一次挂起改写成它没说过的话。
+    模型的 content 与 outcome 给的文本一字不差——不加第二道前缀。
     """
     importlib.reload(streaming)
     plain = "需要用户输入：请输入短信验证码"
