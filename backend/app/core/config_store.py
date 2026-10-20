@@ -83,18 +83,29 @@ DEFAULTS = {
 # 窗口"，是一次 `OverflowError` / `date value out of range`（详情端点 500）。
 # 它同时远小于 2**53：线内的整数都能被 float 精确表示，int→float 不会改值。
 #
-# 射程：这条线是**秒**上的上界，却对**所有数值格**生效（`_type_ok`、
-# `_sanitize_loaded`、`_finite_or_close` 都不分键；`credit_benchmark` 的数值子键
-# 例外，它走自己的 `_sanitize_credit_benchmark`）。例如
-# `credit_shadow_daily_limit=1e12` 根本不是时间，也会被拒收或折回默认（那一格的
-# 默认是 0）。这是范畴错误——收窄到时间三键（宽限期、审批票据有效期、停点作废
-# 窗口）是后续单，本轮不改行为。
+# 射程（#149 已收窄）：这条线只对**秒**格生效——`stream_no_reader_grace_seconds`、
+# `approval_ticket_ttl_seconds`、`task_waiting_user_timeout_seconds`
+# （名单是下面的 `_SECONDS_KEYS`；`_type_ok`、`_sanitize_loaded`、
+# `_finite_or_close` 都按格判）。别的顶层数值格（今天只有
+# `credit_shadow_daily_limit`）是计数不是时长，`1e12` 不是"很长的窗口"而是配得出
+# 来的额度，不许拿这条秒线去拒它；它们的取值范围上界 owner 是 IEEE-754 双精度
+# 浮点本身（`float()` 不溢出且有限，即 `_type_ok` 的 OverflowError 关与
+# `_json_safe` 的 `allow_nan=False` 关），不是 datetime。
 #
 # 窄带：值本身 ≤ 这条线、但从 `waiting_since` 加过去会越界的那一段**不是拒绝，是
 # 封顶**——`task_store.waiting_deadline()` 捕住那次 OverflowError 后返回
 # `datetime.max`（9999-12-31T23:59:59.999999），展示语义是"约八千年后到期"。
 # 这样详情端点绝不因为一次日期加法 500。
 MAX_WINDOW_SECONDS = 315_537_897_599.0
+
+# 秒格的名单：只有会被送进 `timedelta(seconds=...)` / 日期加法的格子才归上面那条线
+# 管。新增一个"秒"配置格时要加到这里；`tests/test_v0350_ticket149_seconds_cap_scope.py`
+# 钉死这份名单，加格会红——那不是麻烦，是提醒你确认它真的该受 datetime 限制。
+_SECONDS_KEYS = frozenset({
+    "stream_no_reader_grace_seconds",
+    "approval_ticket_ttl_seconds",
+    "task_waiting_user_timeout_seconds",
+})
 
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到
 # 会话存储、供应商地址这类东西上时，忘了改这张表的管理端点就等于开了个任意写口子。
@@ -143,7 +154,18 @@ def _env_registration_open():
     return None
 
 
-def _type_ok(value, default) -> bool:
+def _seconds_limited(key) -> bool:
+    """这一格受不受 `MAX_WINDOW_SECONDS`（datetime 能表达的秒数上限）管。
+
+    `key is None` 是"没点名格子"的直接探针走的那一支，按秒格收，也就是严的那一支：
+    现网两个写入口（`restore()` / `apply_update()`）与全部 getter 都点名传 key，不会
+    落到这里；两条 A5 用例（`_type_ok(value, 0.0)`、`_finite_or_close(bad, 7.5, ...)`）
+    就是这么直接探的，它们的判据仍然有效。
+    """
+    return key is None or key in _SECONDS_KEYS
+
+
+def _type_ok(value, default, key: str = None) -> bool:
     """键的形状判定。数字对数字是宽容的：JSON 里 30 与 30.0 是同一个东西的
     两种写法——按老的 isinstance 口径，手写的整数秒会被判"类型不对"悄悄回
     默认，正是"我明明改过怎么没生效"那一类配置事故。bool 仍然只收 bool。
@@ -152,8 +174,10 @@ def _type_ok(value, default) -> bool:
     OverflowError）：`restore()` 跑在导入期、审批 TTL 又在 `app/core/approval.py`
     的模块层被取走，收下这种数就是让现网起不来（不是 500，是 ImportError）；"等读到
     的时候再兜"也挡不住 `read()`——它会把盘上原值直接交给 `GET /v1/config`。
-    另一关是**超出 datetime 可用范围**的值：`10**13` 过得了 float，过不了下游
-    `waiting_since + timedelta(seconds=...)`（见 `MAX_WINDOW_SECONDS`）。形状关是
+    另一关是**超出 datetime 可用范围**的值，但只对秒格（`key in _SECONDS_KEYS`）
+    生效：`10**13` 过得了 float，过不了下游 `waiting_since + timedelta(seconds=...)`
+    （见 `MAX_WINDOW_SECONDS`）。它不是秒格（例如影子护栏那种计数）时不受这条线管，
+    否则 `credit_shadow_daily_limit=1e12` 会被一次范畴错误拒掉。形状关是
     唯一能在写缓存前说"这一键没被接受"的地方，放它进去就只剩 500 或静默折值两条
     坏路。inf 仍然收——它是 float 的形状，非有限值由写缓存前的消毒层折回该格默认。"""
     if isinstance(default, bool):
@@ -165,7 +189,7 @@ def _type_ok(value, default) -> bool:
             number = float(value)
         except OverflowError:
             return False
-        if math.isfinite(number) and number > MAX_WINDOW_SECONDS:
+        if _seconds_limited(key) and math.isfinite(number) and number > MAX_WINDOW_SECONDS:
             return False
         return True
     return isinstance(value, type(default))
@@ -194,7 +218,7 @@ def restore(path: str = None) -> int:
             return 0
         count = 0
         for key in DEFAULTS:
-            if key in data and _type_ok(data[key], DEFAULTS[key]):
+            if key in data and _type_ok(data[key], DEFAULTS[key], key=key):
                 _config[key] = _sanitize_loaded(key, data[key])
                 count += 1
             elif key in data:
@@ -227,9 +251,13 @@ def update_repo() -> str:
     return repo or DEFAULTS["update_repo"]
 
 
-def _finite_or_close(value, fallback: float, where: str) -> float:
-    """把任意 JSON 形状归一成**非负、有限、且不超过 `MAX_WINDOW_SECONDS`** 的浮点；
-    归不出来就折回 `fallback` 并说一句。
+def _finite_or_close(value, fallback: float, where: str, key: str = None) -> float:
+    """把任意 JSON 形状归一成**非负、有限**的浮点；归不出来就折回 `fallback` 并说一句。
+
+    **上界按格判**（#149）：`key` 是秒格（`_SECONDS_KEYS`）时再加一条不超过
+    `MAX_WINDOW_SECONDS` 的上界——那条线管的是 datetime 装不下的秒数，不是"所有数
+    字"。计数格（影子护栏）只受有限性约束，`1e12` 这种超秒线但完全合法的额度原样
+    穿过；`key=None` 是直接探针，按秒格收（严的那一支，见 `_seconds_limited`）。
 
     为什么 `max(0.0, x)` 不够：它只挡负数，挡不住非有限值。`inf` 比 0 大，会**原样
     穿到出口**；而 `nan` 与任何数比较都是 False，于是被 `max` 吃掉、悄悄落回 0.0。
@@ -263,8 +291,8 @@ def _finite_or_close(value, fallback: float, where: str) -> float:
         print(f"⚠️ {where} 读出来不是有限值（{value!r}），按这一格的默认 {fallback!r} 跑；"
               f"非有限值既不能当窗口用，也不能进响应")
         return fallback
-    if number > MAX_WINDOW_SECONDS:
-        # 上界必须在这里判：环境变量臂不经过 `_type_ok` / `_sanitize_loaded`，
+    if _seconds_limited(key) and number > MAX_WINDOW_SECONDS:
+        # 秒格的上界必须在这里判：环境变量臂不经过 `_type_ok` / `_sanitize_loaded`，
         # `TASK_WAITING_USER_TIMEOUT_SECONDS=1e18` 是能现读出来的。
         print(f"⚠️ {where} 读出来超出可用上限（{value!r} > {MAX_WINDOW_SECONDS} 秒）："
               f"datetime 装不下这么大的窗口，按这一格的默认 {fallback!r} 跑")
@@ -364,9 +392,10 @@ def _sanitize_loaded(key: str, value):
 
     两条数值口径：
     - **合法整数原样保型**：`3600` 经 `restore()` 后 `read()` 仍是 int 3600，不统一
-      浮点化（getter 出口仍是 float，形状没变）。上界以内、非负的整数都是精确值；
-      超过 `MAX_WINDOW_SECONDS` 的整数过不了 `_type_ok`，走不到这里，真走到了也按
-      默认落，绝不交给 `float()` 静默取整。
+      浮点化（getter 出口仍是 float，形状没变）。非负的整数都是精确值；秒格
+      （`_SECONDS_KEYS`）里超过 `MAX_WINDOW_SECONDS` 的整数过不了 `_type_ok`，走不到
+      这里，真走到了也按默认落，绝不交给 `float()` 静默取整；非秒格（影子护栏）不受
+      这条线管，`1e12` 这种额度原样留下。
     - 负数的收口沿用 `_finite_or_close` 的同一条 `max(0.0, ...)`：这些数值格的 getter
       本来就把负数读成 0，缓存里存 0 只是让 `read()` 与 getter 看到同一个数。
     """
@@ -377,12 +406,12 @@ def _sanitize_loaded(key: str, value):
         if isinstance(value, int) and not isinstance(value, bool):
             if value < 0:
                 return 0.0
-            if value > MAX_WINDOW_SECONDS:
+            if _seconds_limited(key) and value > MAX_WINDOW_SECONDS:
                 print(f"⚠️ 配置项 {key} 的整数 {value!r} 超出 datetime 可用上限"
                       f"（{MAX_WINDOW_SECONDS} 秒），落回默认 {default!r}")
                 return default
             return value
-        return _finite_or_close(value, float(default), f"配置项 {key}")
+        return _finite_or_close(value, float(default), f"配置项 {key}", key=key)
     return value
 
 
@@ -399,14 +428,16 @@ def stream_no_reader_grace_seconds() -> float:
         try:
             return _finite_or_close(float(raw),
                                     float(DEFAULTS["stream_no_reader_grace_seconds"]),
-                                    "宽限期（环境变量 STREAM_NO_READER_GRACE_SECONDS）")
+                                    "宽限期（环境变量 STREAM_NO_READER_GRACE_SECONDS）",
+                                    key="stream_no_reader_grace_seconds")
         except ValueError:
             print(f"⚠️ 环境变量 STREAM_NO_READER_GRACE_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("stream_no_reader_grace_seconds",
                             DEFAULTS["stream_no_reader_grace_seconds"])
     return _finite_or_close(value, float(DEFAULTS["stream_no_reader_grace_seconds"]),
-                            "宽限期（data/config.json）")
+                            "宽限期（data/config.json）",
+                            key="stream_no_reader_grace_seconds")
 
 
 def approval_ticket_ttl_seconds() -> float:
@@ -422,14 +453,16 @@ def approval_ticket_ttl_seconds() -> float:
         try:
             return _finite_or_close(float(raw),
                                     float(DEFAULTS["approval_ticket_ttl_seconds"]),
-                                    "审批票据有效期（环境变量 APPROVAL_TICKET_TTL_SECONDS）")
+                                    "审批票据有效期（环境变量 APPROVAL_TICKET_TTL_SECONDS）",
+                                    key="approval_ticket_ttl_seconds")
         except ValueError:
             print(f"⚠️ 环境变量 APPROVAL_TICKET_TTL_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("approval_ticket_ttl_seconds",
                             DEFAULTS["approval_ticket_ttl_seconds"])
     return _finite_or_close(value, float(DEFAULTS["approval_ticket_ttl_seconds"]),
-                            "审批票据有效期（data/config.json）")
+                            "审批票据有效期（data/config.json）",
+                            key="approval_ticket_ttl_seconds")
 
 
 def task_waiting_user_timeout_seconds() -> float:
@@ -451,14 +484,16 @@ def task_waiting_user_timeout_seconds() -> float:
             # 兜回 0.0 = 这一格的"关"：坏值绝不许倒向"到点销毁用户手里那个还能续的断点"。
             return _finite_or_close(float(raw),
                                     float(DEFAULTS["task_waiting_user_timeout_seconds"]),
-                                    "停点作废窗口（环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS）")
+                                    "停点作废窗口（环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS）",
+                                    key="task_waiting_user_timeout_seconds")
         except ValueError:
             print(f"⚠️ 环境变量 TASK_WAITING_USER_TIMEOUT_SECONDS 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("task_waiting_user_timeout_seconds",
                             DEFAULTS["task_waiting_user_timeout_seconds"])
     return _finite_or_close(value, float(DEFAULTS["task_waiting_user_timeout_seconds"]),
-                            "停点作废窗口（data/config.json）")
+                            "停点作废窗口（data/config.json）",
+                            key="task_waiting_user_timeout_seconds")
 
 
 def credit_benchmark() -> dict:
@@ -512,20 +547,27 @@ def credit_shadow_daily_limit() -> float:
     "负的额度"不是"倒贴"，是写错了，别让它把每一轮都拦死。非有限值也收进 0：
     这一格的 0 同时是默认与"关"（只算不拦），坏值落在这里不新造第二个方向；
     换成别的数就不行，`inf` 穿出去是一扇永远合不上的闸，`nan` 穿出去会崩响应。
+
+    #149：这一格是**计数**不是秒，不归 `MAX_WINDOW_SECONDS` 管——`1e12` 是配得出来
+    的额度，必须原样读到（盘上、环境变量两路都是）。它的取值范围上界 owner 是
+    IEEE-754 双精度浮点本身：`float()` 不溢出、且有限，就是合法值；`10**400` 这种
+    超出 float 的整数仍由形状关 / 捕获面挡在默认外。
     """
     raw = os.getenv("CREDIT_SHADOW_DAILY_LIMIT", "").strip()
     if raw:
         try:
             return _finite_or_close(float(raw),
                                     float(DEFAULTS["credit_shadow_daily_limit"]),
-                                    "影子护栏（环境变量 CREDIT_SHADOW_DAILY_LIMIT）")
+                                    "影子护栏（环境变量 CREDIT_SHADOW_DAILY_LIMIT）",
+                                    key="credit_shadow_daily_limit")
         except ValueError:
             print(f"⚠️ 环境变量 CREDIT_SHADOW_DAILY_LIMIT 不是数（{raw!r}），按下面的口径跑")
     with _lock:
         value = _config.get("credit_shadow_daily_limit",
                             DEFAULTS["credit_shadow_daily_limit"])
     return _finite_or_close(value, float(DEFAULTS["credit_shadow_daily_limit"]),
-                            "影子护栏（data/config.json）")
+                            "影子护栏（data/config.json）",
+                            key="credit_shadow_daily_limit")
 
 
 def apply_update(partial: dict) -> Tuple[dict, list]:
@@ -535,8 +577,10 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
     界面上"保存"的人想知道的是改成了什么；类型不对同样拒，但只拒那一个键。
     值域不对（_VALUE_CHECKS，目前只有 update_repo 的 owner/repo 白名单）也一样：
     它出站时会拼进服务端要请求的 URL，放行任意字符串等于开一条 SSRF。
-    超出 `MAX_WINDOW_SECONDS` 的数同样拒：`10**18+1` 交给 `float()` 会被静默取整成
-    `1e18`，那是**改值**不是校验，运维在管理端看到的必须是"这一键没被接受"。
+    秒格（`_SECONDS_KEYS`）里超出 `MAX_WINDOW_SECONDS` 的数同样拒：`10**18+1` 交给
+    `float()` 会被静默取整成 `1e18`，那是**改值**不是校验，运维在管理端看到的必须是
+    "这一键没被接受"。非秒格（影子护栏）不按这条秒线拒，`1e12` 这类额度照收；超出
+    float 范围的整数（`10**400`）仍然是 `_type_ok` 的 OverflowError 关拒收。
     """
     rejected = []
     with _lock:
@@ -544,7 +588,7 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
             if key not in MUTABLE_KEYS:
                 rejected.append(key)
                 continue
-            if not _type_ok(value, DEFAULTS[key]):
+            if not _type_ok(value, DEFAULTS[key], key=key):
                 rejected.append(key)
                 continue
             if not _value_ok(key, value):
