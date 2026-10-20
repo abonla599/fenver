@@ -30,7 +30,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir --force-reinstall -r backend/requirements.txt
+          # 只从锁装：backend/requirements.lock 由 backend/requirements.txt 编译（跨平台 + 逐包哈希）。
+          # 清单改了却没重编锁时，下一步的一致性检查会红——而不是让 CI 悄悄装旧的一套。
+          pip install --no-cache-dir --force-reinstall --require-hashes -r backend/requirements.lock
+      - name: Verify dependency lock against backend/requirements.txt
+        run: python tools/check_requirements_lock.py backend/requirements.txt backend/requirements.lock
       # test_sandbox_concurrency.py 真的起容器，用的是 app/sandbox/sandbox_manager.py
       # 里钉死的 ai-sandbox:latest。它不是 pip 依赖，requirements 装不出来，此前只有
       # 开发机上手工 build 过的那一份——于是这条用例在 CI 上从来没跑过，只在本机跑过

@@ -101,6 +101,11 @@ docs-internal/
 # backend/tests/test_release_marker_derived_from_version.py 直接它执行并核它，脚本进不了仓库，那把锁就变成一句注释，
 # 而发版人在换包窗口里也拷不到该用的那一串。纯标准库、只读三个仓库文件、不写盘、不碰网络。
 !/tools/release_marker.py
+# 依赖锁一致性检查器（#146）。与 pre_tag_gate / gen_changelog 同一个理由：tests.yml 的
+# "Verify dependency lock" 那一步直接执行它，那次 checkout 里没有这个文件，整条判据就变成
+# 一句注释——清单改了锁没重编也全绿，正是这把锁要防的那一格。只用标准库 + packaging
+# （清单里已有），只读清单与锁、不写盘、不碰网络。
+!/tools/check_requirements_lock.py
 server.log
 tunnel.log
 PATH_backup_*.txt
