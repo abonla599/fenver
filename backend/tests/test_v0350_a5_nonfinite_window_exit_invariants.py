@@ -8,11 +8,13 @@ r"""A5 出口不变量：**非有限值不许从配置读数口径穿出去**，
 
 ⭐ 为什么还要再写一个文件（既有那把窗口判据的锁已经存在）：`tests/
 test_v0350_a5_timeout_is_suspension.py` 里"窗口坏值"那一族**只喂显式参数**
-（`is_waiting_timed_out(..., timeout_seconds=...)`），走的是 `_window_seconds` 自己
-那道 `isfinite`。环境变量与 `data/config.json` 那两路读数口径它一格没碰，
+（`is_waiting_timed_out(..., timeout_seconds=...)`），走的是 `_window_seconds` 自己那
+道 `isfinite`。环境变量与 `data/config.json` 那两路读数口径它一格没碰，
 `_window_seconds(None)` 那一支也没有别的锁——这条文件补的就是这两路。所以本文件里
-每一条走停点窗口的用例都**刻意不传 `timeout_seconds`**：传了就退化成既有那把尺子
-已经量过的东西，两个文件一起留同一个盲区。
+走 env 与 config 两路的停点窗口用例都**刻意不传 `timeout_seconds`**：传了就退化成既有
+那把尺子已经量过的东西。唯一一条显式传参的是
+`test_停点窗口吃到400位整数时不抛`，它量的不是窗口语义，而是既有那把尺子没量过的
+异常类型（`10**400` 的 OverflowError），两个文件合起来仍不留同一个盲区。
 
 判的是**不变量**，不是某个期望值：`math.isfinite(v) and v >= 0`，外加把 `v` 灌进
 响应之后 `json.dumps(..., allow_nan=False)` 不抛。只有"折回哪一档"那一格按各格自己的
@@ -568,7 +570,8 @@ def test_停点窗口吃到400位整数时不抛(isolated_tasks, tmp_path, monke
     """`_window_seconds` 两条支各喂一次 400 位整数：显式参数、现读配置（getter）。
 
     负向锁：把 `_window_seconds` 里包 getter 的那个 try 摘掉、同时把 `_finite_or_close`
-    的 `OverflowError` 捕获摘掉，这一条红在 OverflowError；只摘一处另一处仍兜得住。
+    的 `OverflowError` 捕获摘掉，这一条红在 OverflowError；只摘 `_finite_or_close`
+    那一处时形状关先拒收（盘上那份进不了缓存），只有直写缓存那半段会红。
     """
     assert ts._window_seconds(HUGE_INT) == 0.0, "显式参数那一支没接住 OverflowError"
     path = tmp_path / "config.json"
@@ -598,7 +601,9 @@ def test_400位整数的TTL在导入期只降级不抛(tmp_path):
 
     负向锁：把 `_type_ok` 里 `float(value)` 的 try 与 `_finite_or_close` 里
     `OverflowError` 的捕获同时摘掉，`restore()` 在 config_store 导入期抛，rc=1，
-    红话是「导入期抛了：...OverflowError...」。只摘一处不红（两层互为纵深）。
+    红话是「导入期抛了：...OverflowError...」。只摘 `_finite_or_close` 那一处**实测
+    不红**（`_type_ok` 先把这个数拒在缓存外）——两层互为纵深，这条锁量的是"入口对
+    OverflowError 的全部防御"，不是其中一层。
     """
     path = tmp_path / "config.json"
     _write_config(path, {"approval_ticket_ttl_seconds": HUGE_INT})
