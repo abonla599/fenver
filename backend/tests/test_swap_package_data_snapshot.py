@@ -42,9 +42,10 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
 `test_swap_package_post_acceptance_tokens.py`，`_find_powershell` / `PROBE_TIMEOUT_SECONDS` 来自
 `test_swap_package_watchdog_enabled_machine_truth.py`。没有 powershell 就只 skip 机器那几条。
 
-**已知的一处名字漂移（不改机制去迁就本文件）**：机制在文件头 `:121` 登记的是
+**名字漂移已收口（#61）**：机制文件头 `:121` 曾登记
 `backend/tests/test_swap_package_rollback_data_snapshot.py`，而票面指定本文件叫
-`test_swap_package_data_snapshot.py`。机制那 214 行不许动，所以这里只登记事实。
+`test_swap_package_data_snapshot.py`；#61 已把头注释改指本文件，并由
+`test_machine_read_pointers.py` 的 deploy 头注释存在性锁看住。
 """
 import hashlib
 import json
