@@ -4,7 +4,9 @@
 真相：加一个资源时人想起改 HTML 却忘了改清单，或者反过来，测试绿而线上漏盖章。
 """
 import re
+from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -162,24 +164,104 @@ def test_the_watermark_moves_with_the_files_and_both_copies_agree(monkeypatch):
     assert token not in moved_html and token not in moved_sw, "两份水印同时在线"
 
 
+def _sw_list(sw_text: str, name: str):
+    """从 sw.js 的响应正文里取出 `const <name> = [...]` 那一串字面量。"""
+    marker = f"const {name} = ["
+    assert marker in sw_text, f"sw.js 里没有 {marker}：清单本身不见了"
+    block = sw_text.split(marker, 1)[1].split("]", 1)[0]
+    return re.findall(r'"([^"]+)"', block)
+
+
 def test_the_worker_precaches_exactly_the_files_that_exist():
     """sw.js 预取清单里的每一条，都得真的取得到，而且带水印时回 immutable。
 
     名字写错一位（比如 vendor 下改了文件名）今天的表现是"离线时少一个文件"——不报错、
     在线时看不出。这里把它变成红的。
-    """
-    from pathlib import Path
 
+    这是**正向**那一半（清单 → 文件）；反过来的另一半（文件 → 清单）在下面
+    `test_every_stampable_static_file_is_in_the_workers_precache_list`。
+    """
     token = web_router.asset_token()
-    body = client.get("/app/sw.js").text
-    block = body.split("const ASSETS = [", 1)[1].split("]", 1)[0]
-    entries = re.findall(r'"([^"]+)"', block)
+    entries = _sw_list(client.get("/app/sw.js").text, "ASSETS")
     assert len(entries) >= 10, f"预取清单读出来只有 {len(entries)} 条，解析本身大概是坏了"
     for name in entries:
         assert (Path(web_router.STATIC_DIR) / name).is_file(), f"预取清单里 {name} 不存在"
         res = client.get("/app/" + name, params={"v": token})
         assert res.status_code == 200, f"/app/{name} 取不到：{res.status_code}"
         assert res.headers["cache-control"] == web_router.IMMUTABLE
+
+
+def _versioned_files():
+    """STATIC_DIR 下**会被 `stamp_assets` 盖章**的文件（相对路径，posix 分隔）。
+
+    判据不另抄一份扩展名清单，而是拿生产代码自己问：把每条相对路径拼成一条
+    `<a href="…">`，`stamp_assets` 盖了章就算数。于是 `_REF` 认哪些扩展名、
+    `stamp_assets` 跳过谁（sw.js 的注册地址固定）都由那一处说了算——这正是
+    "加一个资源不必想起改第二处"的反向用法。
+    """
+    root = Path(web_router.STATIC_DIR)
+    out = set()
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        ref = f'<a href="{rel}">x</a>'
+        if web_router.stamp_assets(ref) != ref:
+            out.add(rel)
+    return out
+
+
+def _assert_worker_precaches_every_versioned_file(sw_text: str) -> None:
+    """反向锁本体：服务端会盖章的每个静态文件，都必须出现在 ASSETS 里。"""
+    missing = sorted(_versioned_files() - set(_sw_list(sw_text, "ASSETS")))
+    assert not missing, (
+        "这些文件服务端会以带水印的 immutable 地址发出去，却不在 sw.js 的 ASSETS 里："
+        f"{missing}。它们不会被预缓存：离线首开取不到，而清单里的旧条目可能停在上一版。"
+        "要预缓存就加进 ASSETS；确实不该预缓存的，要在 sw.js 旁边写明理由。"
+    )
+
+
+def test_every_stampable_static_file_is_in_the_workers_precache_list():
+    """反向锁：服务端会盖章的每个静态文件，都必须出现在 sw.js 的 ASSETS 里。
+
+    现有的两条锁都是单向的：前一条只判"清单里每条都取得到"，test_web_pwa 只判
+    "列出来的取得到"。往 static/ 里放一个新 .js/.css 而不改 sw.js 时，两边都绿——
+    在线时那个文件照样工作，离线时它没被预缓存，旧 shell 配上新文件，正是
+    2026-09-17 那次新旧混发的形状。
+
+    射程（只说这一头）：这只覆盖 `_REF` 认的那批扩展名、且 `stamp_assets` 不跳过的
+    文件。运行时动态生成的 URL（例如 /site/android.apk 的代取）不在其中；`_REF` 之外
+    的扩展名（.html、.json、.md…）也不在，它们本来就没有"加进 ASSETS"这回事。
+
+    正向对照：今天 `_versioned_files()` 的每一项都在 ASSETS 里。下面两条钉子钉的是
+    "推导本身没有空转"——`stamp_assets` 哪天整段不盖章，推导会退化成空集，仅凭差集
+    为空会假绿。
+    """
+    servable = _versioned_files()
+    assert "app.js" in servable, "推导没认出 app.js：盖章这条路整段没生效，反向锁在空转"
+    assert "sw.js" not in servable, "推导把 sw.js 也算了进来：它的注册地址是固定的，不盖章"
+    _assert_worker_precaches_every_versioned_file(client.get("/app/sw.js").text)
+
+
+def test_the_reverse_lock_fails_red_when_one_precache_entry_is_deleted():
+    """负向对照：在 sw.js 的**副本**上删掉一行 ASSETS，判据必须当场点名缺的那个文件。
+
+    生产文件一个字不动：`client.get` 拿到的正文就是一份副本，手术只做在副本上。
+    没有这一条，上面那条锁的绿灯只证明"今天恰好相等"，不证明它有能力报红。
+    """
+    body = client.get("/app/sw.js").text
+    _assert_worker_precaches_every_versioned_file(body)   # 未动手术的同一份正文必须是绿的
+
+    removed = "app.js"
+    lines = body.splitlines(keepends=True)
+    kept = [line for line in lines if line.strip() != f'"{removed}",']
+    assert len(kept) == len(lines) - 1, f"副本里没找到 {removed} 那一行，负向对照没演成"
+    broken = "".join(kept)
+
+    with pytest.raises(AssertionError) as excinfo:
+        _assert_worker_precaches_every_versioned_file(broken)
+    assert removed in str(excinfo.value), \
+        f"判据红了，但没点名被删的那个文件：{str(excinfo.value)[:200]}"
 
 
 def test_stamp_assets_is_idempotent_and_leaves_the_worker_alone():
