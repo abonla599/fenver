@@ -152,7 +152,8 @@ class Orchestrator:
     def run(self, goal: str, task_id: Optional[str] = None,
             user_id: Optional[str] = None,
             provider_id: Optional[str] = None,
-            user_answer: Optional[str] = None) -> Dict[str, Any]:
+            user_answer: Optional[str] = None,
+            charge_upstream=None) -> Dict[str, Any]:
         """
         执行任务的主方法
         Args:
@@ -173,10 +174,33 @@ class Orchestrator:
                 两条答案一起进来时，赢的那条从断点接上，输的那条拿到
                 `{"accepted": False, "reason": …}` 与任务此刻真实的状态——它不重跑子任务、
                 不叫模型、不花一分钱，也不许看到另一条路给出的那个终态。
+            charge_upstream: ⭐ 工单 #38。这一次"真的要开工"时给调用方的一次记账机会
+                （`POST /v1/agent/orchestrate` 传进来的是 `throttle_paid_upstream`）。
+                只在**会花上游钱**的那一刻调用，至多一次：
+                  ① 新建任务：在 `planner.plan()` 之前（规划本身就是一次付费调用）；
+                  ② 恢复/续跑：在认领成功之后、翻 running 之前（盘上一格还没改，
+                     记账被拒时只需还执行权，不必回滚状态）。
+                被拒的形状一次都不调它：`accepted:false` 那一族（already_in_flight /
+                breakpoint_taken / transition_refused / waiting_timeout）、
+                `_refuse_rerun` 那一族（answer_required / breakpoint_untrusted）、
+                不带答案的 waiting_user、以及 completed/cancelled 的回显。它们一分钱
+                没花，扣用户的付费额度就是"账单比事实多"——而那正是 #38 要修的。
+                回调抛什么就原样往外抛（端点的 429 就是它）；认领那一侧会先 `release`
+                再抛，`_EXECUTING` 不会因此漏还。
         Returns:
             包含任务状态和结果的字典
         """
         task = None
+        # ⭐ 工单 #38：一次 run 至多记一笔。两个记账点（规划前 / 认领后）共用这一个
+        # 开关：新建任务走完 ① 之后还会经过 ②，没有它就会双扣。
+        _charged = {"done": False}
+
+        def _charge_once() -> None:
+            if charge_upstream is None or _charged["done"]:
+                return
+            _charged["done"] = True
+            charge_upstream()
+
         # ⭐ v0.35 A3：(断点, 答案)。只有从 waiting_user 带着答案回来才非空。
         # 放在局部而不是 self 上：`orchestrator` 在 main.py 是**进程级单例**，
         # 挂在实例上就是两个用户的请求互相踩脚。
@@ -302,6 +326,11 @@ class Orchestrator:
             # ProviderError→400 之前（v0.25 R1）。规划这一步坏掉时**没有任务**
             # 可标 failed——原先它会裸着抛出端点变 500，这里收成一个带 scrub
             # 的失败形状。
+            # ⭐ 工单 #38：这一格是"会花钱"的第一处，记账必须在 `plan()` 之前。
+            # 放在 try 外面是有意的——回调抛的是 429，不能被下面那句"规划失败"的
+            # 兜底折成 200 + status=failed：那样用户看到的是"任务坏了"，而真相是
+            # "这一趟根本没被允许花钱"。
+            _charge_once()
             try:
                 plan = self.planner.plan(goal, user_id=user_id, provider_id=provider_id)
             except Exception as e:
@@ -337,7 +366,9 @@ class Orchestrator:
             # 认领时**只认这一趟在锁外读到的那一个**断点态：waiting_user 读到的那趟不许
             # 因为"#33 之后 failed 也是一枚断点"就顺着接走一条它从没判过的 failed 记录
             # （那条游标可能已经被别人消费过了，再递一次就是第二次副作用）。
-            breakpoint_status=breakpoint_status)
+            breakpoint_status=breakpoint_status,
+            # ⭐ 工单 #38：恢复/续跑这一族没有"规划前"那一处，钱在**认领成功之后**记。
+            charge=_charge_once)
         if refused is not None:
             return refused          # 一个字节都没改、一次调用都没发、一分钱都没花
 
@@ -518,7 +549,8 @@ class Orchestrator:
 
     def _claim_execution(self, task: Task,
                          claims_breakpoint: bool = False,
-                         breakpoint_status: Optional[TaskStatus] = None
+                         breakpoint_status: Optional[TaskStatus] = None,
+                         charge=None
                          ) -> Optional[Dict[str, Any]]:
         """原子地占住这条任务的执行权。占到回 `None`；占不到回的就是要给调用方的那一格。
 
@@ -546,6 +578,16 @@ class Orchestrator:
         "不可信 → 一句实话拒掉"，两条都不再从这里进通用续跑。
         不带答案停在工具断点上的那一路更早就 return 了（`run` 里那一格），压根不进这里。
 
+        ⭐ 工单 #38：`charge` 是"这一趟真要开工"那一枚付费额度的记账回调，**认领成功
+        之后**才调，且就在 `→ running` 之前。位置就是判据：
+        - 认领失败的那几条路（already_in_flight / breakpoint_taken / transition_refused）
+          都是 `accepted:false`——一次工具都没跑、一次模型都没叫，凭什么扣用户的付费
+          额度？所以它们在上面就 return 了，走不到这一行；
+        - 反过来，认领成功就一定会往下跑（续跑递工具 / 从 current_subtask 继续），
+          记账晚一步就是一次白跑；
+        - 记账回调抛（端点的 429）时，状态还没翻，盘上一格未改：先还执行权再把异常
+          原样抛出去。漏还的症状是这条任务在本进程里永远"有人在跑"，比 429 难查得多。
+
         回 None 之外还顺手把 `_EXECUTING` 那一格留着；调用方必须在 finally 里还。
         """
         with _store_lock:
@@ -571,6 +613,14 @@ class Orchestrator:
             # 而外层这一把是同一个 RLock——判断点、占位、`→ running` 仍是同一批。
             if not claim_execution(task.task_id):
                 return self._answer_not_accepted(task, "already_in_flight")
+            if charge is not None:
+                try:
+                    charge()
+                except BaseException:
+                    # 记账被拒（典型是 429）：这一趟还没跑、状态还没翻，把执行权还回去
+                    # 再让异常照原样上去。`BaseException` 是为了连取消/中断一起还。
+                    release_execution(task.task_id)
+                    raise
             try:
                 task.set_status(TaskStatus.RUNNING)
             except Exception as e:
@@ -610,9 +660,13 @@ class Orchestrator:
           带上——落败的人该知道自己要不要重答；重答要等那一趟跑完、看新的问题，
           而不是拿同一个答案再砸一次。
         - 钱与预算：这一路一次工具都没调、一次模型都没叫、护栏与频控一本都不动，
-          所以它既没花钱，也**没拿到**任何免费的重试额度；而它已经花掉的那一枚
-          上游限流令牌（`throttle_paid_upstream` 在进这里之前就记过账）照旧不还，
-          与本仓"被挡下的调用也不退款"那条口径同一条线。
+          所以它既没花钱，也**没拿到**任何免费的重试额度；**付费上游那一本账也一次
+          不记**（工单 #38：`throttle_paid_upstream` 从这一版起由 `run` 的
+          `charge_upstream` 回调在"真要开工"时才调，被拒的续跑走不到那一行）。
+          以前这里写的是"已经花掉的那一枚令牌照旧不还"，那让一条 retry 循环能把
+          用户自己的聊天额度吃光——这正是 #38 要修的那一笔。拦"刷"的是另一本
+          **尝试**账（`auth_router.throttle_orchestrate_attempt`，60 秒 60 次），
+          它与付费那本隔开：被拒的请求不扣钱，但也不能无限敲。
         """
         status = getattr(task.status, "value", str(task.status))
         waiting = bool(getattr(task, "can_resume", False))

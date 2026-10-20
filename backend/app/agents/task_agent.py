@@ -106,6 +106,17 @@ class TaskAgent:
             {"role": "user", "content": prompt}
         ]
 
+        # v0.31 护栏：与 ReAct/两条聊天路径同口径。原先这条路径没有护栏，
+        # max_turns 循环里能连续拉起 N 次容器，且无重复检测与失败退避。
+        # 每次 execute 建一个实例：跨请求复用会把不同人的计数混在一起。
+        #
+        # ⭐ 工单 #31 边角 N5：实例必须先于续跑种子建。种子是**本轮真实吃进去的一份
+        # 工具结果**，在原先的位置（种子之后建）它绕过了 `clip_output`——于是同一轮
+        # 里"续跑结果 + 后续工具输出"的累计字数比别的路径多出一整份（上限 16000），
+        # 而那句"与执行器 per-call 4000 互补"的预算只对后者生效。执行器那一步已经把
+        # `outcome.text` 裁到 4000，这里再记一次不是重复计费，是让**轮预算**看见它。
+        guard = RoundGuard()
+
         # ⭐ v0.35 A3：断点续跑的种子。形状照抄本文件自己那一问一答（assistant 那行带
         # 工具调用标记、user 那行是"工具执行结果: …"），不另发明第三种形状——模型在
         # 挂起前看到的就是这个形状，续上来才接得上（提案 §四 判据 1「全上下文不丢」）。
@@ -116,13 +127,9 @@ class TaskAgent:
                 "content": f"<{_tag}>" + json.dumps(
                     {"name": str(resumed_tool.get("tool_name", "")), "resumed": True},
                     ensure_ascii=False) + f"</{_tag}>"})
+            seed, _ = guard.clip_output(str(resumed_tool.get("result", "")))
             messages.append({"role": "user",
-                             "content": f"工具执行结果: {resumed_tool.get('result', '')}"})
-
-        # v0.31 护栏：与 ReAct/两条聊天路径同口径。原先这条路径没有护栏，
-        # max_turns 循环里能连续拉起 N 次容器，且无重复检测与失败退避。
-        # 每次 execute 建一个实例：跨请求复用会把不同人的计数混在一起。
-        guard = RoundGuard()
+                             "content": f"工具执行结果: {seed}"})
 
         for turn in range(self.max_turns):
             response = get_llm_response(self.model, messages,

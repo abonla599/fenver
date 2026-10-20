@@ -367,9 +367,11 @@ def _settle_suspension(tool_name: str, response: ToolResponse) -> ToolResponse:
 def _resume_refusal(tool_name: str, info: dict, resume) -> Optional[str]:
     """这次"从断点接上"能不能成立。回 None = 可以，回字符串 = 拒它的理由（给模型看）。
 
-    四条判据全在 fail-closed 那一侧，方向是一致的：**判不出就不往下跑**，
+    五条判据全在 fail-closed 那一侧，方向是一致的：**判不出就不往下跑**，
     而不是"先跑了再说"——跑一次真工具是要花钱的，而一次没有答案的续跑等于
-    让工具自己替用户编一个答案。
+    让工具自己替用户编一个答案。第五条（工单 #31 N2）判的是断点**带不带得过一次
+    重启**：`isinstance(dict)` 只回答"像不像"，`_state_carries` 才回答"能不能落盘
+    再读回来"；后者是 `can_resume` 的同一份判据，两处不许各说各话。
     """
     if not isinstance(resume, dict):
         return (f"续跑 {tool_name} 需要一包状态（{{state, answer}}，取自上一次结果的 "
@@ -382,6 +384,16 @@ def _resume_refusal(tool_name: str, info: dict, resume) -> Optional[str]:
     if not isinstance(state, dict):
         return (f"续跑 {tool_name} 缺断点：resume.state 必须是上一次 suspension 里那份 "
                 "resume_state，收到的是空或别的形状。宁可不动，也不从头再跑一遍。")
+    # ⭐ 工单 #31 边角 N2：形状对（dict）不等于带得过一次重启。原先这里只判 isinstance，
+    # 于是 `{"o": object()}` 这种断点在 `_can_resume` 那边如实报 `can_resume=False`，
+    # 到了这里却一句拒绝都没有——工具照样跑、频控照样吃一格、钱照样花，而它交出的
+    # 断点是**下游谁也接不回去**的。判据不抄第二份：直接用 `_state_carries`（与
+    # `_can_resume` 同一个函数，同一条"JSON 往返得回来的 dict"），两处不可能漂。
+    if not _state_carries(state):
+        return (f"续跑 {tool_name} 的断点带不过一次 JSON 往返（resume.state 里含无法"
+                "序列化的值，或往返后不再相等）。按它续跑等于拿一份谁也接不回去的状态"
+                "接着烧钱，所以这里不跑。不要改成重新调用一次这个工具——请如实告诉用户"
+                "这一步得重新发起。")
     answer = resume.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         return (f"续跑 {tool_name} 必须带上用户给的答案，且答案不能是空的。"

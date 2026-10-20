@@ -146,6 +146,18 @@ CHAT_WINDOW_SECONDS = 60
 MAX_CHAT_CALLS_PER_WINDOW = 20
 _CHATS = _Ledger("chats")
 
+# ⭐ 工单 #38：`/v1/agent/orchestrate` 的**尝试**账，与付费那本分开。
+#
+# 为什么必须有第二本：从 #38 起，付费那本只在该端点**真的要开工**时才记（新任务在
+# 规划前、续跑在认领成功后），于是"这条答案没被采用"`accepted:false` 的那一族不再扣
+# 用户自己的聊天额度——那正是工单要的"没花钱就不记账"。但没有这本的话，一条 retry
+# 循环（断点已被别人接走、任务正在飞）可以不花一分钱地把端点敲到天荒地老：每条仍要
+# 读一次任务表、打一行日志、走一遍 HTTP。这本只拦"刷"，不拦"钱"：上限 60 秒 60 次，
+# 比付费那本（20 次）宽三倍——正常人撞到付费墙之前根本碰不到它。
+ORCHESTRATE_ATTEMPT_WINDOW_SECONDS = 60
+MAX_ORCHESTRATE_ATTEMPTS_PER_WINDOW = 60
+_ORCHESTRATE_ATTEMPTS = _Ledger("orchestrate_attempts")
+
 # v0.34.0：reauth 是全站唯一"不带会话凭据、只带续命凭据"的公开端点，所以它自己
 # 需要两本账。为什么是两本而不是复用 _FAILS：
 # ① _FAILS 是"猜口令"的账（按来源 IP，十分钟十次）。reauth 猜的是 256 位随机值，
@@ -193,6 +205,7 @@ _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_RESET_FAILS, FAILURE_WINDOW_SECONDS),
             (_RESET_FAILS_BY_ACCOUNT, FAILURE_WINDOW_SECONDS),
             (_CHATS, CHAT_WINDOW_SECONDS),
+            (_ORCHESTRATE_ATTEMPTS, ORCHESTRATE_ATTEMPT_WINDOW_SECONDS),
             (_REAUTH_FAILS, FAILURE_WINDOW_SECONDS),
             (_REAUTH_BY_SECRET, FAILURE_WINDOW_SECONDS))
 
@@ -338,27 +351,40 @@ def _client_ip(request: Request) -> str:
 
 
 
-def chat_allowed(ip: str, user_id: str) -> bool:
-    """只看，不记账。记账是 note_chat()，两件事分开才能在"挡下时不花钱"上测得出来。"""
+def _sliding_peek(ledger, key: str, window: float, cap: int) -> bool:
+    """只看，不记账。所有滑动窗口账共用这一条判据（chat / orchestrate 尝试）。"""
     moment = _now()
     _prune(moment)
-    return (len(_recent(_CHATS, _chat_key(ip, user_id), CHAT_WINDOW_SECONDS, moment))
-            < MAX_CHAT_CALLS_PER_WINDOW)
+    return len(_recent(ledger, key, window, moment)) < cap
+
+
+def _sliding_note(ledger, key: str) -> None:
+    """记一次。窗口从 `_LEDGERS` 现取（见 `_note` 的注释：共享存储里桶的寿命就是它）。"""
+    _note(ledger, key)
+
+
+def _sliding_retry_after(ledger, key: str, window: float) -> int:
+    moment = _now()
+    stamps = _recent(ledger, key, window, moment)
+    if not stamps:
+        return int(window)
+    return max(1, int(window - (moment - min(stamps))) + 1)
+
+
+def chat_allowed(ip: str, user_id: str) -> bool:
+    """只看，不记账。记账是 note_chat()，两件事分开才能在"挡下时不花钱"上测得出来。"""
+    return _sliding_peek(_CHATS, _chat_key(ip, user_id), CHAT_WINDOW_SECONDS,
+                         MAX_CHAT_CALLS_PER_WINDOW)
 
 
 def note_chat(ip: str, user_id: str) -> None:
     """记一次尝试。调用点在**放行之后、叫模型之前**，所以失败的、模型报错的那次
     一样占额度——成功还不还预算是这四本旧账定下来的裁决，第五本沿用。"""
-    _note(_CHATS, _chat_key(ip, user_id))
+    _sliding_note(_CHATS, _chat_key(ip, user_id))
 
 
 def chat_retry_after(ip: str, user_id: str) -> int:
-    key = _chat_key(ip, user_id)
-    moment = _now()
-    stamps = _recent(_CHATS, key, CHAT_WINDOW_SECONDS, moment)
-    if not stamps:
-        return CHAT_WINDOW_SECONDS
-    return max(1, int(CHAT_WINDOW_SECONDS - (moment - min(stamps))) + 1)
+    return _sliding_retry_after(_CHATS, _chat_key(ip, user_id), CHAT_WINDOW_SECONDS)
 
 
 def _too_many(retry_after: int) -> HTTPException:
@@ -376,8 +402,15 @@ def throttle_paid_upstream(request: Request, principal) -> None:
     一直挂着这本账，而 `/v1/memory/add?summarize=true`（摘要走 chat-completion）与
     `/v1/memory/search`（查询走云端嵌入）同样出网、同样花钱，却一条都不记账。
     一个注册用户光发记忆接口就能绕开全站唯一的额度闸门，等于限流形同虚设。
-    账本原语（`chat_allowed`/`note_chat`/`chat_retry_after`）一字未动，
-    `backend/tests/test_chat_throttle.py` 钉的还是那三件事。
+    三个公开原语（`chat_allowed`/`note_chat`/`chat_retry_after`）的**行为**一格未动：
+    工单 #38 只把它们内部并到同一条 `_sliding_*` 实现上（第二本窗口账要复用同一条
+    判据），`backend/tests/test_chat_throttle.py` 钉的还是那三件事。
+
+    ⭐ 工单 #38：`/v1/agent/orchestrate` 不再在**进入编排器之前**调它，而是把一个
+    闭包交给编排器，一次 run **至多记一次**（两个候选时刻：新任务在规划之前、续跑在
+    认领成功之后；见 `orchestrator.run` 的 `charge_upstream`）。被拒的续跑
+    （`accepted:false` 那一族）因此不再吃这本账；防刷由另一本
+    `throttle_orchestrate_attempt` 负责。
     """
     ip = _client_ip(request)
     if not chat_allowed(ip, principal.user_id):
@@ -392,6 +425,24 @@ def _cookie_secure() -> bool:
     忘配 env 的方向必须是 Secure=on，降级只能是本机/测试主动做的事。
     """
     return os.getenv("AUTH_COOKIE_SECURE", "1").strip() != "0"
+
+
+def throttle_orchestrate_attempt(request: Request, principal) -> None:
+    """`/v1/agent/orchestrate` 每一条**尝试**都过的闸：60 秒 60 次，键 IP + 登录身份。
+
+    它记的不是钱（钱那一半在 `throttle_paid_upstream`，只在真开工时记），而是"敲了
+    几次门"。两条账分开的理由见 `_ORCHESTRATE_ATTEMPTS` 上面那段：被拒的续跑不该扣
+    用户自己的聊天额度，但也不能因此变成一条不限次的免费信道。顺序同付费那本：
+    先判断、再记账、才进编排器。
+    """
+    ip = _client_ip(request)
+    key = _chat_key(ip, principal.user_id)
+    if not _sliding_peek(_ORCHESTRATE_ATTEMPTS, key,
+                         ORCHESTRATE_ATTEMPT_WINDOW_SECONDS,
+                         MAX_ORCHESTRATE_ATTEMPTS_PER_WINDOW):
+        raise _too_many(_sliding_retry_after(_ORCHESTRATE_ATTEMPTS, key,
+                                             ORCHESTRATE_ATTEMPT_WINDOW_SECONDS))
+    _sliding_note(_ORCHESTRATE_ATTEMPTS, key)
 
 
 def _attach_session(response: Response, token: str) -> None:
