@@ -2,10 +2,12 @@
 """方案 C 的行为契约：会话凭据是 httpOnly Cookie，凭据明文不进 JS。
 
 这份文件钉的是"换了传送带之后，哪些语义必须原样成立、哪些新缝必须焊死"：
-1. 签发收口：全服务端只有 /v1/auth/adopt 会 Set-Cookie。登录/注册/改密的响应
-   一个字都不许多带 Cookie——那既是响应契约（token 字段原样），也是会话固定
-   的防线：跨站的 login 响应若能直接种 Cookie，攻击者就能拿自己的账号把受害
-   者的浏览器钉在自己的会话上。
+1. 签发收口：全服务端只有 /v1/auth/adopt 会种**会话** Cookie。登录/注册/改密的
+   响应一个字都不许多带会话 Cookie——那既是响应契约（token 字段原样），也是会话
+   固定的防线：跨站的 login 响应若能直接种会话 Cookie，攻击者就能拿自己的账号把
+   受害者的浏览器钉在自己的会话上。（v0.35.0 #143② 的续命凭据 Cookie 是另一类
+   凭据，签在 register/login/reauth 上，生命周期与 Path 都不同，判据在
+   test_v0350_device_cookie.py；这里只盯 session 这个名字。）
 2. 只认请求头：adopt 只收编"这次请求头里出示的"凭据。只剩 Cookie 的会话没有
    新东西可收编，400 打发——顺带让这条路由对 CSRF 天然免疫（跨站带不出
    Authorization 头）。
@@ -28,6 +30,12 @@ def _set_cookie_headers(res):
     return [v for k, v in res.headers.multi_items() if k.lower() == "set-cookie"]
 
 
+def _session_set_cookie_headers(res):
+    """只看会话 Cookie 那一枚：续命凭据 Cookie 另有自己的签发判据。"""
+    return [v for v in _set_cookie_headers(res)
+            if v.startswith(f"{authz.SESSION_COOKIE}=")]
+
+
 def _register(client, username="cookie-user", password="correct-horse-battery"):
     res = client.post("/v1/auth/register",
                       json={"username": username, "password": password,
@@ -45,16 +53,21 @@ def _adopt(client, token, **kwargs):
 
 
 def test_only_adopt_issues_the_session_cookie(enforced, client):
-    """登录、注册、改密的响应都不许带 Set-Cookie：发 Cookie 的门只有 adopt 一扇。"""
+    """登录、注册、改密的响应都不许带**会话** Cookie：发 session 的门只有 adopt 一扇。
+
+    v0.35.0 #143② 之后这几个响应会带 device_secret Cookie——那是另一类凭据
+    （Path=/v1/auth/reauth、400 天），不构成本条要挡的会话固定面；这里只看
+    session 这个名字。
+    """
     token = _register(client)
     reg_res = client.post("/v1/auth/register",
                           json={"username": "second-one", "password": "correct-horse-battery",
                                 "security_answers": ["新市场小学", "hehai2024", "李建国"]})
-    assert _set_cookie_headers(reg_res) == [], "注册响应种了 Cookie：固定会话的缝回来了"
+    assert _session_set_cookie_headers(reg_res) == [], "注册响应种了会话 Cookie：固定会话的缝回来了"
     login_res = client.post("/v1/auth/login",
                             json={"username": "cookie-user", "password": "correct-horse-battery"})
     assert login_res.status_code == 200
-    assert _set_cookie_headers(login_res) == [], "登录响应种了 Cookie：同上"
+    assert _session_set_cookie_headers(login_res) == [], "登录响应种了会话 Cookie：同上"
     # 登录的响应体契约原样：token 字段还在，老 API 客户端一根手指头都不用改
     assert "token" in login_res.json()
     reset_res = client.post("/v1/auth/reset",
@@ -62,7 +75,7 @@ def test_only_adopt_issues_the_session_cookie(enforced, client):
                                   "answers": ["新市场小学", "hehai2024", "李建国"],
                                   "new_password": "another-correct-horse"})
     assert reset_res.status_code == 200
-    assert _set_cookie_headers(reset_res) == [], "改密响应种了 Cookie：同上"
+    assert _session_set_cookie_headers(reset_res) == [], "改密响应种了会话 Cookie：同上"
     # 作废了全部令牌之后再 adopt 旧明文：门后没有身份，Cookie 一枚都不许出去
     stale = _adopt(client, token)
     assert stale.status_code == 401
@@ -168,9 +181,9 @@ def test_logout_without_headers_revokes_the_cookie_credential_and_clears_it(enfo
     assert _adopt(client, token).status_code == 200
     out = client.post("/v1/auth/logout", headers={"X-CSRF": "1"})   # 零凭据头
     assert out.status_code == 200
-    cleared = _set_cookie_headers(out)
+    cleared = _session_set_cookie_headers(out)
     assert cleared and authz.SESSION_COOKIE in cleared[0] and "expires" in cleared[0].lower(), \
-        f"退出没刮掉 Cookie：{cleared}"
+        f"退出没刮掉会话 Cookie：{cleared}"
     # 服务端那枚真作废了：拿明文回头再认，认不出
     assert client.get("/v1/auth/me", headers={"Authorization": "Bearer " + token}).status_code == 401
 

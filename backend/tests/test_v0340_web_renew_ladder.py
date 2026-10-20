@@ -261,15 +261,17 @@ def test_the_renew_request_carries_the_same_credentials_as_every_post():
 
 
 def test_only_adopt_still_sets_the_cookie_on_the_web_side():
-    """续期在 Web 侧不许变成第二个种 Cookie 的地方：它只把明文交给 adopt。
+    """前端不手搓 Cookie：续期只把明文交给 adopt，由服务端 Set-Cookie。
 
-    与 test_cookie_auth.py 那条服务端锁配成一对——那边钉"全服务端只有 /v1/auth/adopt
-    发 Set-Cookie"，这边钉"客户端没有绕过 adopt 去手搓 Cookie"（document.cookie）。
+    v0.35.0 #143② 起服务端还会种 device_secret Cookie（register/login/reauth），
+    但那是服务端行为；前端这一侧的边界没变——JS 不碰 document.cookie，也不替任何
+    凭据拼 Cookie。与 test_cookie_auth.py 的会话签发锁、test_v0350_device_cookie.py
+    的续命凭据签发锁配成三对。
     """
     api = _js("api.js")
     app = _js("app.js")
     assert "document.cookie" not in api and "document.cookie" not in app, \
-        "前端直接写 document.cookie：绕过了唯一那扇签发门"
+        "前端直接写 document.cookie：绕过了服务端的签发门"
     renew = _fn_text(api, "renewSession")
     assert "deps.adopt(" in renew, "renew 的明文没走 adopt：新令牌落在别处"
 
@@ -285,16 +287,18 @@ def test_no_password_or_secret_is_persisted_locally(name):
     这里盯的是键名与写入值两侧的形状，而不是"有没有 btoa"。引入"记住密码"这类明文键
     正是这条要红的形状。
 
-    2026-10-08 用户改口径之后，本版有一处**声明过的例外**：device_secret 那一格
-    （续命凭据，不是口令）。例外只开到那一行为止——整份文件里带 DEVICE_SECRET_PREFIX
-    的写入必须恰好一处，多一处就回到"凭据随便往本地存储塞"那条老路上；那一格自己的
-    生命周期（谁能写、什么时候清、用一次就轮换）由 test_v0340_web_device_vault.py 钉。
+    v0.34 曾为 device_secret 开过一处声明过的例外（续命凭据，不是口令）；v0.35.0
+    #143② 把它收编进 httpOnly Cookie 之后，这处例外也关了——Web 端不再有任何凭据
+    落进本地存储。api.js 里剩下的 localStorage 写只有断网提醒的静音日期。
     """
     src = _js(name)
-    vault_writes = [l for l in src.splitlines()
-                    if "setItem" in l and "DEVICE_SECRET_PREFIX" in l]
-    assert len(vault_writes) == (1 if name == "api.js" else 0), \
-        f"{name} 里那处声明过的例外变了：续命凭据的写门应当只有 api.js 那一扇"
+    # 带声明关键字：`LEGACY_DEVICE_SECRET_PREFIX`（存量清理）里含同一串子串，
+    # 裸子串匹配会把"删老键"误判成"又建了新键"。
+    assert "const DEVICE_SECRET_PREFIX" not in src, \
+        f"{name} 里又长出了续命凭据的本地存储键：它现在应当只住在 httpOnly Cookie 里"
+    assert not [l for l in src.splitlines()
+                if "setItem" in l and ("deviceSecret" in l or "device_secret" in l)], \
+        f"{name} 往本地存储写续命凭据：存量清理只许 removeItem"
     # 词边界而不是子串：`contextTokensK`（上下文预算，一个数字）里就含 "token"，
     # 用子串匹配的锁第一跑就红在这个不相干的键上——而一条"永远红"或"永远绿"的锁
     # 都会在下一个 PR 被当噪声拆掉。
@@ -303,8 +307,6 @@ def test_no_password_or_secret_is_persisted_locally(name):
     for line in src.splitlines():
         if "setItem" not in line and "sessionStorage" not in line:
             continue
-        if "DEVICE_SECRET_PREFIX" in line:
-            continue                     # 上面已经数过这一处例外，且只许这一处
         assert not credential_word.search(line), \
             f"本地存储写入里出现了凭据字样：{line.strip()}"
     # 会话令牌的明文只该活过一次 adopt；老版本留在 localStorage 的那个键，今天仍然

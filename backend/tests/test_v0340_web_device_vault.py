@@ -1,18 +1,26 @@
 # backend/tests/test_v0340_web_device_vault.py
-"""判据 4 的 Web 半边：续命凭据这一格怎么存、什么时候用、用坏了怎么收场。
+"""Web 端续命凭据的行为契约——v0.35.0 #143② 之后它住在 httpOnly Cookie 里。
 
-2026-10-08 用户把口径从"Web 只用 Cookie 续期"扩成"Web 也持久化续命凭据"，所以这一格
-是本版唯一新增的本地存储面。文件钉四件事：
+历史：v0.34.0 判据 4 的 Web 半边把 device_secret 按 userId 存在 localStorage，
+这份文件当时钉的是"一个前缀、三个出入口、只在服务端刚发新值时写"。2026-10-08 的
+口径是"Web 也持久化续命凭据"；#143② 把这一格整个搬进 httpOnly + Secure +
+SameSite=Strict Cookie（服务端 register/login/reauth 种、每次 reauth 轮换、
+logout/改密/找回清），JS 从此读不到这把 400 天寿命的钥匙。文件名保留是因为阶梯
+（reauthSession / request 的 401 接线）仍然住在这里；localStorage 那一格已经没了。
 
-1. `reauthSession` 的决策表**真跑**（node）。理由和 renewSession 那条一模一样：
-   "冷却窗内不许敲""连不上服务端不许删凭据""410 才删"这三句，读源码永远读不出对错——
-   把 `if (out.status === 410)` 改成 `if (out.status >= 400)`，文本上仍然像一份谨慎的
-   阶梯，症状却是断网一次就把自愈能力弄没，下次到点只能落登录页。
-2. `request()` 的**接线**也只能真跑：401 到底重打了几发、登录那条 401 有没有被误当成
-   会话过期，是行为问题，不是文本问题。
-3. 这一格的**形状**做结构锁：一个前缀、三个出入口、写只在"服务端刚发新值"那三处，
-   名册仍然零凭据。存储面一旦多开一个口，"退出/换号就清干净"这句就没人负责了。
-4. 与原生 `SessionRenew.reauthOnce` / `Api.kt` 的**判据顺序与豁免名单**逐字对齐：
+本文件钉五件事：
+
+1. `reauthSession` 的决策表**真跑**（node）：冷却窗内不许敲、连不上服务端不算
+   凭据失效、410 才回 gone、没拿到新明文就不动现有 Cookie。把
+   `if (out.status === 410)` 改成 `>= 400`，文本上仍像一份谨慎的阶梯，症状却是
+   一次断网/一次 401 就把自愈判死。
+2. `request()` 的**接线**也只能真跑：401 到底重打了几发、登录那条 401 有没有被
+   误当成会话过期，是行为问题，不是文本问题。
+3. `reauthOnce` 的请求形状：Cookie-only（不把 device_secret 放进 body）、
+   `credentials:"same-origin"`、带 X-CSRF、不带 Authorization、不读 localStorage。
+4. 升级清理：页面加载时把老版本留下的 `fenver.deviceSecret.*` 全部删掉，坏存储
+   不许把页面打停；除此之外 api.js 不再读/写这一格。
+5. 与原生 `SessionRenew.reauthOnce` / `Api.kt` 的判据顺序与豁免名单继续对齐：
    两边错开就是"手机上能自愈、网页上不能"这类没法解释的差别。
 
 语料一律走 test_web_pwa 那把剥注释的尺子。
@@ -69,7 +77,7 @@ def _run_js(scenario: dict) -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("这台机器上没有 node，跑不了这段 JS")
-    d = Path(tempfile.mkdtemp(prefix="device-vault-"))
+    d = Path(tempfile.mkdtemp(prefix="device-cookie-"))
     (d / "fns.js").write_text(_ladder_source(), encoding="utf-8")
     (d / "harness.cjs").write_text(_HARNESS, encoding="utf-8")
     r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
@@ -100,14 +108,12 @@ function fakeFetch(path, opts) {
 
 function makeReauthDeps() {
   return {
-    userId: SC.userId === undefined ? "u_x" : SC.userId,
-    secret: SC.secret === undefined ? "SEC" : SC.secret,
     busy: !!SC.busy,
     lastReauthAt: SC.lastReauthAt || 0,
     now: () => SC.now,
     cooldown: SC.cooldown,
-    reauth: (value) => {
-      calls.push("reauth:" + value);
+    reauth: () => {
+      calls.push("reauth");
       if (SC.reauthThrows) return Promise.reject(new TypeError("连不上服务端"));
       return Promise.resolve({
         status: SC.status === undefined ? 200 : SC.status,
@@ -115,8 +121,6 @@ function makeReauthDeps() {
       });
     },
     adopt: (t) => { calls.push("adopt:" + t); return Promise.resolve({ ok: true }); },
-    save: (v) => { calls.push("save:" + v); },
-    forget: () => { calls.push("forget"); },
     setBusy: (v) => { calls.push("setBusy:" + v); },
     setLastReauthAt: (t) => { calls.push("setLastReauthAt:" + t); },
   };
@@ -161,86 +165,67 @@ vm.runInContext(realFns + "\n;module.exports = { reauthSession, request };", san
 # ---------- 决策表：什么时候不许敲那条端点 ----------
 
 
-def test_no_local_identity_means_no_reauth_request():
-    """没认出"现在是谁"就无处可查这一格：一个请求都不该发。
-
-    变异：删掉 `if (!deps.userId) return "no-identity"` —— 下一句用空 userId 读到空串，
-    表面上也回 "no-secret"，但这一格将来按用户名以外的键存时就会在这里静默错位。
-    """
-    out = _run_js({"userId": "", "now": FAR_ENOUGH})
-    assert out["outcome"] == "no-identity"
-    assert not [c for c in out["calls"] if c.startswith("reauth:")], "没身份还去敲 reauth"
-
-
-def test_a_device_that_never_logged_in_since_upgrade_does_nothing():
-    """存量口径与原生一致：这一格是空的就什么都不做，401 原样落登录页。"""
-    out = _run_js({"secret": "", "now": FAR_ENOUGH})
-    assert out["outcome"] == "no-secret"
-    assert not [c for c in out["calls"] if c.startswith("reauth:")]
-    assert "forget" not in out["calls"], "空格的清理也算副作用：不该有任何写入"
-
-
 def test_the_cooldown_window_blocks_a_second_attempt_on_both_ladders():
     """一次失败不许追着敲：这条端点自己有限速账，自杀式重试只会把人钉在 429 上。"""
     out = _run_js({"now": 1000, "lastReauthAt": 900})
     assert out["outcome"] == "cooling-down"
-    assert not [c for c in out["calls"] if c.startswith("reauth:")]
+    assert "reauth" not in out["calls"]
 
 
 def test_the_ladder_never_runs_two_credential_calls_at_once():
     """与 renew 共用一把闸：正在敲的时候第二次进来直接回绝。"""
     out = _run_js({"now": FAR_ENOUGH, "busy": True})
     assert out["outcome"] == "already-running"
-    assert not [c for c in out["calls"] if c.startswith("reauth:")]
+    assert "reauth" not in out["calls"]
 
 
 def test_the_cooldown_is_judged_before_the_busy_gate():
-    """判据顺序钉死成原生 reauthOnce 那一条：身份 → 有没有这把 → 冷却 → 是否在敲。
+    """判据顺序钉死：冷却 → 是否在敲（身份与本地 secret 两道判断已随 Cookie 化退场）。
 
-    两条闸同时成立时，回绝的理由必须是冷却——顺序漂了以后"为什么没自愈"这件事在两边
-    会给出不同答案，而那正是跨端行为没法解释的开始。
+    两条闸同时成立时，回绝的理由必须是冷却——顺序漂了以后"为什么没自愈"这件事在
+    两端会给出不同答案，而那正是跨端行为没法解释的开始。
     """
     out = _run_js({"now": 1000, "lastReauthAt": 900, "busy": True})
     assert out["outcome"] == "cooling-down", "顺序漂了：先问的是冷却，不是忙不忙"
 
 
-def test_a_successful_reauth_adopts_the_token_and_lands_the_rotated_secret():
-    """主干路径：一发 reauth → 明文交给 adopt（唯一签发门）→ 立刻落下轮换后的新值。"""
+def test_a_successful_reauth_adopts_the_token_and_touches_no_local_storage():
+    """主干路径：一发 reauth → 明文交给 adopt（唯一签发门）。
+
+    v0.35.0 之后没有"落下轮换值"这一步：新 device_secret 由服务端在同一次响应里
+    Set-Cookie，JS 读不到也不需要读。这里钉的是"客户端不再有第二个存储动作"。
+    """
     out = _run_js({"now": FAR_ENOUGH})
     assert out["outcome"] == "reauthed"
-    assert out["calls"].count("reauth:SEC") == 1, "一次自愈最多敲一发"
+    assert out["calls"].count("reauth") == 1, "一次自愈最多敲一发"
     assert "adopt:NEW-TOKEN" in out["calls"], "新令牌没走 adopt：页面重新持有明文或根本没换会话"
-    assert "save:ROTATED" in out["calls"], "单次使用的旧那把已作废，本机必须落下新值"
-    assert "forget" not in out["calls"]
+    assert not [c for c in out["calls"] if c.startswith("save:") or c in ("forget",)], \
+        "客户端还在本地存取续命凭据：它现在只该住在 httpOnly Cookie 里"
     assert "setBusy:false" in out["calls"], "闸没放下：整个阶梯从此永远回 already-running"
 
 
 def test_a_gone_secret_is_dropped_and_nothing_is_adopted():
-    """410 = 服务端判这把死了（400 天没用 / 已被轮换掉）：本机跟着删，不发会话。"""
+    """410 = 服务端判这把死了（400 天没用 / 已被轮换掉）：不发会话，Cookie 由响应清。"""
     out = _run_js({"now": FAR_ENOUGH, "status": 410, "data": {"detail": "gone"}})
     assert out["outcome"] == "gone"
-    assert "forget" in out["calls"]
-    assert not [c for c in out["calls"] if c.startswith("save:")], "死钥匙不许被当成新钥匙留下"
     assert not [c for c in out["calls"] if c.startswith("adopt:")], "没签发令牌就不该收编"
 
 
-def test_a_rejected_secret_is_kept_because_the_next_login_will_mint_a_fresh_one():
-    """401 与 410 分开：401 只说"这次不认"，删掉它就断掉了唯一一条免口令自愈路。
+def test_a_rejected_secret_does_not_trigger_a_second_attempt():
+    """401 只说"这次不认"：本次阶梯到此为止，下一次由冷却窗与下一发 401 决定。
 
-    变异：`status === 410` 写成 `status >= 400` —— 一次猜错或一次服务端抖动就把格子清空，
-    判据 4 的"到点自己爬起来"当场失效，用户只能重新输密码。
+    变异：`status === 410` 写成 `status >= 400` —— 一次猜错或一次服务端抖动就被当成
+    "钥匙已死"，判据 4 的"到点自己爬起来"当场失效。
     """
     out = _run_js({"now": FAR_ENOUGH, "status": 401, "data": {"detail": "no"}})
     assert out["outcome"] == "failed"
-    assert "forget" not in out["calls"], "401 就删凭据：把最后一次自愈能力扔了"
-    assert not [c for c in out["calls"] if c.startswith("save:")]
+    assert not [c for c in out["calls"] if c.startswith("adopt:")]
 
 
-def test_a_network_failure_never_destroys_the_stored_secret():
+def test_a_network_failure_never_destroys_the_self_heal_path():
     """连不上服务端 ≠ 凭据失效：这一句是原生注释里的原话，Web 半边同样成立。"""
     out = _run_js({"now": FAR_ENOUGH, "reauthThrows": True})
     assert out["outcome"] == "unreachable"
-    assert "forget" not in out["calls"], "断网就删钥匙：下次到点只能落登录页"
     assert "setBusy:false" in out["calls"], "抛错路径也要放闸"
 
 
@@ -249,16 +234,13 @@ def test_a_response_without_a_token_changes_nothing():
     out = _run_js({"now": FAR_ENOUGH, "data": {"device_secret": "ROTATED"}})
     assert out["outcome"] == "failed"
     assert not [c for c in out["calls"] if c.startswith("adopt:")]
-    assert not [c for c in out["calls"] if c.startswith("save:")]
-    assert "forget" not in out["calls"]
 
 
-def test_a_rotated_value_the_server_forgot_to_send_clears_the_spent_one():
-    """服务端成功却没带新那把：旧那把已经被这次用掉，留着就是死钥匙，删。"""
+def test_a_token_only_response_is_enough_because_the_cookie_rotates_server_side():
+    """轮换值走 Set-Cookie，不走响应体：只有 token 也算成功。"""
     out = _run_js({"now": FAR_ENOUGH, "data": {"token": "NEW-TOKEN"}})
     assert out["outcome"] == "reauthed"
     assert "adopt:NEW-TOKEN" in out["calls"]
-    assert "forget" in out["calls"] and not [c for c in out["calls"] if c.startswith("save:")]
 
 
 # ---------- request() 的接线：401 到底重打几发 ----------
@@ -347,24 +329,18 @@ def test_the_native_ladder_still_routes_the_exempt_paths_around_self_heal():
 
 
 def _once_source() -> str:
-    """交给 node 的真实代码：那一格存储的四个出入口 + reauthOnce 自己 + SESSION 那一行。
+    """交给 node 的真实代码：reauthOnce + reauthSession + 共享闸那两行。
 
     单独跑 reauthOnce 才问得出"它用的是哪把闸"——决策表剧本里 busy 是测试喂进来的，
-    把源码改成 `busy: false` 那种接法只有从这里才看得出来。
+    把源码改成 `busy: false` 那种接法只有从这里才看得出来。v0.35.0 之后这份源码里
+    不该再有 localStorage 或 device_secret。
     """
     api = _js("api.js")
     m = re.search(r"const SESSION = \{[^}]*\};", api)
     assert m, "api.js 里 SESSION 那一行形状变了：阶梯的状态不再只有一处"
     ruler = re.search(r"const RENEW_COOLDOWN_SECONDS = [^;]+;", api)
     assert ruler, "冷却窗的尺子不是一行了：接线剧本与跨端对比一起失效"
-    prefix = re.search(r"const DEVICE_SECRET_PREFIX = [^;]+;", api)
-    assert prefix, "那一格的键名不是一行了：剧本里的键会和设备上的键悄悄分家"
-    return (m.group(0) + "\n" + ruler.group(0) + "\n" + prefix.group(0) + "\n"
-            + _fn_text(api, "deviceVault") + "\n"
-            + _fn_text(api, "rememberDevice") + "\n"
-            + _fn_text(api, "recallDevice") + "\n"
-            + _fn_text(api, "forgetDevice") + "\n"
-            + _fn_text(api, "currentIdentityId") + "\n"
+    return (m.group(0) + "\n" + ruler.group(0) + "\n"
             + _fn_text(api, "reauthSession") + "\n"
             + _fn_window(api, "reauthOnce"))
 
@@ -373,7 +349,7 @@ def _run_once(scenario: dict) -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("这台机器上没有 node，跑不了这段 JS")
-    d = Path(tempfile.mkdtemp(prefix="device-vault-once-"))
+    d = Path(tempfile.mkdtemp(prefix="device-cookie-once-"))
     (d / "fns.js").write_text(_once_source(), encoding="utf-8")
     (d / "harness.cjs").write_text(_HARNESS_ONCE, encoding="utf-8")
     r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
@@ -388,24 +364,26 @@ const fs = require("fs"), vm = require("vm");
 const realFns = fs.readFileSync(process.argv[2], "utf8");
 const SC = JSON.parse(process.argv[3]);
 const calls = [];
-const store = new Map();
-if (SC.stored) store.set("fenver.deviceSecret.u_x", SC.stored);
-// api.js 里两种写法都有：存储面走 window.localStorage，名册走裸 localStorage。
-// 两个名字必须指向同一块假存储，否则剧本绿在"读不到"上。
+const requests = [];
+const store = new Map(Object.entries(SC.store || {}));
+let reads = 0;
 const fakeStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
+  get length() { return store.size; },
+  key: (i) => (Array.from(store.keys())[i] === undefined ? null : Array.from(store.keys())[i]),
+  getItem: (k) => { reads += 1; return store.has(k) ? store.get(k) : null; },
+  setItem: (k, v) => { store.set(k, String(v)); },
+  removeItem: (k) => { store.delete(k); },
 };
 const sandbox = {
   calls, SC, console, module, Promise, Error, JSON, Date,
   localStorage: fakeStorage,
   window: { localStorage: fakeStorage },
-  csrfHeaders: () => ({}),
-  noteSessionExpiry: () => {},
+  csrfHeaders: (method) => ({ "X-CSRF": "1" }),
+  noteSessionExpiry: () => calls.push("noteExpiry"),
   adopt: (t) => { calls.push("adopt:" + t); return Promise.resolve({ ok: true }); },
-  fetch: (path) => {
+  fetch: (path, opts) => {
     calls.push("fetch:" + path);
+    requests.push({ path, opts: opts || {} });
     const st = SC.status === undefined ? 200 : SC.status;
     return Promise.resolve({
       status: st, ok: st >= 200 && st <= 299,
@@ -416,15 +394,13 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 vm.runInContext(realFns
-  + "\n;localStorage.setItem('currentId','u_x');"
-  + "\n;localStorage.setItem('identities', JSON.stringify([{userId:'u_x'}]));"
   + "\n;if (SC.renewing) SESSION.renewing = true;"
   + "\n;if (SC.lastReauthNow) SESSION.lastReauthAt = Date.now() / 1000;"
   + "\n;if (SC.lastReauthAt !== undefined) SESSION.lastReauthAt = SC.lastReauthAt;"
   + "\n;module.exports = reauthOnce;", sandbox);
 Promise.resolve(sandbox.module.exports())
   .then((outcome) => process.stdout.write(JSON.stringify({
-    outcome, calls, vault: store.get("fenver.deviceSecret.u_x") || null })))
+    outcome, calls, requests, reads, stored: Object.fromEntries(store) })))
   .catch((e) => process.stdout.write(JSON.stringify({ harness_error: String(e) })));
 """
 
@@ -435,46 +411,58 @@ def test_the_two_ladder_layers_really_share_one_gate():
     这条只能真跑：把源码里的 `busy: SESSION.renewing` 改成 `busy: false`，文本上仍然像
     "用了那把闸"（setBusy 那一句还在），运行时却谁也不拦谁。
     """
-    out = _run_once({"stored": "SEC", "renewing": True})
+    out = _run_once({"renewing": True})
     assert out["outcome"] == "already-running"
     assert not [c for c in out["calls"] if c.startswith("fetch:")], "闸没接上：同敲了凭据端点"
-    assert out["vault"] == "SEC", "被闸拦下也顺手改了那一格"
 
 
-def test_reauth_once_reads_the_current_identitys_own_slot():
-    """真接线：从名册读出"现在是谁"，再按那个人那一格取钥匙；成功后落下轮换值。"""
-    out = _run_once({"stored": "SEC"})
-    assert out["outcome"] == "reauthed"
-    assert "fetch:/v1/auth/reauth" in out["calls"]
-    assert out["vault"] == "ROT", "单次使用的旧钥匙没被换掉：下一次 401 无凭可用"
-    assert "adopt:NEW" in out["calls"]
-
-
-def test_reauth_once_does_nothing_when_this_device_never_logged_in():
-    """名册里没这个人这一格 = 存量设备：不发请求，也不动别的条目。"""
+def test_reauth_once_is_cookie_only_and_declares_csrf():
+    """真接线：空 body + 同源 Cookie + X-CSRF，不读 localStorage，不带会话凭据。"""
     out = _run_once({})
-    assert out["outcome"] == "no-secret"
-    assert not [c for c in out["calls"] if c.startswith("fetch:")]
+    assert out["outcome"] == "reauthed"
+    assert len(out["requests"]) == 1
+    req = out["requests"][0]
+    assert req["path"] == "/v1/auth/reauth"
+    assert req["opts"].get("method") == "POST"
+    assert req["opts"].get("credentials") == "same-origin"
+    assert req["opts"].get("headers", {}).get("X-CSRF") == "1"
+    assert "body" not in req["opts"], "还在往请求体里放 device_secret：明文回到了 JS"
+    assert "Authorization" not in req["opts"].get("headers", {}), \
+        "reauth 自己带了请求头凭据：受众隔离被前端绕过"
+    assert out["reads"] == 0, "reauth 还在读 localStorage：凭据来源只该是 httpOnly Cookie"
+    assert out["stored"] == {}, "reauth 往 localStorage 写了东西"
 
 
-def test_reauth_once_keeps_the_secret_when_the_server_rejects_it():
-    """401 只说"这次不认"：这一格不许被抹掉，否则免口令自愈当场失效。"""
-    out = _run_once({"stored": "SEC", "status": 401})
+def test_reauth_once_uses_the_returned_token_through_adopt():
+    out = _run_once({})
+    assert "adopt:NEW" in out["calls"], "轮换后的令牌没有走唯一那道签发门"
+
+
+def test_reauth_once_works_without_any_local_identity_roster():
+    """存量/新浏览器都可能没有名册条目；Cookie 在不在只有服务端知道，客户端不预判。"""
+    out = _run_once({"store": {}})
+    assert out["outcome"] == "reauthed"
+    assert len(out["requests"]) == 1
+
+
+def test_reauth_once_keeps_the_cookie_when_the_server_rejects_it():
+    """401 只说"这次不认"：客户端没有本机副本可删，Cookie 由服务端在 410 时清。"""
+    out = _run_once({"status": 401})
     assert out["outcome"] == "failed"
-    assert out["vault"] == "SEC"
+    assert not [c for c in out["calls"] if c.startswith("adopt:")]
 
 
-def test_reauth_once_clears_the_slot_when_the_secret_is_dead():
-    out = _run_once({"stored": "SEC", "status": 410})
+def test_reauth_once_reports_gone_when_the_secret_is_dead():
+    out = _run_once({"status": 410})
     assert out["outcome"] == "gone"
-    assert out["vault"] is None, "服务端判死了这一把，本机还留着"
+    assert not [c for c in out["calls"] if c.startswith("adopt:")]
 
 
 def test_the_cooldown_gate_is_wired_to_the_real_state_too():
     """接线半边：冷却窗读的是 SESSION.lastReauthAt，不是恒零的局部变量。"""
-    out = _run_once({"stored": "SEC"})
+    out = _run_once({})
     assert out["calls"].count("fetch:/v1/auth/reauth") == 1, "第一次到点该敲，且只敲一发"
-    seconds = _run_once({"stored": "SEC", "lastReauthNow": True})
+    seconds = _run_once({"lastReauthNow": True})
     assert seconds["outcome"] == "cooling-down", "冷却状态没接进来：每次 401 都会再敲一发"
     assert not [c for c in seconds["calls"] if c.startswith("fetch:")]
 
@@ -489,85 +477,130 @@ def test_both_ladders_share_one_renewal_gate_and_one_cooldown_ruler():
         "reauth 没用 renew 那把闸：两条腿可以同时对同一条端点开火"
 
 
-# ---------- 这一格的形状：一个前缀、三个出入口、写只在服务端刚发新值时 ----------
+# ---------- 升级清理：老版本留在 localStorage 的那一格 ----------
 
 
-def test_the_vault_has_exactly_one_key_prefix_and_one_write_door():
+def _legacy_source() -> str:
     api = _js("api.js")
-    assert api.count("const DEVICE_SECRET_PREFIX") == 1, "键名前缀不止一份：清干净这句话没人负责"
-    assert api.count("DEVICE_SECRET_PREFIX + userId") == 3, \
-        "这一格的出入口应该是写/读/清三处，多一处就有人绕过闸门"
-    assert api.count("function rememberDevice(") == 1
-    assert api.count("function recallDevice(") == 1
-    assert api.count("function forgetDevice(") == 1
+    m = re.search(r"const LEGACY_DEVICE_SECRET_PREFIX = [^;]+;", api)
+    assert m, "api.js 里找不到存量清理的前缀：升级后那批明文凭据会永远留在设备上"
+    return m.group(0) + "\n" + _fn_text(api, "purgeLegacyDeviceSecrets")
 
 
-def test_the_vault_never_writes_an_empty_value_and_survives_a_broken_storage():
-    """隐私模式 / 配额满 / 禁用存储：读不到就当没记过，续期不许把业务打停。"""
-    body = _fn_text(_js("api.js"), "rememberDevice")
-    assert "!value" in body, "空值也往格子里写：读出来是一把永远用不了的死钥匙"
-    for name in ("rememberDevice", "recallDevice", "forgetDevice", "deviceVault"):
-        assert "catch" in _fn_text(_js("api.js"), name), f"{name} 没兜异常：存储坏了界面就坏了"
+def _run_purge(scenario: dict) -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    d = Path(tempfile.mkdtemp(prefix="device-purge-"))
+    (d / "fns.js").write_text(_legacy_source(), encoding="utf-8")
+    (d / "harness.cjs").write_text(_HARNESS_PURGE, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
 
 
-def test_the_secret_is_landed_at_the_moment_the_server_mints_one():
-    """写只有三个时机：注册、登录、reauth 轮换。少一个就有设备拿不到自愈能力。
+_HARNESS_PURGE = r"""
+const fs = require("fs"), vm = require("vm");
+const realFns = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+const store = new Map(Object.entries(SC.store || {}));
+const fakeStorage = {
+  get length() { return store.size; },
+  key: (i) => (Array.from(store.keys())[i] === undefined ? null : Array.from(store.keys())[i]),
+  removeItem: (k) => { store.delete(k); },
+};
+const sandbox = { console, module, Map, Array, JSON, String };
+if (SC.broken) {
+  sandbox.window = {};
+  Object.defineProperty(sandbox.window, "localStorage", {
+    get() { throw new Error("storage denied"); },
+  });
+} else {
+  sandbox.window = { localStorage: fakeStorage };
+}
+vm.createContext(sandbox);
+vm.runInContext(realFns + "\n;module.exports = purgeLegacyDeviceSecrets;", sandbox);
+let removed;
+try { removed = sandbox.module.exports(); }
+catch (e) { process.stdout.write(JSON.stringify({ harness_error: String(e) })); process.exit(0); }
+process.stdout.write(JSON.stringify({ removed, keys: Array.from(store.keys()) }));
+"""
 
-    注册与登录在界面上共用 afterAuth 这一个收口（找回后的自动登录也走它），所以写入点
-    钉在它身上；把它拆回 api.js 的每个封装里，漏一条路就没人报警。
-    """
-    app = _js("app.js")
-    after = _fn_text(app, "afterAuth")
-    assert "API.rememberDevice(res.user_id, res.device_secret);" in after, \
-        "登录后没落这一格：判据 4 在这条路上从第一步就断了"
-    assert after.index("addIdentity(res)") < after.index("API.rememberDevice("), \
-        "先写钥匙后记名字：currentId 还没指对人，下一次 401 找不到自己那一格"
+
+def test_legacy_device_secret_entries_are_purged_and_nothing_else_is():
+    """升级清理只删 `fenver.deviceSecret.*`：名册、指针、断网静音一个都不许动。"""
+    out = _run_purge({"store": {
+        "fenver.deviceSecret.u1": "SEC-1",
+        "fenver.deviceSecret.u2": "SEC-2",
+        "identities": "[]",
+        "currentId": "u1",
+        "netminder_mute": "2026-10-20",
+    }})
+    assert out["removed"] == 2
+    assert sorted(out["keys"]) == ["currentId", "identities", "netminder_mute"]
+
+
+def test_a_broken_storage_does_not_break_boot():
+    """隐私模式 / 禁用存储：清理失败返回 0，页面照常启动。"""
+    out = _run_purge({"broken": True})
+    assert out["removed"] == 0
+    assert "harness_error" not in out
+
+
+# ---------- 形状：Web 端不再有第二处凭据存储面 ----------
+
+
+def test_the_old_vault_entry_points_are_gone():
     api = _js("api.js")
-    assert "rememberDevice(res" not in api, "写入点散回 api.js 的每个封装：漏一条路没人报"
+    # 用带声明关键字的形状，别用裸名字：`LEGACY_DEVICE_SECRET_PREFIX` 里就含
+    # `DEVICE_SECRET_PREFIX` 这一串，裸子串匹配会把存量清理本身判成复活。
+    for gone in ("const DEVICE_SECRET_PREFIX", "function deviceVault",
+                 "function rememberDevice", "function recallDevice",
+                 "function forgetDevice", "function currentIdentityId"):
+        assert gone not in api, f"api.js 里还留着 {gone}：localStorage 那一格没有真正退役"
+    assert api.count('"fenver.deviceSecret."') == 1, \
+        "存量前缀出现了不止一处：清理之外的读/写路径又长出来了"
 
 
-def test_only_afterAuth_and_the_ladder_ever_write_the_vault():
-    """整条链路上写这一格的地方就两处：afterAuth（服务端刚发）与 reauth 轮换。"""
-    api = _js("api.js")
+def test_the_app_no_longer_writes_or_clears_a_local_secret():
     app = _js("app.js")
-    assert api.count("rememberDevice(") == 2, \
-        "api.js 里带括号的 rememberDevice 只该有两处：函数定义本身 + reauth 轮换那一句落值"
-    assert app.count("API.rememberDevice(") == 1, "写入点不止一处：名册与保险柜的边界会重新糊掉"
+    assert "API.rememberDevice" not in app and "API.forgetDevice" not in app
+    assert "device_secret" not in app and "fenver.deviceSecret" not in app, \
+        "app.js 还在搬运续命凭据：它现在只该由服务端 Set-Cookie 收编"
 
 
-def test_logout_clears_the_current_devices_secret_because_the_server_revokes_all_of_them():
-    """auth.revoke 在服务端清掉这个人全部 secrets；本机不留一把死钥匙。"""
-    body = _fn_text(_js("api.js"), "logout")
-    assert "if (!token) forgetDevice(currentIdentityId());" in body, \
-        "退出没清这一格（或替别人撤销时误清了当前那位的）"
-    app = _js("app.js")
-    assert "API.forgetDevice(userId);" in _fn_text(app, "dropIdentity"), \
-        "名册里移除一个人却留着他的那一格：忘掉名字不等于忘掉凭据"
-
-
-def test_the_reauth_call_carries_no_session_credential():
-    """那条端点只认 device_secret（判据 5 的反向半边）：这里塞 Authorization 就是混淆受众。"""
+def test_the_reauth_call_carries_no_session_credential_and_no_body_secret():
+    """那条端点只认 Cookie（原生/老 web 的 body 回落由服务端保留，Web 不用）。"""
     body = _fn_window(_js("api.js"), "reauthOnce")
     assert '"/v1/auth/reauth"' in body and 'credentials: "same-origin"' in body
     assert "Authorization" not in body, "reauth 自己带了请求头凭据：受众隔离被前端绕过"
     assert "csrfHeaders(\"POST\")" in body, "reauth 没带 CSRF：Cookie 会话下这发会被 403"
+    assert "body:" not in body and "device_secret" not in body, \
+        "Web 又把续命凭据放回请求体：它应当只在 httpOnly Cookie 里"
+
+
+def test_logout_has_no_local_secret_housekeeping_left():
+    body = _fn_text(_js("api.js"), "logout")
+    assert "localStorage" not in body and "forgetDevice" not in body, \
+        "退出还在清本机那一格：它已经不存在了，清 Cookie 是服务端响应的事"
 
 
 def test_the_front_end_still_never_writes_a_cookie_by_hand():
-    """这一格是 localStorage，不是 document.cookie：签发门仍然只有 adopt 那一道。"""
+    """Cookie 只由服务端 Set-Cookie 种：前端不碰 document.cookie。"""
     for name in ("api.js", "app.js"):
-        assert "document.cookie" not in _js(name), f"{name} 手搓 Cookie：唯一那道 Set-Cookie 门被绕过"
+        assert "document.cookie" not in _js(name), f"{name} 手搓 Cookie：签发门被绕过"
     assert "Set-Cookie" not in _js("api.js")
 
 
 def test_the_identity_roster_still_holds_nothing_but_names():
-    """新增这一格不等于把凭据塞回名册：名册与保险柜是两回事，键名也不许在两侧各写一遍。"""
+    """名册里只有"这台机器认识谁"，没有凭什么——Cookie 化之后这条边界没松。"""
     app = _js("app.js")
     add = _fn_text(app, "addIdentity")
     for forbidden in ("token", "password", "secret", "device"):
         assert forbidden not in add.lower(), f"名册里出现了 {forbidden}：方案 C 的存储边界又开了"
-    assert "fenver.deviceSecret" not in app and "DEVICE_SECRET_PREFIX" not in app, \
-        "app.js 自己拼键名：绕过唯一那道写门，退出时就不可能清干净"
+    assert "fenver.deviceSecret" not in app, "app.js 自己拼存量键名：清理只在 api.js 一处"
 
 
 def test_the_renew_ladder_body_itself_still_touches_no_storage():
@@ -575,7 +608,6 @@ def test_the_renew_ladder_body_itself_still_touches_no_storage():
     api = _js("api.js")
     for name in ("renewSession", "noteSessionExpiry"):
         assert "localStorage" not in _fn_text(api, name)
-    # 存储面集中在那三个出入口 + 一个读身份的小函数里，别处一个都不许多。
-    assert api.count("deviceVault()") == 4, \
-        "存储面不止这四个出入口（写/读/清 + deviceVault 自己）：又多开了一道门"
+    # 存储面只剩断网静音的 setItem 与存量清理的 removeItem，别处一个都不许多。
+    assert api.count("deviceVault()") == 0, "存储面又长出了出入口函数"
     assert (STATIC / "api.js").exists()

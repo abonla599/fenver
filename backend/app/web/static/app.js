@@ -112,9 +112,9 @@ async function dropIdentity(userId) {
     }
   }
   saveIdentities(readIdentities().filter((x) => x.userId !== userId));
-  // 名册忘掉他的同时，他那格续命凭据也要跟着忘：留着就是一把本机读得到、
-  // 服务端随时可能已作废的死钥匙（当前那位在 logout 里已经清过，这一句对他幂等）。
-  API.forgetDevice(userId);
+  // v0.35.0 #143②：本机不再保存续命凭据（它住在 httpOnly Cookie 里，JS 碰不到）。
+  // 退当前会话时服务端已吊销这个人的全部 secrets 并刮掉 Cookie；移除别人的条目
+  // 只忘名字，不再有本机那一格要清。
   return true;
 }
 
@@ -695,10 +695,8 @@ function tasksPageOpen() {
 async function afterAuth(res) {
   await API.adopt(res.token);       // 凭据落地 = 换 Cookie；明文到此为止
   addIdentity(res);                 // 只记名字进来并把这个人设为当前身份，不记凭什么
-  // 续命凭据（v0.34.0 判据 4 的 Web 半边）落在名册之后：这一格按 userId 存，
-  // currentId 得先指对人，之后 401 那一次才找得到自己的钥匙。存的是这把钥匙而不是
-  // 口令——判据 11 禁的是口令进本地存储，这条口径 2026-10-08 由用户点名扩到这里。
-  API.rememberDevice(res.user_id, res.device_secret);
+  // v0.35.0 #143②：续命凭据已由服务端在注册/登录响应里种进 httpOnly Cookie
+  // （Path 收口在 /v1/auth/reauth）。页面不再碰 device_secret，也没有本机那一格要落。
   SHELL.setOwner(res.user_id);      // 告诉壳"现在是谁"：没这一步他看见的提醒是空集
   resetViewForIdentity();           // 从设置里添加第二个账户时，屏幕上正挂着第一个人的对话
   $("authPass").value = "";        // 密码不是运行时凭据，用完就清出输入框
