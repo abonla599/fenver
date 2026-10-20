@@ -48,11 +48,20 @@ watchdog 会把崩溃进程原样拉起，那是一个**新进程**、新 pid。
 恒判不出（见 `classify_pid`），于是每次重启都"成功接管"了一个**活着的**服务的锁，
 两个进程同写一份数据根——这把锁要防的事故由这把锁自己制造了。
 
+## 锁内容必须整份读，但要有上限
+
+锁文件是别人可写的，读它不能按文件大小无限读进内存，也**不能只读前 N 字节**：
+默认 payload 约 120 B，`service` 名字 430 字符就到 534 B，只读 512 B 拿到的是
+**半截 JSON**——release 判"坏内容"不删、acquire 读不出 pid 接不了管，一把正常的锁
+变成只能人工删的永久锁（#154）。所以读走 `_MAX_LOCK_BYTES`（4096）并**多读一字节
+判长**：超限时明说超限并保留文件，绝不把截断内容当坏内容；写侧同界限先拒，免得
+写出自己都读不回来的锁。
+
 ## 测试
 
 `tests/test_v033_data_root_lock.py`。判据里有"第二个进程 fail-fast"与"陈旧锁可
-接管"两条，各配负向锁。释放路径的持有者校验（pid 相同、nonce 不同也不许删）见
-`tests/test_v0350_dataroot_lock_release_holder.py`。
+接管"两条，各配负向锁。释放路径的持有者校验（pid 相同、nonce 不同也不许删）与
+长 payload / 超限读取见 `tests/test_v0350_dataroot_lock_release_holder.py`。
 """
 import errno
 import json
@@ -62,6 +71,11 @@ import uuid
 from typing import Optional
 
 LOCK_NAME = ".data-root.lock"
+
+# 锁内容的读取上限。正常 payload 约 120 B（默认 service 名），离上限很远；上限只挡
+# "这个文件其实不是锁"的形状。**读的时候要多读一字节判长**：只读 4096 分不清"正好
+# 到上限"与"被截断"，就又退回"半截 JSON 当坏内容"的老毛病（#154 的 534 B 锁就是）。
+_MAX_LOCK_BYTES = 4096
 
 # 本进程的持有者标识，进程内生成一次、所有本进程拿到的锁共用。
 #
@@ -171,22 +185,52 @@ def _classify_pid_windows(pid: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+class _LockPayloadTooLong(Exception):
+    """锁内容超过 _MAX_LOCK_BYTES。**不是"内容坏了"**，调用方不许按坏内容处理。
+
+    不继承 ValueError 是有意的：release 对"读不出来"的兜底分支抓的是 ValueError
+    （含 UTF-8 解码失败），超限混进去就又会变成一句"读不出内容"，真实原因（大小）
+    反而被藏起来。
+    """
+
+
+def _read_lock_text(path: str) -> str:
+    """把锁文件整份读出来，上限 `_MAX_LOCK_BYTES`；超限抛 `_LockPayloadTooLong`。
+
+    按**字节**读再解码，上限才是字节数：文本模式的 `read(n)` 数的是字符，一个 4096
+    字符的中文锁最多能占约 16 KB，"4096 字节"就名不副实了。读"上限 + 1"再判长，
+    才分得清"正好到上限"与"被上限截断"——后者绝不能当成内容损坏（#154）。
+    """
+    with open(path, "rb") as f:
+        raw = f.read(_MAX_LOCK_BYTES + 1)
+    if len(raw) > _MAX_LOCK_BYTES:
+        raise _LockPayloadTooLong(
+            "内容超过 %d 字节的读取上限（实际至少 %d 字节）"
+            % (_MAX_LOCK_BYTES, len(raw))
+        )
+    return raw.decode("utf-8")
+
+
 def _read_holder(path: str) -> Optional[dict]:
     """读锁内容。读不到/读坏了都返回 None——调用方据此走"判死"分支。
 
     **返回 None 会被当成"没有活着的持有者"**，所以这里读不到内容时必须格外
     小心：那是 TOCTOU 的入口。见 acquire 里的处理。
+
+    超过 `_MAX_LOCK_BYTES` 时**抛 `_LockPayloadTooLong` 而不是返回 None**：超限只是
+    "这份内容不该按锁解析"，而 None 会被 acquire 当成"锁已经不在了"去重试，反而把
+    真实原因藏起来（6 次重试后只报"反复被抢占"）。
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read(512)
-    except OSError:
+        text = _read_lock_text(path)
+    except (OSError, ValueError):
         return None
     try:
         data = json.loads(text)
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
 
 def _read_holder_strict(path: str) -> Optional[dict]:
     """同 _read_holder，但**读不到内容时返回哨兵而不是 None**。
@@ -198,6 +242,9 @@ def _read_holder_strict(path: str) -> Optional[dict]:
 
     所以"锁存在但读不出 pid"必须区别于"锁里的 pid 确实死了"：前者是**有人在
     写的途中**，要等一下重读；后者才是可以接管的。
+
+    内容超过 `_MAX_LOCK_BYTES` 时**原样抛 `_LockPayloadTooLong`**：那不是"正在写"
+    也不是"损坏"，acquire 据此报明确原因并保留文件。
     """
     holder = _read_holder(path)
     if holder is not None:
@@ -244,13 +291,33 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
         "service": service,
         "started": time.time(),
     }, ensure_ascii=False)
+    # 读侧上限是 4096 字节，写侧就必须同界限先拒：写一把超过上限的锁等于制造一把
+    # release 删不掉、acquire 也读不出 pid 的永久锁。service 是代码里写死的短名，
+    # 超限只可能是调用方传错，那是 ValueError，不是"数据根被占用"。
+    payload_size = len(payload.encode("utf-8"))
+    if payload_size > _MAX_LOCK_BYTES:
+        raise ValueError(
+            "锁内容 %d 字节，超过 %d 字节的读取上限（service=%r…）。"
+            "写出去的锁自己读不回来，会变成只能人工删的永久锁。"
+            % (payload_size, _MAX_LOCK_BYTES, str(service)[:32])
+        )
 
     empty_reads = 0
     for attempt in range(6):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            holder = _read_holder_strict(path)
+            try:
+                holder = _read_holder_strict(path)
+            except _LockPayloadTooLong as exc:
+                # 超限的内容不猜归属、也不动文件：删它可能是替别人作废，当成"锁没了"
+                # 去重试又只会得到"反复被抢占"。这里把真实原因（大小）直接说透。
+                raise DataRootBusyError(
+                    "数据根 %s 的锁 %s %s，读不出持有者（本机锁正常只有约 120 字节）。"
+                    "为避免把超限内容截成半截 JSON 当坏内容，本次拒绝启动。\n"
+                    "请确认没有多个服务进程在启动；若 %s 不是锁文件，手工移走后重试。"
+                    % (data_root, path, exc, path)
+                ) from exc
             if holder is None:
                 # 锁已经不在了（持有者刚释放）—— 回到 O_EXCL 那一步重来
                 continue
@@ -326,6 +393,13 @@ def acquire_data_root_lock(data_root: str, *, service: str = "fenver-backend") -
     )
 
 
+def _nonce_head(nonce) -> str:
+    """日志里只露 nonce 的前 8 位：够对上号，又不至于把整枚 nonce 抄进日志。"""
+    if not isinstance(nonce, str) or not nonce:
+        return "<缺失>"
+    return nonce[:8] + ("…" if len(nonce) > 8 else "")
+
+
 def release_data_root_lock(path: str) -> None:
     """放掉**本进程自己拿到的那把**锁；不是自己的就不动。
 
@@ -338,12 +412,23 @@ def release_data_root_lock(path: str) -> None:
     那里没有处理异常的上下文，放锁失败也不该把关闭流程弄挂。这几种情况一律
     **不删**——看不出来归属的文件，删了就可能删到别人的。真正的遗留锁会由下一次
     acquire 的陈旧锁判据（pid 确认已死才接管）收拾。
+
+    读取**整份内容**（上限 `_MAX_LOCK_BYTES`），不再只读前 512 字节：后者会把
+    service 名稍长的合法锁截成半截 JSON，判成"坏内容"不删，而 acquire 又读不出
+    pid 无法接管——正常的锁就此变成只能人工删的永久锁（#154）。超限时明说超限，
+    同样保留不删。
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read(512)
+        text = _read_lock_text(path)
     except FileNotFoundError:
         return                         # 已经不在了：放锁是幂等的
+    except _LockPayloadTooLong as exc:
+        # 超限**不等于内容坏了**：这是"这个文件不该按锁解析"。保留不删，并把原因
+        # 说清楚，免得运维按"锁坏了"的思路去查一个大小问题。
+        print("[数据根锁] %s %s，无法确认是不是本进程的，保留不删。"
+              "本机锁正常只有约 120 字节，这个大小说明它可能不是锁文件，请人工看一眼。"
+              % (path, exc))
+        return
     except (OSError, ValueError):
         # 读不出来（含非 UTF-8 的垃圾字节）——归属未知，保留不删。
         print("[数据根锁] %s 读不出内容，无法确认是不是本进程的，保留不删。" % path)
@@ -359,8 +444,17 @@ def release_data_root_lock(path: str) -> None:
         return
 
     if holder.get("pid") != os.getpid() or holder.get("nonce") != _PROCESS_NONCE:
-        print("[数据根锁] %s 不是本进程持有的锁（锁里 pid=%r，本进程 pid=%d），保留不删。"
-              % (path, holder.get("pid"), os.getpid()))
+        # 只打印 pid 不够：pid 相同时（pid 被复用）运维必须能看到真正把两者区分开的
+        # 是 nonce，所以两边的 nonce 各露前 8 位，并把"pid 相同但 nonce 不同"明写出来。
+        same_pid = holder.get("pid") == os.getpid()
+        reason = ("pid 相同但 nonce 不同——pid 被系统复用给了另一个进程，"
+                  "这把锁不是本进程留下的"
+                  if same_pid else
+                  "pid 不同——这把锁属于另一个进程")
+        print("[数据根锁] %s 不是本进程持有的锁（锁里 pid=%r、nonce 前 8 位 %s；"
+              "本进程 pid=%d、nonce 前 8 位 %s）。%s，保留不删。"
+              % (path, holder.get("pid"), _nonce_head(holder.get("nonce")),
+                 os.getpid(), _nonce_head(_PROCESS_NONCE), reason))
         return
 
     try:
