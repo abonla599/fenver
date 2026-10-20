@@ -665,9 +665,9 @@ def test_the_generator_refuses_an_unknown_scope_value(tmp_path):
 def test_the_changelog_page_is_served_with_the_same_page_policy_as_the_homepage():
     """/changelog 与 /、/app/ 是同一套页面口径（cache 与 CSP 都得对上），别自造第二套。
 
-    script-src 除外：#143 起它带着"这一页自己的内联脚本"的 sha256，两页脚本段数不同
-    （更新日志页两段、首页一段），哈希本来就该不同。其余指令必须一字不差；哈希与
-    各页正文的对应关系由 tests/test_v0350_csp_hash.py 逐页钉。
+    script-src 除外：#143 起它带着"这一页自己的内联脚本"的 sha256，各页按自己的正文
+    算（段数会跟着页面改，注释里不数它），哈希本来就该不同。其余指令必须一字不差；
+    哈希与各页正文的对应关系由 tests/test_v0350_csp_hash.py 逐页钉。
     """
     res = client.get("/changelog")
     assert res.status_code == 200, res.text

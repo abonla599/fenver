@@ -156,10 +156,10 @@ def stamp_assets(html: str) -> str:
 def inline_script_hashes(html: str):
     """这一页每一段**会执行的内联脚本**的 CSP 哈希（sha256 → base64，按出现顺序去重）。
 
-    必须在 `__ASSET_TOKEN__` 被替换成水印**之后**调用：`/app` 唯一那段内联脚本里就写着
-    `window.__ASSETS__ = "<水印>"`，水印一变，哈希就得跟着变。这里量的是"这一次真要发
-    出去的字节"，不是模板文件——写死哈希的那条路在换版时不会报错，只会让整页脚本在
-    浏览器里一条拒绝、全哑。
+    必须对**每一页替换完水印之后**的正文调用：`/app` 的那段内联脚本里就写着
+    `window.__ASSETS__ = "<水印>"`，水印一变，哈希就得跟着变。各页的段数不同，这里
+    按每页自己的正文算，不在注释里数它们。量的是"这一次真要发出去的字节"，不是模板
+    文件——写死哈希的那条路在换版时不会报错，只会让整页脚本在浏览器里一条拒绝、全哑。
     带 `src=` 的脚本由 `'self'` 管；`type` 不是 JS 的块（JSON-LD 之类）浏览器不执行，
     也不该混进 script-src。
     """
@@ -178,8 +178,23 @@ def inline_script_hashes(html: str):
     return list(dict.fromkeys(found))
 
 
-def content_security_policy(script_hashes=()) -> str:
-    """全站唯一那一份 CSP 字面量；`script_hashes` 是当前文档内联脚本的 sha256。
+# connect-src 的两档口径。全站页面里，浏览器要连的只有同源 /v1 与两个直连搜索源。
+# 唯一的例外是连通性探测页（`/site/probe.html`）：它的目标地址由用户在页面里填
+# （默认 https://api.deepseek.com），页面靠 fetch 直连供应商完成 1–6 项探测，所以
+# 那一页必须放开任意 https。放开 https 是本页的既定用途，不是全站口径；http/ws
+# 不放开。
+CONNECT_SRC_STRICT = ("'self' https://api.bochaai.com/v1/web-search "
+                      "https://api.tavily.com/search")
+CONNECT_SRC_PROBE = "'self' https:"
+PROBE_PAGE_PATH = "/site/probe.html"
+
+
+def content_security_policy(script_hashes=(), page_path: str = "/") -> str:
+    """CSP 的拼装点只此一处；`script_hashes` 是当前文档内联脚本的 sha256。
+
+    `page_path` 只影响 `connect-src`：探测页（`PROBE_PAGE_PATH`）用放开 https 的那一档，
+    其余所有页面保持"同源 + 两个直连搜索源"。按路径分档只分这一条指令，别的指令
+    两档一字不差——别把 `page_path` 扩成"按页面各自配策略"的口子。
 
     为什么是"运行时算哈希"而不是 nonce：HTML 允许缓存 30 秒（`PAGE_CACHE`）。nonce
     若每响应随机，头与身虽在**同一次**渲染里一致，但"缓存里的头/身"这种边角要把
@@ -189,12 +204,13 @@ def content_security_policy(script_hashes=()) -> str:
     每一条指令的代价见 `site_headers` 的注释。
     """
     scripts = " ".join(["'self'", *[f"'sha256-{h}'" for h in script_hashes]])
+    connect_src = CONNECT_SRC_PROBE if page_path == PROBE_PAGE_PATH else CONNECT_SRC_STRICT
     return (
         "default-src 'self'; "
         f"script-src {scripts}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
-        "connect-src 'self' https://api.bochaai.com/v1/web-search https://api.tavily.com/search; "
+        f"connect-src {connect_src}; "
         "frame-src 'none'; "
         "object-src 'none'; "
         "base-uri 'self'; "
@@ -203,7 +219,7 @@ def content_security_policy(script_hashes=()) -> str:
 
 
 def rewritten_html(source: StarletteFileResponse, token: str,
-                   if_none_match: str = "") -> Response:
+                   if_none_match: str = "", page_path: str = "/") -> Response:
     """HTML（以及要盖水印的 sw.js）出门前的那一次改写，连带把条件请求保住。
 
     HTML 允许缓存 `PAGE_CACHE` 这么久：它是"重复打开"这条路上剩下的最后那一趟回源。
@@ -217,6 +233,8 @@ def rewritten_html(source: StarletteFileResponse, token: str,
     CSP（#143）也挂在这一趟里：`script-src` 的 sha256 量的是**替换完水印之后**的
     内联脚本文本，且与正文同一次渲染产出。`asset_token()` 进程内只算一次，所以同一
     进程里每一响应的哈希稳定；重启后水印变、正文变、哈希跟着重算，头与身不会拆家。
+    `page_path` 原样转给 `site_headers`，用来选 `connect-src` 那一档（只有探测页与
+    其余页面不同）。
     """
     with open(source.path, "rb") as fh:
         raw = fh.read().decode("utf-8")
@@ -228,14 +246,16 @@ def rewritten_html(source: StarletteFileResponse, token: str,
     cache = PAGE_CACHE if is_page else "no-cache"
     if etag in if_none_match:
         return site_headers(Response(status_code=304, headers={"ETag": etag}),
-                            cache=cache, script_hashes=hashes)
+                            cache=cache, script_hashes=hashes, page_path=page_path)
     return site_headers(Response(content=body, media_type=source.media_type,
                                  headers={"ETag": etag}),
-                        cache=cache, script_hashes=hashes)
+                        cache=cache, script_hashes=hashes, page_path=page_path)
 
 
-def site_headers(response, cache: str = "no-cache", script_hashes=()):
-    """全站响应共用的一组头，字面量只这一份：/app、/admin、/site 的静态资源走
+def site_headers(response, cache: str = "no-cache", script_hashes=(),
+                 page_path: str = "/"):
+    """全站响应共用的一组头，CSP 拼装只走 `content_security_policy()` 一处（其中
+    `connect-src` 按路径分探测页/其余两档，见下）：/app、/admin、/site 的静态资源走
     RevalidatingStaticFiles，官网 index.html 走 FileResponse，两头都收口在这里。
 
     不抽出来的话就有第二份缓存字面量，改一份漏一份——和 _PROTECTED_PREFIXES
@@ -248,20 +268,25 @@ def site_headers(response, cache: str = "no-cache", script_hashes=()):
       旧文件上——旧 URL 一旦被允许长缓存，就直接复刻 2026-09-17 那次"改了没生效"。
 
     CSP 自 #143 起是一整组（此前只有 frame-src/object-src，等于对"页面里被塞进一段
-    <script>"一个字都没说）。每一条都是取舍，不是模板抄来的：
+    <script>"一个字都没说）。`connect-src` 有两档，除此之外每页一字不差；每一条都是
+    取舍，不是模板抄来的：
     - `default-src 'self'`：兜住 manifest / 字体 / 媒体这些没单列的取处；前端不引任何 CDN。
-    - `script-src 'self' 'sha256-…'`：7 个外链脚本全部同源；唯一那段内联脚本的哈希由
-      `rewritten_html` 对替换后的正文现算（见 `inline_script_hashes`）。**没有
-      'unsafe-inline'**——有它，哈希就等于白算。
+    - `script-src 'self' 'sha256-…'`：页面引用的外链脚本全部同源；每一页内联脚本的哈希
+      由 `rewritten_html` 对该页替换水印后的正文现算（见 `inline_script_hashes`，各页
+      按自己的正文算）。**没有 'unsafe-inline'**——有它，哈希就等于白算。
     - `style-src 'self' 'unsafe-inline'`：PWA 页本身没有内联 style，但头是全站共用的：
-      /admin/index.html 有 11 处 `style=`、/site/probe.html 有 `<style>` 块。把它们迁进
+      /admin/index.html 有 `style=` 属性、/site/probe.html 有 `<style>` 块。把它们迁进
       CSS 之前这条只能留着（为兼容 admin/probe 保留，收紧不在本票射程）。
     - `img-src 'self' data: blob:`：附件预览与聊天图片走 objectURL（app.js / api.js 的
       `URL.createObjectURL`），没有 `blob:` 预览就整片空白；`data:` 留给粘贴的 data URI。
       模型回复里的外链图片会被挡掉——有意为之（挡追踪像素），要放开得先有人明确同意。
-    - `connect-src 'self' …`：app.js 的「直连搜索」真的从浏览器 POST 到
+    - `connect-src 'self' + 两个搜索源`：app.js 的「直连搜索」真的从浏览器 POST 到
       api.bochaai.com / api.tavily.com（`searchDirect`）；不列出这两个源，那一档会在
-      控制台里静默变哑。其余请求一律 /v1 同源。
+      控制台里静默变哑。除探测页外，页面里的其余请求一律 /v1 同源。
+    - 探测页（`/site/probe.html`）是唯一例外，单独一档 `connect-src 'self' https:`：
+      它的 endpoint 由用户在页面里填（默认 https://api.deepseek.com），页面靠 fetch
+      直连供应商完成 1–6 项探测。这是连通性探测页的既定用途，不是全站口径；只放开
+      https，不放开 http/ws，其余页面照旧严格。
     - `frame-src 'none'`：全站零 iframe（2026-09-19 grep 确认），它挡的是"WebView 里
       @JavascriptInterface 会挂到每个 frame"这条路。
     - `object-src 'none'`：没有插件/内嵌 PDF 需求，堵 <object>/<embed> 这条执行面。
@@ -270,7 +295,8 @@ def site_headers(response, cache: str = "no-cache", script_hashes=()):
     service worker 的注册走 script-src 的回落（同源 sw.js），因此不需要单列 worker-src。
     """
     response.headers["Cache-Control"] = cache
-    response.headers["Content-Security-Policy"] = content_security_policy(script_hashes)
+    response.headers["Content-Security-Policy"] = content_security_policy(
+        script_hashes, page_path=page_path)
     return response
 
 
@@ -302,7 +328,10 @@ class RevalidatingStaticFiles(StaticFiles):
             # （判据见 _query_token 那段：占位符落点是 index.html 的 `window.__ASSETS__`
             # 与 sw.js 的 `const V`，两处都是 JS 字符串字面量，所以"发出去的字面量"只有
             # 经过校验的这一种形状）。
-            return rewritten_html(response, token or asset_token(), incoming)
+            # 完整请求路径一并交给 rewritten_html：探测页与其余页面的 connect-src 分两档
+            # （判据与理由见 CONNECT_SRC_PROBE 那段），别的指令不按路径分。
+            return rewritten_html(response, token or asset_token(), incoming,
+                                  page_path=scope.get("path", ""))
         # 认不出当下水印（包括压根不合格）的一律 no-cache：给一个 URL 上带任意查询参数的
         # 响应发一年 immutable，等于让人存进书签的那条旧地址被钉死一年。
         return site_headers(response, cache=IMMUTABLE if token == asset_token() else "no-cache")

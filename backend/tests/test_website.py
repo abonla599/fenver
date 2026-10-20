@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from app.main import app
-from app.web.web_router import IMMUTABLE, asset_token, content_security_policy
+from app.web.web_router import IMMUTABLE, asset_token
 
 client = TestClient(app)
 
@@ -29,6 +29,23 @@ def test_root_serves_the_site_with_the_same_cache_policy_as_app():
     assert "frame-src 'none'" in res.headers["content-security-policy"]
 
 
+# 静态资源的整串 CSP。这一份是**故意**在测试里保留的字面量：拿
+# `content_security_policy()` 跟响应比，是生成器跟它自己比——生成器被改坏时两边一起
+# 变，这条锁谁也抓不住。资源没有内联脚本，所以这里就是不带 sha256 的底子；HTML 每页
+# 多出来的哈希、探测页单独放开的 connect-src，由 tests/test_v0350_csp_hash.py 钉。
+STATIC_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self' https://api.bochaai.com/v1/web-search https://api.tavily.com/search; "
+    "frame-src 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+
 def test_site_assets_are_public_and_uncached():
     """`/site/...` 是官网资源。公开是刻意的(css 和截图不含任何用户数据)。
 
@@ -41,12 +58,11 @@ def test_site_assets_are_public_and_uncached():
     assert res.headers["cache-control"] == "no-cache"
     fresh = client.get("/site/site.css", params={"v": asset_token()})
     assert fresh.headers["cache-control"] == IMMUTABLE, "官网资源拿不到长缓存：首屏还是每趟回源"
-    # 整串相等而不是 in:`/` 那半只用了 in,两边合起来才真正钉住"页面与资源的头
-    # 是同一组",而这一组字面量在 web_router 里只有一份(content_security_policy)。
-    # 资源没有内联脚本，所以这里取的是不带哈希的底子；HTML 上多出来的 sha256 由
-    # tests/test_v0350_csp_hash.py 按每一页自己的正文钉。
-    assert res.headers["content-security-policy"] == content_security_policy()
-    assert fresh.headers["content-security-policy"] == content_security_policy()
+    # 整串相等而不是 in：这一条是"生成器被改坏"的独立证据（判据见 STATIC_CSP 那段）。
+    # 资源没有内联脚本，所以两条取的都不带哈希；带水印与不带水印的 CSP 必须同一串。
+    assert res.headers["content-security-policy"] == STATIC_CSP, \
+        f"静态资源的 CSP 被改了：{res.headers['content-security-policy']!r}"
+    assert fresh.headers["content-security-policy"] == STATIC_CSP
 
 
 def test_unknown_paths_still_get_the_framework_json_404():

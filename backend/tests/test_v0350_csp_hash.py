@@ -16,6 +16,7 @@ import base64
 import hashlib
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -53,15 +54,28 @@ def _sha256_b64(text: str) -> str:
     return base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode("ascii")
 
 
-def _directives(res) -> dict:
-    csp = res.headers.get("content-security-policy") or ""
+def _parse_directives(csp: str) -> dict:
+    """CSP 头 → {指令名: 值}；同名指令重复即判死。
+
+    为什么要在这里判死：CSP 规范（CSP3 §2.2.1）规定重复的同名指令**只取第一条**，
+    浏览器照此执行；而 `dict[name] = value` 取的是**末值**。于是"同名重复、恶意值在
+    前"的头（`frame-src *; … frame-src 'none'`）在浏览器里 frame-src 仍是 `*`
+    （WebView 桥会挂到每个 frame），按末值解析却读成 'none'——这条链就是旧解析器
+    被骗绿的那条路。宁可判"头本身不合法"，也不替浏览器猜它认哪一条。
+    """
     out = {}
     for part in csp.split(";"):
         part = part.strip()
         if part:
             name, _, value = part.partition(" ")
+            assert name not in out, (
+                f"CSP 里 {name} 出现了不止一次（浏览器只认第一条，后写的会被忽略）：{csp!r}")
             out[name] = value.strip()
     return out
+
+
+def _directives(res) -> dict:
+    return _parse_directives(res.headers.get("content-security-policy") or "")
 
 
 def _header_hashes(res) -> list:
@@ -145,11 +159,26 @@ def test_the_304_reuses_the_policy_it_computed_for_the_same_body():
     assert second.headers["content-security-policy"] == first.headers["content-security-policy"]
 
 
+def test_the_directive_parser_refuses_a_duplicate_directive():
+    """反例常驻：同名指令重复时解析必须判死，不许按"后写的那个"取值。
+
+    CSP 规范（CSP3 §2.2.1）规定只取第一条，浏览器照此执行；`dict` 赋值取末值。
+    `frame-src *; … frame-src 'none'` 这种"恶意值在前"的头在浏览器里 frame-src 仍
+    是 `*`，按末值解析却读成 'none'——这条链就是旧解析器被骗绿的那条。这条用例把
+    "解析器不许再退回 dict 赋值"变成常驻的牙，而不是只靠一次手工变异实验。
+    """
+    with pytest.raises(AssertionError):
+        _parse_directives("frame-src *; default-src 'self'; frame-src 'none'")
+    # 正向对照：没有重复时照常解析，免得上面那条红是因为解析器根本不会工作。
+    assert _parse_directives("frame-src 'none'; default-src 'self'") == {
+        "frame-src": "'none'", "default-src": "'self'"}
+
+
 def test_every_html_page_gets_hashes_for_its_own_inline_scripts():
     """头是全站共用的（site_headers），但哈希必须按每一页自己的正文算。
 
-    site/index.html 有 1 段内联脚本、changelog.html 有 2 段、probe.html 也有；/admin/
-    没有。任何一页拿到别页的哈希，它自己的脚本就是被拒的那一段。
+    各页的内联脚本段数不同（入口页、更新日志页、探测页各有各的正文，这里不数它们）；
+    /admin/ 没有内联脚本。任何一页拿到别页的哈希，它自己的脚本就是被拒的那一段。
     """
     for path in ("/", "/changelog", "/site/probe.html", "/admin/"):
         res = client.get(path)
@@ -160,6 +189,28 @@ def test_every_html_page_gets_hashes_for_its_own_inline_scripts():
             f"  头: {_header_hashes(res)}\n  正文: {body_hashes}"
         )
     assert _header_hashes(client.get("/admin/")) == [], "/admin/ 没有内联脚本，不该多出哈希"
+
+
+def test_only_the_probe_page_may_connect_beyond_self_and_the_search_sources():
+    """探测页单独一档 connect-src；其余页面保持严格。
+
+    探测页的 fetch 目标是用户填的 base URL（默认 api.deepseek.com），这一页的
+    1–6 项直连探测全靠它。connect-src 若只剩 'self' + 两个搜索源，那些探测会在
+    浏览器里全部被拒——页面上只会看到"跑了但全红"，而 changelog 还在教用户跑它。
+    所以这一页放开 https（不含 http/ws）；其余页面照旧，一个都不许跟着放开。
+    """
+    probe = _directives(client.get("/site/probe.html"))["connect-src"].split()
+    assert set(probe) == {"'self'", "https:"}, \
+        f"探测页的 connect-src 不是「'self' + https:」：{probe}"
+
+    strict = {"'self'", "https://api.bochaai.com/v1/web-search",
+              "https://api.tavily.com/search"}
+    for path in ("/app/", "/", "/changelog", "/admin/"):
+        got = set(_directives(client.get(path))["connect-src"].split())
+        assert got == strict, (
+            f"{path} 的 connect-src 不该跟着探测页放开：{got}——"
+            "放开 https 只属于 /site/probe.html 这一页的既定用途")
+        assert "https:" not in got, f"{path} 出现了通配 https:，全站口径被放开了"
 
 
 def test_a_one_byte_change_in_the_body_breaks_the_match():
