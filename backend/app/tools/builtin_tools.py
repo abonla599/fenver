@@ -349,26 +349,32 @@ def execute_code(code: str, language: str = "python", max_retries=2) -> str:
 from app.core import schedule as _schedule
 
 
-# 「这句话里有没有时间锚点」与「这个锚点具体是哪天几点」共用下面这几张词表。
-# 为什么需要它们：`plan_add` 只在**缺到落不了地**时问一次。问得太勤（连「今天下午」
-# 也拦）会让每加一条日程都被打断；问得太少（把「记得提醒我交周报」直接记到今天）
-# 则是替用户编了一个他没说的日子。这里的取舍偏向**不问**：只要句子里出现任何一个
-# 时间词，就按它（或默认今天）落地，绝不打断。
+# 「时间是哪一天」与「这一天里的哪个时刻」分开认：两族词认不出时该做的事不同。
+#   - `_DAY_WORD_RE`：指向某一天/某段日子的词。命中却给不出具体日期（「周末」
+#     「下个月」「月底」「明年」「年初」）⇒ 这正是用户在回答"哪天"，落今天就是把
+#     日程记错一天到几个月，必须挂起问一次。
+#   - `_CLOCK_WORD_RE`：只指向一天内时段/钟点的词（「下午」「稍后」）。日期上它
+#     明确就是今天；钟点认不出就按"今天找时间做"记下并留 note，不为它打断用户。
+#   - 两族都不命中（「买菜」）：没有时间意图，按默认今天直通（已拍口径：没有意图
+#     就别打断）。
 # 射程（实测见 tests/test_v0350_planadd_suspend_contract.py）：
-#   - 问：text 里下列时间词一个都没有，且 at、day 都为空。
-#   - 不问：at 或 day 有一个（哪怕是模型写错的形状，交给 schedule 报错）；
-#           或 text 含下列任一时间词（认得出具体日子/时刻就采用，认不出就落今天）。
-_TIME_WORD_RE = re.compile(
+#   - 问：at、day 都为空，text 里有日子词，但 `_day_from_text` 没给出具体日期。
+#   - 不问：at 或 day 有一个（哪怕是模型写错的形状，交给 schedule 报错）；或 text
+#           里的日子词认出了具体日期；或 text 里只有时段/钟点词；或一个时间词都没有。
+_DAY_WORD_RE = re.compile(
     r"今天|今日|今儿|今晚|今早|明天|明日|明儿|明早|明晚|大后天|后天|"
     r"(?:这|本|下下|下个|下)?(?:周|星期|礼拜)[一二三四五六日天]|"
-    r"下周|这周|本周|周末|月底|月初|年底|明年|下个月|"
-    r"一会儿|待会儿|待会|稍后|晚点|马上|立刻|"
-    r"上午|下午|中午|晚上|夜里|半夜|早上|早晨|清晨|凌晨|傍晚|"
-    r"\d{1,2}\s*[:：]\s*\d{2}|"
-    r"[零一二两三四五六七八九十\d]{1,3}\s*[点时點]|"
+    r"(?:这|本|下下|下个|下)(?:星期|礼拜)|"
+    r"下周|这周|本周|周末|月底|月初|年底|年初|明年|下个月|"
     r"\d{1,2}\s*月\s*\d{1,2}\s*[日号]|"
     r"\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}|"
     r"[零一二两三四五六七八九十\d]+\s*天(?:后|以后|之后)"
+)
+_CLOCK_WORD_RE = re.compile(
+    r"一会儿|待会儿|待会|稍后|晚点|马上|立刻|"
+    r"上午|下午|中午|晚上|夜里|半夜|早上|早晨|清晨|凌晨|傍晚|"
+    r"\d{1,2}\s*[:：]\s*\d{2}|"
+    r"[零一二两三四五六七八九十\d]{1,3}\s*[点时點]"
 )
 
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
@@ -520,9 +526,11 @@ def today_plan(user_id: str):
     needs_user=True,
     # ⭐ v0.35 工单 #79/#40 先立起"可挂起"的声明，工单 #153 在这里补上真正的挂起点。
     # 射程（实测见 tests/test_v0350_planadd_suspend_contract.py）：
-    #   - 问一次：at、day 都为空，且 text 里没有任何可识别的时间词。
-    #   - 不问：at 或 day 有一个（形状不对交给 schedule 报错）；或 text 里有时间词
-    #     （认得出具体日子/时刻就采用，认不出就落今天，并在返回值里留一句 note）。
+    #   - 问一次：at、day 都为空，text 里有日子词（「周末」「下个月」「月底」…）却
+    #     认不出具体日期。用户明确表达了时间意图，落今天就是把日程记错。
+    #   - 不问：at 或 day 有一个（形状不对交给 schedule 报错）；text 里的日子词认出了
+    #     具体日期；只有时段/钟点词（「下午」）时按今天记下并留 note；一个时间词都
+    #     没有时按默认今天直通（没有意图就别打断）。
     #   - 续跑：只认 state 里的原文与已定部分 + answer；answer 仍认不出就落今天并留
     #     note，绝不再问第二次。state 里只有 text/at/day 三格，不塞会话。
     # 为什么是它——它只写本地日程（`_schedule.add_item`），无网络、无积分、无审批面，
@@ -558,6 +566,9 @@ def plan_add(user_id: str, text: str, at: str = "", day: str = "", resume: dict 
     text = _schedule.clean_text(text)
     at = str(at or "").strip()
     day = str(day or "").strip()
+    # 模型亲自给出的 at/day 是"信息充足"的直接证据：形状不对也只交给 schedule 报错，
+    # 不因此打断用户。
+    anchored = bool(at or day)
     if day:
         try:
             day = _schedule.normalize_day(day)
@@ -575,18 +586,21 @@ def plan_add(user_id: str, text: str, at: str = "", day: str = "", resume: dict 
     if not at:
         at = _at_from_text(text)
 
-    if not day and not at and not _TIME_WORD_RE.search(text):
+    if not day and not anchored and _DAY_WORD_RE.search(text):
+        # 说了日子却认不出是哪天（「周末」「下个月」「月底」「明年」）。这正是用户
+        # 在回答"哪天"，替它落今天就是把日程记错，问一次再写。
+        # 已解析出的 at 要带进断点：「周末九点」问回「周六」时必须落在周六 09:00。
         raise ToolSuspended(
-            f"「{text}」要记到哪天？说个日子或时间就行，比如「今天」「明天九点」。",
-            state={"text": text, "at": "", "day": ""},
+            f"「{text}」要记到哪一天？说个具体日子就行，比如「周六」「10月25日」。",
+            state={"text": text, "at": at, "day": ""},
             hint="把这句话原样问用户；拿到答复后从断点续跑，不要重新建一条日程。")
 
     item = _schedule.add_item(user_id, text, at=at, day=day)
     result = {"day": _schedule.normalize_day(day), "text": item["text"],
               "at": item["at"], "id": item["id"]}
-    if not day and not at:
-        # 句子里有时间词、但认不出具体是哪天几点（「周末」「下午」这类）。不问，
-        # 但要让模型知道它被落在了今天，而不是以为那个模糊时间被精确执行了。
-        result["note"] = (f"这句话里没认出具体日子或时刻，已按今天"
-                          f"（{result['day']}）记下；要改就告诉我哪天。")
+    if not day and not at and _CLOCK_WORD_RE.search(text):
+        # 句子里只有时段/钟点（「下午」这类），认不出具体钟点。日期上它就是今天，
+        # 所以不打断；但要让模型知道它是"今天找时间做"，而不是某个精确时刻。
+        result["note"] = (f"这句话里没认出具体时刻，已按今天"
+                          f"（{result['day']}）记下；要定点就告诉我几点。")
     return result
