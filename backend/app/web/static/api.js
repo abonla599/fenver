@@ -747,5 +747,24 @@ const API = (() => {
         body: { ticket_id: ticketId, decision: decision } }),
     getApprovalStatus: (ticketId) =>
       request("/v1/approval/" + encodeURIComponent(ticketId)),
+
+    /* 任务面（v0.35 #133）：读侧只有一个真相源。卡片状态一律由 GET /v1/tasks/{id} 现读，
+     * 流里的帧最多算"去读一次"的提示——stream_runs 的缓冲随进程没，只有"读"才让
+     * 「服务重启后这张卡片还在」成为用户自己验得了的事。
+     *
+     * answerTask 走的是**一次长阻塞 POST**：/v1/agent/orchestrate 在服务端是同步 def
+     * （跑完、或再次挂回断点才回话，这一枪不许改成 async），断连时服务端照跑，所以
+     * 它不收 signal——没有任何客户端动作该掐掉一个已经在花钱的执行。
+     *
+     * goal 必填（main.py 的 OrchestrateRequest 里 goal 那一格没有默认值，缺它整枪 422），
+     * 续跑判定认的却是 task_id：恢复分支从头到尾不读形参 goal。于是这里把任务自己那条
+     * goal 原样带回去——留空串也能过校验，但那会把"这一枪在续哪件事"从服务端的日志与
+     * Task 记录里抹掉，而它恰好是排查重复付费时唯一想看的那一行。
+     */
+    listTasks: () => request("/v1/tasks"),
+    getTask: (taskId) => request("/v1/tasks/" + encodeURIComponent(taskId)),
+    answerTask: (goal, taskId, userAnswer) =>
+      request("/v1/agent/orchestrate", { method: "POST",
+        body: { goal, task_id: taskId, user_answer: userAnswer } }),
   };
 })();

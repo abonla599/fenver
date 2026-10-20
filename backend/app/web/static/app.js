@@ -224,6 +224,12 @@ const state = {
   myDefault: null,        // /v1/me/providers 报的"我的默认"，服务端持久化那份
   me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
   currentRunId: null,     // 这一轮流式对话的 run_id：停止要打服务端取消、断线续播也认它
+  // 任务面（v0.35 #133）：tasks 是列表那一屏，taskDetail 是**唯一**的卡片真相（GET 读回来
+  // 的那一份），taskOpenId 记着这一页开的是哪一条，taskAnswering 是那一枪长阻塞在途。
+  tasks: [],
+  taskDetail: null,
+  taskOpenId: "",
+  taskAnswering: false,
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -1833,6 +1839,233 @@ function startApprovalExpiry(holder, node) {
   }, remaining);
 }
 
+/* ---------------- v0.35 任务面：「需要你输入」卡片 ----------------
+ * 状态只从一个地方来：GET /v1/tasks/{id}。SSE 帧在这一页一个字都不读，最多算"去读一次"
+ * 的提示——stream_runs 的缓冲随进程没，只有"读"才让「服务重启后这张卡片还在」成为用户
+ * 自己验得了的事（他关掉页面再回来，按同一个 id 问一次就看见它）。
+ *
+ * 回答是一次**长阻塞** POST：/v1/agent/orchestrate 在服务端是同步 def，跑完（或再次挂回
+ * 断点）才回话。断连时服务端照跑，所以提交之后先落「执行中」这一句、再靠读状态推进，
+ * 绝不靠"这条连接还活着"来推断事情办没办。
+ *
+ * 下面几个 task* 函数是纯的（不读 $、不读 API、不读 state），沿用 accumulateTrace /
+ * reminderStatusCard 的规矩：渲染判据要能在 node 里真跑一遍才算数。
+ */
+const TASK_CARD_TITLE = "需要你输入";
+const TASK_WAITING_TEXT = "等你回复";
+const TASK_EXECUTING_TEXT = "执行中";
+// 非属主与不存在的 id 在服务端是同一句 404（那是归属探测的闸）。这句话要说的是"读不到"，
+// 不是"断网"——说成断网，人就守着一颗刷新键反复敲一条永远不会有的记录。
+const TASK_GONE_TEXT = "这条任务打不开：它可能已经不在了，也可能本来就不是你的。";
+const TASK_STATUS_TEXT = {
+  pending: "排队中", running: "执行中", waiting_user: "需要你输入",
+  completed: "办完了", failed: "没办成", cancelled: "已停止",
+};
+
+function taskStatusText(status) {
+  const key = String(status || "");
+  return TASK_STATUS_TEXT[key] || key;
+}
+
+/** 进度只在游标真的给了两个数时才说。缺任何一个就当没说：猜出来的"第 1 / 0 步"比空白更坏。 */
+function taskProgressLine(detail) {
+  const cursor = (detail && detail.resume_cursor) || {};
+  const idx = Number(cursor.subtask_index);
+  const total = Number(cursor.subtask_total);
+  if (!Number.isFinite(idx) || !Number.isFinite(total) || total <= 0) return "";
+  return "第 " + (idx + 1) + " / " + total + " 步";
+}
+
+/** 时限那一句的唯一出处：只看 waiting_expires_at 这一个已有键，不引入客户端自己的状态。
+ *  默认窗口是 0，后端把 0（以及读不懂的坏值）归成"永不做废"，于是 waiting_expires_at
+ *  就是 None——这一格无可数之物，既不说数字也不说"无限"，只说人该做什么。 */
+function taskWaitingLine(detail, nowMs) {
+  const raw = detail && detail.waiting_expires_at;
+  if (!raw) return TASK_WAITING_TEXT;
+  const at = Date.parse(String(raw));
+  if (!Number.isFinite(at)) return TASK_WAITING_TEXT;
+  const left = Math.round((at - (nowMs === undefined ? Date.now() : nowMs)) / 1000);
+  if (left <= 0) return "时限已过";
+  if (left < 60) return left + " 秒内回复";
+  return Math.ceil(left / 60) + " 分钟内回复";
+}
+
+/** 卡片上那句"这一条在干什么"。busy 是提交在途这件事的界面表达，不是任务的状态——
+ *  任务自己那一刻说什么，等这次读回来算它自己的。 */
+function taskStatusLine(detail, busy) {
+  if (!detail) return "";
+  if (busy) return TASK_EXECUTING_TEXT;
+  const label = taskStatusText(detail.status);
+  // 超时作废与用户自己取消在 status 上是同一个词，服务端用 end_reason 分开这两件事。
+  if (String(detail.status || "") === "cancelled"
+      && String(detail.end_reason || "") === "cancelled_by_timeout") {
+    return label + " · 等回复等得太久";
+  }
+  return label;
+}
+
+/** 整张卡片要画的东西，一次算完。detail 为空（没选中 / 读不到）时 visible=false，
+ *  于是画出来的是一个不占位的空壳——这一页本来就没有可回答的东西。 */
+function taskCardView(detail, opts) {
+  const o = opts || {};
+  const view = { visible: false, title: "", question: "", progress: "",
+                 waiting: "", canAnswer: false, state: "", busy: !!o.busy };
+  view.state = taskStatusLine(detail, o.busy);
+  if (!detail) return view;
+  if (String(detail.status || "") !== "waiting_user") return view;
+  const cursor = detail.resume_cursor || {};
+  view.visible = true;
+  view.title = TASK_CARD_TITLE;
+  view.question = String(cursor.question || "");
+  view.progress = taskProgressLine(detail);
+  view.waiting = taskWaitingLine(detail, o.now);
+  // can_resume 是布尔字段、不是状态字面量（服务端 A1 的不变式：它 ⟺ waiting_user）。
+  // 这里照读它，因为"这一态"与"这一步真能接住一句话"是两件事，游标种类认不认得只有
+  // 服务端判得准——读侧不许替它猜一个能按的键。
+  view.canAnswer = !!detail.can_resume && !o.busy;
+  return view;
+}
+
+/** 把卡片画进这一页。骨架在 index.html 的 #paneTasks 里，字符串一个都不从服务端进 HTML。 */
+function paintTaskCard(node, view) {
+  const card = node && node.querySelector ? node.querySelector(".msg-task") : null;
+  if (!card || !view) return;
+  card.classList.toggle("hidden", !view.visible);
+  const put = (sel, text) => {
+    const el = card.querySelector(sel);
+    if (el) el.textContent = text || "";
+  };
+  put(".task-card-head", view.title);
+  put(".task-question", view.question);
+  put(".task-progress", view.progress);
+  put(".task-waiting", view.waiting);
+  put(".task-state", view.state);
+  const form = card.querySelector(".task-answer");
+  if (form) form.classList.toggle("hidden", !view.canAnswer);
+  card.classList.toggle("busy", !!view.busy);
+}
+
+function setTaskError(text) {
+  const el = $("taskError");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("hidden", !text);
+}
+
+function renderTaskList() {
+  const box = $("taskList");
+  if (!box) return;
+  box.innerHTML = "";
+  const list = Array.isArray(state.tasks) ? state.tasks : [];
+  const empty = $("taskEmpty");
+  if (empty) empty.classList.toggle("hidden", list.length > 0);
+  list.forEach((row) => {
+    const id = String(row.task_id || "");
+    const li = document.createElement("li");
+    li.className = "task-item";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "task-pick";
+    btn.classList.toggle("on", !!id && id === state.taskOpenId);
+    const goal = document.createElement("span");
+    goal.className = "task-goal";
+    goal.textContent = String(row.goal || "（没写目标）");
+    const meta = document.createElement("span");
+    meta.className = "task-meta-line";
+    // 列表端的进度是服务端拼好的 "已完成/总数"，照原样带出来；这一页不自己算步数。
+    meta.textContent = [taskStatusText(row.status), String(row.progress || "")]
+      .filter(Boolean).join(" · ");
+    btn.appendChild(goal);
+    btn.appendChild(meta);
+    btn.onclick = () => { openTaskDetail(id); };
+    li.appendChild(btn);
+    box.appendChild(li);
+  });
+}
+
+function paintTasks(opts) {
+  renderTaskList();
+  paintTaskCard($("paneTasks"), taskCardView(state.taskDetail, opts));
+}
+
+async function openTaskDetail(taskId) {
+  const id = String(taskId || "");
+  state.taskOpenId = id;
+  if (!id) return;
+  try {
+    state.taskDetail = await API.getTask(id);
+    setTaskError("");
+  } catch (e) {
+    state.taskDetail = null;
+    setTaskError(taskErrorLine(e));
+    // 404 是服务端好好回的一句话，不是"请求根本没出设备"，不该弹断网卡片；
+    // 401 由 needsAuth 落登录页，也不该在这里再说一句读不到。
+    if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
+  }
+  paintTasks({ busy: state.taskAnswering });
+}
+
+/** 错误怎么说法：404 有自己那句话（归属的事），其余照服务端给的原因说，
+ *  连不上（fetch 抛 TypeError）说成连不上。把前一种当网络故障重试是这一页最贵的错。 */
+function taskErrorLine(e) {
+  if (!e) return "";
+  if (e.status === 404) return TASK_GONE_TEXT;
+  if (e instanceof TypeError) return "连不上服务端，任务状态还没读到。";
+  if (e.status === 401) return "";
+  return String(e.message || "任务状态没读到。");
+}
+
+async function loadTasks(openId) {
+  try {
+    const out = await API.listTasks();
+    state.tasks = (out && Array.isArray(out.tasks)) ? out.tasks : [];
+    setTaskError("");
+  } catch (e) {
+    state.tasks = [];
+    setTaskError(taskErrorLine(e));
+    if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
+  }
+  // 落在哪一条：显式点过的 > 第一条等人的 > 第一条。没有可开的那条就画空壳。
+  const waiting = state.tasks.find((t) => String(t.status || "") === "waiting_user");
+  const want = String(openId || state.taskOpenId
+    || (waiting && waiting.task_id) || (state.tasks[0] && state.tasks[0].task_id) || "");
+  if (!want) {
+    state.taskOpenId = "";
+    state.taskDetail = null;
+    paintTasks();
+    return;
+  }
+  await openTaskDetail(want);
+}
+
+async function submitTaskAnswer() {
+  const detail = state.taskDetail;
+  if (!detail || state.taskAnswering) return;
+  const input = $("taskAnswerInput");
+  const text = String((input && input.value) || "").trim();
+  if (!text) return;
+  // 同一枚断点只许一个答案接走（服务端 _claim_execution 的闸），所以这一格在途时按键：
+  // 双击送出的是两枪，后到的那一枪只会拿到一句"没接住"，白等一次长阻塞。
+  state.taskAnswering = true;
+  const btn = $("taskAnswerBtn");
+  if (btn) btn.disabled = true;
+  paintTaskCard($("paneTasks"), taskCardView(detail, { busy: true }));
+  try {
+    await API.answerTask(String(detail.goal || ""), String(detail.task_id), text);
+  } catch (e) {
+    setTaskError(taskErrorLine(e));
+    if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
+  } finally {
+    state.taskAnswering = false;
+    if (btn) btn.disabled = false;
+    if (input) input.value = "";
+    // 回没回话都再读一次：这一枪可能因为断连根本没回来，而服务端照样在跑，
+    // 此刻唯一说得出"挂在哪一步"的地方还是 GET。
+    await openTaskDetail(String(detail.task_id));
+    await loadTasks(String(detail.task_id));
+  }
+}
+
 function messageNode(m, index) {
   const node = $("msgTpl").content.firstElementChild.cloneNode(true);
   node.classList.add(m.role === "user" ? "user" : "assistant");
@@ -2538,7 +2771,7 @@ $("sdSearchForm").onsubmit = async (e) => {
  */
 const SET_PAGES = { providers: "模型服务", accounts: "账户",
                     persona: "角色设定", memory: "长期记忆", reminders: "提醒",
-                    schedule: "日程", feedback: "意见反馈", searchkeys: "搜索源" };
+                    schedule: "日程", tasks: "任务", feedback: "意见反馈", searchkeys: "搜索源" };
 
 function openSettings(page) {
   // 从侧栏点进别的页面，也是离开日程页：先确认，再把弹层换掉。
@@ -2572,6 +2805,9 @@ function openSetPage(name) {
   if (name === "persona") syncPersonaChip();
   if (name === "reminders") renderReminders($("paneReminders"));
   if (name === "schedule") loadSchedule();
+  // 任务面每次进来都重读一遍（v0.35 #133）：卡片状态只在 GET 里，而这一页开着的这几秒
+  // 可能正好有一次编排在外面跑完了——不缓存、不猜，进来就问。
+  if (name === "tasks") loadTasks();
   if (name === "accounts") { syncConnPane(); renderAccounts(); }
   if (name === "searchkeys") loadSearchKeys();
 }
@@ -3200,6 +3436,13 @@ function resetViewForIdentity() {
   $("memoryList").innerHTML = "";
   $("personaInput").value = "";
   $("memoryQuery").value = "";
+  // 任务面同理（v0.35 #133）：那张卡片是从"这个人的任务"读出来的，换人不换掉它，
+  // 屏幕上就挂着上一个人的问题原文和一个能按的答案键——那句回答会打到他的断点上。
+  state.tasks = [];
+  state.taskDetail = null;
+  state.taskOpenId = "";
+  renderTaskList();
+  paintTaskCard($("paneTasks"), taskCardView(null));
   // 刻意不动 lastSessionId：setCurrent 之后 pref.sessionId 读到的就是新那个人自己
   // 记着的那条。把上一个人的指针一起擦掉，切回来就变成"我刚才聊的呢？"（实测）。
   renderMessages();
@@ -4008,6 +4251,7 @@ function bind() {
   $("navProviders").onclick = () => { openSettings("providers"); closeSidebar(); };
   $("navMemory").onclick = () => { openSettings("memory"); closeSidebar(); };
   $("navSchedule").onclick = () => { openSettings("schedule"); closeSidebar(); };
+  $("navTask").onclick = () => { openSettings("tasks"); closeSidebar(); };
   // 不传 tab：落在哪一页由 openSettings 按角色决定（管理员=模型服务，其他人=连接）。
   // 收起侧栏是必须的：手机上它是抽屉，不收就是一片遮罩挡在面板前面。
   $("whoRow").onclick = () => { openSettings(); closeSidebar(); };
@@ -4117,6 +4361,10 @@ function bind() {
   $("calPrevMonth").onclick = () => schedMoveMonth(-1);
   $("calNextMonth").onclick = () => schedMoveMonth(1);
   $("calNextYear").onclick = () => schedMoveMonth(12);
+  /* 任务面（v0.35 #133）：这颗键不做任何"猜状态"的事，它就是再去问一次 GET。
+     答案表单也不 fetch：submitTaskAnswer 打的是那次长阻塞 POST，回话之后仍由读推进。 */
+  $("taskRefresh").onclick = () => loadTasks();
+  $("taskAnswerForm").onsubmit = (e) => { e.preventDefault(); submitTaskAnswer(); };
   const calWeeks = $("schedCalWeeks");
   SCHED_WEEK_HEAD.forEach((w) => {
     const s = document.createElement("span");
