@@ -18,7 +18,8 @@ from app.core import search_usage
 from app.tools.registry import register_tool, tools_registry, is_available
 from app.tools import search_chain
 from app.tools.executor import suspend_ready_for_model
-from app.tools.response import ToolResponse 
+from app.tools.response import ToolResponse, ToolSuspended
+from datetime import date, timedelta
 # ---------- 计算器工具 ----------
 sandbox = SandboxManager()
 @register_tool(
@@ -348,6 +349,148 @@ def execute_code(code: str, language: str = "python", max_retries=2) -> str:
 from app.core import schedule as _schedule
 
 
+# 「这句话里有没有时间锚点」与「这个锚点具体是哪天几点」共用下面这几张词表。
+# 为什么需要它们：`plan_add` 只在**缺到落不了地**时问一次。问得太勤（连「今天下午」
+# 也拦）会让每加一条日程都被打断；问得太少（把「记得提醒我交周报」直接记到今天）
+# 则是替用户编了一个他没说的日子。这里的取舍偏向**不问**：只要句子里出现任何一个
+# 时间词，就按它（或默认今天）落地，绝不打断。
+# 射程（实测见 tests/test_v0350_planadd_suspend_contract.py）：
+#   - 问：text 里下列时间词一个都没有，且 at、day 都为空。
+#   - 不问：at 或 day 有一个（哪怕是模型写错的形状，交给 schedule 报错）；
+#           或 text 含下列任一时间词（认得出具体日子/时刻就采用，认不出就落今天）。
+_TIME_WORD_RE = re.compile(
+    r"今天|今日|今儿|今晚|今早|明天|明日|明儿|明早|明晚|大后天|后天|"
+    r"(?:这|本|下下|下个|下)?(?:周|星期|礼拜)[一二三四五六日天]|"
+    r"下周|这周|本周|周末|月底|月初|年底|明年|下个月|"
+    r"一会儿|待会儿|待会|稍后|晚点|马上|立刻|"
+    r"上午|下午|中午|晚上|夜里|半夜|早上|早晨|清晨|凌晨|傍晚|"
+    r"\d{1,2}\s*[:：]\s*\d{2}|"
+    r"[零一二两三四五六七八九十\d]{1,3}\s*[点时點]|"
+    r"\d{1,2}\s*月\s*\d{1,2}\s*[日号]|"
+    r"\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}|"
+    r"[零一二两三四五六七八九十\d]+\s*天(?:后|以后|之后)"
+)
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_WEEKDAY_INDEX = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+_DAY_OFFSETS = {"大后天": 3, "后天": 2, "明早": 1, "明晚": 1, "明天": 1, "明日": 1,
+                "明儿": 1, "今晚": 0, "今早": 0, "今天": 0, "今日": 0, "今儿": 0}
+_PERIOD_RE = re.compile(r"上午|早上|早晨|清晨|凌晨|中午|下午|傍晚|晚上|夜里|半夜")
+
+
+def _number(token: str):
+    """把 `9` / `九` / `十一` / `二十三` 认成整数；认不出回 None。"""
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if "十" not in text:
+        return _CN_DIGITS.get(text)
+    tens, _, ones = text.partition("十")
+    high = _CN_DIGITS.get(tens, 1) if tens else 1
+    low = _CN_DIGITS.get(ones, 0) if ones else 0
+    return high * 10 + low
+
+
+def _day_from_text(text: str, base: date) -> str:
+    """从一句话里认出一个**不早于 base** 的日子；认不出回空串。"""
+    raw = str(text or "")
+    absolute = re.search(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})", raw)
+    if absolute:
+        try:
+            return date(int(absolute.group(1)), int(absolute.group(2)),
+                        int(absolute.group(3))).isoformat()
+        except ValueError:
+            return ""
+    m = re.search(r"大后天|后天|明早|明晚|明天|明日|明儿|今晚|今早|今天|今日|今儿", raw)
+    if m:
+        return (base + timedelta(days=_DAY_OFFSETS[m.group(0)])).isoformat()
+    m = re.search(r"(下下|这|本|下个|下)?\s*(?:周|星期|礼拜)([一二三四五六日天])", raw)
+    if m:
+        prefix = m.group(1) or ""
+        monday = base - timedelta(days=base.weekday())
+        if prefix == "下":
+            monday += timedelta(days=7)
+        elif prefix == "下下":
+            monday += timedelta(days=14)
+        day = monday + timedelta(days=_WEEKDAY_INDEX[m.group(2)])
+        if day < base:
+            # 「这周五」说在周六 = 那个周五已经过去，按下一个周五算。向前排是日程的
+            # 唯一方向：落一个已经过去的日子，用户只会以为没记上。
+            day += timedelta(days=7)
+        return day.isoformat()
+    m = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]", raw)
+    if m:
+        try:
+            day = date(base.year, int(m.group(1)), int(m.group(2)))
+            if day < base:
+                day = date(base.year + 1, day.month, day.day)
+            return day.isoformat()
+        except ValueError:
+            return ""
+    m = re.search(r"([零一二两三四五六七八九十\d]+)\s*天(?:后|以后|之后)", raw)
+    if m:
+        days = _number(m.group(1))
+        if days is None:
+            return ""
+        try:
+            return (base + timedelta(days=days)).isoformat()
+        except (ValueError, OverflowError):
+            return ""
+    return ""
+
+
+def _period_near(raw: str, index: int) -> str:
+    """离这个时刻最近的那个时段词：先看它前面，前面没有再看后面。
+
+    「早上开会，下午三点」不能取句首那个「早上」——那会把 15:00 记成 03:00。
+    """
+    before = list(_PERIOD_RE.finditer(raw, 0, index))
+    if before:
+        return before[-1].group(0)
+    after = _PERIOD_RE.search(raw, index)
+    return after.group(0) if after else ""
+
+
+def _at_from_text(text: str) -> str:
+    """从一句话里认出 24 小时的 `HH:MM`；认不出回空串。"""
+    raw = str(text or "")
+
+    def settle(hour: int, minute: int, index: int) -> str:
+        if not (0 <= minute <= 59):
+            return ""
+        period = _period_near(raw, index)
+        if period in ("下午", "傍晚", "晚上", "夜里") and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+        elif period == "凌晨" and hour == 12:
+            hour = 0
+        return f"{hour:02d}:{minute:02d}" if 0 <= hour <= 23 else ""
+
+    m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", raw)
+    if m:
+        return settle(int(m.group(1)), int(m.group(2)), m.start())
+    m = re.search(r"([零一二两三四五六七八九十\d]{1,3})\s*[点时點]\s*"
+                  r"(半|一刻|三刻|([零一二两三四五六七八九十\d]{1,3})\s*分)?", raw)
+    if m:
+        hour = _number(m.group(1))
+        if hour is None:
+            return ""
+        minute = {"半": 30, "一刻": 15, "三刻": 45}.get(m.group(2), 0)
+        if m.group(3):
+            minute = _number(m.group(3)) or 0
+        return settle(hour, minute, m.start())
+    return ""
+
+
+def _read_when(text: str, base: date):
+    """一句话里的 (日子, 时刻)，认不出各自回空串。"""
+    return _day_from_text(text, base), _at_from_text(text)
+
+
 @register_tool(
     name="today_plan",
     description="读这个人今天的日程清单（事项、时间、做完没有）。返回值第一行是服务端的今天"
@@ -375,20 +518,75 @@ def today_plan(user_id: str):
         "required": ["text"],
     },
     needs_user=True,
-    # ⭐ v0.35 工单 #79/#40：全仓第一条真声明 suspends 的工具。为什么是它——它只写本地
-    # 日程（`_schedule.add_item`），无网络、无积分、无审批面，因此不会撞上 #37 那条
-    # "suspends + requires_approval 二选一"的派发拒绝（`execute_code` 恰恰带着审批，选不得）。
-    # 声明 suspends 的意义是把 `_can_resume` 从恒假变成可兑现：编排器那侧
-    # `can_resume ⟺ status 是 waiting_user` 的不变式今天才可能真的走到 waiting_user 那一格。
-    # 诚实交代射程：这一版 plan_add **还没有真的挂起点**（函数体不 raise ToolSuspended），
-    # 所以现网不会凭空多出等用户回答的任务；真的问一句由后续票在这里补，配套的两样
-    # （频控档 + resume 形参）已经先备好了。
+    # ⭐ v0.35 工单 #79/#40 先立起"可挂起"的声明，工单 #153 在这里补上真正的挂起点。
+    # 射程（实测见 tests/test_v0350_planadd_suspend_contract.py）：
+    #   - 问一次：at、day 都为空，且 text 里没有任何可识别的时间词。
+    #   - 不问：at 或 day 有一个（形状不对交给 schedule 报错）；或 text 里有时间词
+    #     （认得出具体日子/时刻就采用，认不出就落今天，并在返回值里留一句 note）。
+    #   - 续跑：只认 state 里的原文与已定部分 + answer；answer 仍认不出就落今天并留
+    #     note，绝不再问第二次。state 里只有 text/at/day 三格，不塞会话。
+    # 为什么是它——它只写本地日程（`_schedule.add_item`），无网络、无积分、无审批面，
+    # 因此不会撞上 #37 那条"suspends + requires_approval 二选一"的派发拒绝。
     suspends=True,
     # 配套缺任何一样就退回"模型看不见它"，而不是让它带着没档的挂起被反复续跑。
     available=lambda: suspend_ready_for_model("plan_add"),
 )
 def plan_add(user_id: str, text: str, at: str = "", day: str = "", resume: dict = None):
     """往这个人的日程追加一条。`resume` 由执行器在续跑那一次注入（不是模型给的参数）。"""
+    base = date.fromisoformat(_schedule.today())
+
+    if resume is not None:
+        state = resume.get("state") if isinstance(resume, dict) else None
+        state = state if isinstance(state, dict) else {}
+        raw_text = _schedule.clean_text(state.get("text") or text)
+        at = str(state.get("at") or at or "").strip()
+        day = str(state.get("day") or day or "").strip()
+        answer = str((resume or {}).get("answer") or "")
+        got_day, got_at = _read_when(answer, base)
+        day = day or got_day
+        at = at or got_at
+        item = _schedule.add_item(user_id, raw_text, at=at, day=day)
+        result = {"day": _schedule.normalize_day(day), "text": item["text"],
+                  "at": item["at"], "id": item["id"]}
+        if not (got_day or got_at):
+            # 有界失败：答案仍然不足以落地就按默认今天写完，且把"我没听懂"说出来。
+            # 绝不在这里再 raise 一次——无限追问会把一条日程变成一场盘问。
+            result["note"] = (f"没从你的回答里认出具体日子或时刻，已按今天"
+                              f"（{result['day']}）先记下；要换日子再告诉我。")
+        return result
+
+    text = _schedule.clean_text(text)
+    at = str(at or "").strip()
+    day = str(day or "").strip()
+    if day:
+        try:
+            day = _schedule.normalize_day(day)
+        except _schedule.ScheduleError:
+            # 模型常把「明天」直接塞进 day（schema 写的是 YYYY-MM-DD）。认得出就替它
+            # 换算；认不出保留原样，让 schedule 的报错照旧说清哪里不对。
+            day = _day_from_text(day, base) or day
+    if at:
+        try:
+            at = _schedule.clean_at(at)
+        except _schedule.ScheduleError:
+            at = _at_from_text(at) or at
+    if not day:
+        day = _day_from_text(text, base)
+    if not at:
+        at = _at_from_text(text)
+
+    if not day and not at and not _TIME_WORD_RE.search(text):
+        raise ToolSuspended(
+            f"「{text}」要记到哪天？说个日子或时间就行，比如「今天」「明天九点」。",
+            state={"text": text, "at": "", "day": ""},
+            hint="把这句话原样问用户；拿到答复后从断点续跑，不要重新建一条日程。")
+
     item = _schedule.add_item(user_id, text, at=at, day=day)
-    return {"day": _schedule.normalize_day(day), "text": item["text"],
-            "at": item["at"], "id": item["id"]}
+    result = {"day": _schedule.normalize_day(day), "text": item["text"],
+              "at": item["at"], "id": item["id"]}
+    if not day and not at:
+        # 句子里有时间词、但认不出具体是哪天几点（「周末」「下午」这类）。不问，
+        # 但要让模型知道它被落在了今天，而不是以为那个模糊时间被精确执行了。
+        result["note"] = (f"这句话里没认出具体日子或时刻，已按今天"
+                          f"（{result['day']}）记下；要改就告诉我哪天。")
+    return result
