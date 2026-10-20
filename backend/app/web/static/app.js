@@ -230,6 +230,7 @@ const state = {
   taskDetail: null,
   taskOpenId: "",
   taskAnswering: false,
+  taskEpoch: 0,           // 换身份 +1：在途那一枪回来时认不认这个页面，看它还是不是出发时那一个
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -1878,14 +1879,15 @@ function taskProgressLine(detail) {
 
 /** 时限那一句的唯一出处：只看 waiting_expires_at 这一个已有键，不引入客户端自己的状态。
  *  默认窗口是 0，后端把 0（以及读不懂的坏值）归成"永不做废"，于是 waiting_expires_at
- *  就是 None——这一格无可数之物，既不说数字也不说"无限"，只说人该做什么。 */
+ *  就是 None——这一格无可数之物，既不说数字也不说"无限"，只说人该做什么。非正的剩余
+ *  同理：窗口坏没坏这一页判不了，而服务端还在等，就不该替它说"时限已过"。 */
 function taskWaitingLine(detail, nowMs) {
   const raw = detail && detail.waiting_expires_at;
   if (!raw) return TASK_WAITING_TEXT;
   const at = Date.parse(String(raw));
   if (!Number.isFinite(at)) return TASK_WAITING_TEXT;
   const left = Math.round((at - (nowMs === undefined ? Date.now() : nowMs)) / 1000);
-  if (left <= 0) return "时限已过";
+  if (left <= 0) return TASK_WAITING_TEXT;
   if (left < 60) return left + " 秒内回复";
   return Math.ceil(left / 60) + " 分钟内回复";
 }
@@ -1939,9 +1941,17 @@ function paintTaskCard(node, view) {
   put(".task-question", view.question);
   put(".task-progress", view.progress);
   put(".task-waiting", view.waiting);
-  put(".task-state", view.state);
+  // 状态句是这一页唯一说"它此刻在干什么"的地方。骨架里它带着 hidden（style.css 又是
+  // display:none），所以有句子就必须在这里摘掉——只写 textContent 等于没写。
+  const stateEl = card.querySelector(".task-state");
+  if (stateEl) {
+    stateEl.textContent = view.state || "";
+    stateEl.classList.toggle("hidden", !view.state);
+  }
+  // 表单跟着卡片在不在场：提交在途时只置忙（控件由提交那一侧禁用），不许收起——
+  // 收起后人就看不见自己在等什么，还以为刚才那一下没反应。
   const form = card.querySelector(".task-answer");
-  if (form) form.classList.toggle("hidden", !view.canAnswer);
+  if (form) form.classList.toggle("hidden", !view.visible);
   card.classList.toggle("busy", !!view.busy);
 }
 
@@ -2044,25 +2054,33 @@ async function submitTaskAnswer() {
   const input = $("taskAnswerInput");
   const text = String((input && input.value) || "").trim();
   if (!text) return;
+  // 这一枪可能跨过一次换人：收尾要写回"出发时那一个页面"。记下代号，换身份把它 +1，
+  // 回来对不上就整段丢掉——否则旧请求的错误/任务 id 会落进新那个人的界面。
+  const epoch = state.taskEpoch;
   // 同一枚断点只许一个答案接走（服务端 _claim_execution 的闸），所以这一格在途时按键：
   // 双击送出的是两枪，后到的那一枪只会拿到一句"没接住"，白等一次长阻塞。
   state.taskAnswering = true;
   const btn = $("taskAnswerBtn");
   if (btn) btn.disabled = true;
+  if (input) input.disabled = true;
   paintTaskCard($("paneTasks"), taskCardView(detail, { busy: true }));
   try {
     await API.answerTask(String(detail.goal || ""), String(detail.task_id), text);
   } catch (e) {
-    setTaskError(taskErrorLine(e));
-    if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
+    if (epoch === state.taskEpoch) {
+      setTaskError(taskErrorLine(e));
+      if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
+    }
   } finally {
-    state.taskAnswering = false;
-    if (btn) btn.disabled = false;
-    if (input) input.value = "";
-    // 回没回话都再读一次：这一枪可能因为断连根本没回来，而服务端照样在跑，
-    // 此刻唯一说得出"挂在哪一步"的地方还是 GET。
-    await openTaskDetail(String(detail.task_id));
-    await loadTasks(String(detail.task_id));
+    if (epoch === state.taskEpoch) {
+      state.taskAnswering = false;
+      if (btn) btn.disabled = false;
+      if (input) { input.disabled = false; input.value = ""; }
+      // 回没回话都再读一次：这一枪可能因为断连根本没回来，而服务端照样在跑，
+      // 此刻唯一说得出"挂在哪一步"的地方还是 GET。
+      await openTaskDetail(String(detail.task_id));
+      await loadTasks(String(detail.task_id));
+    }
   }
 }
 
@@ -3425,7 +3443,7 @@ function onShellEvent(evt) {
 
 /** 切换前必须一次清掉的本机视图。
  *  漏一项就是"界面写着 B、屏幕上画着 A 的对话"——用户据此判断「账号之间记忆共享」，
- *  哪怕服务端从来没共享过。所以这 7 项列在一处，而不是散在切换路径里各清各的。 */
+ *  哪怕服务端从来没共享过。所以这些项列在一处，而不是散在切换路径里各清各的。 */
 function resetViewForIdentity() {
   state.messages = [];
   state.sessions = [];
@@ -3438,9 +3456,17 @@ function resetViewForIdentity() {
   $("memoryQuery").value = "";
   // 任务面同理（v0.35 #133）：那张卡片是从"这个人的任务"读出来的，换人不换掉它，
   // 屏幕上就挂着上一个人的问题原文和一个能按的答案键——那句回答会打到他的断点上。
+  // 答案框里常是短信验证码，所以输入串、错误条、在途标记一起复位；不能等旧请求回头
+  // 再清（它可能一直不回来，而新那个人已经在看这一页了）。
+  state.taskEpoch += 1;
+  state.taskAnswering = false;
   state.tasks = [];
   state.taskDetail = null;
   state.taskOpenId = "";
+  $("taskAnswerInput").value = "";
+  $("taskAnswerInput").disabled = false;
+  $("taskAnswerBtn").disabled = false;
+  setTaskError("");
   renderTaskList();
   paintTaskCard($("paneTasks"), taskCardView(null));
   // 刻意不动 lastSessionId：setCurrent 之后 pref.sessionId 读到的就是新那个人自己

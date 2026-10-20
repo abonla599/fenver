@@ -14,6 +14,11 @@
 4. **非属主 404 是一句话，不是一次断网**。服务端把"不存在"和"不是你的"收成同一句 404
    （那是归属探测的闸），前端要说成"读不到"。说成断网，人就守着一颗刷新键反复敲一条
    永远不会有的记录——这一页没有任何自动重试，也没有一个自己的定时器。
+5. **换身份要把任务面清干净**。答案框里常是短信验证码，换人后旧输入、旧错误条、在途
+   标记一个都不许留在 DOM 里；长阻塞的那一枪回来也不许写进新那个人的页面。
+6. **文案只以 textContent 进 DOM，且任务面一条帧都不读**。前者用真 `paintTaskCard` /
+   `renderTaskList` 跑注入串（假 DOM 的 innerHTML 会真的长出节点）来判；后者反过来断言
+   任务面对服务端帧名的引用集合为空、`onEvent` 到任务面没有调用边。
 
 倒计时那一句只建立在 `waiting_expires_at` 上，而默认窗口下服务端答的是 None；
 "默认显示「等你回复」、既不说数字也不说无限"由下面的默认窗口那条钉，输入取
@@ -42,6 +47,11 @@ EMIT_SIDE = (APP_PY / "main.py", APP_PY / "core" / "streaming.py",
 # 这一页读的三个函数名。写在这里是因为它是**对外契约的名字**（票面定的），
 # 不是因为测试想挑一次实现细节。
 TASK_API_FUNCS = ("listTasks", "getTask", "answerTask")
+
+# 任务面这一组函数与 onEvent 之间不许有调用边：卡片状态只从 GET 来，流不是它的第二真源。
+TASK_FACE_FUNCS = ("taskStatusText", "taskProgressLine", "taskWaitingLine", "taskStatusLine",
+                   "taskCardView", "paintTaskCard", "taskErrorLine", "renderTaskList",
+                   "paintTasks", "openTaskDetail", "loadTasks", "submitTaskAnswer")
 
 
 def _text(path: Path) -> str:
@@ -158,6 +168,67 @@ def _run_node(source: str, driver: str, scenario=None):
         return out["out"]
 
 
+# 假 DOM 的公共底：textContent 与 innerHTML 分开收，innerHTML 会真的"长出"一颗 <img>。
+# 有了这条，把写入改成 innerHTML 才是在行为上被判红，而不是被一次字符串搜索判红。
+_FAKE_DOM = r"""
+var __created = [];
+function __node(tag) {
+  const n = {
+    tag: tag || "div", className: "", type: "", textContent: "", _html: "",
+    _kids: {}, _children: [], _imgs: [],
+    classList: {
+      _s: new Set(),
+      toggle(c, on) { if (on) this._s.add(c); else this._s.delete(c); },
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+    },
+    appendChild(ch) { this._children.push(ch); return ch; },
+    querySelector(sel) {
+      if (sel === "img") {
+        for (const k in this._kids) if (this._kids[k]._imgs.length) return this._kids[k]._imgs[0];
+        return null;
+      }
+      if (sel.charAt(0) !== ".") return null;
+      if (!this._kids[sel]) this._kids[sel] = __node("div");
+      return this._kids[sel];
+    },
+  };
+  Object.defineProperty(n, "innerHTML", {
+    get() { return this._html; },
+    set(v) {
+      this._html = String(v);
+      const m = String(v).match(/<img\b[^>]*>/i);
+      if (m) { const img = __node("img"); img._html = m[0]; this._imgs.push(img); }
+    },
+  });
+  __created.push(n);
+  return n;
+}
+function __findImgs() {
+  const out = [];
+  __created.forEach((n) => { if (n._imgs && n._imgs.length) out.push.apply(out, n._imgs); });
+  return out;
+}
+var __els = {};
+function __el(id) { if (!__els[id]) __els[id] = __node("div"); return __els[id]; }
+var document = { createElement: (tag) => __node(tag) };
+var $ = (id) => __el(id);
+var state = { messages: [], sessions: [], pending: [], memoryQuery: "", filter: "",
+              tasks: [], taskDetail: null, taskOpenId: "", taskAnswering: false,
+              taskEpoch: 0 };
+var renderMessages = () => {};
+var renderSessions = () => {};
+var NetMinder = { note: () => {} };
+var needsAuth = () => false;
+var API = {};
+"""
+
+
+def _with_dom(source: str) -> str:
+    return _FAKE_DOM + source
+
+
 def _api_source() -> str:
     return _text(STATIC / "api.js")
 
@@ -176,6 +247,15 @@ def _task_module_source() -> str:
     names = ("taskStatusText", "taskProgressLine", "taskWaitingLine", "taskStatusLine",
              "taskCardView", "paintTaskCard", "taskErrorLine")
     return consts + "\n" + "\n".join(_js_function(src, n) for n in names)
+
+
+def _task_face_source() -> str:
+    """任务面整组函数（纯函数 + 接线函数）：判"一条帧都不读"的射程就是这一整组。"""
+    src = _app_source()
+    extra = [n for n in TASK_FACE_FUNCS if n not in (
+        "taskStatusText", "taskProgressLine", "taskWaitingLine", "taskStatusLine",
+        "taskCardView", "paintTaskCard", "taskErrorLine")]
+    return _task_module_source() + "\n" + "\n".join(_js_function(src, n) for n in extra)
 
 
 def _card_block(html: str) -> str:
@@ -351,6 +431,9 @@ def test_the_app_side_event_handler_still_routes_only_through_the_existing_seam(
     任务这一页不挂在这条缝上（卡片状态只认 GET）。这里钉它，是因为"往 onEvent 里塞一个
     waiting_user 分支"是本票最容易顺手做错的一步——那会把一份随进程没的缓冲当成真相，
     而症状正是"重启之后卡片没了"。
+
+    判据是白名单而不是黑名单：这条缝认的帧名必须**恰好**是审批那一枚（多认一枚就红），
+    且对任务面一个调用边都没有。黑名单只挡得住想得到的名字，想不到的那个正是事故。
     """
     src = _strip_js_comments(_app_source())
     handler = re.search(r"onEvent:\s*\(evt\)\s*=>\s*\{([\s\S]*?)\n      \},", src)
@@ -358,8 +441,26 @@ def test_the_app_side_event_handler_still_routes_only_through_the_existing_seam(
     body = handler.group(1)
     assert 'evt.type === "approval_request"' in body and "paintApproval(node, holder)" in body
     assert "accumulateTrace(holder, evt)" in body
-    for not_here in ("waiting_user", "getTask", "resume_cursor", "orchestrate", "answerTask"):
-        assert not_here not in body, f"任务状态被塞进流的那条缝里了：{not_here}"
+    recognised = set(re.findall(r'evt\.type\s*===\s*"([A-Za-z_]+)"', body))
+    assert recognised == {"approval_request"}, \
+        f"onEvent 多认了帧：{sorted(recognised - {'approval_request'})}"
+    for name in TASK_FACE_FUNCS + TASK_API_FUNCS:
+        assert not re.search(rf"\b{name}\s*\(", body), f"onEvent 调到了任务面：{name}"
+
+
+def test_the_task_face_consumes_no_frame_type_at_all():
+    """任务面整组函数不认任何帧：不认识事件对象，也没有一处按 type 分发。
+
+    判据是形状而不是词表：`cancelled` 同时是任务状态字面量，拿"源码里出现过哪些词"
+    求交会把状态误判成帧。这里正面断言任务面认得的帧名集合为空——没有 evt / onEvent /
+    streamChat，也没有任何 `type === "..."` 的分发。反控是往 onEvent 塞一个
+    `task_refresh` 分支：上面那条白名单（以及调用边）会红。
+    """
+    code = _strip_js_comments(_task_face_source())
+    assert not re.search(r"\b(onEvent|evt|streamChat)\b", code), \
+        "任务面挂到流事件上了：它的状态只该从 GET 来"
+    dispatched = set(re.findall(r'(?:\.type|\["type"\])\s*===?\s*"([A-Za-z_]+)"', code))
+    assert not dispatched, f"任务面在按帧名分发：{sorted(dispatched)}"
 
 
 # ==========================================================================
@@ -413,6 +514,92 @@ def test_the_card_skeleton_and_the_painter_point_at_each_other():
     assert not dead, f"这些格子既没人填也没画法（死骨架）：{dead}"
     assert {"task-question", "task-answer", "task-card-head"} <= queried, \
         f"问题原文、回答入口或标题没被画：{sorted(queried)}"
+
+
+XSS_PAYLOAD = '<img src=x onerror=alert(1)>'
+
+
+def test_task_text_enters_the_dom_as_text_not_markup():
+    """问题原文与列表里的 goal 只走 textContent：写进去的是一个字符串，不是节点。
+
+    假 DOM 的 innerHTML 会真的长出一颗 <img>，所以把任一写入点换成 innerHTML，这里会
+    同时丢掉原文、多出一颗 img。射程只到本票新增的这几个写入点，不是全站 XSS 证明。
+    """
+    payload = XSS_PAYLOAD
+    src = _with_dom(_task_module_source() + "\n" + _js_function(_app_source(), "renderTaskList"))
+    driver = r"""
+      const pane = __node("div");
+      paintTaskCard(pane, SC.view);
+      const card = pane.querySelector(".msg-task");
+      state.tasks = [{ task_id: "T1", goal: SC.payload, status: "running", progress: SC.payload }];
+      state.taskOpenId = "";
+      __els.taskList = __node("ul");
+      __els.taskEmpty = __node("div");
+      renderTaskList();
+      const goal = __created.filter((n) => n.className === "task-goal")[0];
+      return {
+        imgs: __findImgs().length,
+        head: card.querySelector(".task-card-head").textContent,
+        question: card.querySelector(".task-question").textContent,
+        progress: card.querySelector(".task-progress").textContent,
+        waiting: card.querySelector(".task-waiting").textContent,
+        state: card.querySelector(".task-state").textContent,
+        goal: goal ? goal.textContent : null,
+        goal_html: goal ? goal._html : null,
+      };
+    """
+    view = {"visible": True, "title": payload, "question": payload, "progress": payload,
+            "waiting": payload, "canAnswer": True, "state": payload, "busy": False}
+    out = _run_node(src, driver, {"payload": payload, "view": view})
+    assert out["imgs"] == 0, "有写入点走了 innerHTML：注入串在 DOM 里长成了节点"
+    for field in ("head", "question", "progress", "waiting", "state", "goal"):
+        assert out[field] == payload, f"{field} 写入后不是原文：{out[field]!r}"
+    assert out["goal_html"] == "", f"goal 不是按文本写进去的：{out['goal_html']!r}"
+
+
+def test_the_state_line_is_visible_whenever_it_has_something_to_say():
+    """状态句有内容时必须摘掉 #taskState 的 hidden；.busy 不许把回答表单收走。
+
+    HTML 里这一格默认 hidden、style.css 又是 display:none，只写 textContent 等于没写。
+    跑真 paintTaskCard：有句子时无 hidden，空句子时仍有 hidden；busy 那张卡的表单也
+    必须在场（可以压暗/禁用，但不能消失）。
+    """
+    css = _text(STATIC / "style.css")
+    assert not re.search(r"\.msg-task\.busy[^{]*\{[^}]*display:\s*none", css), \
+        ".busy 又把回答表单 display:none 收走了：提交后输入框会凭空消失"
+    driver = r"""
+      const pane = __node("div");
+      paintTaskCard(pane, SC.with_state);
+      const card = pane.querySelector(".msg-task");
+      const stateEl = card.querySelector(".task-state");
+      const withState = { hidden: stateEl.classList.contains("hidden"),
+                          text: stateEl.textContent,
+                          card_hidden: card.classList.contains("hidden") };
+      const busyPane = __node("div");
+      paintTaskCard(busyPane, SC.busy);
+      const busyCard = busyPane.querySelector(".msg-task");
+      const busy = { form_hidden: busyCard.querySelector(".task-answer").classList.contains("hidden"),
+                     state_hidden: busyCard.querySelector(".task-state").classList.contains("hidden"),
+                     state_text: busyCard.querySelector(".task-state").textContent,
+                     busy_class: busyCard.classList.contains("busy") };
+      paintTaskCard(pane, SC.empty_view);
+      const empty = { hidden: stateEl.classList.contains("hidden"), text: stateEl.textContent };
+      return { withState, busy, empty };
+    """
+    base = {"visible": True, "title": "需要你输入", "question": "验证码", "progress": "",
+            "waiting": "", "canAnswer": False}
+    scenario = {
+        "with_state": dict(base, state="执行中", busy=False),
+        "busy": dict(base, state="执行中", busy=True),
+        "empty_view": {"visible": False, "title": "", "question": "", "progress": "",
+                       "waiting": "", "canAnswer": False, "state": "", "busy": False},
+    }
+    out = _run_node(_with_dom(_task_module_source()), driver, scenario)
+    assert out["withState"] == {"hidden": False, "text": "执行中", "card_hidden": False}, out["withState"]
+    assert out["busy"]["state_hidden"] is False and out["busy"]["state_text"] == "执行中", out["busy"]
+    assert out["busy"]["form_hidden"] is False, "提交在途时回答表单被收起了"
+    assert out["busy"]["busy_class"] is True
+    assert out["empty"] == {"hidden": True, "text": ""}, out["empty"]
 
 
 def test_the_nav_entry_and_the_answer_input_are_wired():
@@ -484,18 +671,22 @@ def test_default_window_renders_no_countdown_at_all(isolated_tasks):
 
     Infinity 与 0 走同一条渲染路径——这件事在服务端已经归好了（`_window_seconds` 把非有限
     值与坏值收成 0，于是 `waiting_expires_at` 恒为 None），前端只需认那一格，不许自己再造
-    一个"无限"状态。阳性对照：真给了到期时刻就必须说出还剩多久，否则这条只是恒真。
+    一个"无限"状态。非正的剩余同理：坏窗口只在前端自造输入时可达，而这一页判不了窗口坏
+    没坏、服务端还在等，就不替它说「时限已过」。阳性对照：真给了到期时刻就必须说出还剩
+    多久，否则这条只是恒真。
     """
     src = _app_source()
     waiting_text = _js_const(src, "TASK_WAITING_TEXT")
     driver = ("return { none: taskWaitingLine(SC.no_window, SC.t0), "
               "past: taskWaitingLine(SC.past, SC.t0), "
+              "neg5: taskWaitingLine(SC.neg5, SC.t0), "
               "soon: taskWaitingLine(SC.soon, SC.t0) };")
     t0 = 1_700_000_000_000          # 2023-11-14T22:13:20Z
     scenario = {
         "no_window": {"status": "waiting_user", "waiting_expires_at": None,
                       "waiting_timeout_seconds": 0.0},
         "past": {"status": "waiting_user", "waiting_expires_at": "2023-11-14T22:12:20Z"},
+        "neg5": {"status": "waiting_user", "waiting_expires_at": "2023-11-14T22:13:15Z"},
         "soon": {"status": "waiting_user", "waiting_expires_at": "2023-11-14T22:16:20Z"},
         "t0": t0,
     }
@@ -503,7 +694,9 @@ def test_default_window_renders_no_countdown_at_all(isolated_tasks):
     assert out["none"] == waiting_text, out["none"]
     assert not re.search(r"\d", out["none"]), f"默认那一格说出了数字：{out['none']!r}"
     assert "无限" not in out["none"] and "∞" not in out["none"], out["none"]
-    assert out["past"] != waiting_text and out["soon"] != waiting_text, out
+    assert out["past"] == waiting_text and out["neg5"] == waiting_text, out
+    assert not re.search(r"\d", out["neg5"]), f"负窗口说出了数字或旧文案：{out['neg5']!r}"
+    assert out["soon"] != waiting_text, out
     assert re.search(r"\d", out["soon"]), f"真给了到期时刻却不说还剩多久（阳性对照）：{out['soon']!r}"
 
     ts = isolated_tasks
@@ -609,6 +802,103 @@ def test_the_card_title_and_the_waiting_gate_are_the_agreed_words():
     assert [r["visible"] for r in rows[1:]] == [False] * 3, rows[1:]
     assert [r["canAnswer"] for r in rows[1:]] == [False] * 3, rows[1:]
     assert "等回复" in rows[2]["state"], f"超时作废被说成用户自己取消：{rows[2]}"
+
+
+# ==========================================================================
+# ⑤ 换身份：上一个人的答案、错误与在途标记都不许留在这一页
+# ==========================================================================
+
+def _identity_source() -> str:
+    """换身份那条路上真正会跑的几段：任务渲染 + 错误条 + resetViewForIdentity。"""
+    app = _app_source()
+    return _with_dom(_task_module_source() + "\n" + "\n".join(
+        _js_function(app, n) for n in ("renderTaskList", "setTaskError", "resetViewForIdentity")))
+
+
+def test_switching_identity_leaves_none_of_the_previous_answer_in_the_dom():
+    """换人时输入串、错误条、在途标记必须当场复位，并重画成干净的空卡。
+
+    答案框里常是短信验证码。这里先铺一个"上一个人正在回答"的现场（输入串 + 错误条 +
+    busy 卡 + 在途标记），跑真 resetViewForIdentity，再把整棵假 DOM 的文本与 value 扫一遍。
+    """
+    driver = r"""
+      state.messages = ["上一个人的对话"];
+      state.tasks = [{ task_id: "T-A", goal: "上一个人的任务" }];
+      state.taskDetail = { task_id: "T-A", status: "waiting_user", can_resume: true,
+                           resume_cursor: { question: "上一个人的问题",
+                                            subtask_index: 1, subtask_total: 2 } };
+      state.taskOpenId = "T-A";
+      state.taskAnswering = true;
+      state.taskEpoch = 7;
+      __el("taskAnswerInput").value = SC.secret;
+      __el("taskAnswerInput").disabled = true;
+      __el("taskAnswerBtn").disabled = true;
+      __el("taskError").textContent = SC.err;
+      __el("taskError").classList.toggle("hidden", false);
+      const pane = __el("paneTasks");
+      paintTaskCard(pane, taskCardView(state.taskDetail, { busy: true }));
+      const before = pane.querySelector(".msg-task").classList.contains("busy");
+      resetViewForIdentity();
+      const card = pane.querySelector(".msg-task");
+      const seen = [];
+      __created.forEach((n) => { seen.push(String(n.textContent || ""), String(n.value || "")); });
+      return {
+        before,
+        input: __el("taskAnswerInput").value,
+        input_disabled: __el("taskAnswerInput").disabled,
+        err: __el("taskError").textContent,
+        err_hidden: __el("taskError").classList.contains("hidden"),
+        answering: state.taskAnswering,
+        epoch: state.taskEpoch,
+        card_hidden: card.classList.contains("hidden"),
+        card_busy: card.classList.contains("busy"),
+        state_hidden: card.querySelector(".task-state").classList.contains("hidden"),
+        leak: seen.filter((t) => t.includes(SC.secret) || t.includes(SC.err)),
+      };
+    """
+    out = _run_node(_identity_source(), driver, {"secret": "554433", "err": "慢一点再说"})
+    assert out["before"] is True, "现场没铺成 busy 卡，这条锁等于没跑"
+    assert out["input"] == "" and out["input_disabled"] is False, out
+    assert out["err"] == "" and out["err_hidden"] is True, out
+    assert out["answering"] is False and out["epoch"] == 8, out
+    assert out["card_hidden"] is True and out["card_busy"] is False, out
+    assert out["state_hidden"] is True, out
+    assert out["leak"] == [], f"换人后 DOM 里还找得到上一个人的输入/错误：{out['leak']}"
+
+
+def test_an_answer_in_flight_cannot_write_into_the_new_identity_page():
+    """长阻塞的那一枪在换人之后回来：错误条、重读、输入框清空都不许发生。
+
+    这是复核现场的另一半——旧请求回来会把新用户的卡片重新置忙，或把旧任务的报错写进
+    新页面。resetViewForIdentity 把 taskEpoch +1，收尾对不上就整段丢掉。
+    """
+    driver = r"""
+      let rejectIt;
+      const pending = new Promise((_, reject) => { rejectIt = reject; });
+      const calls = [];
+      API.answerTask = () => pending;
+      API.getTask = async () => { calls.push("getTask"); return null; };
+      API.listTasks = async () => { calls.push("listTasks"); return { tasks: [] }; };
+      state.taskDetail = { task_id: "T-A", goal: "买票", status: "waiting_user", can_resume: true,
+                           resume_cursor: { question: "验证码", subtask_index: 0, subtask_total: 1 } };
+      state.taskEpoch = 3;
+      __el("taskAnswerInput").value = "123456";
+      const run = submitTaskAnswer();
+      resetViewForIdentity();
+      rejectIt({ status: 429, message: "慢一点再说" });
+      await run;
+      return { err: __el("taskError").textContent,
+               err_hidden: __el("taskError").classList.contains("hidden"),
+               answering: state.taskAnswering, calls,
+               input: __el("taskAnswerInput").value,
+               card_busy: __el("paneTasks").querySelector(".msg-task").classList.contains("busy") };
+    """
+    out = _run_node(_identity_source() + "\n" + _js_function(_app_source(), "submitTaskAnswer"),
+                    driver)
+    assert out["err"] == "" and out["err_hidden"] is True, out
+    assert out["calls"] == [], f"换人后旧请求还去重读了任务：{out['calls']}"
+    assert out["answering"] is False and out["card_busy"] is False, out
+    assert out["input"] == "", out
 
 
 def test_this_feature_grew_no_new_static_file():
