@@ -1880,13 +1880,15 @@ function taskProgressLine(detail) {
 /** 时限那一句的唯一出处：只看 waiting_expires_at 这一个已有键，不引入客户端自己的状态。
  *  默认窗口是 0，后端把 0（以及读不懂的坏值）归成"永不做废"，于是 waiting_expires_at
  *  就是 None——这一格无可数之物，既不说数字也不说"无限"，只说人该做什么。非正的剩余
- *  同理：窗口坏没坏这一页判不了，而服务端还在等，就不该替它说"时限已过"。 */
+ *  同理：窗口坏没坏这一页判不了，而服务端还在等，就不该替它说"时限已过"。
+ *  正数剩余一律向上取整到秒：不足 1 秒说「1 秒内回复」，只有真到点才说「等你回复」。
+ *  后者是"没有时限"的那句话，拿它说一个正在走的倒计时，人会以为不用急。 */
 function taskWaitingLine(detail, nowMs) {
   const raw = detail && detail.waiting_expires_at;
   if (!raw) return TASK_WAITING_TEXT;
   const at = Date.parse(String(raw));
   if (!Number.isFinite(at)) return TASK_WAITING_TEXT;
-  const left = Math.round((at - (nowMs === undefined ? Date.now() : nowMs)) / 1000);
+  const left = Math.ceil((at - (nowMs === undefined ? Date.now() : nowMs)) / 1000);
   if (left <= 0) return TASK_WAITING_TEXT;
   if (left < 60) return left + " 秒内回复";
   return Math.ceil(left / 60) + " 分钟内回复";
@@ -2000,12 +2002,19 @@ function paintTasks(opts) {
 
 async function openTaskDetail(taskId) {
   const id = String(taskId || "");
+  // 换身份会把 taskEpoch +1。这个函数自己也要从头记一次、落地前再比一次：await 可以被
+  // 任何一次 reset 插进来，而"上一层的收尾比过了"不代表这一枪回来时页面还是同一个人的。
+  // 对不上就整段丢掉：不写 state、不画 DOM、不动错误条与输入框。
+  const epoch = state.taskEpoch;
   state.taskOpenId = id;
   if (!id) return;
   try {
-    state.taskDetail = await API.getTask(id);
+    const detail = await API.getTask(id);
+    if (epoch !== state.taskEpoch) return;
+    state.taskDetail = detail;
     setTaskError("");
   } catch (e) {
+    if (epoch !== state.taskEpoch) return;
     state.taskDetail = null;
     setTaskError(taskErrorLine(e));
     // 404 是服务端好好回的一句话，不是"请求根本没出设备"，不该弹断网卡片；
@@ -2026,11 +2035,16 @@ function taskErrorLine(e) {
 }
 
 async function loadTasks(openId) {
+  // 同 openTaskDetail：进函数记一次 epoch，列表回来先比再落地。reset 之后旧清单连
+  // "挑一条去打开"都不许做——那一步会发出新请求并把结果画进新那个人的页面。
+  const epoch = state.taskEpoch;
   try {
     const out = await API.listTasks();
+    if (epoch !== state.taskEpoch) return;
     state.tasks = (out && Array.isArray(out.tasks)) ? out.tasks : [];
     setTaskError("");
   } catch (e) {
+    if (epoch !== state.taskEpoch) return;
     state.tasks = [];
     setTaskError(taskErrorLine(e));
     if (!(e && e.status === 404) && !needsAuth(e)) NetMinder.note(e);
@@ -2079,7 +2093,9 @@ async function submitTaskAnswer() {
       // 回没回话都再读一次：这一枪可能因为断连根本没回来，而服务端照样在跑，
       // 此刻唯一说得出"挂在哪一步"的地方还是 GET。
       await openTaskDetail(String(detail.task_id));
-      await loadTasks(String(detail.task_id));
+      // 这一次 await 又跨过一次可能的换人：openTaskDetail 自己会丢掉落地，但这里若不再
+      // 比一次，下一句会拿 A 的 task_id 去打 B 的清单——B 的页面会收到 A 那条任务的 404。
+      if (epoch === state.taskEpoch) await loadTasks(String(detail.task_id));
     }
   }
 }
