@@ -71,10 +71,11 @@ NO_SUCH_ENVS = (
     "FENVER_ALLOW_LEAK",
     "LEAK_QUARANTINE_WARN_ONLY",
 )
-# `--help` 里允许出现的旗：闸门本来的四面 + argparse 自带的 --help。多一面就是新开关。
+# `--help` 里允许出现的旗：闸门本来的四面 + argparse 自带的 --help，外加 #113 的
+# `--pre-build`（构建前的产源预检，与泄露隔离无关，也没有降级档）。多一面就是新开关。
 DOCUMENTED_FLAGS = frozenset({
     "--expect", "--health-url", "--check-local", "--local-health-url", "--timeout",
-    "--no-versionname-check", "--allow-unreachable", "--backend-only", "--help",
+    "--no-versionname-check", "--allow-unreachable", "--backend-only", "--pre-build", "--help",
 })
 
 

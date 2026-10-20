@@ -50,9 +50,14 @@ v0.34→1.0 战略路线），后写的那份必须在开头用一句话写明**
 ## 5. 发版顺序是机器把关的，不要凭记忆
 
 CI 全绿 → 本地全量复跑 → **本地打 tag**（`/health` 的 `build` 字段在构建时从
-`git describe` 烘进包里，所以 tag 必须先于构建存在）→ 构建 staging →
+`git describe` 烘进包里，所以 tag 必须先于构建存在）→ `tools\pre_tag_gate.py --pre-build`
+（HEAD 必须就是 tag 那一笔、工作树干净；没有跳过开关）→ 构建 staging →
 `deploy\swap-package.ps1` 换包 → 线上验收 → `tools\pre_tag_gate.py` 放行 →
 推 tag → 发 Release → 播报。跳过 `pre_tag_gate` 就是它在拦的那两次事故的复现。
+
+改了任何一份发版说明（`docs\releases\*.md`），必须在**同一次提交**里重跑
+`tools\gen_changelog.py`，把 `backend\app\web\site\changelog.json` 一起提交；漏了会让
+changelog 锁在 CI 变红，看起来像产品坏了。
 
 ## 6. 服务端上线形态
 
