@@ -21,8 +21,6 @@
 模式说明：全局 client 是 AUTH_MODE=disabled，中间件在 Cookie 分支之前就短路，
 这里几乎所有用例都要 enforced（它同时换掉身份库与 ACCESS_TOKEN）。
 """
-import pytest
-
 from app.core import authz
 
 
@@ -244,7 +242,3 @@ def _age_to_renewable(store, token, seconds_left=60):
     record = store._users[principal.user_id]
     record["token_issued_at"][hash_token(token)] = _time.time() - (
         SESSION_TOKEN_TTL_SECONDS - seconds_left)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

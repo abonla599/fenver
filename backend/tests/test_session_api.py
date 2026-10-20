@@ -306,38 +306,3 @@ def test_the_ticket_store_expires_purges_lazily_and_burns_on_redemption():
     assert store.consume(t1) is None, "过期票据兑换必须像从没存在过"
     assert store.consume(t3) == ("s3", "o3")
     assert store.consume(t3) is None, "一票一问：第二次兑换与从没存在过同形"
-
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("开始测试会话管理 API")
-    print("=" * 60)
-
-    # 1. 创建会话
-    response = client.post("/v1/sessions?model=deepseek-chat")
-    assert response.status_code == 200
-    data = response.json()
-    session_id = data.get("session_id") or data.get("data", {}).get("session_id")
-    print(f"✅ 创建会话成功: {session_id}")
-
-    # 2. 获取会话列表
-    test_list_sessions()
-
-    # 3. 获取会话详情
-    test_get_session(session_id)
-
-    # 4. 发送消息（带 session_id）
-    test_chat_with_session(session_id)
-
-    # 5. 验证消息已保存
-    test_get_session_after_chat(session_id)
-
-    # 6. 发送消息（不带 session_id）
-    test_chat_without_session()
-
-    # 7. 删除会话
-    test_delete_session(session_id)
-
-    print("=" * 60)
-    print("✅ 所有测试通过！")
-    print("=" * 60)

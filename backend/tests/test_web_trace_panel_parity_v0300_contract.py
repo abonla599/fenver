@@ -447,7 +447,3 @@ def test_the_comment_stripper_does_not_blind_the_detector():
     probe = 'const re = /^https?:\\/\\/\\S+$/i; const keep = "✗";'
     assert "keep" in _js_code(probe) and "✗" in _js_code(probe), \
         "剥注释的尺子把正则字面量当成了注释：这条判据会瞎"
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(pytest.main([__file__, "-q"]))

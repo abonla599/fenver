@@ -60,7 +60,3 @@ def main():
     print(f"\n总计: {total_tasks} | 成功: {success} | 失败: {error}")
     if sm.unavailable_reason:
         print(f"（Docker 不可用原因：{sm.unavailable_reason}）")
-
-
-if __name__ == "__main__":
-    main()
