@@ -652,6 +652,8 @@ def test_machine_disable_threw_token_is_one_line_with_fail_closed_sentinels(tmp_
     同一份探针里还固定着改前那种裸拼接，用同样的输入演示它确实劈成两行、且
     via= 是空的——红绿两侧都由这台机器回答，不是文本推断。
     """
+    if _POWERSHELL is None:
+        _skip_machine()
     src = _token_probe_source(PS1)
     assert src is not None, "探针源码生不出来：Format-TokenField 或 token 行抽不出来"
     path = tmp_path / "probe-disable-threw-token.ps1"

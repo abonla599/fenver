@@ -757,6 +757,8 @@ def _retention_probe_source(text: str):
 
 
 def _run_retention(text: str, root: Path, current: Path, keep: int, work: Path, lock: Path = None):
+    if _POWERSHELL is None:
+        _skip_machine()
     src = _retention_probe_source(text)
     assert src is not None, "轮转探针源码生不出来（两个函数体抄不出原文）"
     path = _write_crlf(work, "probe-t62-retention.ps1", src)
