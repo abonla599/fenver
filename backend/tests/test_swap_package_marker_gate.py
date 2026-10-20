@@ -22,6 +22,16 @@
 脚本读的全是 tmp_path 下的东西：真 `dist\\`、真 `data\\`、真进程都不在射程里。
 非 Windows 上行为层跳过、文本层照跑（惯例与理由同
 test_v0340_swap_path_normalization.py:68——CI 是 ubuntu，硬断言会把锁变成 CI 红）。
+
+工单 #63 的旁注（skip 数不是判据）：整套用例的 skipped 数跟着**本机产物**走，不跟代码走——
+`data/apk/` 里有没有那一版包（test_update_channel 的种子摘要锁；同一件事另由
+`tools/pre_tag_gate.py` 在打 tag 前 fail-closed 把关，见那里的「发版物料顺序」）、`chroma_db/`
+在不在（test_test_isolation 的真库只读锁）、`docs-internal/` 的日程设计稿在不在
+（test_schedule_ui_contract 的两条文案/色值锁）、`dist/run_backend` 构建产物在不在
+（test_build_vc_runtime 的产物锁，参数化 ×3）。这四处缺的都是**被测的那个东西本身**：缺了就没有
+可判的字节，跳过不等于放行。所以 14→15 这类计数漂移是本机快照差异，**单看总数不是回归**；判回归
+只认「哪一条从 passed 变成 skipped」。反面形状是本文件原来的 `_dryrun_reported`：缺的 TASK 行不是
+被测对象而是跑彩排的前提，skip 咽掉的是在真机器上本会执行的 DRYRUN 断言——#56 已改成红。
 """
 import os
 import re
@@ -123,16 +133,27 @@ def _gate_passed(rc, lines, out, expect_contains=()):
 
 
 def _dryrun_reported(lines, *needles):
-    """彩排的结论行里必须出现这些片段。
+    """彩排的结论行里必须出现这些片段；彩排没走到 TASK 行**红，不 skip**（工单 #56）。
 
-    为什么这里有一个 skip：`-DryRun` 在预检之后还要去找看门狗计划任务（脚本 step 1），
-    那一步要求任务**唯一**。换包脚本本来就只跑在装了那个任务的机器上，但一台没注册守护
-    的机器不该因此得到一条"锁红了"——那时彩排到不了 DRYRUN 那几行，而两侧计数那条闸已经
-    由 `PRECHECK ok` 行证明了。skip 里写着这一点，就不至于让下一个人以为锁在空转。
+    `-DryRun` 在预检之后还要去找看门狗计划任务（脚本 step 1），那一步要求任务**唯一**。
+    以前这里在缺 TASK 行时 `pytest.skip`：一台没注册（或注册了两遍）守护的机器上，DRYRUN
+    那几行断言整段消失，报告里只多一个没人看的 "1 skipped"。但缺的 TASK 行不是被测对象
+    （被测对象是换包脚本那把闸），而是这台机器能跑彩排的前提；这台机器又恰是唯一会跑正式
+    换包的那台（AGENTS.md：开机自启与崩溃守护就是计划任务）。前提没满足时该红在前提上，
+    不是把问题当成没问过。
+
+    两侧计数那条闸仍由 `PRECHECK ok` 行证明（那是别的用例的判据，这里不放宽也不重复）；
+    `_gate_passed` 对「任务不唯一」那把退出码的容忍照旧——兄弟计数锁一个字不动。
     """
     if not any("TASK name-len=" in ln for ln in lines):
-        pytest.skip("彩排在闸之后的任务查找那一步停了（这台机器的看门狗任务不唯一），"
-                    "DRYRUN 那几行报不出来；两侧计数这条闸已由 PRECHECK ok 行证明")
+        pytest.fail(
+            "彩排没有走到 `TASK name-len=` 那一行，所以 DRYRUN 的结论行一条都没打出来——"
+            "这条锁要判的东西根本没跑。两种形状：换包脚本 step 1 按 action 找到的看门狗任务"
+            "不是恰好 1 个（0 个=守护没注册，2 个以上=重复注册），或者预检就没过（那会先在"
+            " PRECHECK fail 上红）。先跑 `Get-ScheduledTask | Where-Object { $_.Actions.Execute "
+            "-eq 'wscript.exe' -and $_.Actions.Arguments -like '*watchdog-hidden.vbs*' }` 看"
+            "个数，修回唯一一个再跑。这里不再用 skip 把 DRYRUN 断言静默咽掉（#56）。"
+            "拿到的行：" + repr(lines))
     for needle in needles:
         assert any(needle in ln for ln in lines), f"彩排行里少了 {needle}：{lines}"
 
@@ -317,3 +338,42 @@ def test_mutation_removing_the_live_side_gate_turns_the_lock_red():
     assert m.group(0) in moved, "变异三没生效：搬走之后没能插回锚点之后"
     assert not _marker_gate_ok(moved), \
         "把两侧计数挪到停用看门狗之后，锁必须红：预检失败时生产须原封不动，位置就是判据的一部分"
+
+
+# ------------------------------------------------------------------ 4. 缺 TASK 行必须红（#56 反例）
+def test_a_rehearsal_that_never_reached_the_task_line_is_a_loud_failure():
+    """反例：彩排停在任务查找那一步时，`_dryrun_reported` 必须红，不许 skip。
+
+    这就是 #56 那个洞的形状：缺 TASK 行时它只 skip，DRYRUN 那几行的断言整段消失，报告里
+    多一个 "1 skipped"，和"这台机器上根本没跑过这条判据"在报告里长得一模一样。这里造的是
+    当年触发 skip 的那个线集（有 `PRECHECK ok`、没有 `TASK`），证明现在它红，而且红在
+    "任务查找"这个原因上。
+
+    抓 `BaseException` 是有意的：`pytest.skip` 抛的 `Skipped` 也是 `BaseException`。万一哪天
+    被改回 skip，这条反例会**红**，而不是自己被记成 skipped、再从报告里消失一次。
+    """
+    lines_without_task = [
+        "PRECHECK ok stage-version=v9.9.9 marker-lines=1 live-marker-lines=0 "
+        "live-appjs=present marker-mode=forward",
+    ]
+    raised = None
+    try:
+        _dryrun_reported(lines_without_task, "DRYRUN ok")
+    except BaseException as exc:          # 见 docstring：Skipped 也要抓得住
+        raised = exc
+    assert raised is not None, (
+        "缺 TASK 行的线集进来，_dryrun_reported 一声不吭地返回了：DRYRUN 断言被放过，"
+        "报告里只会多一个没人看的 skipped")
+    assert not isinstance(raised, pytest.skip.Exception), (
+        "缺 TASK 行时仍在 pytest.skip：这台机器上 DRYRUN 那几行断言整段消失，而报告看起来"
+        "和'根本没有这条判据'完全一样——#56 要堵的就是这个")
+    assert isinstance(raised, pytest.fail.Exception), (
+        f"红的方式不对（{type(raised).__name__}）：要的是 pytest.fail 那种点名原因的 loud "
+        f"failure，不是后面断言顺手撞上的红：{raised}")
+    msg = str(raised)
+    assert "TASK" in msg and "watchdog" in msg, (
+        f"红了但没说清是任务查找那一步停的，运维从这条红里读不出该修什么：{msg}")
+
+    # 正对照：TASK 行在场时同一个函数必须不红，否则"永远红"不是锁
+    _dryrun_reported(["TASK name-len=12 state=Ready",
+                      "DRYRUN ok (no process was stopped, no file was moved)"], "DRYRUN ok")
