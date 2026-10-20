@@ -724,6 +724,39 @@ def test_guard_detection_does_not_trust_parameter_names():
 # ---------- 壳的响应头契约（计划 2026-09-19 Task 1） ----------
 
 
+def _csp_directives(csp: str, where: str = "") -> dict:
+    """CSP 头 → {指令名: 值}；同名指令重复即判死。
+
+    CSP 规范（CSP3 §2.2.1）规定重复的同名指令**只取第一条**，浏览器照此执行；
+    而 `dict[name] = value` 取的是**末值**。`frame-src *; … frame-src 'none'` 这种
+    "恶意值在前"的头在浏览器里 frame-src 仍是 `*`（WebView 桥会挂到每个 frame），
+    按末值解析却读成 'none'——旧解析器就是在这里被骗绿的。头本身不合法就判死，
+    不替浏览器猜它认哪一条。
+    """
+    out = {}
+    for part in csp.split(";"):
+        part = part.strip()
+        if part:
+            name, _, value = part.partition(" ")
+            assert name not in out, (
+                f"{where} 的 CSP 里 {name} 出现了不止一次（浏览器只认第一条）：{csp!r}")
+            out[name] = value.strip()
+    return out
+
+
+def test_the_csp_directive_parser_refuses_a_duplicate():
+    """反例常驻：同名重复、恶意值在前时，解析必须判死而不是取末值。
+
+    没有这条，`_csp_directives` 被改回一行 `out[name] = value` 时，下面那条 frame-src
+    断言会拿末值（'none'）判绿，而浏览器执行的是首值（`*`）。
+    """
+    with pytest.raises(AssertionError):
+        _csp_directives("frame-src *; default-src 'self'; frame-src 'none'")
+    # 正向对照：没有重复时照常解析，免得上面那条红是因为解析器根本不会工作。
+    assert _csp_directives("frame-src 'none'; default-src 'self'") == {
+        "frame-src": "'none'", "default-src": "'self'"}
+
+
 def test_app_shell_refuses_frames(client):
     """`@JavascriptInterface` 挂到**每个 frame** 的 window 上，而原生侧的 origin 校验
     只看主文档 URL（`webview.getUrl()`）。所以同源页面上任何能塞进第三方 iframe 的
@@ -739,13 +772,11 @@ def test_app_shell_refuses_frames(client):
         # "安全头没了"，红到离真凶很远的地方。
         assert res.status_code == 200, f"{path} 拿不到 200（{res.status_code}），先修这个再谈 CSP"
         # #143 起 CSP 是一整组（多了 default-src/script-src 等），这里只按指令名取值，
-        # 不再钉整串字面量——"整串只有一份"由 test_website 钉 site_headers 那个出口。
+        # 不再钉整串字面量——静态资源那一整串由 test_website 用字面量单独钉，HTML 每页
+        # 的哈希与探测页的 connect-src 由 test_v0350_csp_hash 钉。
+        # 按名解析的前提是"同名只有一条"：解析器遇到重复当场判死（浏览器认首值，
+        # 取末值会把"恶意值在前"读成良性值，见 _csp_directives）。
         csp = res.headers.get("content-security-policy") or ""
-        directives = {}
-        for part in csp.split(";"):
-            part = part.strip()
-            if part:
-                name, _, value = part.partition(" ")
-                directives[name] = value.strip()
+        directives = _csp_directives(csp, where=path)
         assert directives.get("frame-src") == "'none'", f"{path} 的 frame-src 不是 none: {csp!r}"
         assert directives.get("object-src") == "'none'", f"{path} 的 object-src 不是 none: {csp!r}"
