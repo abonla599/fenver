@@ -82,6 +82,18 @@ DEFAULTS = {
 # "date value out of range"，315537897599.0 才加得进去。超过这条线的数不是"很长的
 # 窗口"，是一次 `OverflowError` / `date value out of range`（详情端点 500）。
 # 它同时远小于 2**53：线内的整数都能被 float 精确表示，int→float 不会改值。
+#
+# 射程：这条线是**秒**上的上界，却对**所有数值格**生效（`_type_ok`、
+# `_sanitize_loaded`、`_finite_or_close` 都不分键；`credit_benchmark` 的数值子键
+# 例外，它走自己的 `_sanitize_credit_benchmark`）。例如
+# `credit_shadow_daily_limit=1e12` 根本不是时间，也会被拒收或折回默认（那一格的
+# 默认是 0）。这是范畴错误——收窄到时间三键（宽限期、审批票据有效期、停点作废
+# 窗口）是后续单，本轮不改行为。
+#
+# 窄带：值本身 ≤ 这条线、但从 `waiting_since` 加过去会越界的那一段**不是拒绝，是
+# 封顶**——`task_store.waiting_deadline()` 捕住那次 OverflowError 后返回
+# `datetime.max`（9999-12-31T23:59:59.999999），展示语义是"约八千年后到期"。
+# 这样详情端点绝不因为一次日期加法 500。
 MAX_WINDOW_SECONDS = 315_537_897_599.0
 
 # 允许被 POST /v1/admin/config 改写的键。白名单而不是全接收：配置面将来加到

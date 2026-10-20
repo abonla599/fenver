@@ -63,10 +63,11 @@ test_v0350_a5_timeout_is_suspension.py` 里"窗口坏值"那一族**只喂显式
 - HTTP 层不在射程：这里验的是 `read()` / `waiting_timeout_info()` 交出来的字典能否过
   `allow_nan=False`——那正是响应序列化唯一会抛的地方；把端点接进 `TestClient` 只会给
   这条不变量多两个失败原因（鉴权、路由）。
-- 「不变量」那一族只看得到 `inf`：`nan` 与 `-inf` 被 `max` 折成 0.0，而 0.0 也是干净值。
-  这两行由"落点必须是该格默认"那句方向断言负责（env 臂与 config 臂各有一条）。剩下
-  一种真看不出差别的情形要如实说：默认本来就是 0 的那两格（作废窗口、影子护栏），
-  坏值折成 0 与折成默认是同一个数——那里 0 就是它们自己要的那一档，不是被拧过去的。
+- 「不变量」那一族只看得到"出口干不干净"：`nan` 与 `-inf` 都被折回**该格自己的默认**
+  （实跑：宽限期 `NaN → 120.0`、审批 TTL `-Infinity → 60.0`），干净值，所以这一族
+  不红。折回哪一档由"落点必须是该格默认"那句方向断言负责（env 臂与 config 臂各有
+  一条）。一种真看不出差别的情形要如实说：默认本来就是 0 的那两格（作废窗口、影子
+  护栏），坏值折回默认就是 0——那里 0 就是它们自己要的那一档，不是被拧过去的。
 - 真链路那条（不经显式参数）只在**两层同时**漏收时才红——两层互为纵深，一把尺子量不到
   第二层，第二层的锁是 `test_读数口径本身漏收时…`。
 """
@@ -276,8 +277,8 @@ def test_坏值折回的是自己那一格的默认而不是全文件统一的�
     从来没做过的收紧——用户那边表现为票据一弹就得立刻点、流式一断线就没人接。
 
     参照的是 `DEFAULTS` 本身：默认改了，两头一起动，不存在第二份真相。
-    `nan` 与 `-inf` 这两行是上面两族不变量用例接不住的（坏值被 `max` 折成 0.0 也算
-    "干净值"），这一族才问得出"0 是不是那一格想要的 0"。
+    `nan` 与 `-inf` 这两行是上面两族不变量用例接不住的：坏值折回该格默认（或即便被
+    `max` 折成 0.0）都是"干净值"，这一族才问得出"0 是不是那一格想要的 0"。
     负向锁：把出口改成恒 `return 0.0`，只有宽限期与审批票据有效期这两格红（它们的
     默认不是 0），另两格照旧绿——那两格的默认本来就是关。
     """
@@ -742,9 +743,10 @@ DATETIME_OVERRANGE_INTS = (10 ** 13, 10 ** 14, 10 ** 18, 10 ** 18 + 1)
 def test_窗口上限常量卡在datetime能表达的最大边界上():
     """常量不是拍的：上限那一秒从 datetime.min 加得进去，再加一秒就出界。
 
-    负向锁：把 `MAX_WINDOW_SECONDS` 放宽到 `sys.float_info.max`，第二句不再抛
-    OverflowError，这条红；同一变异下 10**13 那一族也全红——这正是复核员说的
-    "只挡 float 范围不够"。
+    负向锁（实跑）：把 `MAX_WINDOW_SECONDS` 放宽到 `sys.float_info.max`
+    （1.7976931348623157e308），**首句**就先抛 `OverflowError: Python int too large
+    to convert to C int`——`timedelta(seconds=...)` 自己都构不出来，轮不到"第二句
+    不再抛"。同一变异下 10**13 那一族也全红——这正是复核员说的"只挡 float 范围不够"。
     """
     edge = config_store.MAX_WINDOW_SECONDS
     assert datetime.datetime.min + datetime.timedelta(seconds=edge) <= datetime.datetime.max
@@ -777,10 +779,12 @@ def test_超出datetime范围的整数经盘进来时详情响应不炸(value, i
 
     这里**不传** `timeout_seconds`：复现的就是 `waiting_timeout_info` 自己现读那一支。
 
-    负向锁（实跑）：把 `MAX_WINDOW_SECONDS` 放宽到 float 极限（两层上界一起失效），
-    10**13/10**14/10**18 三行红在 `waiting_timeout_info` 里的 OverflowError，
-    10**18+1 那一行还多一条"read() 里不是默认 0"的断言。只摘 `_type_ok` 一层不红
-    （`_sanitize_loaded` 的上界分支接着折回默认）——两层是纵深。
+    负向锁（实跑）：把 `MAX_WINDOW_SECONDS` 放宽到 `sys.float_info.max`
+    （1.7976931348623157e308，两层上界一起失效），四个 id **全红在同一条断言**上，
+    红话是 `AssertionError: 10000000000000 没在写缓存前折回默认：10000000000000`
+    （每个 id 报它自己的数）——`waiting_deadline` 已经把到期时刻封顶到
+    `datetime.max`，`waiting_timeout_info` 这一层不再抛 OverflowError。只摘
+    `_type_ok` 一层不红（`_sanitize_loaded` 的上界分支接着折回默认）——两层是纵深。
     """
     path = tmp_path / "config.json"
     _write_config(path, {"task_waiting_user_timeout_seconds": value})
