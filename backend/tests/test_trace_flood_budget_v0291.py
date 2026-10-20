@@ -16,15 +16,15 @@ THINKING_FLUSH_SECONDS / THINKING_TOTAL_MAX / TRACE_STEPS_MAX / TRACE_CHARS_MAX 
 
 诚实声明（实测出来的现状，不是断言错误）：THINKING_TOTAL_MAX 这道闸是**执行了的**
 （恰好停在 8000，正文照流、不抛异常），但被裁的 4000 字**不记账**：
-streaming.py:272-275 在 room<=0 时把 think_buf 直接清空、streaming.py:276 在余量
-不足时丢掉缓冲区尾巴、streaming.py:314 此后连攒都不攒——帧与步里都没有
-omitted/truncated 之类的记号（对比 compact_trace：stream_events.py:243-249 把丢的步
-记成 {kind:"omitted",count:N}）。② 把「裁了且不记账」钉成现状断言；将来若补上记账
+`streaming.py` 的 `flush_thinking` 在 room<=0 时把 think_buf 直接清空、在余量不足时
+丢掉缓冲区尾巴、此后连攒都不攒——帧与步里都没有 omitted/truncated 之类的记号
+（对比 `stream_events.py` 的 `compact_trace` 把丢的步记成
+{kind:"omitted",count:N}）。② 把「裁了且不记账」钉成现状断言；将来若补上记账
 帧，② 会红——那是缺口被堵上的信号，按新形状改断言即可，不是测试坏了。
 
 另：计划里那句「…中间 N 步已省略…」在**服务端源码里并不存在**——服务端产的是结构化
 步（kind=omitted + count），文案是两个客户端各自渲染的（app.js:1415、ChatUi.kt:2102），
-双端文案一致性已由 test_process_trace_contract.py:891 那组守着，本文件不重复钉。
+双端文案一致性已由 `test_process_trace_contract.py` 里那组文案锁守着，本文件不重复钉。
 
 THINKING_FLUSH_SECONDS（0.4）这里不测：时间触发只是「面板别长时间没动静」的下限，
 洪泛场景下字数触发必然先到（同 test_streaming_events 第 3 组的口径，测试不为它 sleep）。
@@ -218,7 +218,7 @@ def test_compact_trace_flood_cuts_thinking_keeps_evidence_and_accounts_omitted()
     assert len(marks) == 1 and marks[0]["count"] == 600 - 29 == 571, marks
     assert 0 < out.index(marks[0]) < len(out) - 1
 
-    # 首尾保底 + 实测的裁刀落点：并列最长时 max 取**第一个**（stream_events.py:239），
+    # 首尾保底 + 实测的裁刀落点：并列最长时 `compact_trace` 的 max 取**第一个**，
     # 于是先被删的是头窗里最前面的大段思考——11 条全落在思考上，头两条反而提前成了
     # 工具/搜索（证据往前顶），尾仍是搜索。「什么都不剩」才是这里要堵的死法。
     assert out[0]["kind"] == "tool" and out[-1]["kind"] == "search"
@@ -248,7 +248,8 @@ def test_every_builder_field_is_capped_where_it_is_enforced():
     逐字段打一遍，两个口径都要：长度恰好等于预算（闸在、且贴着闸），以及
     帧/步两条路同源（step_search 复用 search_frame，改一处两处的形状不能劈叉）。
     """
-    # thinking：帧按 2×FLUSH 封顶（stream_events.py:87），步按 TOTAL_MAX 封顶（:184）。
+    # thinking：帧按 2×FLUSH 封顶（`thinking_frame`），步按 TOTAL_MAX 封顶
+    # （`step_thinking`）。
     f = se.thinking_frame("x" * (se.THINKING_FLUSH_CHARS * 2 + 37))
     assert len(f["text"]) == se.THINKING_FLUSH_CHARS * 2 == 240
     assert f["text"].endswith("…")

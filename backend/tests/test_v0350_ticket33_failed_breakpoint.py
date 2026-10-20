@@ -4,7 +4,8 @@
 工具可能挂起（→ `waiting_user` + `kind=="tool_suspension"` 的游标），这一趟也可能抛。
 `_record_failure` 写 `TaskStatus.FAILED`，而 `set_status` **刻意留着**那份游标（它是
 "上次停在哪儿"的证据）。留下来的结果就是一个"代码嘴上说不可续、身体却从第 1 步重跑"
-的状态：FAILED 分支（`orchestrator.py:164-165`）**一眼都不看游标**，直接掉进通用续跑，
+的状态：FAILED 分支（`orchestrator` 里 `task.status == TaskStatus.FAILED` 那条）
+**一眼都不看游标**，直接掉进通用续跑，
 于是已经付过钱的第 1~3 步（查店、加购、发验证码）再烧一遍，验证码再发一遍。
 
 本文件先原样把它跑红（`test_a_failed_task_with_a_trusted_breakpoint_does_not_re_pay_...`），
@@ -739,7 +740,7 @@ def _paths_outside(pairs, allowed_roots):
 def test_this_file_writes_only_inside_its_own_temp_root(t33_tools, stub, tmp_path):
     """⚠️ 本机作业纪律：跑完整条 #33 链路之后，每一个可变数据落点仍在临时根内。
 
-    正例：`resolve_all_data_paths()`（`app/core/paths.py:119`）逐条量。
+    正例：`resolve_all_data_paths()`（`app/core/paths.py`）逐条量。
     反例：同一把尺子量一份**手工造的**"指回仓库真库"的清单必须报红——否则上面那句
     绿是没牙的。反例绝不真的把 `TASKS_DB_PATH` 改成仓库路径（本目录同时是生产机，
     那一刻之后任何一次 flush 都会写进真 `data/tasks.json`）。

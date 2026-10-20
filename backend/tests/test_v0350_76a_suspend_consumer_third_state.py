@@ -1,11 +1,12 @@
 """工单 #76a 的行为锁：消费端把"停在断点"记成第三态，而不是记成一次失败。
 
 背景（#29 把护栏的第三格开好了，#76a 才把线接上）：
-`record_outcome(..., suspended=True)` 在 `guardrails.py:167-173`，排在 `:175` 的 `if ok:`
-之前；调用点此前一律传 `ok=bool(outcome.ok)`，于是"请输入短信验证码"被读成一次工具
-失败，两次就把这个工具在本轮熔断（`guardrails.py:177-180`）。#76a 把四个读数点接上
-结构化那一格：`pipeline.py:306`、`streaming.py:478`、`react_agent.py:212`、
-`task_agent.py:178`。#29 那一份锁（`test_v0350_ticket29_guardrail_third_state.py`）
+`record_outcome(..., suspended=True)` 在 `record_outcome` 开头的 `if suspended:` 那一支，
+排在 `if ok:` 之前；调用点此前一律传 `ok=bool(outcome.ok)`，于是"请输入短信验证码"被读成
+一次工具失败，两次就把这个工具在本轮熔断（`record_outcome` 里失败退避那几行）。#76a 把
+四个读数点接上结构化那一格：pipeline / streaming / react_agent / task_agent 里
+`ok=bool(outcome.ok)` 与 `suspended=bool(outcome.suspended)` 两处关键字实参。
+#29 那一份锁（`test_v0350_ticket29_guardrail_third_state.py`）
 是**直接对 RoundGuard 说话**的，摘掉调用点的 `suspended=` 它一条都不会红——所以本文件
 补的是"走真实代码路"的那一把，摘掉就红。
 
@@ -18,17 +19,18 @@
 * 每条锁都配**同一条路上的反例**：同一路、同一夹具，只差"挂起"与"真失败"。反例必须
   熔断——否则上面那条绿只是因为这条路根本没往护栏里记任何东西。
 * D1（不许发明文本前缀判据）在这里为什么不给"前缀 vs 结构化"的反例锁：渲染器
-  （`tools/response.py:84-87`）让每一次真挂起的文本都以 `⏸ ` 开头，而成功/失败两支分别是
+  （`tools/response.py` 的 `SUSPEND_PREFIX` 渲染）让每一次真挂起的文本都以 `⏸ ` 开头，
+  而成功/失败两支分别是
   `✓ `/`✗ 错误: `——所以在真执行器下面两者今天恒等相关，行为层面造不出"前缀说挂起、
   结构化说不挂起"的输入。**实测过**：把 pipeline 与 react_agent 两处**挂起**判据换成
   `startswith("⏸ ")` 之后，本文件 7 条全绿（rc=0）——**本文件这把行为锁到今天仍然管不了前缀
   判据**，别以为它在管。原因不在测试写得薄，而在等价性由执行器替所有读法兜住
-  （`executor.py:251-256` 的 fail-closed + `executor.py:82` 的保头裁剪），这一族回归在行为层面
+  （`execute_tool_detailed` 的 fail-closed + `clip_for_model` 的保头裁剪），这一族回归在行为层面
   **结构上抓不到**。
 * 抓得到的是源码形状，而**形状这一侧此前无锁**（只靠人工审那四个读数点）。⭐ 工单 #80 已把它
   变成两把机器锁，就在 `tests/test_v0350_80_d1_shape_and_forbidden_prefix_locks.py`：
-  **形状锁**钉四个读数点（`pipeline.py:306`、`streaming.py:478`、`react_agent.py:212`、
-  `task_agent.py:178`）的两个关键字实参必须逐字是 `ok=bool(outcome.ok)` 与
+  **形状锁**钉四个读数点（pipeline / streaming / react_agent / task_agent 里那两处
+  关键字实参）必须逐字是 `ok=bool(outcome.ok)` 与
   `suspended=bool(outcome.suspended)`；它的**孪生判据**管的是"记账不许被 `startswith(...)` 的结果
   喂进去"，跟随射程按 #83 第二轮实测写：**一跳之内覆盖 `=`/`:` 赋值以及 walrus（`:=`）目标与
   下标/属性实参的基名回溯，两跳以上仍然漏**（仍漏清单在锁文件的边界段里列着）。walrus/下标/
@@ -39,7 +41,8 @@
   `tools/response.py` 的定义与渲染两处 —— 文本级判据，只守"源码里看得见的写法"，运行时才拼出来的
   串在射程外，**不声称已穷尽**。硬造一把前缀反例锁仍然不被接受：那只能靠 mock 渲染器，
   等于让被测对象自报，本仓不认。
-* ⭐ 工单 #76b（本票的第二波，只换判据、不加锁也不删锁）：`react_agent.py:212` 那一行的**成败**
+* ⭐ 工单 #76b（本票的第二波，只换判据、不加锁也不删锁）：`react_agent.py` 里
+  `guard.record_outcome(tool_name, ok=bool(outcome.ok), suspended=...)` 那一行的**成败**
   判据也已从 `str(tool_result).startswith("✓")` 换成 `ok=bool(outcome.ok)`，与上面四处同形；同一
   口径实测过——把那处摘回文本前缀写法之后**全量仍绿**（passed/skipped/rc 见 #76b 的 commit
   正文）⇒ 落锁之前本文件与 #29 那一份只管 `suspended=`，**当时**没有任何一把锁读得出这一处回归；
@@ -75,7 +78,7 @@ def t76a_tools():
 
     为什么不借 `test_v0350_a3_*` 那份 `fake_tools`：那份夹具带着 task_store 落盘和八个
     本单用不到的道具；跨文件借夹具等于把"道具长什么样"交给别人决定。这里只要两件事：
-    `suspends: True`（`executor.py:225-232` 的 `_can_resume` 要它，才给得出可续的挂起）
+    `suspends: True`（执行器的 `_can_resume` 要它，才给得出可续的挂起）
     与"每次调用都走到那一步"。
     """
     calls = []
@@ -249,13 +252,13 @@ def _assert_two_suspensions_recorded_as_third_state(guard, seen_calls):
     assert blocked is None, f"两次挂起把这个工具熔断了：{blocked!r}"
 
 
-# ---------- 锁 1：非流式（pipeline，rich=True 那一支，读数点 pipeline.py:306） ----------
+# ---------- 锁 1：非流式（pipeline，rich=True 那一支的读数点） ----------
 
 def test_lock1_pipeline_suspensions_never_fuse_the_tool(monkeypatch, t76a_tools):
     """走 pipeline 的真实工具循环：连续两次挂起 → 不熔断、挂起账是 2。
 
-    摘掉 `suspended=` 会红在哪：`pipeline.py:306-307` 退回只传 ok 之后，两次挂起就是两次
-    ok=False → `guardrails.py:177-180` 跳退避 → 本条最后一句 `check()` 拿到"连续失败 2 次"
+    摘掉 `suspended=` 会红在哪：pipeline 那个读数点退回只传 ok 之后，两次挂起就是两次
+    ok=False → `record_outcome` 的失败退避跳闸 → 本条最后一句 `check()` 拿到"连续失败 2 次"
     （并且 `suspension_counts` 变空、事件变成 fail_backoff），红在 `_assert_...` 那三条里。
     """
     seen = _spy_guard(monkeypatch, pipeline_mod, [])
@@ -298,10 +301,11 @@ def test_lock1_control_pipeline_real_failures_still_fuse(monkeypatch, t76a_tools
         f"两次真失败必须熔断（#29 没放宽这一条）：{blocked!r}")
 
 
-# ---------- 锁 2：ReAct（react_agent.py:212，#76a 换 detailed、#76b 把成败判据换成 outcome.ok） ----------
+# ---------- 锁 2：ReAct（#76a 换 detailed、#76b 把成败判据换成 outcome.ok） ----------
 
 def test_lock2_react_agent_suspensions_never_fuse_the_tool(monkeypatch, t76a_tools):
-    """走 ReActAgent.run 的真实循环：证明 :212 传的是 `outcome.suspended` 那格。
+    """走 ReActAgent.run 的真实循环：证明 `record_outcome` 传的是
+    `suspended=bool(outcome.suspended)` 那格。
 
     这一条路 #76a 之前只有纯文本（`execute_tool` 的投影）+ `startswith("✓")` 猜成败，
     挂起必然被记成失败；#76a 换成 detailed 后文本仍取 `.text`，#76b 已把那处成败判据换成
@@ -346,14 +350,14 @@ def test_lock2_control_react_agent_real_failures_still_fuse(monkeypatch, t76a_to
         f"ReAct 这条路的失败退避不许被放宽：{blocked!r}")
 
 
-# ---------- 锁 3：流式非富那一支（streaming.py:478 + 本单重写的 _run_tool） ----------
+# ---------- 锁 3：流式非富那一支（streaming 的读数点 + 本单重写的 _run_tool） ----------
 
 def test_lock3_streaming_non_rich_suspensions_never_fuse(monkeypatch, real_stream_chat,
                                                           t76a_tools):
     """`stream_chat`（无 sink ⇒ rich=False）也要产出第三态：证明 `_run_tool` 换形状没换错。
 
     这一支现网不可达（生产流式走 `stream_chat_events` + sink ⇒ rich=True），改动前它连
-    outcome 都没有、`ok` 恒 True；现在两支同形，读数点只剩 `streaming.py:478` 一处。
+    outcome 都没有、`ok` 恒 True；现在两支同形，读数点只剩 streaming 那一处。
     摘掉 `suspended=` → 两记失败 → `check()` 给出"连续失败 2 次"，本条红。
     """
     completions = real_stream_chat([

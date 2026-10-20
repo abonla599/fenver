@@ -3,7 +3,7 @@
 规划提案 §四 v0.35 那一行的原文是「超时语义：用户不响应**不是失败**，是 `needs_input`
 （挂起保活）」，而验收判据 1 的原文是「跑到第 3 步需要验证码的任务能挂起 **5 分钟**，
 用户输入后从第 4 步继续，全上下文不丢」。A3 交付了「挂得起也接得回」，并把「5 分钟」
-那一半明确交还给本票（见 `tests/test_v0350_a3_suspendable_tool_protocol.py:7-8`：
+那一半明确交还给本票（见 `tests/test_v0350_a3_suspendable_tool_protocol.py` 文件头那句
 「本文件把"5 分钟"那半条交给 A5 的超时语义与真机验收」），所以 A5 只管**时间**那一半。
 两处措辞按 A1 已经落地的形状读，两条都不按字面抄：
 
@@ -23,7 +23,7 @@
 `test_a_timeout_while_parked_costs_no_model_and_no_tool_call…` 用计数假账量出来。
 
 一条贯穿全文件的读法：**时间由夹具推进，不由真睡**。`task_store._now()` 是那枚唯一的
-时钟接缝（`task_store.py:25`），`clock.advance(300)` 就是「挂了 5 分钟」；没有任何一条
+时钟接缝，`clock.advance(300)` 就是「挂了 5 分钟」；没有任何一条
 用例 `sleep` 抢时机，跨请求那一族的会合走 `asyncio.gather`。
 
 跨请求那一族必须用 `httpx.ASGITransport` + `asyncio.gather`，不能用 `TestClient`：

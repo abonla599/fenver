@@ -8,11 +8,11 @@
    （本文件把"5 分钟"那半条交给 A5 的超时语义与真机验收，见交付报告的未证实清单）；
 2. 变异锁：删掉 `waiting_user` 那一跳 → 本文件的任务面测试红（判据 4）。
 
-executor 的歧义是按提案自己的两个行号认门的：§四 v0.38 写「复用已下沉的执行器闸门
-（`executor.py:169-176`）」与「`executor.py:21` 那个 10 次 / 600s 模型」——`tools/executor.py:21`
-正是 `_FREQ_LIMITS = {"execute_code": (600.0, 10)}`、`:169-176` 正是那段 `requires_approval`
-闸门；而 `agents/executor.py` 全文只有 39 行、既没有那把闸门也没有那本频控账，那份是
-"用 TaskAgent 跑一个子任务"的薄壳。所以 A3 的协议改在 `tools/executor.py`。
+executor 的歧义按提案自己的两处描述认门：§四 v0.38 写「复用已下沉的执行器闸门」与
+「10 次 / 600s 模型」——`tools/executor.py` 里 `_FREQ_LIMITS = {"execute_code": (600.0, 10)}`
+就是那本频控账，`requires_approval` 那一段就是那道闸门；而 `agents/executor.py` 全文只有
+39 行、既没有那把闸门也没有那本频控账，那份是"用 TaskAgent 跑一个子任务"的薄壳。所以 A3
+的协议改在 `tools/executor.py`。
 
 一条贯穿全文件的纪律：**挂起绝不许被读成失败**。三条老读法各配一把负向锁——
 ① 按文本前缀猜成败（`startswith("✓")`），② 兜底 `except Exception` 把挂起折成
@@ -231,9 +231,10 @@ def test_suspension_is_the_third_outcome_and_not_the_error_one(fake_tools):
 def test_the_three_outcomes_have_three_mutually_distinct_text_projections(fake_tools):
     """只读文本的老消费者（`execute_tool` 那一条）也分得开三态。
 
-    历史口径（这一族今天已经没有生产读者）：`task_agent.py:178` 早在 #76a 之前就改读
+    历史口径（这一族今天已经没有生产读者）：`task_agent.py` 早在 #76a 之前就改读
     `ok=bool(outcome.ok)`，`react_agent.py` 那句 `str(tool_result).startswith("✓")` 也在 #76b
-    换成了 `outcome.ok`（现在写在 :212）。所以本条钉的是**文本形状本身**：三种前缀互不重叠，
+    换成了 `outcome.ok`（现在写在它的 `record_outcome` 调用上）。所以本条钉的是
+    **文本形状本身**：三种前缀互不重叠，
     挂起那一支**既不是 ✓ 也不是 ✗**——按前缀猜成败的读法只会把它读成"这次没拿到可用结果"，
     那是安全的方向；读成"成功了"才是事故。
     """
@@ -250,8 +251,9 @@ def test_the_three_outcomes_have_three_mutually_distinct_text_projections(fake_t
 def test_the_pre_existing_two_outcomes_render_byte_identically(fake_tools):
     """向后兼容的正面证据：引入第三态**没有**改动前两态的任何字节。
 
-    给模型的文本是全站契约（`tools/executor.py:104` 那句"签名与返回类型一律不动"）。
-    这两行是从改动前的 `response.py:18-19` 逐字抄来的基准，不是从新代码的产物反推的。
+    给模型的文本是全站契约（`execute_tool` docstring 里那句"签名与返回类型 str 一律不动"）。
+    这两行是从改动前的 `response.py` 里 `OK_PREFIX` / `FAIL_PREFIX` 两枚常量逐字抄来的
+    基准，不是从新代码的产物反推的。
     """
     assert ToolResponse(True, data=7).to_string() == "✓ 7"
     assert ToolResponse(False, error="炸了", hint="换个法子").to_string() == \
@@ -287,7 +289,7 @@ def test_no_suspension_signal_ever_escapes_the_executor(fake_tools):
     """挂起在协议里是**值**，不是异常：两条公开函数都只回 str / ToolOutcome。
 
     这条是向后兼容的承重墙。调用侧全都写着兜底 `except Exception`
-    （`streaming.py:553`、`pipeline.py`、`react_agent.py:215`），异常一旦外飘立刻被
+    （`streaming.py`、`pipeline.py`、`react_agent.py` 各一处），异常一旦外飘立刻被
     折成一句"工具执行错误"，第三态当场退化回失败态。
     """
     try:
@@ -324,7 +326,8 @@ def test_a_suspension_whose_state_cannot_be_carried_promises_no_resume(fake_tool
     """断点带不过去（这里是一张装着 object() 的 dict）→ 仍然挂起，但 `can_resume=False`。
 
     为什么 can_resume 要在这里判死而不是等落盘再炸：A1 那份存储的不变式是
-    `can_resume ⟺ status 是 waiting_user`（task_store.py:190 与 :263 同一判据）。
+    `can_resume ⟺ status 是 waiting_user`（`Task.set_status` 里
+    `self.can_resume = target is TaskStatus.WAITING_USER` 那一句，恢复路径同一判据）。
     没有这一格，编排器就会把接不回去的任务写成 waiting_user（见
     `test_a_suspension_nobody_can_carry_is_parked_as_failed_not_waiting`）。
     """
@@ -397,10 +400,10 @@ def test_resume_still_pays_the_approval_gate(fake_tools):
 
 
 def test_resume_still_pays_the_frequency_gate(fake_tools):
-    """续跑**不放宽**频控：那一本 10 次 / 600 秒的账照旧计数（`tools/executor.py:21`）。
+    """续跑**不放宽**频控：那一本 10 次 / 600 秒的账照旧计数（`_FREQ_LIMITS` 那张表）。
 
     做法：给 `a3_order` 临时挂上一条频控规则（`_FREQ_LIMITS` 是这张表，判据在
-    `tools/executor.py:21` 与 `_freq_gate`），先把这个人的账本灌满，再看续跑能不能
+    `_freq_gate`），先把这个人的账本灌满，再看续跑能不能
     白拿一次执行。负向锁：把 `_freq_gate` 那句调用删掉，
     `fake_tools["calls"]` 会非空 → 这条红。
     """
@@ -453,7 +456,7 @@ def test_a_refused_resume_consumes_no_frequency_slot(fake_tools):
 
     方向要说清：频控闸在 `_dispatch` 里排在续跑判据**之后**，为的是"根本没开始的
     调用不该消耗这个人的额度"——与本仓既有那句"被闸门挡下的调用不该已经拉起过容器"
-    （`tools/executor.py:190`）同一个理由。
+    （`_dispatch` 里频控那句注释）同一个理由。
 
     道具刻意用 `a3_order` 而不是 `execute_code`：**第一版这条是假绿**——它拿
     execute_code 做道具，而 execute_code 挂着审批闸（`requires_approval=True`），
@@ -489,7 +492,7 @@ def test_suspending_round_is_counted_and_not_credited_as_success(fake_tools, mon
 
     三个反面都要防：
     - 不 `record_outcome` → 本轮轮次少记一笔 → 成本上限被绕过（本仓那条
-      "尝试即计数"的口径，见 tools/executor.py:16-18）。
+      "尝试即计数"的口径，见 `_FREQ_LIMITS` 上方那段注释）。
     - 先 `clip_output` 再抛 → 那句根本没给模型看的问话还吃掉了本轮输出预算。
     - 挂起被记成失败 → 退避/熔断那一族事件混进这一轮的账里。
     负向锁：删掉 `task_agent.py` 里 `guard.record_outcome(tool_name, ok=..., suspended=...)`
@@ -498,7 +501,7 @@ def test_suspending_round_is_counted_and_not_credited_as_success(fake_tools, mon
     ⭐ 下面最后那组断言在工单 #76a 改过一次，改前/改后各钉什么要说清（不写就变成
     "谁红改谁"）：#29 只开了护栏侧的入口，调用点还传 `ok=bool(outcome.ok)`，挂起被读成
     **失败**，那一轮一条事件都不会产生 → 这里钉的是 `types == []`。#76a 把 task_agent
-    接上 `suspended=` 之后，`guardrails.py:171-172` 必然追加一条 `suspend` 事件 →
+    接上 `suspended=` 之后，`record_outcome` 的挂起分支必然追加一条 `suspend` 事件 →
     空清单那条断言必红（本单最大的红点）。现在钉的是"**只有** `suspend` 这一条、而且是
     机器自己数出来的那一条"：类型清单、工具名、`suspension_counts` 三样同时成立，并且
     熔断/退避那一族（fail_backoff / duplicate / cost_cap_*）一条都不许出现。
@@ -538,7 +541,8 @@ def test_suspending_round_is_counted_and_not_credited_as_success(fake_tools, mon
 def test_usage_already_spent_before_a_suspension_stays_on_the_ledger(fake_tools, monkeypatch):
     """挂起不改账本：已经发生的每次模型调用各记一次，一次都不许少、一次都不许多。
 
-    形状上的根据是这条路上钱记在**每一次模型调用**的当场（`llm_client.py:66`），
+    形状上的根据是这条路上钱记在**每一次模型调用**的当场（`core/llm_client.py` 里
+    `usage.record_call(...)` 那一句），
     而挂起是值不是异常（见 `test_no_suspension_signal_ever_escapes_the_executor`），
     所以没有任何 `finally` / 记账路径会被跳过。负向锁：把工具改成**抛普通异常**，
     这条不变（异常也一样记过账），但把 `get_llm_response` 的调用挪到挂起之后
@@ -766,7 +770,7 @@ def test_the_protocol_gained_no_new_status_literal():
     """任务状态字面量仍然只有那六个；第三态在协议里是**字段**，不是第二个状态。
 
     与本仓那条纪律同源：`resumable` / `suspended` 这两个词各有别的含义
-    （`stream_runs.py:248` 的函数 `resumable()` 与 JSON 布尔 `resumable`、壳侧
+    （`stream_runs.py` 的 `resumable()` 函数与 JSON 布尔 `resumable`、壳侧
     `Api.kt` 那个不是一回事的 Boolean），再拿它们当状态名等于让下一个人猜是哪一面。
     所以 A3 全程只说布尔字段（suspended / can_resume），往外报的 status 值一律取自
     既有的 `TaskStatus`。
@@ -871,8 +875,8 @@ def test_threading_lock_is_still_the_only_concurrency_primitive_in_the_executor(
 # **看不见 waiting_user** 了，于是掉进那句通用的"恢复任务 … 进度: 0/1"，把整条子任务
 # 从第 1 步重跑——那正是 A3 承诺省掉的那一笔钱（重复下单 + 重复发验证码）；两个响应还
 # 互相矛盾（一个说还在等人，一个说办完了）。更窄的窗口里审查员另外拿到一枚**从端点
-# 飘出去**的 `IllegalTaskTransition: completed → failed`，抛点就在失败处理器里面
-# （`orchestrator.py:318` 那一跳）→ 客户端看到的是 500。
+# 飘出去**的 `IllegalTaskTransition: completed → failed`，抛点就在失败处理器
+# `_record_failure` 里 `task.set_status(TaskStatus.FAILED)` 那一跳 → 客户端看到的是 500。
 #
 # 这一族测试必须用 `httpx.ASGITransport` + 真并发驱动，理由与本仓那条硬约定同源：
 # `TestClient` 每个请求另开一个 portal（各自一条循环、各自一套线程池），跨请求互相
@@ -1099,8 +1103,8 @@ def test_two_answers_that_both_read_waiting_user_leave_exactly_one_owner(
         race_tools, isolated_tasks, client, enforced, monkeypatch):
     """⭐ 更窄的那一格：两条请求都在翻状态**之前**读到了 waiting_user。
 
-    会合点搬进读侧——`_tool_suspension`（WAITING_USER 那一支唯一会调的那次读游标，
-    `orchestrator.py:139`）包一层 `threading.Barrier(2)`：两条请求必然都在这一行读到
+    会合点搬进读侧——`_tool_suspension`（WAITING_USER 那一支唯一会调的那次读游标）
+    包一层 `threading.Barrier(2)`：两条请求必然都在这一行读到
     同一份 waiting_user，然后一起放行。这正是"两个都看见在等人、两个都动手"的交错，与
     上一条的"一个已翻状态"互补，两条合起来才盖住审查员说的那两个窗口。
 
@@ -1303,7 +1307,8 @@ def test_a_cancel_racing_an_in_flight_answer_is_refused_not_silently_dropped(
 
 def test_the_failure_handler_cannot_raise_even_when_the_table_refuses_failed(
         race_tools, isolated_tasks, client, enforced, monkeypatch, capsys):
-    """⭐ 把 `orchestrator.py:317` 那一跳的"拒"**确定地**造出来，不靠并发撞窗口。
+    """⭐ 把 `_record_failure` 里 `task.set_status(TaskStatus.FAILED)` 那一跳的"拒"
+    **确定地**造出来，不靠并发撞窗口。
 
     做法与本文件那条既有变异锁同形：运行期 `monkeypatch.setitem` 把
     `ALLOWED_TRANSITIONS[RUNNING]` 里 FAILED 那一格抹掉（`task_store.py` 一个字节不动），
@@ -1424,8 +1429,9 @@ def _paths_outside(pairs, allowed_roots):
     """这些实际落点里有几条**不该要它**：不在允许的临时根内，或干脆落在仓库里。
 
     两条判据叠在一起是有意的：`… 不在临时根` 是本仓那条既有约定的写法
-    （`tests/test_test_isolation.py:58` 用的是"不许落在 REPO_ROOT 之下"，因为那才是
-    本机生产数据的家；`tests/test_paths.py:134` 用的是"必须在某个根之下"），这里一次
+    （`tests/test_test_isolation.py` 里 `inside = [...]` 那条用的是"不许落在 REPO_ROOT
+    之下"，因为那才是本机生产数据的家；`tests/test_paths.py` 里
+    `resolved.is_relative_to(root)` 那句用的是"必须在某个根之下"），这里一次
     判两样。第二句尤其要紧：本机的生产 `data/` 就躺在仓库目录里，路径跟着项目根走
     才是真正的那一刀。
     """
@@ -1447,7 +1453,8 @@ def test_the_race_harness_writes_only_inside_its_own_temp_root(
     都必须在自己的临时根里。
 
     判据抄本仓既有那一条：`paths.resolve_all_data_paths()` 是"可变数据到底落在哪"的唯一
-    权威清单（`app/core/paths.py:119`，清单判据在 `tests/test_paths.py:213`）。这里在真的
+    权威清单（`app/core/paths.py` 的 `resolve_all_data_paths()`，清单判据在
+    `tests/test_paths.py` 的 `test_resolve_all_data_paths_covers_every_store`）。这里在真的
     停点 + 真的答案跑完之后逐条判它是否还在临时根内；再把仓库那份真 `data/tasks.json`
     的字节前后对一遍（路径判据说"不在这里"，这一句直接证明"这里没被写过"）。
     判据自己配反例：同一把尺子量一份"指回仓库真库"的清单必须报红，量一份合法指法必须

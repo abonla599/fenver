@@ -29,7 +29,7 @@ def _source_repo_root() -> str:
 
 
 def data_root() -> str:
-    """会话、长期记忆、附件、模型服务配置共同挂在它下面。
+    r"""会话、长期记忆、附件、模型服务配置共同挂在它下面。
 
     `DATA_ROOT` 环境变量优先。这条口子是 2026-10-08 为**测试**加的，不是给生产用的：
     本仓的开发机同时就是生产机（`dist\run_backend\` 跑着线上服务），而 v0.33 的数据根
@@ -59,7 +59,7 @@ def data_file(env_var: str, filename: str) -> str:
     那棵树下。第二点的后果是版本控制层面的：`.gitignore` 里写的是 `feedback.json`、
     `preference.txt` 这两个**精确文件名**，而按人分账后偏好摘要叫
     `preference-<uid>.txt`——换个名字就漏进仓库。本仓已经因运行数据被跟踪付出过一次
-    代价（chroma_db/ 与 .env 曾入库，API Key 公开了五个月），所以"漏一个名字就裸奔"
+    代价（chroma_db/ 与 .env 曾入库，API Key 因此公开），所以"漏一个名字就裸奔"
     这个形状本身就是要拆掉的东西。
 
     第三档（项目根那份）只为兼容而留：本机管理员多年的 feedback.json/preference.txt

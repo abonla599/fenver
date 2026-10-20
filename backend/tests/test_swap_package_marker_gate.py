@@ -250,7 +250,7 @@ def _marker_gate_ok(text: str) -> bool:
         i_live_count = _line_of(GATE_COUNT, text)
         i_absent_gate = _line_of(GATE_ABSENT, text)
         i_stage_gate = _line_of(r"stage-appjs-marker=absent", text)
-        i_disable = _line_of(r"^Disable-ScheduledTask -TaskPath", text)
+        i_disable = _line_of(r"^\s*Disable-ScheduledTask -TaskPath", text)
         i_stop = _line_of(r"Stop-Process -Id \$p\.ProcessId -Force", text)
         i_precheck_ok = _line_of(r"PRECHECK ok", text)
         i_dryrun = _line_of(r"^if \(\$DryRun\)", text)

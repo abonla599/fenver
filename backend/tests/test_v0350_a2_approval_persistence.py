@@ -12,8 +12,9 @@
    "能力"从进程生命周期里救出来，如果 consumed 不跟着走，救出来的就是一张复活的能力）。
 3. **盘上只存摘要**：键与文件都是 `sha256:<hex>`，明文 ticket_id 一个字节都不落盘。
    抄的是 auth.py 的既有纪律（会话令牌与 device_secrets 都以摘要为键，
-   `auth.py:141-152` 定义、`:975` 按摘要查、`:989` 单次使用即弹出），且**是第三个名字**
-   而不是把三类凭据塞进同一张表——受众隔离那句理由就写在 auth.py:145-152。
+   `hash_token` / `hash_secret` 定义摘要口径、按摘要查记录、单次使用即从表里弹出），
+   且**是第三个名字**而不是把三类凭据塞进同一张表——受众隔离那句理由就写在
+   `hash_secret` 的 docstring 里。
 4. **扫描不再只挂在建票时**：落盘之后"没人建票就没人扫"会从内存问题变成磁盘问题
    （过期记录带着参数与执行结果长期留在文件里）。现在建/消费/查/回填/装载五个入口都扫，
    仍然不起后台线程。
@@ -189,7 +190,7 @@ def test_a_timeout_written_before_the_restart_is_not_granted_after(isolated_appr
 def test_the_disk_holds_the_digest_never_the_plain_id(isolated_approvals):
     """文件里不许出现明文 ticket_id；表键就是 `sha256:<64 hex>`。
 
-    抄的是 auth.py:141-152 那两个函数（`hash_token` / `hash_secret`）与它们各自的表：
+    抄的是 auth.py 的 `hash_token` / `hash_secret` 两个函数与它们各自的表：
     凭据只存摘要，查找时把呈现方带来的原文算一次再比。这里复用同一个**原语**
     （`hash_ticket` 调 hash_token），但坚持是第三个名字——受众隔离。
 
@@ -501,7 +502,8 @@ def test_the_confirm_write_lands_off_the_event_loop(client, isolated_approvals,
 def test_the_sweep_costs_no_background_thread_and_no_timer():
     """扫这个洞是用"每个入口顺手一次"补的，不是用常驻线程/定时器补的。
 
-    提案与本仓的既有结论一致（`session/export_store.py:10-11` 那句"为一张几行的小表养一条常驻线程，
+    提案与本仓的既有结论一致（`session/export_store.py` 模块 docstring 里那句
+    "为一张几行的小表养一条常驻线程，
     换来的是每个测试进程里多一个关不掉的幽灵"）：不起线程。这条锁钉的是"以后别图省事加一条"。
 
     负向锁：把 `_sweep_locked` 换成 `threading.Timer(60, ...)` 常驻，第一条红；

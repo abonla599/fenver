@@ -3,15 +3,16 @@
 这条文件只走**现网那两个 HTTP 面**（网页/PWA 的 #133 用的就是它们）：
 
 - 任务入口与回答入口是同一个 `POST /v1/agent/orchestrate`，回答那一枪带
-  `{"goal", "task_id", "user_answer"}`（网页端 `api.js` 的 `answerTask`，main.py:1716）；
-- 读侧是 `GET /v1/tasks/{task_id}`（main.py:1753）。
+  `{"goal", "task_id", "user_answer"}`（网页端 `api.js` 的 `answerTask`，
+  `main.py` 的 `orchestrate_task` 路由）；
+- 读侧是 `GET /v1/tasks/{task_id}`（`main.py` 的 `get_task_status` 路由）。
 
 判据 1 的形状：请求命中 `plan_add` 的真挂起点（#153：文本里有日子词、却认不出具体
 日期，`suspends=True`）后，`TaskStore` 里留下一条 `waiting_user` 任务；把用户回答从
 回答入口递回去，编排器从断点续跑、任务落到 `completed`，并且 `plan_add` 收到的就是
 用户答的那个日子（不是今天、也不是没收到答案时重挂一次）。
 
-判据 2 的形状：中途调 `task_store.restore()`——模块导入期（task_store.py:827）跑的
+判据 2 的形状：中途调 `task_store.restore()`——模块导入期那句 `restore()` 跑的
 就是这一条无参调用——模拟进程重启；`GET /v1/tasks/{id}` 仍须答得出等待游标与
 `can_resume`，重启之后回答仍然能续跑。
 
@@ -53,7 +54,8 @@ def _install_fake_llm(monkeypatch, calls):
     """确定性替身：规划一步、执行时要求调 plan_add、汇总给一句话。
 
     执行侧只要对话里已经有「工具执行结果」就收尾——那一行正是编排器从断点续跑时
-    补进 TaskAgent 的种子（task_agent.py:112-120）。所以如果续跑没把工具结果接上，
+    补进 TaskAgent 的种子（`TaskAgent` 里把续跑结果塞进首条 tool 消息那几句）。
+    所以如果续跑没把工具结果接上，
     这个替身会再要一次 plan_add，任务会第二次挂起，用例当场红在 "completed" 上。
     """
     def plan_llm(model, messages, **kw):

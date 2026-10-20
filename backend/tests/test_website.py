@@ -73,7 +73,8 @@ def test_unknown_paths_still_get_the_framework_json_404():
     application/json,换上根 Mount 这条照样绿(本轮 RED 就是这么露馅的)。
     真正抓得住根 Mount 的是另外两条:test_trailing_slash_semantics_are_untouched
     (`/health/` 只有 redirect_slashes 还活着才回 200;同一条语义的安全侧由
-    test_auth_endpoints.py:296 钉)与 test_site_assets_are_public_and_uncached
+    `test_auth_endpoints.py` 的 `test_trailing_slash_cannot_dodge_the_throttle` 钉)与
+    test_site_assets_are_public_and_uncached
     (`/site/site.css` 得真有这么个前缀,根 Mount 只会拿它去找 SITE_DIR 下的
     site/site.css)。
     """

@@ -96,11 +96,11 @@ _HELPER_FIELDS = ("Enabled", "State", "Instances", "ReadError", "EnabledSource")
 _IF_LINE = re.compile(r"^\s*if \((?P<pred>.+)\) \{$")
 _SAFETY_LINE = re.compile(r"^\s*Stop-AfterFailure\s+'(?P<stage>[A-Za-z0-9-]+)'")
 _FLAG_TRUE = re.compile(r"^\s*\$script:watchdogDisabled = \$true\s*$")
-_FLAG_LINE_COL0 = r"^\$script:watchdogDisabled = \$true"
+_FLAG_LINE = r"^\s*\$script:watchdogDisabled = \$true"
 _BARE_EXIT = re.compile(r"^\s*(throw|exit)\b")
 _TOKEN_LINE = re.compile(r"^\s*Write-Output \('DISABLE-THREW enabled='")
 _TRY_OPEN = re.compile(r"^\s*try\s*\{$")
-_DISABLE_COL0 = re.compile(r"^Disable-ScheduledTask -TaskPath")
+_DISABLE_LINE = re.compile(r"^\s*Disable-ScheduledTask -TaskPath")
 _READ_CALL = r"$disableProbe = Get-WatchdogTaskState -TaskToRead $task"
 _ERROR_CAPTURE = r"$disableError = $_.Exception.Message"
 # 把脚本里的条件原文拼进生成的探针，这是唯一的护栏，宁可窄：只许这些字符
@@ -231,10 +231,10 @@ def _try_wraps_and_routes(text: str) -> bool:
         return False
     s, e = ctx["span"]
     lines, lo = ctx["lines"], ctx["lo"]
-    # 顶格形状是刻意的（见脚本里那段注释）：三处顺序锁按第 0 列认这一步
-    if not _DISABLE_COL0.match(lines[lo]):
+    # 只按命令文本认这一步，不认列：try 体内的正常缩进不该让锁误判
+    if not _DISABLE_LINE.match(lines[lo]):
         return False
-    flag = _idx(_FLAG_LINE_COL0, lines, lo, ctx["hi"])
+    flag = _idx(_FLAG_LINE, lines, lo, ctx["hi"])
     if flag is None or flag <= lo or flag > e:
         return False
     if not _catch_routes_to_restore(lines, ctx["span"]):
@@ -623,7 +623,8 @@ def _drift_to_pre_ticket_bare_shape(text: str):
         return None
     lines = _code_lines(text)
     s, e = ctx["span"]
-    if lines[ctx["lo"]] != _BARE_DISABLE or lines[ctx["lo"] + 1] != _BARE_FLAG:
+    if (lines[ctx["lo"]].strip() != _BARE_DISABLE
+            or lines[ctx["lo"] + 1].strip() != _BARE_FLAG):
         return None
     kept = lines[:s] + [_BARE_DISABLE, _BARE_FLAG] + lines[e + 1:]
     return "\n".join(kept)

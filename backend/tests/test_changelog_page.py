@@ -358,7 +358,8 @@ def _page_splits_the_two_groups(html: str) -> bool:
 # "筛子还在但筛错了对象"。本仓对网页 JS 的既有做法是把那段真跑一遍（没有浏览器、不装
 # 依赖，一个 node + 一份手写 DOM 替身），所以这里沿用同一招：把 changelog.html 里含
 # `function render(` 的那段内联脚本抽出来，喂给它**真产物**，再把渲染完的 DOM 收回来判。
-# 没有 node 的机器上这几条 skip（与 test_v0340_swap_path_normalization.py:68 同一口径），
+# 没有 node 的机器上这几条 skip（与 test_v0340_swap_path_normalization.py 里
+# "没有解释器就 skip"同一口径），
 # 文本判据那几条照跑。
 _RENDER_HARNESS = r"""
 const fs = require("fs"), vm = require("vm");
