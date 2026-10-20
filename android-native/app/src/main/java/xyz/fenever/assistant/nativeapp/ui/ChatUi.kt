@@ -157,6 +157,7 @@ import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.SessionSummary
 import xyz.fenever.assistant.nativeapp.StoredMessage
 import xyz.fenever.assistant.nativeapp.StreamNeedHistoryException
+import xyz.fenever.assistant.core.TaskCard
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
 import xyz.fenever.assistant.nativeapp.theme.WebTokens
@@ -211,6 +212,20 @@ data class ApprovalState(
     val expiresAt: Double,
     val resolved: Boolean = false,
     val decision: String = "",  // "allow" / "reject" / "" (pending)
+)
+
+/* v0.35 #99「需要你输入」卡片的本机状态。detailJson 是 GET /v1/tasks/{id} 的原样回包：
+ * 卡片上每个字都由 core.TaskCard 从这一份 JSON 现算，不把服务端文本拆成多个字段再拼。
+ * 状态住在 ChatScreen 这一层（LazyColumn 条目滚出视口会销毁组合，记在条目里会丢），
+ * 并随身份一起 remember：换账号时旧卡片（常是验证码）一个字节都不留。
+ * owner 是抓取时的那一个 user_id；任何一枪回来先比它，对不上就整段丢掉。 */
+private data class TaskCardUi(
+    val owner: String,
+    val taskId: String,
+    val detailJson: String,
+    val draft: String = "",
+    val busy: Boolean = false,
+    val error: String = "",
 )
 
 /* 落盘步 → UI 步：全量读法（缺键给空值），认不出的 kind 不猜形状、只把能给的字留下。 */
@@ -317,6 +332,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
+    // 当前身份（任务卡片的归属锚点）：换账号时 MainActivity 会整壳重建，这里再 remember
+    // 一次，让任何一条重建路径都把旧卡片清干净，而不是只靠"外面恰好重建了"。
+    val identityId = Prefs.currentEntry()?.userId.orEmpty()
 
     // ---------- 状态：对照 app.js 的 state / pref ----------
     var sessionId by remember { mutableStateOf(Prefs.lastSessionId) }
@@ -340,6 +358,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var streamTraceTouched by remember { mutableStateOf(false) }
     // v0.31 审批卡片：流式中收到的 approval_request 帧。用户允许/拒绝/超时后置 resolved。
     var streamApproval by remember { mutableStateOf<ApprovalState?>(null) }
+    // v0.35 #99 任务卡片：当前在 waiting_user 的那一条（由 GET /v1/tasks 找到、详情由
+    // GET /v1/tasks/{id} 现读）。流上的挂起前缀只触发"去读一次"，从不当卡片状态用。
+    var taskCard by remember(identityId) { mutableStateOf<TaskCardUi?>(null) }
     var attachOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
     var drawerTick by remember { mutableStateOf(0) }
@@ -390,8 +411,107 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
      * clearAuth() 会把这台机器上所有身份（含各自的 providerId/lastSessionId）
      * 一起抹掉，把一次可恢复的过期放大成"账户全没"。改为只 forgetCurrent()。 */
     fun logoutIf401(e: Throwable): Boolean {
-        if (e is ApiException && e.status == 401) { Prefs.forgetCurrent(); onLoggedOut(); return true }
+        if (e is ApiException && e.status == 401) {
+            // 任务卡片里常是短信验证码/收货地址：落登录页这一刻就要让它消失，
+            // 不等下一次重组或下一次读列表。
+            taskCard = null
+            Prefs.forgetCurrent(); onLoggedOut(); return true
+        }
         return false
+    }
+
+    /* ---------------- v0.35 #99 任务卡片：读侧只有一个真相源 ----------------
+     * 1) 触发面只有两个：冷启动/换人后进来读一次；流上出现挂起前缀时再读一次。
+     *    帧上没有任务身份，所以"哪一条"由 GET /v1/tasks 的 waiting_user 现找，详情
+     *    一律 GET /v1/tasks/{id} 现读——重启后卡片还在，靠的就是这一步不靠进程内缓冲。
+     * 2) 回答是一次长阻塞 POST；提交在途时按钮与输入一起置灰（同一枚断点只许一个答案
+     *    接走，双击送出的第二枪只会拿到"没接住"）。无论回没回话，收尾都再读一次 GET：
+     *    断连时服务端照跑，唯一说得出"现在挂在哪一步"的地方还是读接口。
+     * 3) 每一枪回来先比 owner；换人之后旧请求的结果一个字段都不许落进新界面。 */
+    fun taskReadError(e: Throwable): String =
+        if (e is ApiException) TaskCard.readError(e.status, e.message.orEmpty())
+        else TaskCard.NETWORK_ERROR_TEXT
+
+    suspend fun refreshTaskCard() {
+        val owner = Prefs.currentEntry()?.userId.orEmpty()
+        if (owner.isEmpty()) { taskCard = null; return }
+        val listRaw = try {
+            Api.listTasks()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (logoutIf401(e)) { taskCard = null; return }
+            // 列表没读到：已经显示着的那份不动（它仍是最后一次读到的真相），只把
+            // 读不到这件事落在卡片上；没有卡片时不凭空造一张错误卡。
+            taskCard = taskCard?.copy(error = taskReadError(e))
+            return
+        }
+        if (Prefs.currentEntry()?.userId.orEmpty() != owner) return
+        val id = TaskCard.waitingTaskId(listRaw, owner)
+        if (id.isEmpty()) { taskCard = null; return }
+        val detailRaw = try {
+            Api.getTask(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (logoutIf401(e)) { taskCard = null; return }
+            val cur = taskCard
+            if (cur != null && cur.owner == owner && cur.taskId == id)
+                taskCard = cur.copy(error = taskReadError(e))
+            return
+        }
+        if (Prefs.currentEntry()?.userId.orEmpty() != owner) return
+        val view = TaskCard.view(detailRaw, false)
+        taskCard = if (!view.visible) null else {
+            // 同一条任务的草稿和在途标记跨刷新留着（用户可能刚打一半/刚按提交，
+            // 一次并发读回来的旧忙碌态不该把按钮重新点亮）；换了一条就从空框开始，
+            // 绝不把上一条的答案带进下一条。
+            val cur = taskCard?.takeIf { it.owner == owner && it.taskId == id }
+            TaskCardUi(owner, id, detailRaw, draft = cur?.draft.orEmpty(),
+                busy = cur?.busy ?: false)
+        }
+    }
+
+    fun submitTaskAnswer() {
+        val cur = taskCard ?: return
+        if (cur.busy) return                      // 双击/连点：第二下直接丢，不送第二枪
+        val text = cur.draft.trim()
+        if (text.isEmpty()) return
+        val view = TaskCard.view(cur.detailJson, false)
+        if (!view.canAnswer) return
+        val owner = cur.owner
+        taskCard = cur.copy(busy = true, error = "")
+        scope.launch {
+            var loggedOut = false
+            var cancelled = false
+            try {
+                Api.answerTask(view.goal, view.taskId, text)
+            } catch (e: CancellationException) {
+                cancelled = true
+                throw e
+            } catch (e: Exception) {
+                if (logoutIf401(e)) {
+                    loggedOut = true
+                    taskCard = null
+                } else if (Prefs.currentEntry()?.userId.orEmpty() == owner) {
+                    val now = taskCard
+                    // 这一枪出发之后卡片可能已换成另一条任务：错误只落回它自己那一条。
+                    if (now != null && now.owner == owner && now.taskId == view.taskId)
+                        taskCard = now.copy(error = taskReadError(e))
+                }
+            } finally {
+                if (!loggedOut && Prefs.currentEntry()?.userId.orEmpty() == owner) {
+                    val now = taskCard
+                    if (now != null && now.owner == owner && now.taskId == view.taskId) {
+                        // 取消（整壳被换掉）也要把在途标记收回；只有真跑完的那一枪才
+                        // 需要再去 GET 一次——取消之后界面已经不归这一次组合管了。
+                        taskCard = now.copy(busy = false,
+                            draft = if (cancelled) now.draft else "")
+                    }
+                    if (!cancelled) refreshTaskCard()
+                }
+            }
+        }
     }
 
     /* app.js 的同一组纯函数：serverDefaultProvider / currentProvider / modelCapK。
@@ -420,7 +540,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         scope.launch { runCatching { Api.listSessions() }
             .onSuccess { sessions = it }.onFailure { logoutIf401(it) } }
     }
-    LaunchedEffect(Unit) { loadModelsNow(); refreshSessions() }
+    LaunchedEffect(Unit) { loadModelsNow(); refreshSessions(); refreshTaskCard() }
 
     // switchSession：getSession 拉全量消息（含服务端留存的附件条目）
     fun openSession(id: String) {
@@ -668,6 +788,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             var failMsg = ""
             var stopped = false
             var needHistory = false
+            // v0.35 #99：流上出现挂起前缀 = "去读一次任务"。它只是触发器，不是状态；
+            // 帧上没有任务身份，真正在等哪一条由列表 + 详情两个 GET 回答。
+            var sawSuspend = false
             val pid = currentProvider()?.id
             val atts = messages.lastOrNull { it.role == "user" }?.attachments
                 ?.map { it.id } ?: emptyList()
@@ -703,6 +826,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             publishTrace()
                         }
                         is ChatEvent.ToolResult -> {
+                            // 挂起这一枪只说明"值得去读一次任务"：逐字前缀取自
+                            // backend/app/tools/response.py，判据仍只认 GET 回来的状态。
+                            if (ev.summary.startsWith(TaskCard.SUSPEND_PREFIX)) sawSuspend = true
                             val at = traceAcc.indexOfLast {
                                 it.kind == "tool" && it.pending &&
                                     (ev.id.isEmpty() || it.id == ev.id)
@@ -804,6 +930,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 persist(messages)
                 runCatching { sessions = Api.listSessions() }
             }
+            // 流上有人说"停在断点等输入"了：去读一次任务的真相。找不到等待中的任务
+            // 就什么都不画（多数挂起只是聊天里的一次工具断点，并没有对应的 Task）。
+            if (sawSuspend) refreshTaskCard()
             if (!failed && !stopped) setStatus("")
         }
     }
@@ -1032,6 +1161,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
     fun closeDrawer() { scope.launch { drawerState.close() } }
 
+    /* 任务卡片的可画字段只在"详情/在途"变了才重算：打字只改 draft，不该每次都把
+     * 那份 JSON 再解析一遍。visible 为假就整块不挂——一条不在等人的任务不该占位。 */
+    val taskUi = taskCard
+    val taskView = remember(taskUi?.detailJson, taskUi?.busy) {
+        taskUi?.let { TaskCard.view(it.detailJson, it.busy) }
+    }
+
     // 第 11 轮改判（对齐 DeepSeek/豆包）：输入框恢复系统默认文字工具条——键盘起着
     // 时长按输入框出复制/粘贴/全选（光标旁）；键盘没起时输入位是占位条，单点不挂框
     // 不冒菜单、长按归语音。语音长按只在键盘收起（或语音模式）时接管，靠 voiceHold
@@ -1180,6 +1316,22 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                         streamApproval = cur.copy(resolved = true, decision = decision)
                                     }
                                 })
+                        }
+                    }
+                    // v0.35 #99：卡片挂在消息与流式气泡之后。它是"这一轮停下来等你"，
+                    // 不该夹在历史中间；状态住在 ChatScreen 层，滚出视口再回来还是同一份。
+                    val tc = taskUi
+                    val tv = taskView
+                    if (tc != null && tv != null && tv.visible) {
+                        item(key = "task-card") {
+                            TaskWaitingCard(
+                                view = tv,
+                                draft = tc.draft,
+                                busy = tc.busy,
+                                error = tc.error,
+                                onDraft = { t -> taskCard = taskCard?.copy(draft = t) },
+                                onSubmit = { submitTaskAnswer() },
+                            )
                         }
                     }
                 }
@@ -2288,6 +2440,69 @@ private fun ApprovalCard(state: ApprovalState,
             Text(APPROVAL_ALLOW_TEXT, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
                 color = scheme.primary.copy(alpha = btnAlpha),
                 modifier = Modifier.clickable(enabled = !resolved) { onDecision?.invoke("allow") }
+                    .padding(horizontal = 12.dp, vertical = 5.dp))
+        }
+    }
+}
+
+/* ---------- v0.35 #99「需要你输入」卡片 ----------
+ * 形状照 v0.31 的 ApprovalCard（同一档底色/描边/圆角与字号），内容与 PWA 的
+ * .msg-task 同一套文案：标题、问题原文、进度/等待那一行、回答输入、状态句与错误句。
+ * 服务端文本一律当字面量渲染，不拼 HTML；按钮只有一枚「提交」，在途时输入和按钮一起
+ * 置灰——同一枚断点只许一个答案接走（服务端 _claim_execution 的闸），双击送出的
+ * 第二枪只会拿到一句"没接住"，白等一次长阻塞。 */
+@Composable
+private fun TaskWaitingCard(view: TaskCard.View, draft: String, busy: Boolean,
+                            error: String, onDraft: (String) -> Unit,
+                            onSubmit: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(8.dp)
+    val canSubmit = !busy && draft.trim().isNotEmpty()
+    Column(Modifier.fillMaxWidth()
+        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
+        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
+        .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(TaskCard.TITLE, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                color = scheme.onSurface, modifier = Modifier.weight(1f))
+            if (view.state.isNotEmpty())
+                Text(view.state, fontSize = 11.sp, color = text3Color())
+        }
+        if (view.question.isNotEmpty())
+            Text(view.question, fontSize = 13.sp, lineHeight = 19.sp,
+                color = scheme.onSurfaceVariant)
+        val meta = listOf(view.progress, view.waiting)
+            .filter { it.isNotEmpty() }.joinToString(" · ")
+        if (meta.isNotEmpty())
+            Text(meta, fontSize = 11.sp, color = text3Color())
+        BasicTextField(
+            value = draft, onValueChange = onDraft, enabled = !busy,
+            textStyle = TextStyle(fontSize = 14.sp, lineHeight = 21.sp,
+                color = scheme.onSurface),
+            cursorBrush = SolidColor(scheme.primary),
+            modifier = Modifier.fillMaxWidth()
+                .background(scheme.surface, RoundedCornerShape(10.dp))
+                .border(BorderStroke(1.dp, scheme.outline), RoundedCornerShape(10.dp))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { if (canSubmit) onSubmit() }),
+            decorationBox = { inner ->
+                Box {
+                    if (draft.isEmpty())
+                        Text(if (busy) "正在提交…" else "在这里输入你的回答",
+                            fontSize = 14.sp, color = text3Color())
+                    inner()
+                }
+            })
+        if (error.isNotEmpty())
+            Text(error, fontSize = 11.sp, lineHeight = 16.sp, color = scheme.error)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Text(if (busy) "提交中…" else "提交", fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = scheme.primary.copy(alpha = if (canSubmit) 1f else 0.5f),
+                modifier = Modifier
+                    .clickable(enabled = canSubmit) { onSubmit() }
                     .padding(horizontal = 12.dp, vertical = 5.dp))
         }
     }

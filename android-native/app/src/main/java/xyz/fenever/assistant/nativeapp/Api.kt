@@ -544,6 +544,29 @@ object Api {
         return call("/v1/approval/" + enc(ticketId))
     }
 
+    /* ---------- 任务面（v0.35 #99）：读侧只有一个真相源 ----------
+     * 卡片状态一律由 GET /v1/tasks/{id} 现读，流上的 tool_result 最多算"去读一次"的
+     * 提示——帧上没有任务身份（见 backend/app/core/streaming.py 那一格），拿它推状态
+     * 只能推出一份随进程没的假真相。列表只用来找出"当前在等人的那一条"：非管理员由
+     * 服务端按属主过滤，管理员拿到全量，所以界面侧还要再按 user_id 挑一次。
+     *
+     * 回答走一次**长阻塞** POST /v1/agent/orchestrate：服务端跑完、或再次挂回断点才
+     * 回话。goal 在请求模型里是必填（缺它整枪 422），续跑判定认的却是 task_id；这里
+     * 把任务自己那条 goal 原样带回去——留空也能过校验，但会把"这一枪在续哪件事"
+     * 从服务端记录里抹掉。三格都不进日志、不落游标（答案可能是验证码）。
+     *
+     * 返回原样 JSON 而不是在这儿 decode：取值与"缺键给什么"的判断收在纯 JVM 的
+     * core/TaskCard.java 里，台架（tools/shell_jvm_tests.py）能把每条判据真跑一遍。 */
+    suspend fun listTasks(): String = call("/v1/tasks")
+
+    suspend fun getTask(taskId: String): String = call("/v1/tasks/" + enc(taskId))
+
+    suspend fun answerTask(goal: String, taskId: String, userAnswer: String): String =
+        call("/v1/agent/orchestrate", "POST", obj(listOf(
+            "goal" to JsonPrimitive(goal),
+            "task_id" to s(taskId),
+            "user_answer" to s(userAnswer))))
+
     /* 续播内核的一次游标累加（v0.25 安卓 · T2.4/T2.8）。这几个状态跨多次重开存活：
        run_id 给"停止"当目标、lastEventId 给续播当凭据、resumable 一旦被 cannot_resume 置
        false 就不再尝试续播、terminal 收到 done/error 才止住重连。 */
