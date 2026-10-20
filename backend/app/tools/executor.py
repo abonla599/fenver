@@ -1,3 +1,4 @@
+import inspect
 import json
 import threading
 import time
@@ -19,7 +20,12 @@ from app.tools.response import ToolResponse, ToolSuspended
 # 模型碰不到它；无凭据调用归 "anon" 同一个桶，不给匿名调用开平行额度。
 # 窗口 10 分钟 / 上限 10 次：正常用户一轮对话用不满，脚本循环与注入驱动的密集
 # 调用必然撞上；撞上的回复带"还需等约 N 秒"，让模型有明确出口而不是盲目重试。
-_FREQ_LIMITS = {"execute_code": (600.0, 10)}
+#
+# plan_add 这一档不是"顺手也给日程限一次"，而是工单 #79 的配对要求：**凡是声明了
+# suspends 的工具都必须有一档**。一次挂起至少占两次派发（首跑 + 把答案递回去的续跑，
+# 闸门在两者之前都会计数），而挂起这一族天生招重试——没有档的话，它就是白名单制闸门
+# 下那个"一次都不被挡"的口子，比 execute_code 更省注入驱动者的力气。
+_FREQ_LIMITS = {"execute_code": (600.0, 10), "plan_add": (900.0, 6)}
 _FREQ_LEDGER = defaultdict(list)
 _FREQ_LEDGER_MAX_KEYS = 4096          # 键数上限：超了顺手清过期键，防无界增长
 _FREQ_LOCK = threading.Lock()         # 计数与追加必须同锁：否则并发两条各见 9 次、各放行
@@ -48,6 +54,89 @@ def _freq_gate(tool_name: str, user_id: str):
             for k in stale:
                 del _FREQ_LEDGER[k]
     return None
+
+# ---------- 挂起声明的两样配套（工单 #79 频控档 / 工单 #40 接得住 resume）----------
+#
+# 为什么这两样要钉在一起：`suspends=True` 是一句对外许诺——"这个断点接得回去"。
+# 许诺要能兑现，前提是①续跑真的递得进那条函数（缺了就是一次白跑的挂起），
+# ②这条工具在频控表里有档（缺了就是闸门"一次都不挡"的那一族，而挂起比正常调用更招
+# 重试）。两样都在注册表的一句话上，而那句话随时可能被下一个人抄着写漏。
+#
+# 检查放在哪一档：**运行期只降级、不抛**——`available()` 回 False（模型看不见这条工具，
+# 也就点不着它）外加一行响亮 ERROR。绝不放在注册期/装饰期抛：`builtin_tools` 是**导入期**
+# 注册的，装饰期一抛就是现网启动即 ImportError，而开机守护的重试额度用完就不再拉活，
+# 一次配置疏漏足以把线上打死。**"漏配就合不进去"由测试期那两把 fail-closed 锁负责**
+# （tests/test_v0350_freq_suspends_locks.py），这一层只负责"万一真漏了，症状是藏起来
+# 而不是打死服务"。
+#
+# 一个诚实的局限：这里的降级只挂在各条工具自己登记的 `available` 上（见 builtin_tools
+# 里 plan_add 那一处）。将来某条声明 suspends 的工具忘了接这句，运行期没人拦它——那是
+# 测试期那两把锁的射程（它们扫全表），不是这里的。
+GAP_NO_FREQ_TIER = "没在 _FREQ_LIMITS 里配频控档"
+GAP_NO_RESUME_PARAM = "函数接不住 resume 关键字参数"
+
+
+def _takes_resume_kwarg(func) -> bool:
+    """这条函数能不能被 `func(resume=...)` 叫动。
+
+    按关键字传参的口径判（执行器就是这么递的，见 `_dispatch` 里那次注入），不看位置：
+    多一个位置形参不代表它愿意接断点。`**kwargs` 算接得住。拿不到签名（C 实现之类）
+    按接不住处理——判不出就当作不合格，方向与 `_resume_refusal` 一致。
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    for p in params.values():
+        if p.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    target = params.get("resume")
+    return target is not None and target.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+
+
+def suspend_config_gaps(tool_name: str) -> list:
+    """这条工具的 suspends 声明还缺哪几样配套；回空列表 = 齐。
+
+    没声明 `suspends` 的工具恒回空：这两样是挂起这一族的代价，不该拿去拦一条普通工具
+    （否则就是给白名单制闸门之外凭空添一道闸）。
+    """
+    info = tools_registry.get(tool_name) or {}
+    if not info.get("suspends"):
+        return []
+    gaps = []
+    if tool_name not in _FREQ_LIMITS:
+        gaps.append(GAP_NO_FREQ_TIER)
+    if not _takes_resume_kwarg(info.get("function")):
+        gaps.append(GAP_NO_RESUME_PARAM)
+    return gaps
+
+
+_gap_reports = set()      # 同一个 (工具, 缺项组合) 只喊一行：available() 每次拼清单都会跑
+
+
+def suspend_ready_for_model(tool_name: str) -> bool:
+    """给 `available=` 用的那一句：配套齐了才对模型开放这条挂起工具。
+
+    这一处刻意走"误关"那一侧，与 `registry.is_available` 的"检查出错按可用"相反：缺配
+    是**确定的事实**而不是探测失败，而放行的代价（一条没有档的挂起工具被反复续跑）比
+    误关（模型这段时间看不见"往日程加一条"）重。只有检查本身抛了才退回按可用。
+    """
+    try:
+        gaps = suspend_config_gaps(tool_name)
+    except Exception as e:
+        print(f"⚠️ 挂起配套检查失败，按可用处理：{tool_name}: {e}")
+        return True
+    if not gaps:
+        return True
+    key = (tool_name, tuple(gaps))
+    if key not in _gap_reports:
+        _gap_reports.add(key)
+        print(f"❌ [Tools][ERROR] {tool_name} 声明了 suspends 却缺配套：{'、'.join(gaps)}。"
+              "这一版把它按不可用处理（available()=False，模型看不见它），补齐之前不跑它；"
+              "这里不抛异常是刻意的——导入期一抛，现网启动就死。")
+    return False
+
 
 # 一次工具调用允许发给模型多少字。
 #

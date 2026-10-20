@@ -17,6 +17,7 @@ from app.tools import availability
 from app.core import search_usage
 from app.tools.registry import register_tool, tools_registry, is_available
 from app.tools import search_chain
+from app.tools.executor import suspend_ready_for_model
 from app.tools.response import ToolResponse 
 # ---------- 计算器工具 ----------
 sandbox = SandboxManager()
@@ -374,8 +375,20 @@ def today_plan(user_id: str):
         "required": ["text"],
     },
     needs_user=True,
+    # ⭐ v0.35 工单 #79/#40：全仓第一条真声明 suspends 的工具。为什么是它——它只写本地
+    # 日程（`_schedule.add_item`），无网络、无积分、无审批面，因此不会撞上 #37 那条
+    # "suspends + requires_approval 二选一"的派发拒绝（`execute_code` 恰恰带着审批，选不得）。
+    # 声明 suspends 的意义是把 `_can_resume` 从恒假变成可兑现：编排器那侧
+    # `can_resume ⟺ status 是 waiting_user` 的不变式今天才可能真的走到 waiting_user 那一格。
+    # 诚实交代射程：这一版 plan_add **还没有真的挂起点**（函数体不 raise ToolSuspended），
+    # 所以现网不会凭空多出等用户回答的任务；真的问一句由后续票在这里补，配套的两样
+    # （频控档 + resume 形参）已经先备好了。
+    suspends=True,
+    # 配套缺任何一样就退回"模型看不见它"，而不是让它带着没档的挂起被反复续跑。
+    available=lambda: suspend_ready_for_model("plan_add"),
 )
-def plan_add(user_id: str, text: str, at: str = "", day: str = ""):
+def plan_add(user_id: str, text: str, at: str = "", day: str = "", resume: dict = None):
+    """往这个人的日程追加一条。`resume` 由执行器在续跑那一次注入（不是模型给的参数）。"""
     item = _schedule.add_item(user_id, text, at=at, day=day)
     return {"day": _schedule.normalize_day(day), "text": item["text"],
             "at": item["at"], "id": item["id"]}
