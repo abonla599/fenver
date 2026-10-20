@@ -26,23 +26,34 @@ test_v0350_a5_timeout_is_suspension.py` 里"窗口坏值"那一族**只喂显式
 - 数值 getter 的 env 臂与 config 臂，射程就是下面的 `CELLS` 表：宽限期、审批票据
   有效期、停点作废窗口、影子护栏。表里新增一行，这批判据自动跟着扩。基准价（`credit_benchmark`）单独一条，它的坏值落点是**逐键各自的默认**，
   不是某个统一数。
+- `restore()` / `apply_update()` **写缓存之前**的消毒：盘上（或管理端 JSON 里）的
+  `Infinity` / `NaN` / `-Infinity` 收进来之前就折回该格默认，判据是把 `read()` 整份
+  交给 `json.dumps(..., allow_nan=False)`——`GET /v1/config` 与 `POST /v1/admin/config`
+  的响应形状就是这一份字典。
+- 超出 float 范围的整数（`10**400`）：`_type_ok` 拒收、导入期子进程、`credit_benchmark`
+  的 `float()`、`_window_seconds` 的显式参数与现读两支。
 - `task_store._window_seconds` 的 `None` 那一支（现读那一条），以及一个故意绕开配置
   出口的假读数口径（验的是"就算上游漏了，这一层也拦得住"）。
 - 形状只有这些：`("inf","Inf","Infinity","+inf","1e400","  inf ","nan","-inf","","五分钟")`
   喂 env 臂；`(inf, -inf, nan)` 经 `restore()` 喂 config 臂；同一批字符串另走一支
-  绕过 `restore()` 的直写用例。
+  绕过 `restore()` 的直写用例；`10**400` 走盘、基准价、管理端与导入期四条路。
 
 ──────── 仍然漏掉的形状（本文件不声称覆盖）────────
-- config 臂上 `""` 与 `"五分钟"` **到不了 getter 的那一次 `float()`**：它们在
-  `restore()` 的形状关（`_type_ok`）就被拦下、按默认跑。字符串真被送到 `float()`
-  面前只有一次，就是那条直写用例，它模拟的是"上游形状关被跳过"，不是现网通道。
+- 直写 `config_store._config` 的路径只有 getter 层那一条锁（`test_绕过形状关直写内存态时
+  读数口径自己也拦得住`）：`read()` 不叠第二层消毒，所以同一种坏值被直写进缓存之后，
+  `read()` 仍会把它交出去。现网写入口只有 `restore()` 与 `apply_update()` 两处（都在
+  写缓存前消毒，见上面射程），"以后新增的第三条绕过它们的写入口"不在本文件射程。
+- config 臂上 `""` 与 `"五分钟"` **到不了 `_finite_or_close` 的 `float()`**：它们在
+  `restore()` 的形状关（`_type_ok`）就被拦下、按默认跑。字符串真被送到数值转换面前
+  只有一次，就是那条直写用例，它模拟的是"上游形状关被跳过"，不是现网通道。
 - 下游一格没动，也不由本文件验：`stream_runs.py` 那道钱闸与 `core/approval.py` 的
   票据窗口，各自的判据在它们自己的文件里。**出口折回什么值，它们就按什么值跑**——
   所以"宽限期与 TTL 的坏值折回默认窗口而不是 0"这一格的实际后果在下游，不在这把尺子
   里；要验那两格的真行为，得由持有那两个文件的票接手。
 - 不经这些 getter 的读数（直接 `os.getenv`、或拿 `read()` 里的原始值）不在射程。
-- HTTP 层不在射程：这里验的是 `waiting_timeout_info()` 吐出的那份 dict——详情端点
-  序列化正是这份 dict；把它接进 `TestClient` 只会给这条不变量多两个失败原因。
+- HTTP 层不在射程：这里验的是 `read()` / `waiting_timeout_info()` 交出来的字典能否过
+  `allow_nan=False`——那正是响应序列化唯一会抛的地方；把端点接进 `TestClient` 只会给
+  这条不变量多两个失败原因（鉴权、路由）。
 - 「不变量」那一族只看得到 `inf`：`nan` 与 `-inf` 被 `max` 折成 0.0，而 0.0 也是干净值。
   这两行由"落点必须是该格默认"那句方向断言负责（env 臂与 config 臂各有一条）。剩下
   一种真看不出差别的情形要如实说：默认本来就是 0 的那两格（作废窗口、影子护栏），
@@ -396,3 +407,214 @@ def test_坏TTL在导入期只降级不抛(text, tmp_path):
     report = [ln for ln in lines if ln.startswith("OK ")][-1].split()
     for got in (float(report[1]), float(report[2])):
         assert math.isfinite(got) and got >= 0, f"导入期拿到 {got!r}"
+
+
+# ---------- BLOCK ①：read() / 管理端响应也不许把非有限值交出去 ----------
+#
+# 复核员实跑：`restore()` 把盘上的 `Infinity` 收进 `_config`，`read()` 原样返回，
+# `GET /v1/config` 直接 `return config_store.read()`，一个 `inf` 就是一次 500。
+# 修在**缓存写入层**（`restore()` 与 `apply_update()` 写 `_config` 之前消毒），
+# 所以这里判的就是 `read()` 那一份字典本身。
+
+@pytest.mark.parametrize("number", BAD_CONFIG_NUMBERS, ids=["inf", "-inf", "nan"])
+def test_盘上每种非有限值经restore后read都过得了allow_nan序列化(number, tmp_path,
+                                                              monkeypatch):
+    """复核员那句原话的复现：`json.dumps(cs.read(), allow_nan=False)` 不许抛。
+
+    四种数值格与基准价的每一个数值键都喂同一个坏值，落点必须仍是各格自己的默认。
+    负向锁：把 `restore()` 里 `_sanitize_loaded(key, data[key])` 摘回 `data[key]`，
+    三行都红，红话是「restore() 把盘上的非有限值收进了缓存，GET /v1/config 会在这里抛」。
+    """
+    path = tmp_path / "config.json"
+    raw = {key: number for _, key, _, _ in CELLS}
+    raw["credit_benchmark"] = {
+        "currency": "CNY", "input_per_m": number, "output_per_m": number,
+        "mixed_input_output_ratio": number, "tokens_per_credit": number,
+    }
+    _write_config(path, raw)
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    config_store.restore()
+    try:
+        json.dumps(config_store.read(), allow_nan=False)
+    except ValueError as exc:
+        pytest.fail(f"restore() 把盘上的非有限值收进了缓存，GET /v1/config 会在这里抛：{exc}")
+    cfg = config_store.read()
+    for _, key, _, _ in CELLS:
+        assert cfg[key] == float(config_store.DEFAULTS[key]), (
+            f"{key} 没在写缓存前折回自己那一格的默认：{cfg[key]!r}")
+    for sub, default in config_store.DEFAULTS["credit_benchmark"].items():
+        if sub == "currency":
+            continue
+        assert cfg["credit_benchmark"][sub] == default, (
+            f"credit_benchmark.{sub} 没折回默认：{cfg['credit_benchmark'][sub]!r}")
+
+
+@pytest.mark.parametrize("cell", CELLS, ids=[c[0] for c in CELLS])
+def test_管理端写入非有限值后的响应也过得了allow_nan序列化(cell, tmp_path, monkeypatch):
+    """`apply_update` 的返回值就是 `POST /v1/admin/config` 的响应体，同样原样回给前端。
+
+    真实形状：请求 JSON 里写 `1e400`，Python 的 `json.loads` 把它解析成 `inf`
+    （不是拒绝），`_type_ok` 只看形状、会放行。负向锁：把 `apply_update` 里
+    `_sanitize_loaded(...)` 摘回 `value`，这一条红在 dumps；落盘那份也会带着
+    `Infinity`，下一次启动又回到复核员那条链路。
+    """
+    _, key, _, _ = cell
+    monkeypatch.setenv("CONFIG_DB_PATH", str(tmp_path / "config.json"))
+    config_store.restore()
+    out, rejected = config_store.apply_update({key: float("inf")})
+    assert rejected == [], "形状关收下它了，消毒层就该给出默认值而不是把它拒掉"
+    assert out[key] == float(config_store.DEFAULTS[key]), (
+        f"{key} 把 inf 原样交给了管理端响应：{out[key]!r}")
+    json.dumps(out, allow_nan=False)
+    json.dumps(config_store.read(), allow_nan=False)
+    with open(tmp_path / "config.json", encoding="utf-8") as f:
+        json.dumps(json.load(f), allow_nan=False)
+
+
+# ---------- BLOCK ②：超出 float 范围的整数 ----------
+
+# `float(HUGE_INT)` 抛 OverflowError（"int too large to convert to float"），
+# 而 `json.dump` 写它毫不费力——这就是复核员那个 400 位整数的形状。
+HUGE_INT = 10 ** 400
+
+
+@pytest.mark.parametrize("bad", (HUGE_INT, "五分钟", None, [1], {"a": 1}),
+                         ids=["10^400", "中文", "null", "list", "dict"])
+def test_数值归一函数对每种JSON形状都零raise(bad):
+    """`_finite_or_close` 的 docstring 写着"零 raise"，这一条替那句话作证。
+
+    捕获面就是 `float()` 对 JSON 值会抛的三类：TypeError（null/列表/字典）、
+    ValueError（中文）、OverflowError（400 位整数）。负向锁：把 `except` 里的
+    `OverflowError` 摘掉，`10^400` 那一行红在异常上。
+    """
+    assert config_store._finite_or_close(bad, 7.5, "判据") == 7.5
+
+
+def test_超出float范围的整数被形状关拒收():
+    """`_type_ok` 是缓存写入前判"收不收"的地方：它拒，restore/apply_update 就不会收。
+
+    负向锁：把 `_type_ok` 里那次 `float(value)` 的 try 摘掉，前两句变成 OverflowError
+    （不是 False），这条红在异常而不是断言——同样是红。
+    """
+    assert config_store._type_ok(HUGE_INT, 0.0) is False
+    assert config_store._type_ok(HUGE_INT, 0) is False
+    assert config_store._type_ok(1000, 0.0) is True
+    assert config_store._type_ok(float("inf"), 0.0) is True, (
+        "inf 是 float，形状关收它；非有限值由写缓存前的消毒层折回默认")
+
+
+def test_盘上是400位整数时read仍能过allow_nan序列化(tmp_path, monkeypatch):
+    """复核员的实跑：`restore()` 收下 400 位整数，`read()` 把它原样交给序列化。
+
+    修法有两层：`_type_ok` 先拒收（这个数根本进不了缓存），`_finite_or_close` 的捕获面
+    兜住任何绕过形状关的路径。只摘一层时另一层仍兜得住——两层是纵深，不是互斥。
+    """
+    path = tmp_path / "config.json"
+    raw = {key: HUGE_INT for _, key, _, _ in CELLS}
+    raw["credit_benchmark"] = {"tokens_per_credit": HUGE_INT}
+    _write_config(path, raw)
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    config_store.restore()
+    try:
+        json.dumps(config_store.read(), allow_nan=False)
+    except ValueError as exc:
+        pytest.fail(f"read() 把 10**400 交给了序列化（GET /v1/config 会 500）：{exc}")
+    cfg = config_store.read()
+    for _, key, _, _ in CELLS:
+        assert cfg[key] == float(config_store.DEFAULTS[key]), (
+            f"{key} 没折回自己那一格的默认：{cfg[key]!r}")
+    assert cfg["credit_benchmark"]["tokens_per_credit"] == 1000
+
+
+def test_管理端写入400位整数被拒且响应可序列化(tmp_path, monkeypatch):
+    """超范围整数在管理端是"这一键没被接受"，不是 500，也不是静默改写成别的数。"""
+    monkeypatch.setenv("CONFIG_DB_PATH", str(tmp_path / "config.json"))
+    config_store.restore()
+    out, rejected = config_store.apply_update({"approval_ticket_ttl_seconds": HUGE_INT})
+    assert rejected == ["approval_ticket_ttl_seconds"]
+    assert out["approval_ticket_ttl_seconds"] == float(
+        config_store.DEFAULTS["approval_ticket_ttl_seconds"])
+    json.dumps(out, allow_nan=False)
+
+
+def test_基准价喂400位整数不抛且只折回那一键():
+    """`credit_benchmark` 里那次 `float(value)` 曾在判据外：400 位整数直接 500。
+
+    负向锁：把 `float(value)` 挪回 if 条件里（没有 try），任一键一行都红在
+    OverflowError 上。判据：该键回默认，其余键**一个都不动**（不是整表重排）。
+    """
+    defaults = config_store.DEFAULTS["credit_benchmark"]
+    numeric_keys = ("input_per_m", "output_per_m", "mixed_input_output_ratio",
+                    "tokens_per_credit")
+    for key in numeric_keys:
+        raw = dict(defaults)
+        raw[key] = HUGE_INT
+        with config_store._lock:
+            prev = config_store._config.get("credit_benchmark")
+            config_store._config["credit_benchmark"] = raw
+        try:
+            out = config_store.credit_benchmark()
+        finally:
+            with config_store._lock:
+                config_store._config["credit_benchmark"] = prev
+        assert out[key] == defaults[key], f"{key} 没折回它自己的默认"
+        for other in numeric_keys:
+            if other != key:
+                assert out[other] == defaults[other], (
+                    f"一键坏了却动了 {other}：整表重排是另一件事，不是消毒")
+
+
+def test_停点窗口吃到400位整数时不抛(isolated_tasks, tmp_path, monkeypatch):
+    """`_window_seconds` 两条支各喂一次 400 位整数：显式参数、现读配置（getter）。
+
+    负向锁：把 `_window_seconds` 里包 getter 的那个 try 摘掉、同时把 `_finite_or_close`
+    的 `OverflowError` 捕获摘掉，这一条红在 OverflowError；只摘一处另一处仍兜得住。
+    """
+    assert ts._window_seconds(HUGE_INT) == 0.0, "显式参数那一支没接住 OverflowError"
+    path = tmp_path / "config.json"
+    _write_config(path, {"task_waiting_user_timeout_seconds": HUGE_INT})
+    monkeypatch.setenv("CONFIG_DB_PATH", str(path))
+    monkeypatch.delenv("TASK_WAITING_USER_TIMEOUT_SECONDS", raising=False)
+    config_store.restore()
+    assert ts._window_seconds() == 0.0, "现读那一支在形状关之后仍然抛了"
+    # 绕过形状关直写缓存：getter 的 `_finite_or_close` 自己也要接得住。
+    with config_store._lock:
+        prev = config_store._config.get("task_waiting_user_timeout_seconds")
+        config_store._config["task_waiting_user_timeout_seconds"] = HUGE_INT
+    try:
+        assert ts._window_seconds() == 0.0, "直写缓存后 getter 没接住 OverflowError"
+    finally:
+        with config_store._lock:
+            config_store._config["task_waiting_user_timeout_seconds"] = prev
+    info = ts.waiting_timeout_info(_parked_task())
+    json.dumps(info, allow_nan=False)
+
+
+def test_400位整数的TTL在导入期只降级不抛(tmp_path):
+    """复核员的实跑：子进程 `import app.core.approval` 曾 rc=1（现网启动会炸）。
+
+    盘上那份 config.json 用 `json.dump` 原样写 400 位整数；判据是 rc=0、OK 行仍在、
+    而且**有一行说出来**（点名 `approval_ticket_ttl_seconds`、说按默认跑）。
+
+    负向锁：把 `_type_ok` 里 `float(value)` 的 try 与 `_finite_or_close` 里
+    `OverflowError` 的捕获同时摘掉，`restore()` 在 config_store 导入期抛，rc=1，
+    红话是「导入期抛了：...OverflowError...」。只摘一处不红（两层互为纵深）。
+    """
+    path = tmp_path / "config.json"
+    _write_config(path, {"approval_ticket_ttl_seconds": HUGE_INT})
+    script = ("import app.core.approval as a;"
+              "print('OK', a.ticket_ttl_seconds(), a.APPROVAL_TIMEOUT_SECONDS)")
+    env = dict(os.environ)
+    env.pop("APPROVAL_TICKET_TTL_SECONDS", None)
+    env["DATA_ROOT"] = str(tmp_path)
+    env["CONFIG_DB_PATH"] = str(path)
+    proc = subprocess.run([sys.executable, "-c", script], cwd=str(BACKEND_DIR),
+                          env=env, capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, f"导入期抛了：{proc.stderr[-600:]}"
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert any(ln.startswith("OK ") for ln in lines), proc.stdout[-300:]
+    assert any("approval_ticket_ttl_seconds" in ln and "按默认值跑" in ln for ln in lines), (
+        f"400 位整数静悄悄地过了导入期，没人说出来：{proc.stdout[-400:]}")
+    report = [ln for ln in lines if ln.startswith("OK ")][-1].split()
+    default = float(config_store.DEFAULTS["approval_ticket_ttl_seconds"])
+    assert (float(report[1]), float(report[2])) == (default, default)

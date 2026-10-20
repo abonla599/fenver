@@ -464,10 +464,17 @@ def _window_seconds(timeout_seconds=None) -> float:
         # 收过一层非有限值，这一格是纵深防御——读侧还有 `waiting_timeout_info` 会把
         # 窗口原样塞进 JSON 响应，非有限值一旦穿出去就是序列化当场抛（详情端点 500），
         # 而那条路上没有人再判第二次。判据与显式参数那一支共用同一条，不另写一套。
-        timeout_seconds = task_waiting_user_timeout_seconds()
+        try:
+            timeout_seconds = task_waiting_user_timeout_seconds()
+        except (TypeError, ValueError, OverflowError) as exc:
+            # 读数口径自己抛（现网出现过的形状：盘上一个 400 位整数，`float()` 抛
+            # OverflowError）：折回 0（关）并说出来，绝不带着半截值往下走。覆盖的就是
+            # 数值转换这三类；别的异常照旧往上抛，那是真 bug，不该被这里伪装成"没配窗口"。
+            print(f"⚠️ 停点作废窗口读数失败（{type(exc).__name__}: {exc}），按不作废跑")
+            return 0.0
     try:
         value = float(timeout_seconds)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         print(f"⚠️ 停点作废窗口不是数（{timeout_seconds!r}），按不作废跑")
         return 0.0
     if not math.isfinite(value):        # inf / nan：比较起来恒 False，不能让它穿过判据
