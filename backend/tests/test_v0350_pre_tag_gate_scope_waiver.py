@@ -9,8 +9,9 @@
 **只换服务端的一版根本不 bump versionName**——实测 `git show v0.34.1:android-native/app/build.gradle`
 是 `versionCode 60 / versionName "0.34.0"`，而同一时刻 `docs/releases/v0.34.1.md` 第 3 行写着
 `<!-- scope: server-only -->`。于是下一版纯后端的 v0.35.0 会被这把锁拦住，唯一的出路是
-`--no-versionname-check`——而那面旗的 help 自己写明只给"这份 checkout 里没有 android-native/"用
-（CI 那一格）。台账里 v0.34.2 是**没带这个旗**过的，v0.34.1 那次带旗被记为"绕道，本版该跟着撤"：
+`--no-versionname-check`——而那面旗的 help 自己写明只给"一份本机 checkout 真的没有
+android-native/"用（CI 的 checkout 一直带着 `android-native/`，那不是这面旗的适用场景）。
+台账里 v0.34.2 是**没带这个旗**过的，v0.34.1 那次带旗被记为"绕道，本版该跟着撤"：
 用过一次，从未被追认。同一个脚本的第 5 条判据却早就接受形态声明（`--backend-only`，help 里还
 写着"纯后端版，v0.35.x 就可能是"）——**一把锁对"纯后端版合不合法"给了两种答案**。
 
@@ -114,8 +115,8 @@ def test_server_only_note_waives_the_versionname_equality(gate, monkeypatch, cap
 
 def test_gate_does_not_demand_the_flag_for_a_server_only_release(gate, monkeypatch, capsys):
     """豁免**不许**通过 `--no-versionname-check` 那条路走：带旗时第 1 条整条跳过，
-    打印的是"没有这一格"而不是 `waived-scope`——旗的语义仍然是"这份 checkout 没有
-    android-native/"（`release-apk.yml` 那一格），不是"这一版是纯后端版"。
+    打印的是"没有这一格"而不是 `waived-scope`——旗的语义仍然是"一份本机 checkout 真的
+    没有 android-native/"，不是"这一版是纯后端版"。
     """
     _shape(gate, monkeypatch, (True, None), ("0.34.2", "ok"))
     assert gate.main(["--expect", TAG, "--no-versionname-check"]) == 0
@@ -261,23 +262,16 @@ def test_gate_delegates_the_scope_read_and_copies_no_third_regex():
     仓库里已经有两份：`tools/gen_changelog.py` 与 `tools/release_marker.py`（#68 负责合并）。
     第三份一旦长出来，"这一版到底是不是只换服务端"就有了第三种真相——#65/#69/#71 修的正是这个。
 
-    **射程**：正向那句（必须 delegate）吃 `strip_py_prose`——判的是剥掉 `#` 注释与 docstring
-    之后还在的那行 import；反向那句（不许出现 scope 字面量或正则）仍吃原文按三条引号切出来的
-    那一截，今天读不到 token 因而恒绿，收窄归 #74。正向与反向不是同一把尺子，这是有意的：把那句
-    `split` 的输入换成剥层那一份会直接把这一跑变成 IndexError，而那不是判据。
+    **射程**：两条断言吃的是同一把尺子 `strip_py_prose`——剥掉 `#` 注释与 docstring、原位
+    刷空白之后，**整份源码**都还在射程里。旧的反向那句按三条引号 `split` 只取模块 docstring
+    之后的一小截（#74），`scope:` 落在那一截之外，于是代码里抄几条 scope 正则都恒绿；现在
+    藏在第一个 docstring 之后的正则照样读得到。
     """
     src = strip_py_prose(GATE.read_text(encoding="utf-8"))
     assert "from release_marker import" in src and "note_scope" in src, \
         "第 1 条判据必须吃 release_marker.note_scope 那把尺子（判的是剥掉注释与 docstring 之后" \
         "还在的那一行 import；原文里注释与代码长得一样，抄一句就能替真代码答到）"
-    # 下面那句判的是「不许出现」，吃的是**原文**按三条引号切出来的那一截，与上面那句分工不同、
-    # 也**不能**换成剥层那一份：`strip_py_prose` 把 docstring 的定界符也原位刷空，剥完之后
-    # `split('"""')` 只剩一段，这一句会直接 IndexError。而这一截读不到 token
-    # （`scope:` 与 `<!--` 的首现位置都落在模块 docstring 里、在那一截之外），所以这两句今天
-    # 恒绿——那是声明过的盲区（test_v0350_lock_comment_stripping_scope 清单里的
-    # rough-triple-quote-slice），把这两句一起收窄归 #74，本单不动它。
-    code = GATE.read_text(encoding="utf-8").split('"""')[2]
-    assert "<!--" not in code and "scope:" not in code, \
+    assert "<!--" not in src and "scope:" not in src, \
         "闸门代码里不许出现 scope 行的正则或字面量——读法只有 release_marker 那一份"
     mod = _load_gate()
     assert not hasattr(mod, "SCOPE_RE"), "闸门自己不许再定义一条 scope 正则"
@@ -303,17 +297,56 @@ def test_the_delegation_lock_reads_the_import_line_not_the_docstring():
         "代码行上的 import 也被剥掉了 ⇒ 尺子在空转，上面那句「不认」不算证据")
 
 
+def _assert_not_gitignored(repo_root, rel):
+    """`rel` 必须没有被 .gitignore 挡住；只有 git 明确回答 rc=1 才算通过。
+
+    退出码是三档，不是"非零/零"两档（#74）：0 = 被某条规则命中（挡住）；1 = 没被命中
+    （通过）；其余（128：目录不是仓库 / 对象缺失 / 参数不认识……）以及**连 git 都起不来**
+    = 判不了。把"判不了"并进"通过"就是旧写法 `returncode != 0` 的那一口：rc=128 和 rc=1
+    在它眼里长得一模一样。
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root), "check-ignore", "-q", "--", rel],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AssertionError(
+            "git 起不来或超时，无法证明 %s 没被 .gitignore 挡住（%s: %s）——"
+            "判不了不许当成通过" % (rel, type(exc).__name__, exc)) from exc
+    if res.returncode == 0:
+        raise AssertionError(
+            "%s 被 .gitignore 挡住了：pre_tag_gate.py import 它会在 CI 那次 checkout 里当场炸。"
+            "加一行 !/tools/release_marker.py" % rel)
+    assert res.returncode == 1, (
+        "git check-ignore 对 %s 没给出可解释的答案（rc=%d，stderr=%r）：0=被挡住、1=没被挡住，"
+        "其它一律是『判不了』——判不了不许当成通过"
+        % (rel, res.returncode, (res.stderr or b"")[:200]))
+
+
 def test_scope_reader_is_present_in_a_ci_checkout():
     """import 的前提必须钉住：`tools/release_marker.py` 没被 .gitignore 挡住。
 
     `/tools/*` 默认整目录排除；闸门被 `!` 例外放进来才有 CI 那一步，被 import 的那份同理——
     少了这条，本机全绿而 CI 每次都在 import 上炸（机制退化回一句提醒，而且退化得悄无声息）。
     """
-    res = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--stdin"],
-        input=b"tools/release_marker.py\n", capture_output=True, timeout=60)
-    assert res.returncode != 0, (
-        "tools/release_marker.py 被 .gitignore 挡住了：pre_tag_gate.py import 它会在 CI "
-        "那次 checkout 里当场炸。加一行 !/tools/release_marker.py")
-    # input 走 bytes：text=True 时 Windows 上 "\n" 会被换成 "\r\n"，git 拿带 \r 的路径去
-    # 匹配，永远"没被忽略"，这条锁就空转了。
+    _assert_not_gitignored(REPO_ROOT, "tools/release_marker.py")
+
+
+def test_the_gitignore_lock_fails_loudly_when_git_cannot_answer(tmp_path, monkeypatch):
+    """rc=128 与「连 git 都起不来」都不许被读成「没被忽略」（#74 的那一口）。
+
+    旧断言是 `returncode != 0`，于是"不是仓库"的 128 和"没被挡住"的 1 都算通过。这里两种
+    "答不了"各造一次，判据必须抛 AssertionError；安静通过就等于这把锁在最需要它的机器上
+    自动放绿。
+    """
+    # 1) 目录不是 git 仓库：git 用 128 说"我不知道"
+    with pytest.raises(AssertionError, match="rc=128"):
+        _assert_not_gitignored(tmp_path, "tools/release_marker.py")
+
+    # 2) 连 git 可执行文件都起不来：OSError 也一样是"判不了"
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", _no_git)
+    with pytest.raises(AssertionError, match="git 起不来"):
+        _assert_not_gitignored(REPO_ROOT, "tools/release_marker.py")

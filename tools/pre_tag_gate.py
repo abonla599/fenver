@@ -14,8 +14,9 @@ v0.28.1"——事后谁也说不清用户装的是哪一版，而这恰好是最
 
 **这条顺序连着被违反两次**（v0.29.0、v0.33.0，两次的换包执行记录里都写了同一段
 "流程没有机制"的检讨）。提醒不是机制：提醒依赖"当时那个人记得"，而人被催着发版时
-最先跳过的就是最后一步验收。所以把判据写成脚本，让 CI 在**生成 Release 之前**跑它
-一次——跳不过去的那种。
+最先跳过的就是最后一步验收。所以把判据写成脚本，由**发版人在生产机上敲 `git tag`
+之前**跑一次——#90b 起 `release-apk.yml` 不再跑这把全量闸门（那两格在 CI 的 checkout
+里结构上取不到，见下面「用法」），这道闸漏跑没有任何东西替你兜住。
 
 ## 判据为什么取 `/health` 的 build 字段
 
@@ -56,7 +57,8 @@ v0.28.1"——事后谁也说不清用户装的是哪一版，而这恰好是最
 `git show v0.34.1:android-native/app/build.gradle` 是 `versionCode 60 / versionName "0.34.0"`，
 而 `docs/releases/v0.34.1.md` 第 3 行写着 `<!-- scope: server-only -->`。旧写法在这里先于
 第 2 条判据红（`versionname-mismatch`），唯一的出路是 `--no-versionname-check`，而那面旗的
-help 自己写明只给"这份 checkout 里没有 android-native/"用（CI 那一格，`release-apk.yml`）。
+help 自己写明只给"一份本机 checkout 真的没有 android-native/"用（不是 CI：每次 CI checkout
+都带着 `android-native/`，`release-apk.yml` 也不再跑这把闸门）。
 把"这一版是什么形态"的判断权交回人的嘴 = #65/#69/#71 在另一把锁上刚修掉的同一个错误，
 而同一脚本的第 5 条判据早就接受形态声明（`--backend-only` 的 help 还写着"纯后端版，
 v0.35.x 就可能是"）——一把锁两种说法。
@@ -68,7 +70,7 @@ v0.35.x 就可能是"）——一把锁两种说法。
   违反"只播最新**装得上**的那一版"（#17/#18）；
 - 缺说明 / 说明读不动 / scope 值不认识 ⇒ **不豁免**，第 1 条照旧要求 `versionName == tag`，
   与改动前逐字一致（默认成 server-only 就是把这条锁静默放成绿灯）；
-- 其余形态一字未改，`--no-versionname-check` 的语义仍是"这份 checkout 没有 android-native/"。
+- 其余形态一字未改，`--no-versionname-check` 的语义仍是"一份本机 checkout 真的没有 android-native/"。
 
 scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 `note_scope`（同目录、
 `!/tools/release_marker.py` 保证 CI checkout 里有；那个文件的路径检查由契约测试钉住），
@@ -518,8 +520,8 @@ def main(argv=None) -> int:
     ap.add_argument("--local-health-url", default=DEFAULT_LOCAL_HEALTH_URL)
     ap.add_argument("--timeout", type=float, default=15.0)
     ap.add_argument("--no-versionname-check", action="store_true",
-                    help="skip the build.gradle comparison (CI already has a dedicated step; "
-                         "use this only when the checkout does not carry android-native/)")
+                    help="skip the build.gradle comparison (release-apk.yml has its own tag/versionName "
+                         "step; use this only in a local checkout that genuinely lacks android-native/)")
     ap.add_argument("--allow-unreachable", action="store_true",
                     help="downgrade 'cannot read the live verdict' to a WARNING. Off by "
                          "default and should stay off: not-proven means do-not-tag.")
@@ -540,7 +542,7 @@ def main(argv=None) -> int:
 
     # 1) 声明侧：仓库里写的 versionName 必须等于这个 tag——**除非这一版自己声明只换服务端**。
     #    豁免的判据是"世界事实"（docs/releases/<tag>.md 里那一行），不是操作者手边的旗子：
-    #    --no-versionname-check 的语义保持原样（这份 checkout 里没有 android-native/，CI 那一格）。
+    #    --no-versionname-check 的语义保持原样（一份本机 checkout 真的没有 android-native/）。
     if not args.no_versionname_check:
         server_only, scope_reason = note_declares_server_only(root, tag)
         if scope_reason and scope_reason != NOTE_MISSING:
@@ -565,8 +567,8 @@ def main(argv=None) -> int:
                     % (declared, tag, tag, SCOPE_SERVER_ONLY_LINE))
             print("PRETAG versionname=waived-scope note=%s scope=server-only declared=%s —— "
                   "本版说明声明只换服务端，versionName 不动才是预期形状（实测 v0.34.1 停在 0.34.0）；"
-                  "这一格**不是** --no-versionname-check，那面旗只表示『这份 checkout 没有 "
-                  "android-native/』" % (tag, declared))
+                  "这一格**不是** --no-versionname-check，那面旗只表示『一份本机 checkout "
+                  "真的没有 android-native/』" % (tag, declared))
         elif declared != tag.lstrip("v"):
             return _fail("versionname-mismatch declared=%s tag=%s —— 三件套还没改，"
                          "这个 tag 会发出一个和 APK 里不一致的 Release" % (declared, tag))
