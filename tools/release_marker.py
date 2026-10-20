@@ -18,7 +18,7 @@
 `ff85ee0f` 补的是**产物**（那一行注释），不是机制：下一个人照样能挑一个两边都有的串。
 本文件是机制那一半：标记是**算出来的**，不是选出来的。
 
-## 规则（可机读，并且在构建之前就核得动）
+## 规则（可机读，并且在打本地 tag / 构建之前就核得动）
 
     「这一版要发的是哪个号、是哪一形态」的权威 = docs/releases/<tag>.md 的 scope 行
         <!-- scope: server-only -->   ⇒ 本版只换服务端，安卓包不动（v0.34.1 就是这一形态）
@@ -36,9 +36,11 @@
                  哪个文件"：release-marker-v<VERSION> 此刻**不得出现在线上那份包里**
                  （`dist/run_backend/_internal/app/web/static/app.js` —— 就是 `swap-package.ps1`
                  数装机侧的那一份）。仓库的 app.js 里有没有这一行只说明走到哪一步，两种都**绿**，
-                 token 写明是哪一刻：没有 ⇒ `server-only-moment=add-this-line`（把这一行补进去
-                 再构建）；有了 ⇒ `server-only-moment=verified-ready-to-build`（暂存≥1 / 装机=0
-                 的形状已经成立，可以构建）。已经在**线上**了 ⇒ 无论仓库里有没有都拒绝
+                 token 写明是哪一刻：没有 ⇒ `server-only-moment=add-this-line`（把这一行补进
+                 app.js 并提交，**先打本地 tag 再构建**——tag 必须先于构建存在，换包窗口里再补
+                 就只能换出一份 tag 与内容对不上的包）；有了 ⇒
+                 `server-only-moment=verified-ready-to-build`（暂存≥1 / 装机=0 的形状已经成立，
+                 可以打本地 tag 并构建）。已经在**线上**了 ⇒ 无论仓库里有没有都拒绝
                  （`server-only-marker=already-present`）：两侧都数得到同一枚串 = v0.34.1 拿
                  `/changelog` 撞上的空转验收。并且 app.js 里不得有比它更新的标记
                  （`server-only-marker=newest-above`，标记是累积的，v0.34.2 那版就是两行）
@@ -63,7 +65,12 @@
         · 那份说明的版本号领先 versionName；
         · 那份说明自己声明 `<!-- scope: server-only -->`（值不认识 / 读不出文本 ⇒ 算没声明）；
         · app.js 里最新那枚标记也领先 versionName（还没补行的那一刻它不领先 ⇒ 回到原判据，
-          那一刻"该领先的是哪一枚"由 --expect 那一路说）。
+          那一刻"该领先的是哪一枚"由 --expect 那一路说）；
+        · 那份说明的版本号是 versionName 的**紧邻下一版**：下一补丁、下一 minor 的 `.0` 或下一
+          major 的 `.0.0`。跳号（v0.34.2 → v0.99.0）不换 target，报
+          `bare-shape=version-jump`——裸跑只替"下一版"读形状，确要发跳号的一版就用 `--expect`
+          把目标明示出来。这条是"标记行必须落在当前/紧邻的那一版上"，不是"app.js 里随便哪枚
+          更大的标记都能当在途版本"。
     只换服务端的一版 marker 按设计就该领先（新包里有、线上包里绝没有），而它的 versionName
     按规矩不动，所以把裸跑的 target 焊死在 versionName 上 = 把这一版的正确形状判成红，还顺手
     印出上一版那枚已经躺在装机包里的串。
@@ -73,6 +80,11 @@
     说明不领先 versionName、scope 行缺失或值不认识或读不出文本、标记还没补上、装机侧是否已有
     同一枚串、versionName 该不该追平（只换服务端的那一版不追）。
 
+    版本号只认**规范三段号**（每段是 `0` 或非零开头的十进制数，无前导零）：`v0.34.03` 不是
+    `v0.34.3` 的另一种写法，而是**认不出**——退 2，绝不先把它规范成 v0.34.3 再背书。
+    docs/releases 里同值两形的文件名（`v0.34.3.md` 与 `v0.34.03.md`）并存时同样退 2，不按
+    `os.listdir` 的返回顺序挑一份当权威：同一棵树在 CI 与本机必须给同一个结论。
+
 发版准备那次一提交说明、一进版本，这里立刻给结论，并把**该用的那一串**直接打在消息里——
 标记于是是抄机器的，不是挑的。说明缺 / 读不到 / scope 值不认识 ⇒ 退 2（fail-closed），
 不放行，也**不许**顺手把 versionName 顶上去当替代判据。
@@ -81,15 +93,17 @@
 
 `pre_tag_gate.py` 的第 3 条要求**线上 `/health` 的 build 已经等于这个 tag**，也就是说它
 只有在上**线之后**才有绿灯；而标记缺不缺必须在上**线之前**就说，否则拦住的时刻正是它
-最怕的时刻（窗口中间）。发版顺序里排在"构建 staging"之前的只有 `CI 全绿 → 本地全量复跑`，
+最怕的时刻（窗口中间）。当前发版顺序是 `CI 全绿 → 本地全量复跑 → 本地打 tag → 构建
+staging → swap-package → 线上验收 → pre_tag_gate → 推 tag`：tag 一打下去，构建烘进去的
+就是那个提交，**换包窗口里再补或再改标记已经晚了**——只能换出一份 tag 与内容对不上的包。
 所以判据的常驻位置是那两次复跑（锁在 `backend/tests/test_release_marker_derived_from_version.py`），
-本文件的 CLI 只是同一份判据的即时可读版：换包窗口里 `python tools/release_marker.py`
-抄一行，不用想。
+本文件的 CLI 是同一份判据的即时可读版：**发版准备时（补 app.js 那一行、打本地 tag 之前）**
+跑一次，把该用的串抄进 app.js 并提交，再打 tag、构建；换包窗口里只核对，不在这里才决定标记。
 
 ## 用法
 
-    python tools/release_marker.py                    # 自检并打印本版的 -Marker 串
-    python tools/release_marker.py --expect v0.35.0   # 构建之前按目标版本核
+    python tools/release_marker.py                    # 自检并打印本版的 -Marker 串（发版准备时跑）
+    python tools/release_marker.py --expect v0.35.0   # 打本地 tag 之前按目标版本核（tag 先于构建）
     # 只换服务端那一版才会读装机侧；仓库不在生产机上时用 --live-appjs 指到那份真在读的 app.js
     python tools/release_marker.py --expect v0.35.0 --live-appjs D:/old/run_backend/_internal/app/web/static/app.js
 
@@ -105,7 +119,10 @@ import sys
 # 与 tools/pre_tag_gate.py 的 _VERSION_NAME_RE 必须是同一条（漂移由 tests 钉住）：
 # 声明侧只有一份，否则第 1 条判据和这把锁会在两个不同的"版本"上各自点头。
 VERSION_NAME_RE = re.compile(r'^\s*versionName\s+"([^"]+)"', re.M)
-MARKER_RE = re.compile(r'release-marker-v(\d+\.\d+\.\d+)')
+# 规范三段号：每段是 `0` 或非零开头的十进制数。`0.34.03` / `01.2.3` 不是同一版的另一种写法，
+# 而是另一串字符——它们会和规范形在 version_key 上撞值，却会被 tag / 文件名 / 标记逐字符区分。
+VERSION_CORE_RE = re.compile(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')
+MARKER_RE = re.compile(r'release-marker-v([0-9][0-9A-Za-z_.+-]*)')
 RELEASE_NOTE_RE = re.compile(r'^v(\d+\.\d+\.\d+)\.md$')
 FULL_TAG_RE = re.compile(r'^v\d+\.\d+\.\d+$')
 APP_JS_RELPATH = os.path.join("backend", "app", "web", "static", "app.js")
@@ -143,19 +160,41 @@ def _read_text(path):
 
 
 def version_key(text):
-    parts = text.split(".")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+    match = VERSION_CORE_RE.match(text or "")
+    if not match:
+        parts = (text or "").split(".")
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            raise MarkerSourceError("non-canonical-version:%s" % text)
         raise MarkerSourceError("bad-version:%s" % text)
-    return tuple(int(p) for p in parts)
+    return tuple(int(p) for p in match.groups())
 
 
 def normalize_version(raw):
-    """`0.34.2` 与 `v0.34.2` 是同一个版本；统一成不带 v 的三段号，比较只看数值。"""
+    """`0.34.2` 与 `v0.34.2` 是同一个版本；统一成不带 v 的三段号，比较只看数值。
+
+    只接受规范三段号：前导零（`0.34.03`）不在这里被"修好"，而是让调用方 fail-closed。
+    把它悄悄规范成 `0.34.3` 就等于背书一个逐字符不同于 tag / 文件名的版本号。
+    """
     value = (raw or "").strip()
     if value.startswith("v"):
         value = value[1:]
     version_key(value)
     return value
+
+
+def is_next_version(declared, candidate):
+    """`candidate` 是不是 `declared` 的紧邻下一版：下一补丁 / 下一 minor 的 .0 / 下一 major 的 .0.0。
+
+    裸跑（没有 --expect）只替"下一版"读在途形状。跳号（v0.34.2 → v0.99.0）不是机器能替人
+    猜的形状：它既可能是真的要发那一版，也可能是 app.js 里躺着一枚写错的标记。两种都不该由
+    裸跑盖章——确要发跳号的一版，用 `--expect` 把目标明示出来。
+    """
+    major, minor, patch = version_key(declared)
+    return version_key(candidate) in {
+        (major, minor, patch + 1),
+        (major, minor + 1, 0),
+        (major + 1, 0, 0),
+    }
 
 
 def declared_version(repo_root):
@@ -190,16 +229,25 @@ def count_marker_lines(app_js_text, marker):
 
 
 def released_note_versions(repo_root):
-    """docs/releases/vX.Y.Z.md 里已写过的最高版本（发版说明侧，第 2 条判据的仓库镜像）。"""
+    """docs/releases/vX.Y.Z.md 里已写过的版本（发版说明侧，第 2 条判据的仓库镜像）。
+
+    文件名先排序再解析，同值两形（`v0.34.3.md` 与 `v0.34.03.md`）并存时**退 2**，不按
+    `os.listdir` 的顺序挑一份当"最新"：那会让同一棵树在 CI 与本机判出不同 target。
+    非规范版本号（前导零）也不在这里被规范成规范形——那是背书，不是校对。
+    """
     folder = os.path.join(repo_root, RELEASES_RELPATH)
     if not os.path.isdir(folder):
         raise MarkerSourceError("releases-dir-missing:%s" % folder)
-    versions = []
-    for name in os.listdir(folder):
-        match = RELEASE_NOTE_RE.match(name)
-        if match:
-            versions.append(normalize_version(match.group(1)))
-    return versions
+    names = sorted(name for name in os.listdir(folder) if RELEASE_NOTE_RE.match(name))
+    seen = {}
+    for name in names:
+        raw = RELEASE_NOTE_RE.match(name).group(1)
+        value = tuple(int(part) for part in raw.split("."))
+        if value in seen:
+            raise MarkerSourceError(
+                "duplicate-release-note-version:%s / %s" % (seen[value], name))
+        seen[value] = name
+    return [normalize_version(RELEASE_NOTE_RE.match(name).group(1)) for name in names]
 
 
 def release_note_path(repo_root, version):
@@ -294,17 +342,26 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         if not os.path.isfile(app_js_path):
             raise MarkerSourceError("appjs-missing:%s" % app_js_path)
         app_js = _read_text(app_js_path)
+        # 先读说明目录：同值两形的文件要在解析 app.js 之前就判掉，否则标记侧的非规范写法
+        # 会先报错，把"两份说明争同一个版本值"这个真正的原因盖住。
         notes = released_note_versions(repo_root)
+        found = marker_lines(app_js)
     except MarkerSourceError as exc:
         return 2, ["RELEASE-MARKER verdict=UNKNOWN reason=%s —— 判据读不到就是不许" % exc]
 
     target = declared
     bare_marker_ahead = False
+    bare_version_jump = None
     if expect:
         value = expect.strip()
         if not FULL_TAG_RE.match(value):
             return 1, ["RELEASE-MARKER verdict=FAIL token=expect-must-be-full-tag got=%s" % value]
-        target = normalize_version(value)
+        try:
+            target = normalize_version(value)
+        except MarkerSourceError as exc:
+            return 1, ["RELEASE-MARKER verdict=FAIL token=expect-must-be-canonical got=%s "
+                       "reason=%s —— tag 只认规范三段号（无前导零），不把 v0.34.03 当成 v0.34.3"
+                       % (value, exc)]
     else:
         # 裸跑（不带 --expect）：target 与 scope 的权威不再只有 versionName。只换服务端的一版
         # 按规矩不 bump versionName，而它的 -Marker 按设计**就该**领先 versionName（新包里有、
@@ -315,7 +372,10 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         #   · 那份说明自己声明 SCOPE_SERVER_ONLY（值不认识、读不出文本都算**没声明**：读不出就
         #     不豁免，这是"照旧红"，不是"放行"）；
         #   · app.js 里最新那枚标记也领先 versionName。还没补行的那一刻它不领先，那一刻仓库里
-        #     没有任何机器可读的东西说清"该领先的是哪一枚"，形态判读归 --expect 那一路。
+        #     没有任何机器可读的东西说清"该领先的是哪一枚"，形态判读归 --expect 那一路；
+        #   · 那份说明的版本号是 versionName 的紧邻下一版（下一补丁 / 下一 minor 的 .0 / 下一
+        #     major 的 .0.0）。跳号不换 target：app.js 里任何一枚更大的标记都能让"最新"领先，
+        #     但只有紧邻的那一版才是裸跑能替人读的在途形状；确要发跳号的一版用 --expect 明示。
         # 成立时 target = 那份说明的版本，判据随之变成「app.js 里最新 marker == 那个领先的版本」
         # ——等号右边取自**说明**而不是取自标记，所以一枚领先却对不上说明的标记（领先到别的版本
         # 号）在这里仍然是红的。"恰好一行""不得互为子串"由 installer 那一支原样复用。
@@ -327,11 +387,14 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         newest_note = max(notes, key=version_key) if notes else None
         if newest_note is not None and version_key(newest_note) > version_key(declared):
             note_is_server_only, _ = note_scope(repo_root, newest_note)
-            newest_marker = max((v for _, v in marker_lines(app_js)), key=version_key, default=None)
+            newest_marker = max((v for _, v in found), key=version_key, default=None)
             if note_is_server_only and newest_marker is not None \
                     and version_key(newest_marker) > version_key(declared):
-                target = newest_note
-                bare_marker_ahead = True
+                if is_next_version(declared, newest_note):
+                    target = newest_note
+                    bare_marker_ahead = True
+                else:
+                    bare_version_jump = newest_note
 
     # 形态判读：要切的这一版是不是"只换服务端"，权威是它自己的发版说明，不是 versionName。
     server_only, reason = note_scope(repo_root, target)
@@ -353,10 +416,10 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         # 有安装包的那一版：这条判据是对的，留着——装不上的包不 bump versionName，能装的必须 bump。
         return 1, ["RELEASE-MARKER verdict=FAIL token=versionname-not-bumped "
                    "expect=v%s declared=v%s —— 本版说明没带 %s，那就是要出安卓包的一版，"
-                   "而三件套的声明侧还没改到这个版本：先把 build.gradle 的 versionName bump "
-                   "上来再核标记（如果这一版其实只换服务端，那就在 docs/releases/v%s.md 补 scope "
-                   "标记，而不是 bump 版本号）"
-                   % (target, declared, SCOPE_SERVER_ONLY, target)]
+                   "而三件套的声明侧还没改到这个版本：确认说明的 scope 确实是 installer 之后，"
+                   "把 build.gradle 的 versionName 追平到 v%s 再核标记；如果这一版其实只换服务端，"
+                   "那就在 docs/releases/v%s.md 补 scope 标记，而不是 bump 版本号"
+                   % (target, declared, SCOPE_SERVER_ONLY, target, target)]
 
     marker = marker_for(target)
     lines.append("RELEASE-MARKER declared=v%s target=v%s scope=%s marker=%s"
@@ -371,8 +434,17 @@ def evaluate(repo_root, expect=None, live_appjs=None):
                      "里恰好一行、且是最新的那枚；这一格只核仓库里的文本，线上是不是已经有这一串"
                      "要用 --expect v%s 另核" % (newest_note, declared, marker, target))
     problems = []
+    if bare_version_jump is not None:
+        # 跳号不是"最新"就能当在途版本：app.js 里任何一枚更大的标记都能把 newest 顶上去，
+        # 但裸跑只该替紧邻的下一版读形状。这里不换 target（仍按声明侧判），把该明示的动作
+        # 写出来——确要发这一版，--expect 是唯一入口。
+        problems.append("token=bare-shape=version-jump note=v%s declared=v%s —— 最新那份说明要的是 "
+                        "v%s，比声明侧 v%s 跳过了中间的版本；裸跑只认紧邻的下一版（下一补丁 / 下一 "
+                        "minor 的 .0 / 下一 major 的 .0.0），不替跳号盖章。确要发这一版就用 "
+                        "--expect v%s 把目标明示出来"
+                        % (bare_version_jump, declared, bare_version_jump, declared,
+                           bare_version_jump))
 
-    found = marker_lines(app_js)
     if server_only and not bare_marker_ahead:
         # 只换服务端的一版不 bump versionName，所以"这一枚串能不能把两侧分开"跟开发者手上
         # 那个文件有没有改过无关（#65 把 app.js 里在不在当判据，于是补了行的那一版和该补行的
@@ -410,12 +482,14 @@ def evaluate(repo_root, expect=None, live_appjs=None):
                 lines.append("RELEASE-MARKER verdict=OK token=server-only-moment="
                              "verified-ready-to-build marker=%s repo-lines=%d live-lines=0 —— "
                              "这一行已经在仓库的 app.js 里、线上那份包里没有：暂存侧≥1 / 装机侧=0 "
-                             "正是换包闸要的两侧形状，可以构建了（构建完再跑一次不会变红）"
+                             "正是换包闸要的两侧形状，可以打本地 tag 并构建了（tag 先于构建；"
+                             "构建完再跑一次不会变红）"
                              % (marker, repo_lines))
             else:
                 lines.append("RELEASE-MARKER verdict=OK token=server-only-moment=add-this-line "
                              "marker=%s repo-lines=0 live-lines=0 —— 线上那份包里没有这一串、仓库的 "
-                             "%s 里也还没有：把 %r 原样补成一行再构建，补完再跑这里会报 "
+                             "%s 里也还没有：把 %r 原样补成一行并提交，先打本地 tag 再构建"
+                             "（换包窗口里再补就晚了）；补完再跑这里会报 "
                              "verified-ready-to-build" % (marker, APP_JS_RELPATH, marker))
         for existing in sorted({v for _, v in found}, key=version_key):
             if version_key(existing) == version_key(target):
@@ -473,9 +547,11 @@ def evaluate(repo_root, expect=None, live_appjs=None):
             newest_server_only, _ = note_scope(repo_root, newest_note)
             if not newest_server_only:
                 problems.append("token=release-note=ahead docs/releases/v%s.md 比目标版本 v%s 还新 —— "
-                                "说明文档跑在声明侧前面，先核 versionName（如果这一版其实只换服务端，"
-                                "那就在 docs/releases/v%s.md 补一行 %s，而不是 bump 版本号）"
-                                % (newest_note, target, newest_note, SCOPE_SERVER_ONLY_LINE))
+                                "说明文档跑在声明侧前面：先看这一版的 scope 行——只换服务端的那一版"
+                                "在 docs/releases/v%s.md 补一行 %s（不 bump versionName）；有安装包的"
+                                "那一版才把 build.gradle 的 versionName 追平到 v%s"
+                                % (newest_note, target, newest_note, SCOPE_SERVER_ONLY_LINE,
+                                   newest_note))
 
     if problems:
         lines.extend("RELEASE-MARKER verdict=FAIL " + p for p in problems)

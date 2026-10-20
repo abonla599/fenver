@@ -29,10 +29,15 @@
             installer，而那一版的 -Marker 按设计就该领先 versionName（新包里有、线上包里绝没有），
             于是把正确形状判成红、并把上一版那枚已经躺在装机包里的串印成"该用的那一串"。
             下面几条同时成立才换 target：最新那份说明领先 versionName、它自己声明
-            `scope: server-only`、app.js 里最新那枚标记也领先 versionName ⇒ target=那份说明的
-            版本，判据是「app.js 里最新 marker == 那个领先的版本」（等号右边取自说明，所以对不上
-            说明的领先标记照旧红）。任何一条不成立 ⇒ 回到原判据（target=versionName、installer
-            那一支原有的判据一字未改），"有一条 server-only 说明"本身不是放行理由。
+            `scope: server-only`、app.js 里最新那枚标记也领先 versionName、**并且那份说明是
+            versionName 的紧邻下一版**（下一补丁 / 下一 minor 的 .0 / 下一 major 的 .0.0）
+            ⇒ target=那份说明的版本，判据是「app.js 里最新 marker == 那个领先的版本」（等号右边
+            取自说明，所以对不上说明的领先标记照旧红）。跳号（v0.34.2 → v0.99.0）不换 target、
+            报 `bare-shape=version-jump`，确要发就用 `--expect` 明示。任何一条不成立 ⇒ 回到原判据
+            （target=versionName、installer 那一支原有的判据一字未改），"有一条 server-only
+            说明"本身不是放行理由。
+            版本号只认规范三段号（无前导零）：`v0.34.03.md` 退 2，不先规范成 v0.34.3 再背书；
+            `v0.34.3.md` 与 `v0.34.03.md` 同值并存也退 2，不按 `os.listdir` 顺序挑一份当权威。
             **这一支的射程**：只读仓库里的 app.js 与那份说明，**不读装机侧那份包**——裸跑在没有
             dist\\ 的机器（CI、新克隆、清过盘）上也要能给出结论，所以"这枚串线上是不是已经有了"
             只有 `--expect` 那一路判（另有测试钉住同一棵树在那一路上的读法）。判不了的：说明不存在、
@@ -52,6 +57,7 @@ build **已经**等于这个 tag，也就是它只有在下**线之后**才可�
 `repo_root`，这一点由 `test_the_tool_reads_only_the_root_it_is_handed` 钉住。
 """
 import importlib.util
+import os
 import re
 from pathlib import Path
 
@@ -192,6 +198,22 @@ def _run(root, expect=None, live=None):
 def test_derivation_script_is_in_the_repo_and_runnable():
     assert TOOL.is_file(), "tools/release_marker.py 必须入库：推导是脚本，不是文档里的一句话"
     assert callable(rm.main) and callable(rm.evaluate), "这把锁没有可调的入口，等于没锁"
+
+
+def test_prose_puts_the_marker_decision_before_the_local_tag_not_in_the_swap_window():
+    """#70：换包窗口 / 构建之前才决定标记，是过期的两步。
+
+    tag 一打下去，构建烘进去的就是那个提交；窗口里再跑本工具、再补 app.js 那一行，只能换出
+    一份 tag 与内容对不上的包。所以文档里的动作时刻必须是"发版准备、打本地 tag 之前"，不能
+    再教人"换包窗口里抄一行"或"构建之前才核"。
+    """
+    prose = TOOL.read_text(encoding="utf-8")
+    assert "换包窗口里 `python tools/release_marker.py`" not in prose, (
+        "还在教人在换包窗口里才跑本工具：那时 tag/build 都已经做完，标记改不动了")
+    assert "构建之前按目标版本核" not in prose, (
+        "还在把核对时刻写成「构建之前」：tag 先于构建，应该在打本地 tag 之前核")
+    assert "打本地 tag 之前" in prose and "先打本地 tag 再构建" in prose, (
+        "过期话术删了，但没有把正确时刻写清楚：先打本地 tag，再构建")
 
 
 def test_real_repo_marker_equals_the_derived_declared_version():
@@ -840,6 +862,125 @@ def test_marker_ahead_with_bogus_or_unreadable_leading_note_is_refused(tmp_path)
                    for ln in lines), (name, lines)
         assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), (name, lines)
         assert not any("verdict=PASS" in ln for ln in lines), (name, lines)
+
+
+def test_non_leading_server_only_note_cannot_switch_the_bare_target(tmp_path):
+    """#140 第一格：leads 守卫必须有自己的牙。
+
+    说明 v0.34.1 写着只换服务端，但它**不领先**声明侧 v0.34.2；app.js 里另有一枚 v0.35.0 的
+    标记在领先。把 `:312` 那句「说明存在且领先」替成 `if True:` 时，这棵树会被拿去做紧邻/
+    跳号判读（打出 `bare-shape=version-jump`；没有紧邻检查的旧代码则会把 target 错换成
+    v0.34.1），而整棵树仍然只是 rc=1——旧测试的红来自 `marker-newest` 这个共因，量不出守卫
+    本身。这里钉的是**有没有走进在途分支**：守卫一旦失效，下面的 target/scope 或 token 断言红。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+               notes=("v0.34.1",), server_only=("v0.34.1",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], (
+        "不领先的说明把 target/scope 换掉了：leads 守卫没有自己的牙：%s" % lines)
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), (
+        "不领先的说明也被当成在途的 server-only 版：%s" % lines)
+    assert not any("bare-shape=version-jump" in ln for ln in lines), (
+        "不领先的说明被拿去走紧邻/跳号那一支：leads 守卫没有挡住：%s" % lines)
+    assert any("token=marker-newest=mismatch" in ln and "newest=v0.35.0" in ln
+               and "target=v0.34.2" in ln for ln in lines), lines
+
+
+def test_bare_run_without_any_release_note_never_enters_the_in_flight_branch(tmp_path):
+    """#140 第一格的另一半：连一份说明都没有时，"说明存在"这半句必须自己挡住。
+
+    把整句守卫换成 `if True:` 之后，`newest_note` 是 None，`note_scope(root, None)` 会拿
+    None 去拼 vNone.md——旧套件里没有一棵 notes 为空的树，所以这半句一直没有独立牙。这里钉
+    住：空说明目录下裸跑必须给普通红灯（rc=1，按声明侧判），不是异常，也不是进在途分支。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"), notes=(),
+               live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, lines
+    assert "scope=installer" in lines[0] and "target=v0.34.2" in lines[0], lines
+    assert not any("bare-shape=server-only-marker-ahead" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_bare_run_refuses_a_skipped_version_even_when_the_marker_matches(tmp_path):
+    """#140 第二格：在途版本必须是紧邻的下一版，不是 app.js 里任意一枚更大的标记。
+
+    v0.99.0 的说明与同名标记同时存在时，旧工具 rc=0 PASS——等于把"跳过了几十个版本号"的
+    形状当成正常在途。裸跑只替紧邻的下一版读形状；确要发跳号的一版，用 --expect 明示。
+    同一文件里补一棵**紧邻补丁**的树作正对照，证明这条不是把正常的下一版也拦掉。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.99.0"),
+               notes=("v0.34.2", "v0.99.0"), server_only=("v0.99.0",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 1, "跳号的说明 + 同名标记被放行：%s" % lines
+    assert any("token=bare-shape=version-jump" in ln and "note=v0.99.0" in ln
+               and "declared=v0.34.2" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+    adjacent = _fake_repo(tmp_path / "adjacent", version_name="0.34.2",
+                          markers=("0.34.2", "0.34.3"), notes=("v0.34.2", "v0.34.3"),
+                          server_only=("v0.34.3",), live_markers=("0.34.2",))
+    ok_rc, ok_lines = _run(adjacent)
+    assert ok_rc == 0, "紧邻的下一补丁被跳号检查误伤：%s" % ok_lines
+    assert "target=v0.34.3" in ok_lines[0], ok_lines
+    assert any("token=bare-shape=server-only-marker-ahead" in ln for ln in ok_lines), ok_lines
+
+
+def test_non_canonical_release_note_version_is_not_endorsed(tmp_path):
+    """#140 第三格：`v0.34.03` 不是 `v0.34.3` 的另一种写法。
+
+    旧工具把它原样规范化成 target=v0.34.03、再在 app.js 里数到同形标记 ⇒ rc=0 PASS。
+    前导零的三段号在这里必须 fail-closed（退 2），`--expect v0.34.03` 也不收（退 1），
+    绝不先把它"修好"成 v0.34.3 再背书。标记行同理：`release-marker-v0.34.3.1` 也不许被
+    截成前三段、再靠子串计数当成 v0.34.3 的合法标记（旧正则正是这么放行的）。
+    """
+    _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.34.03"),
+               notes=("v0.34.2", "v0.34.03"), server_only=("v0.34.03",), live_markers=("0.34.2",))
+    rc, lines = _run(tmp_path)
+    assert rc == 2, "非规范的说明版本号被背书成 PASS：%s" % lines
+    assert any("non-canonical-version:0.34.03" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+    plain = _fake_repo(tmp_path / "expect", version_name="0.34.2", markers=("0.34.2",),
+                       notes=("v0.34.2",))
+    rc2, lines2 = _run(plain, expect="v0.34.03")
+    assert rc2 == 1, "非规范的 --expect 被当成合法 tag：%s" % lines2
+    assert any("token=expect-must-be-canonical" in ln and "v0.34.03" in ln for ln in lines2), lines2
+    assert not any("verdict=PASS" in ln for ln in lines2), lines2
+
+    # 标记行本身也不能只截前三段：旧正则会在 release-marker-v0.34.3.1 里读到 v0.34.3，
+    # 再靠 Select-String 的子串计数把它当成合法标记（rc=0 PASS）。四段号必须 fail-closed。
+    dotted = _fake_repo(tmp_path / "dotted", version_name="0.34.2",
+                        markers=("0.34.2", "0.34.3.1"), notes=("v0.34.2", "v0.34.3"),
+                        server_only=("v0.34.3",), live_markers=("0.34.2",))
+    rc3, lines3 = _run(dotted)
+    assert rc3 == 2, "四段号标记被截成三段背书：%s" % lines3
+    assert any("bad-version:0.34.3.1" in ln for ln in lines3), lines3
+    assert not any("verdict=PASS" in ln for ln in lines3), lines3
+
+
+def test_same_value_release_note_filenames_do_not_tie_by_listdir_order(tmp_path, monkeypatch):
+    """#140 第四格：`v0.34.3.md` 与 `v0.34.03.md` 同值并存时，旧工具的 target 由
+    `os.listdir` 顺序决定：一种顺序 rc=0 PASS（target=v0.34.03），另一种 rc=1。CI 与本机
+    可以判出不同答案。这里把两种顺序都跑一遍，两边都必须退 2 且报同一类原因。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2",
+                      markers=("0.34.2", "0.34.3", "0.34.03"),
+                      notes=("v0.34.2", "v0.34.3", "v0.34.03"),
+                      server_only=("v0.34.03",), live_markers=("0.34.2",))
+    real_listdir = os.listdir
+    runs = []
+    for reverse in (False, True):
+        def ordered(path, _reverse=reverse):
+            return sorted(real_listdir(path), reverse=_reverse)
+        monkeypatch.setattr(rm.os, "listdir", ordered)
+        runs.append(_run(root))
+    for rc, lines in runs:
+        assert rc == 2, "同值两形文件并存时没有 fail-closed：%s" % lines
+        assert any("duplicate-release-note-version" in ln for ln in lines), lines
+        assert not any("verdict=PASS" in ln for ln in lines), lines
+    assert runs[0] == runs[1], "同一棵树两种 listdir 顺序给出了不同结论：%s" % (runs,)
 
 
 def test_ahead_server_only_note_does_not_exempt_the_installer_checks(tmp_path):
