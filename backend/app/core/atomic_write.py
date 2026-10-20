@@ -43,11 +43,15 @@ def write_json_atomic(path: str, payload) -> None:
     # 前缀带 `.` 让它在同目录的其它文件里不显眼，也避免被任何 `*.json` 通配扫到。
     fd, tmp = tempfile.mkstemp(prefix=".w-", suffix=".tmp", dir=directory or None)
     try:
-        # 权限必须在这一次 open 里就定下来，而不是"写完再 chmod"：后者的那个瞬间，
+        # 权限必须在这次 open 里就定下来，而不是"写完再 chmod"：后者的那个瞬间，
         # providers.json 的明文密钥、users.json 的口令摘要正以 0644 躺在同目录下。
-        # 走 mkstemp 传 mode 是唯一没有这个窗口的写法（umask 只可能进一步收紧权限，
-        # 不可能放宽，所以这里不必先 umask 再建文件）。这些 JSON 全是服务端私有数据，
-        # 没有任何一个读者在进程外，0600 不牺牲任何功能。
+        # POSIX：mkstemp 建出来就是 0600，下面这行只是把它钉住（umask 只可能更紧）。
+        # Windows：POSIX 权限位不生效，os.chmod 只动只读属性（实测 data/approvals.json
+        # 落盘后仍是 0666）。隔离来自数据目录的 NTFS ACL 继承——SYSTEM /
+        # Administrators / 属主（pytest 的 mkdtemp 目录里显示为 OWNER RIGHTS），
+        # 不含 BUILTIN\Users；不是这行 chmod。若把数据目录放到对 Users 开放的卷上，
+        # Windows 上这里挡不住，那是 ACL 的职责。这些 JSON 全是服务端私有数据，
+        # 没有任何一个读者在进程外，收紧权限不牺牲任何功能。
         os.chmod(tmp, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)

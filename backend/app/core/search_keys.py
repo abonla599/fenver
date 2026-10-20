@@ -3,7 +3,8 @@
 为什么不并进 provider_keys.json：`ProviderStore._flush()` 会按"模型 provider 清单"
 整份重建那个文件——搜索源密钥不在那份清单里，它要是躺在那儿，管理员下一次保存
 模型设置就会把它悄悄抹掉。复用的纪律是那三条：与记录文件分离存储、原子写
-（走公共 write_json_atomic，0600）、对外只露 providers.mask_key 的「末四位」口径；
+（走公共 write_json_atomic；POSIX 上 0600，Windows 上权限位不生效、靠 NTFS ACL
+继承）、对外只露 providers.mask_key 的「末四位」口径；
 并且读到任何一把 key 都顺手登记进 logsanitizer，让它万一出现在别的日志行里
 也会被脱敏。
 
@@ -86,7 +87,8 @@ def _usable(value) -> str:
 def set_key(name: str, key: str) -> str:
     """登记该源的 key，返回唯一可外显的掩码形态。
 
-    纪律逐字照抄 providers 写路径：原子写（write_json_atomic，0600）、值一落盘
+    纪律逐字照抄 providers 写路径：原子写（write_json_atomic；POSIX 上 0600，
+    Windows 上权限位不生效、靠 NTFS ACL 继承）、值一落盘
     就登记进 logsanitizer、明文只进这一次磁盘写——返回值、日志、审计里出现的
     都是掩码。占位符形状直接拒收而不是"存下但视作未启用"：配界面上一格显示
     「已配置」而链实际不用，正是 providers 当年"切换模型没反应"的那个根因形状，
