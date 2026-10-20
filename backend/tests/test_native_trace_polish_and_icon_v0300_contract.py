@@ -14,8 +14,6 @@ import re
 import struct
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UI = REPO_ROOT / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever" / \
      "assistant" / "nativeapp" / "ui"
@@ -305,7 +303,3 @@ def test_version_bumped_and_release_notes_brief():
     assert heads and set(heads) <= allowed, \
         "更新日志三段式（第 12 轮钦定延续）：没有的不写，解释性段落禁止"
     assert not re.search(r"怎么修|根因|教训|改判|逆向", doc), "简版口径：只报结果，不展开过程"
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(pytest.main([__file__, "-q"]))

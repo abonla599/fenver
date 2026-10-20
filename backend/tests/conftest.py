@@ -435,3 +435,54 @@ def isolated_schedule(tmp_path, monkeypatch):
         yield path
     finally:
         schedule._plans, schedule._PATH = prev_plans, prev_path
+
+
+# ---------- #77：测试写现网 data/ 的机器锁 ----------
+# 放在文件末尾而不是顶部：上面的行号被多份注释与工单引用，新代码不插队。
+# app.main 的导入发生在这段之前，但那条路只读不写：四条敏感路径在本文件顶部
+# 就已用 env 指到临时目录（APPROVALS_DB_PATH 在 app.core.approval 导入时即生效），
+# 所以不存在"导入期写盘"的窗口。
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+import _prod_data_guard as _prod_guard  # noqa: E402 - 必须在 sys.path 补齐之后
+
+_PROD_GUARD = _prod_guard.activate(_prod_guard.ProductionWriteGuard(
+    repo_root=Path(__file__).resolve().parents[2],
+    # 允许根两条：本文件的 _TEST_DATA_DIR（DATA_ROOT 的落点）与系统临时根
+    # （pytest 的 tmp_path 在后者之下）。仓库目录本身永远不算，见 violations()。
+    allowed_roots=[_TEST_DATA_DIR, tempfile.gettempdir()],
+).install())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _production_data_write_guard():
+    """#77：整个 pytest 会话期间，测试进程不许写现网 data/。
+
+    三件事一起判（细节在 `_prod_data_guard` 的模块 docstring）：
+    1. 写者归因——会话一开始就挂 `sys.addaudithook`，本进程任何写 `<repo>/data/**`
+       的调用当场抛 `ProductionDataWriteError`；
+    2. 会话对账——严格档（approvals / 两份 feedback）前后 `(mtime_ns, size)` 必须
+       一致，`data/preference*.txt` 是线上 300 秒定时器的产物，只记录不判；
+    3. fail-closed——会话前后都要求四条生效路径落在测试临时根内且不在仓库下。
+    反例与"硬编码生产路径必须被报红"的自证在
+    `tests/test_v0350_77_prod_data_write_guard.py`。
+    """
+    _PROD_GUARD.check_effective_paths("会话开始")
+    yield
+    _PROD_GUARD.finish()
+
+
+@pytest.fixture(autouse=True)
+def _prod_paths_stay_inside_the_test_tmp_root(_stub_llm_calls):
+    """每条用例进出各查一次四条生效路径。
+
+    依赖 `_stub_llm_calls` 是为了拿到"它已经 patch、但还没还原"的那一刻：用例若把
+    `FEEDBACK_FILE` / `PREFERENCE_FILE` / `USER_FEEDBACK_FILE` 指到仓库 data/，
+    收尾这一查会看见指向还没被 monkeypatch 撤回，于是当场红——而不是等下一次
+    写盘时才发现。指到 `tmp_path` 的用例照常通过（系统临时根在允许根里）。
+    """
+    _PROD_GUARD.check_effective_paths("用例开始")
+    yield
+    _PROD_GUARD.check_effective_paths("用例结束")
