@@ -43,20 +43,20 @@ deploy/swap-package.ps1"，下一个人先去查 `swap-package.ps1` 的代码，
 
 #90a 那版把判据钉死在 tests.yml 一个文件上，于是它天生管不到"下一个人把读历史的命令抄进
 别的 workflow"——那正是 #90b 反向钉只覆盖一个文件留下的同一个洞。泛化后按
-`.github/workflows/*.yml` 逐份、逐作业走三步：
+`.github/workflows/*.yml` 与 `*.yaml` 逐份、逐作业走三步（扩展名两种都收：只收一种的话，
+下一个人存成 `.yaml` 就永久落在面外，见 `workflow_files`）：
 
 1. 取该作业每个步骤的 `run:` **可执行正文**，并**剥掉"去掉缩进之后行首是 `#`"的行**。YAML 注释在
    `yaml.safe_load` 之后本来就不在结构里，shell 行注释还留在 `run` 字符串里但不执行；
    两处都不算数，才配得上"读的是可执行位置，不是散文"（口径同
-   `test_machine_read_pointers.py::_from_workflows`）。**这一层剥离有牙，两个相反方向都钉住了**：
-   `test_comment_only_history_prose_never_becomes_a_requirement` 按形状把同一条 `git log` 各喂一次
-   判据——写成整行注释的（行首即 `#`，以及剥掉缩进才到行首的那种）必须判成散文、不得要求历史；
-   同一批行去掉注释前缀、以及命令后面挂 `# 数历史` 的那一版必须判成命令、必须要求历史。于是下面
-   这几种缴械都会红：把那行过滤整行摘掉（散文侧全红）；把条件写成只认**无缩进**行首的 `#`——少剥，
-   块标量只按首行缩进 dedent，run 正文里天然存在带缩进的注释行，那句散文就开始当判据；放宽成
-   "行里含 `#` 就整行不算"——多剥，真读历史的那行被吞成散文，哨反过来放过一个没配 fetch-depth 的
-   作业。这几种形状之外的缴械写法没有逐条的账，连同"把钉子本身删掉"记在射程段末尾。不许只把
-   "散文不算数"写在注释里。
+   `test_machine_read_pointers.py::_from_workflows`）。**这一层剥离的判据不是"抽几对样本各喂一次"，
+   而是值域表**：`_STRIP_SURVIVORS` 由 `itertools.product(缩进, 行形, 尾随)` 生成，每格给一条
+   真 YAML 的 `run` 正文，直接断言 `_run_bodies` 之后的**存活集合**（哪些行还在、逐字节是什么）。
+   期望值写在表里（`survives` 那一格），测试不重算规则——重算就是把判据抄第二遍。这张表一次
+   覆盖两端的缴械：整行注释（行首 `#`、双 `#`、裸 `#`、无空格 `#`、缩进 0/空格/Tab）必须整行消失；
+   命令（带尾随 `#` 说明、引号里的 `#`、`--grep="#103"` 这种引号后紧跟 `#` 的命令）必须原样存活。
+   摘掉那行过滤（少剥）与"行里含 `#` 就整行不算"（多剥）都会让表里成片的格子红。表外的缴械写法
+   连同"把钉子本身删掉"记在射程段末尾；不许只把"散文不算数"写在注释里。
 2. 正文命中"读仓库历史"的标记集合（`HISTORY_READING_MARKERS`）⇒ 这个作业**要求历史**。
    反过来不成立：没命中标记 = 不要求，哪怕它其实读了历史。那一半差额是本锁的边界，下面
    "射程"段的仍漏清单是**一批抽样**（名单以 `_SYNTH_STILL_MISSED` 为准，每条一枚边界钉），
@@ -151,10 +151,10 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
   在这段清单里出现），所以"加一枚钉忘了写账"和"改账忘了改钉"都会红。
   **把这批命令加进标记集合是下一步的事**（#92b 或后续单），今天没做，就不许把声明写得像已经做了。
 - **钉子自己的仍漏**（不是命令形状，因而没有对应的边界钉）：把
-  `test_comment_only_history_prose_never_becomes_a_requirement` 这个函数整个删掉 ⇒ 其余用例照样
+  `test_the_strip_line_survivor_set_is_the_table` 这个函数整个删掉 ⇒ 其余用例照样
   全绿，**本判据今天抓不住"把钉子本身删掉"这件事**。不补一枚"钉住钉子"的元钉子是主动选择：给锁
   上锁没有尽头，还要往文件里引进一个会腐烂的函数名字符串；这一格归"本机复跑 + 独立审查"那一层。
-  上面那组剥行配对夹具同理——它们钉住的是列出来的那几种形状，把剥行条件换成别的写法是否仍会红，
+  上面那张值域表同理——它钉住的是列出来的那几维形状，把剥行条件换成表外的写法是否仍会红，
   逐条没有账。
 - #90b 那条反向钉（`run` 正文不许再出现 `tools/pre_tag_gate.py`）目前**只覆盖
   release-apk.yml 一个文件**，抄进别的 workflow 今天不红；扩到全 `run:` 集合归 #92b。
@@ -200,6 +200,7 @@ fetch-depth ⇒ 红；同一处只写成 YAML 注释 ⇒ 绿；删 tests.yml 的
   自带反例"的结构钉）。红路子里没有 skip，也没有 `pytest.xfail`。
 """
 
+import itertools
 import os
 import re
 import subprocess
@@ -262,18 +263,26 @@ HISTORY_READING_MARKERS = (
 
 # 标记的反向索引：红话与钉子按 id 认一条标记（id 短、写得进断言消息），判据按整条理由认。
 # 本测试自己抄写的那份归属声明（tests.yml 靠 `python -m pytest` 那一行进名单、gitleaks.yml 靠
-# `gitleaks detect` 那一行）就是靠这两张表落到判据上的（见
+# `gitleaks detect` 那一行）就是靠这张表落到判据上的（见
 # `test_the_workflow_sweep_actually_sees_the_history_readers` 的按条归属断言）。两份 workflow 里的
 # 同口径注释没有任何机器读取：`safe_load` 在解析阶段就把注释丢了，那条边界记在射程段第 4 点。
 _TOOTH_ID_BY_LABEL = {label: tooth_id
                       for label, _pattern, tooth_id, _lines in HISTORY_READING_MARKERS}
-_LABEL_BY_TOOTH_ID = {tooth_id: label
-                      for label, _pattern, tooth_id, _lines in HISTORY_READING_MARKERS}
 
 # 收集期就把目录摊开 ⇒ 一份 workflow 一个参数化 id（目录里有几份就几条）。目录为空时
 # `WORKFLOW_NAMES` 为空，上面那条参数化锁不成立也别静默：**覆盖自检**那条会红（见它的 docstring）。
-WORKFLOW_NAMES = sorted({p.name for p in WORKFLOWS_DIR.glob("*")
-                         if p.is_file() and p.suffix in (".yml", ".yaml")})
+def workflow_files(root=None) -> list:
+    """`root` 里所有 workflow 文件：`.yml` 与 `.yaml` 两种扩展名都收。
+
+    只 glob 一种扩展名是 #131 记下的"永久失明"：有人把 `tests.yml` 另存成 `tests.yaml`
+    （或者新加一份 `deploy.yaml`），那份就永远不在任何 token 禁面、指针扫描或 fetch-depth
+    哨的射程里，而所有手抄名单与条数钉都照绿。两种扩展名在 Actions 里等价，判据面必须跟着等价。
+    """
+    base = Path(root) if root else WORKFLOWS_DIR
+    return sorted({p for p in base.glob("*.yml")} | {p for p in base.glob("*.yaml")})
+
+
+WORKFLOW_NAMES = [p.name for p in workflow_files()]
 
 
 def _action_name(step) -> str:
@@ -297,10 +306,10 @@ def _run_bodies(steps) -> str:
     要求 fetch-depth——那是拿散文当判据，正是 #90b 换窄时要拆掉的那把尺子。
 
     下面这行过滤是本文件唯一一处剥行，也是上面那句"散文不算数"落地的地方；它的射程由
-    `test_comment_only_history_prose_never_becomes_a_requirement` 那组配对夹具钉住：整行注释（行首
-    有没有缩进都算）必须被剥掉，可执行命令哪怕后面挂着 `#` 也必须留下。摘掉这行过滤、把条件写成
-    只认无缩进行首、放宽成行里含 `#` 就整行剥掉，三种都会让对应那枚夹具当场红；这几种形状之外
-    不保证（见射程段末尾那条声明）。
+    `_STRIP_SURVIVORS` 那张值域表逐格钉住：整行注释（行首有没有缩进、单 `#` 还是双 `#`、`#`
+    后面有没有空格）必须整行消失，可执行命令哪怕后面挂着 `#`、哪怕引号后紧跟 `#` 也必须原样
+    留下。摘掉这行过滤、把条件写成只认无缩进行首、放宽成行里含 `#` 就整行剥掉，三种都会让表里
+    成片的格子红；这几种形状之外不保证（见射程段末尾那条声明）。
     """
     lines = []
     for step in steps:
@@ -417,7 +426,10 @@ def _with_surface(step_with: dict, label: str) -> list:
     - **A 键名层**：键名在 `_WITH_KEYS_EXECUTABLE` 里 ⇒ 值原样进面。这一层不抛红，命中由调用方
       的 token 判据报（红话里的键名由 `workflow_with_face` 提供），因为"值被禁"是调用方的事。
       值**不剥注释**：`with:` 的值没有"行首 `#` 就不执行"这一层语义，把它剥掉就是替 Actions
-      撒谎。
+      撒谎。**非标量值当场红**（#131）：`script: {inline: ...}` 或 `script: [a, b]` 这种结构化
+      值没法按字符串判它里面有没有那条命令，旧写法 `isinstance(value, str)` 不成立就直接
+      `continue`——命令藏进映射/列表就静默进不了面，而禁判据全绿。判不了就说判不了，不许当成
+      "没有命令"。
     - **B 值形状层**：两份名单都不认得的键名，值同时含闸门命令串**且**有命令形状 ⇒ 红。
     - **C 键名登记层**：两份名单都不认得的键名，值也不像命令 ⇒ 红。
 
@@ -431,7 +443,12 @@ def _with_surface(step_with: dict, label: str) -> list:
         if norm in _WITH_KEYS_EXECUTABLE:
             if isinstance(value, str):
                 out.append(value)
-            continue
+                continue
+            raise AssertionError(label + " 的 `with:` 可执行字段 " + str(key) + " 的值不是标量"
+                                 "（读到类型 " + type(value).__name__ + "，值 " + repr(value)
+                                 + "）：结构化值没法按字符串判它里面有没有被禁的命令，"
+                                 "静默跳过等于给这条命令留一扇没人看的门。要么把它改成标量，"
+                                 "要么先写清这个 action 对结构化输入的执行语义再登记。")
         if norm in _WITH_KEYS_SEEN_IN_TREE:
             continue
         if (isinstance(value, str) and _WITH_TOKEN_SHAPE in value
@@ -640,22 +657,35 @@ _SYNTH_MARKER_SHAPE_CASES = (
      "装上 gitleaks 而没 detect，判据不该要求全历史"),
 )
 
-# 「剥掉行首（去缩进后）是 `#` 的行」这一层的**配对**夹具：少剥与多剥两个相反方向各有夹具，
-# 单独任何一枚都留着一段缴械空间。四格：(参数化 id, 注入的 run 正文行,
-# 这一批行应当被当成散文(True)还是可执行命令(False), 这一格存在的理由)。
-# 注释那几枚刻意把无害命令放在**第一行**：YAML 块标量的缩进量由首行决定，注释行放前面会让整块
-# 按更深的缩进 dedent 而直接解析失败——放在后面才落到「剥掉缩进才到行首」的真实形状上。
-_SYNTH_PROSE_STRIP_CASES = (
-    ("plain-comment-line", ("# git log --oneline -1", "echo ok"), True,
-     "行首即 `#` 的整行注释：shell 根本不执行它，判据不得因此要求历史"),
-    ("indented-comment-line", ("echo ok", "    # git log --oneline -1"), True,
-     "去掉缩进之后才到行首的整行注释：`run: |` 的正文里天然存在这种行。把条件写成只认**无缩进**"
-     "行首的 `#`（少剥），这句散文就开始当判据"),
-    ("bare-history-command", ("git log --oneline -1", "echo ok"), False,
-     "同一批行去掉注释前缀：这是对照——注释那几枚的空命中只能来自剥离，不是夹具本身看不见东西"),
-    ("command-with-trailing-comment", ("git log --oneline -1  # 数历史", "echo ok"), False,
-     "可执行命令挂尾随 `#` 注释：命令在前、注释在后，这一行是要跑的。放宽成「行里含 `#` 就整行"
-     "不算」（多剥），真读历史的那格就被吞成散文，哨反过来放过一个没配 fetch-depth 的作业"),
+# 「剥掉行首（去缩进后）是 `#` 的行」这一层现在是**值域表**：缩进 × 行形 × 尾随 三个维度做
+# `itertools.product`，每格一条真 YAML 的 run 正文，断言 `_run_bodies` 之后**存活的行集合**
+# （逐字节、含缩进与尾随那段）。期望值只写在表里（`survives` 那一格），测试绝不重算规则。
+#
+# 行形覆盖两侧：散文侧是 `#` 的四种写法（单、双、裸、无空格）——它们在任何缩进下都必须整行消失；
+# 命令侧是三种「命令里带 `#`」的真实形状（尾随说明、引号里的 `#`、`--grep="#103"` 这种引号后
+# 紧跟 `#` 的命令）——它们必须原样存活。只钉「缩进有无 × 含 git log」或「命令+空格+#+无引号」
+# 的夹具只能看见部分缴械；这张表把「少剥」（摘掉过滤条件）与「多剥」（行里含 # 就整行不算）
+# 两个方向在一张表里同时量，且量的是存活集合本身，不是某条标记在不在。
+_STRIP_INDENTS = ("", "  ", "\t")
+_STRIP_SHAPES = (
+    ("full-line-comment", "# git log --oneline -1", False, True),
+    ("double-hash-comment", "## 安装（安卓）", False, False),
+    ("bare-hash", "#", False, False),
+    ("hash-no-space", "#git log --oneline -1", False, True),
+    ("history-command", "git log --oneline -1", True, True),
+    ("quoted-hash-command", 'git log --grep="#103" -1', True, True),
+    ("echo-quoted-hash", 'echo "# not a comment"', True, False),
+)
+_STRIP_TRAILINGS = ("", "  # 数历史")
+# 每行五格：(参数化 id, 注入的第二行, 这一行应不应该存活, 存活后是否命中历史标记, 行形 id)。
+# 第一行永远是 `echo ok`：YAML 块标量的缩进量由首行决定，注释行放前面会让整块按更深的缩进
+# dedent 而直接解析失败——放在后面才落到「剥掉缩进才到行首」的真实形状上。
+_STRIP_SURVIVORS = tuple(
+    ("%s-i%d-%s" % (shape_id, i, "trail" if trailing else "bare"),
+     indent + body + trailing, survives, history, shape_id)
+    for i, indent in enumerate(_STRIP_INDENTS)
+    for shape_id, body, survives, history in _STRIP_SHAPES
+    for trailing in _STRIP_TRAILINGS
 )
 
 
@@ -936,7 +966,7 @@ def test_tightened_indirect_markers_hit_commands_and_ignore_prose(case_id, run_l
     gitleaks.yml 都在，并按条钉住各自靠哪一条标记进名单），逐条标记的红由
     `test_each_history_marker_has_its_own_counterexample` 判。
     入参是**裸 run 行**、不经 `_run_bodies`，所以"行首 `#` 要不要剥掉"这一格不归它判——
-    那由 `test_comment_only_history_prose_never_becomes_a_requirement` 守着。
+    那由 `test_the_strip_line_survivor_set_is_the_table` 守着。
     """
     hit = _history_markers_in(run_line)
     if expect_hit:
@@ -949,59 +979,54 @@ def test_tightened_indirect_markers_hit_commands_and_ignore_prose(case_id, run_l
             "拿散文当判据会让不读历史的 job 也被要求 fetch-depth。")
 
 
-@pytest.mark.parametrize("case_id,run_lines,expect_prose,why", _SYNTH_PROSE_STRIP_CASES,
-                         ids=[c[0] for c in _SYNTH_PROSE_STRIP_CASES])
-def test_comment_only_history_prose_never_becomes_a_requirement(case_id, run_lines,
-                                                                expect_prose, why):
-    """「去掉缩进后行首是 `#` 的行不算数」这一层剥离是有牙的，两个相反方向各钉了一枚。
+@pytest.mark.parametrize("case_id,case_line,survives,history,shape_id", _STRIP_SURVIVORS,
+                         ids=[c[0] for c in _STRIP_SURVIVORS])
+def test_the_strip_line_survivor_set_is_the_table(case_id, case_line, survives, history,
+                                                  shape_id):
+    """剥行层的保证 = **存活集合**与值域表逐字节相同（#104：表驱动，期望值是数据）。
 
-    夹具只差注释前缀与缩进，于是散文那几枚的"命中为空"只能来自 `_run_bodies` 那一次剥行，而不是
-    夹具本身看不见东西——同一批行去掉注释前缀的对照必须命中 `git log`：
+    这一条替代了原来「散文侧一枚、命令侧一枚」的成对夹具。配对夹具是**构造出来的判别**：
+    它只对「缩进有无 × 含 `git log` 子串」和「命令+空格+`#`+无引号」敏感，于是引号感知的多剥
+    （`--grep="#103"` 被当注释吞掉）、双 `#` 行、Tab 缩进、`#` 后无空格这些形状都能一路全绿。
+    这里 `itertools.product(缩进, 行形, 尾随)` 把值域摊开，每格断言的**不是某条标记在不在**，
+    而是 `_run_bodies` 之后还剩哪几行（连缩进与尾随那段一起逐字节比）：
 
-    - **散文侧（少剥的那个方向）**：行首即 `#`、以及剥掉缩进才到行首的整行注释，可执行正文里都不
-      该出现它们，命中清单必须是空，作业级判定不得要求历史。把那一行过滤的条件写成只认**无缩进**
-      行首的 `#` ⇒ 缩进那枚当场红（YAML 块标量只按首行缩进 dedent，带缩进的注释行是真物的形状）。
-    - **命令侧（多剥的那个方向）**：去掉前缀的同一批行、以及 `git log --oneline -1` 后面挂
-      `# 数历史` 的那一版，都必须只命中 `git log` 那条标记并红在「checkout 没有 with: 块」那一句。
-      把条件放宽成「行里含 `#` 就整行不算」⇒ 尾随注释那枚当场红（哨会放过一个真读历史却没配
-      fetch-depth 的作业）。
+    - 散文侧：`#` 的四种写法 × 三种缩进 × 有无尾随，存活集合里都必须没有它——摘掉过滤条件
+      （少剥）或把条件写成只认无缩进行首，都会让成片格子红；
+    - 命令侧：命令尾随 `#` 说明、引号里的 `#`、`--grep="#103"`，必须原样存活——放宽成「行里含
+      `#` 就整行不算」（多剥）会让这几格当场红。
+    - 存活且命中历史标记的行还要走一遍作业级判据：必须红在「checkout 没有 with: 块」；不存活
+      的散文行不得要求历史。这一半证明上表的存活集合不是孤立事实，而是那条哨真正吃进去的东西。
 
-    摘掉那行过滤 ⇒ 散文侧全红。这几种形状之外的缴械写法（含"把本函数整个删掉"）没有逐条的账，
-    见模块 docstring 射程段末尾那条声明。
+    表外的缴械写法（含"把本函数整个删掉"）没有逐条的账，见模块 docstring 射程段末尾那条声明。
     """
-    steps = _synthetic_steps(list(run_lines))
+    assert history or shape_id in ("double-hash-comment", "bare-hash", "echo-quoted-hash"), (
+        "%s 的历史标记期望值没在表里写对：这张表只许把「读历史」写在真会命中的行形上" % case_id)
+    steps = _synthetic_steps(["echo ok", case_line])
     bodies = _run_bodies(steps)
+    want = ["echo ok"] + ([case_line] if survives else [])
+    assert bodies.splitlines() == want, (
+        "剥行层的存活集合与值域表分家：%s（注入 %r，期望存活 %r，实得 %r）。"
+        "少剥会把散文当命令、多剥会把真命令吞成散文——两个方向都在这张表里量，"
+        "改剥行规则就同批改表里的 survives 那格，别在测试里重算规则。"
+        % (case_id, case_line, want, bodies.splitlines()))
+
     hit = _history_markers_in(bodies)
-
-    if expect_prose:
-        assert "git log" not in bodies, (
-            "注释剥离失效（少剥的方向）：散文开始当判据——`_run_bodies` 把「" + case_id
-            + "」这一行留在了可执行正文里（读到 " + repr(bodies) + "）。" + why
-            + "。那一行过滤是本文件模块 docstring 与本函数 docstring 那句「散文不算数」的唯一"
-              "执行处，它的射程由本组配对夹具钉住。")
+    if survives and history:
+        assert hit, (
+            "%s 存活了却不再命中历史标记（读到 %r）：标记集合与这张表有一边在撒谎" % (case_id, bodies))
+        with pytest.raises(AssertionError) as excinfo:
+            _judge_job(steps, "合成 workflow 的作业 synth")
+        assert "with: 块缺失" in str(excinfo.value), (
+            "命令侧「%s」命中了标记，作业级判定却没红在「第 0 步的 checkout **with: 块缺失**」"
+            "那一句，实得红话：%s" % (case_id, str(excinfo.value)[:200]))
+    else:
         assert hit == [], (
-            "注释剥离失效（少剥的方向）：只把历史命令写进注释的作业仍被认成读仓库历史，命中 "
-            + str(hit) + "（可执行正文读到 " + repr(bodies) + "）。" + why)
-        try:
-            judged = _judge_job(steps, "合成 workflow 的作业 synth")
-        except AssertionError as exc:
-            pytest.fail("注释剥离失效（少剥的方向）：不读历史的合成作业被要求 fetch-depth: 0，"
-                        "「" + case_id + "」红话首行：" + str(exc).strip().splitlines()[0])
-        assert judged == [], (
-            "注释剥离失效：标记清单说没命中，作业级判定却给出了要求 " + str(judged)
-            + "：两份判据有一份在撒谎，红话不可采信。")
-        return
-
-    assert hit == [_LABEL_BY_TOOTH_ID["git-log"]], (
-        "剥离过头（多剥的方向）：夹具「" + case_id + "」本该是可执行命令，实得命中 " + str(hit)
-        + "（可执行正文读到 " + repr(bodies) + "）。" + why + "。把剥行条件从「去掉缩进后行首是 `#`」"
-        "放宽成「行里含 `#` 就整行不算」时这一格空手：真读历史的那行被吞成散文，参数化锁对它判绿——"
-        "哨就此静默放过一个读了历史却没配 fetch-depth 的作业。")
-    with pytest.raises(AssertionError) as excinfo:
-        _judge_job(steps, "合成 workflow 的作业 synth")
-    assert "with: 块缺失" in str(excinfo.value), (
-        "命令侧夹具「" + case_id + "」命中了标记，作业级判定却没红在「第 0 步的 checkout "
-        "**with: 块缺失**」那一句，实得红话：" + str(excinfo.value)[:200])
+            "散文侧「%s」被当成了命令（命中 %s，可执行正文读到 %r）：这一格证明存活集合里"
+            "多留了一行，哨会因此要求一个不读历史的作业配 fetch-depth" % (case_id, hit, bodies))
+        assert _judge_job(steps, "合成 workflow 的作业 synth") == [], (
+            "散文侧「%s」：标记清单说没命中，作业级判定却要求了 fetch-depth——两份判据有一份在撒谎"
+            % case_id)
 
 
 def test_the_with_key_registry_is_a_snapshot_of_the_real_tree():

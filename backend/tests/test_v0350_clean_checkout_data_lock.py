@@ -22,13 +22,15 @@
    换成一条**不存在**的路径（干净检出的形状），它必须回 `(None, None)`，不许抛。
 
 认不到的形状逐条记在 `_STILL_MISSED_SHAPES` 那份清单里，每条配一枚"今天必须看不见"的钉子
-（`test_the_declared_blind_spots_are_actually_blind`；另有三枚把钉子的**落点**钉到机制上——
-间接格认出的名字、async 格的同步对照、动态派发格的"根名字就是被认出的那个常量"，
+（`test_the_declared_blind_spots_are_actually_blind`；另有一组把钉子的**落点**钉到机制上的用例——
+间接格认出的名字、async 格的同步对照、动态派发两族各自的"根名字就是被认出的那个常量"，
 防止"看不见"其实是合成源码写坏了）：谁把这些形状收进
 判据而没回来改清单，
-钉子就红；清单不是"已穷尽"，它只覆盖复验过的那几种形状。另有两格与形状无关的边界：静态按
-文本顺序判，会放过"问了却没用上答案"那一种，那种由动态这半条兜；两半条都不覆盖 CI 本身——
-真跑一遍干净检出得在仓库外做克隆（仓库永远带着 `data/`，本文件自己也一样），也不覆盖
+钉子就红；清单不是"已穷尽"，它只覆盖复验过的那几种形状。清单**两个方向都钉死**：
+`_DECLARED_BLIND_SPOT_NAMES` 是手抄的名单，`test_the_blind_spot_list_is_pinned_in_both_directions`
+要求元组与它逐条相等——删掉一条（射程悄悄变宽）与加一条（账没跟上）都会红。另有两格与形状无关的
+边界：静态按文本顺序判，会放过"问了却没用上答案"那一种，那种由动态这半条兜；两半条都不覆盖 CI
+本身——真跑一遍干净检出得在仓库外做克隆（仓库永远带着 `data/`，本文件自己也一样），也不覆盖
 `test_v0350_*.py` 之外那些文件读仓库数据的方式。
 """
 import ast
@@ -280,7 +282,7 @@ _ASYNC_SNAPSHOT_HELPER_UNGUARDED = _HDR + (
 
 # 动态派发族：读点的**方法名**是递进 getattr / methodcaller 的字符串，而 `_calls_in` 那一关只吃
 # `func` 是 `ast.Attribute` 的调用 ⇒ 静态报不出读点、动态也枚举不到快照函数，未守卫的那条读点在
-# 干净检出里照样抛 FileNotFoundError。三种拼法同一根因；对照组是同款函数体的静态派发写法
+# 干净检出里照样抛 FileNotFoundError。这一族的几种拼法同一根因；对照组是同款函数体的静态派发写法
 # （`_SYNC_SNAPSHOT_HELPER_TWIN`）与同一函数体的 getattr 守卫版，落点由
 # `test_the_dynamic_dispatch_family_is_blind_at_the_method_end` 钉住。
 _DYNAMIC_DISPATCH_GETATTR = _HDR + (
@@ -300,6 +302,34 @@ _DYNAMIC_DISPATCH_GETATTR_GUARDED = _HDR + (
     'def _repo_data_state():\n'
     '    return (getattr(REPO_DATA_TASKS, "read_bytes")()\n'
     '            if REPO_DATA_TASKS.exists() else None), None\n')
+
+# 第四形：**方法本身当值**传（不是方法名的字符串），四种拼法同一根因。这一族与上面那一族的
+# 差别要讲准：上面瞎在「方法名是字符串、被 getattr/methodcaller 拿着」；这里方法对象已经是值，
+# 外面套的是局部别名、`__getattribute__`、从 `type(x).__dict__` 里取未绑定函数、或 attrgetter。
+# 四种写法的读点 func 分别是 Name / Attribute(__getattribute__，不在 READ_METHODS) / Subscript /
+# Call，`_calls_in` 一条都吃不到；路径仍是模块级那个被认出的常量。每一条都必须今天看不见、
+# 且把常量指向缺失路径时真抛 FileNotFoundError（落点由
+# `test_the_dynamic_dispatch_methods_as_values_family_is_blind_at_the_value_end` 钉住）。
+_METHOD_VALUE_FORMS = (
+    ("bound-method-in-local-var", _HDR + (
+        'def _repo_data_state():\n'
+        '    read = REPO_DATA_TASKS.read_bytes\n'
+        '    return read(), None\n')),
+    ("dunder-getattribute", _HDR + (
+        'def _repo_data_state():\n'
+        '    return REPO_DATA_TASKS.__getattribute__("read_bytes")(), None\n')),
+    ("unbound-from-type-dict", _HDR + (
+        'def _repo_data_state():\n'
+        '    return type(REPO_DATA_TASKS).__mro__[1].__dict__["read_bytes"](REPO_DATA_TASKS), None\n')),
+    ("operator-attrgetter", (
+        'import os\nfrom operator import attrgetter\nfrom pathlib import Path\n'
+        'REPO_ROOT = Path(".")\nREPO_DATA_TASKS = REPO_ROOT / "data" / "tasks.json"\n'
+        'def _repo_data_state():\n'
+        '    return attrgetter("read_bytes")(REPO_DATA_TASKS)(), None\n')),
+)
+# 清单那一格只放一条（一种形状），样本把四种拼法都装进去；机制钉逐条单量。
+_DYNAMIC_DISPATCH_METHODS_AS_VALUES = "\n".join(
+    source for _tag, source in _METHOD_VALUE_FORMS)
 
 _STILL_MISSED_SHAPES = (
     ("param-hand-off",
@@ -393,11 +423,69 @@ _STILL_MISSED_SHAPES = (
      "`methodcaller(\"read_bytes\")(REPO_DATA_TASKS)`：外层调用的 `func` 是一个 `Call`、内层的 attr "
      "是 `methodcaller`（不在 READ_METHODS）⇒ 两条都过不去 `_calls_in`，而根名字照样是被认出的"
      "常量。本批 `methodcaller` 零命中 ⇒ 无活例"),
+    ("dynamic-dispatch-methods-as-values",
+     _DYNAMIC_DISPATCH_METHODS_AS_VALUES,
+     "**方法本身当值**的四种拼法：局部别名 `read = REPO_DATA_TASKS.read_bytes; read()`、"
+     "`__getattribute__(\"read_bytes\")()`、`type(x).__mro__[1].__dict__[\"read_bytes\"](x)`"
+     "（具体的 WindowsPath/PosixPath 类不带继承来的 read_bytes，所以取 MRO 上的 Path 那一格；"
+     "这正是「从类字典里取出未绑定函数」的写法）、`attrgetter(\"read_bytes\")(x)()`。与上一族的分界是"
+     "「方法名还是字符串」——这里方法对象已经"
+     "是值，所以改 getattr/methodcaller 那两格的判据不会顺手收掉这一族。四种写法的读点 `func`"
+     "分别是 Name / 不在 READ_METHODS 的 Attribute / Subscript / Call，`_calls_in` 一条都吃不到；"
+     "根名字仍是被认出的那个常量。本批扫过：没有把方法对象存成值或经 attrgetter/type-dict 派发的"
+     "读点 ⇒ 无活例"),
 )
 
 # 对照组：尺子对"它说它认得"的那个形状是真认得——没有这一枚，上面那一串"看不见"就可能是
 # 尺子在空转（这条文件的反空转规矩）。
 _RECOGNIZED_SHAPE = _HDR + 'def f():\n    return REPO_DATA_TASKS.read_bytes()\n'
+
+# 手抄的名单（#126 的"两个方向"）：`_STILL_MISSED_SHAPES` 只有"今天仍然看不见"这一半，
+# 删掉一条（把某一格说成已覆盖）或悄悄加一条都不会被上面那枚钉子拦住。这里把名单本身钉成
+# 逐条相等：少一条 = 射程声明变宽而没人回来删账；多一条 = 新形状没登记进这份手抄名单。
+# 改清单必须同批改这份名单，与 `test_v0350_lock_comment_stripping_scope.py` 的条数钉同一个方向。
+_DECLARED_BLIND_SPOT_NAMES = (
+    "param-hand-off", "inline-open", "unbound-data-literal", "os-path-join",
+    "imported-constant", "module-level-read-guarded-elsewhere", "alias-then-read",
+    "function-scope-binding", "data-segment-indirection", "annotated-assignment",
+    "async-snapshot-helper", "dynamic-dispatch-getattr",
+    "dynamic-dispatch-method-name-in-var", "dynamic-dispatch-methodcaller",
+    "dynamic-dispatch-methods-as-values",
+)
+
+
+def _blind_spot_roster_problems(names, roster) -> dict:
+    """清单与手抄名单的分叉，两个方向各回一份：`missing` = 名单里有、清单里没了；
+    `unledgered` = 清单里有、名单没登记。顺序不同也算分叉（这份名单是给人按序读的账）。"""
+    return {
+        "missing": [n for n in roster if n not in names],
+        "unledgered": [n for n in names if n not in roster],
+        "order": names != tuple(n for n in roster if n in names),
+    }
+
+
+def test_the_blind_spot_list_is_pinned_in_both_directions():
+    """清单两个方向都钉：删掉一条（射程悄悄变宽）与加一条（账没跟上）都必须红。
+
+    没有这一枚时，`_STILL_MISSED_SHAPES` 是**单向钉**——它只问"列出来的这些今天还看不见吗"，
+    把其中三条整行删掉，参数化循环少转三圈，全绿且没人知道射程声明已经比测量宽。反过来加一条
+    新形状也不会有人被提醒去核手抄名单。这里比的是元组与 `_DECLARED_BLIND_SPOT_NAMES` 的完整
+    等式（含顺序），两边必须同批改。
+    """
+    names = tuple(name for name, _source, _note in _STILL_MISSED_SHAPES)
+    problems = _blind_spot_roster_problems(names, _DECLARED_BLIND_SPOT_NAMES)
+    assert not any(problems.values()), (
+        "清单与手抄名单分家了：missing（名单里有、清单删了）= %s，unledgered（清单加了、名单没"
+        "登记）= %s，order=%s。修清单就把 `_DECLARED_BLIND_SPOT_NAMES` 同批改，别让射程声明"
+        "与清单各说各话" % (problems["missing"], problems["unledgered"], problems["order"]))
+    # 反例：这枚等式必须有牙——删掉最后一格、改成名单外的名字、打乱顺序，三种分叉都得被点名。
+    dropped = _blind_spot_roster_problems(names[:-1], _DECLARED_BLIND_SPOT_NAMES)
+    renamed = _blind_spot_roster_problems(names[:-1] + ("dynamic-dispatch-invented",),
+                                          _DECLARED_BLIND_SPOT_NAMES)
+    reordered = _blind_spot_roster_problems(tuple(reversed(names)), _DECLARED_BLIND_SPOT_NAMES)
+    assert dropped["missing"] == [_DECLARED_BLIND_SPOT_NAMES[-1]], dropped
+    assert renamed["unledgered"] == ["dynamic-dispatch-invented"], renamed
+    assert reordered["order"] is True, reordered
 
 
 def test_the_declared_blind_spots_are_actually_blind():
@@ -453,15 +541,15 @@ def test_the_async_gap_is_the_async_and_not_the_shape():
 
 
 def test_the_dynamic_dispatch_family_is_blind_at_the_method_end(tmp_path):
-    """动态派发那一族：瞎的是**方法名**那一端，不是根名字——这一格必须钉到机制上才敢引用它。
+    """方法名当字符串那一族：瞎的是**方法名**那一端，不是根名字——这一格必须钉到机制上才敢引用它。
 
     `inline-open` 与 `os-path-join` 那两格也是"看不见"，但落点完全不同（根名字陌生），所以光靠
-    清单里那条通用钉子分不开这三格与那两格。这里各量一次：
-    ① 三种拼法的合成源码里，`_data_bound_names` 认出的名字必须**恰好**是那条 data 路径常量——
+    清单里那条通用钉子分不开这一族与那两格。这里各量一次：
+    ① 这一族每种拼法的合成源码里，`_data_bound_names` 认出的名字必须**恰好**是那条 data 路径常量——
        名单空了或换成了别的名字都说明源码与判据脱钩，那枚"看不见"是假的；
     ② 对照组：同款函数体写成静态属性派发必须被枚举成快照函数，写成 getattr 递方法名（带守卫那版）
        必须不被枚举 ⇒ 两次的差异只剩派发形态，不是"函数体本来就不像快照函数"；
-    ③ 代价当场量一次：把常量指向一条不存在的路径（干净检出的形状）单跑那三种写法，必须真抛
+    ③ 代价当场量一次：把常量指向一条不存在的路径（干净检出的形状）单跑这一族每种写法，必须真抛
        `FileNotFoundError`，而同一份源码在两半条判据里各报空——"CI 会红但不报 文件:行号"这句
        不是相信出来的，是跑出来的。
     """
@@ -484,8 +572,9 @@ def test_the_dynamic_dispatch_family_is_blind_at_the_method_end(tmp_path):
     assert not snapshot_helpers(_DYNAMIC_DISPATCH_GETATTR_GUARDED, "<synth>")[2], (
         "带守卫的 getattr 版已经被枚举成快照函数：射程收了这一格，清单里该删那条")
 
-    # 单跑三种写法：被 exec 的只有那个函数体，源码里那行 `from operator import methodcaller` 不参与，
-    # 所以命名空间里补的是标准库同一个对象；REPO_DATA_TASKS 指向父目录都不在的路径 = 干净检出。
+    # 单跑这一族每种写法：被 exec 的只有那个函数体，源码里那行 `from operator import methodcaller`
+    # 不参与，所以命名空间里补的是标准库同一个对象；REPO_DATA_TASKS 指向父目录都不在的路径 =
+    # 干净检出。
     missing = tmp_path / "not-checked-out" / "tasks.json"
     probe_globals = {"__name__": "dispatch_probe", "Path": Path, "os": os,
                      "REPO_DATA_TASKS": missing,
@@ -493,6 +582,41 @@ def test_the_dynamic_dispatch_family_is_blind_at_the_method_end(tmp_path):
     for source, tag in ((_DYNAMIC_DISPATCH_GETATTR, "<getattr>"),
                         (_DYNAMIC_DISPATCH_METHOD_NAME_IN_VAR, "<method-in-var>"),
                         (_DYNAMIC_DISPATCH_METHODCALLER, "<methodcaller>")):
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef))
+        namespace = dict(probe_globals)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "<probe>", "exec"), namespace)
+        with pytest.raises(FileNotFoundError):
+            namespace["_repo_data_state"]()
+
+
+def test_the_dynamic_dispatch_methods_as_values_family_is_blind_at_the_value_end(tmp_path):
+    """第四形（方法本身当值）：落点仍是方法那一端，但**方法名连字符串都不是**了。
+
+    与 `dynamic-dispatch-getattr` 那一族的分界：那里瞎在"字符串被 getattr/methodcaller 拿着"，
+    这里方法对象已经是值，套的是局部别名、`__getattribute__`、`type(x).__dict__` 里的未绑定
+    函数、或 attrgetter。把上面那族的判据收进射程，这一族照样看不见——所以清单里必须是两条，
+    不能合成一条。每种拼法各量：
+    ① `_data_bound_names` 认出的名字恰好是那条 data 路径常量（根名字没变，落点在方法那一端）；
+    ② 静态报不出读点、动态也枚举不到快照函数；
+    ③ 把常量指向缺失路径单跑，必须真抛 `FileNotFoundError`——这四条写法是**真读**，不是死代码。
+    对照组仍用静态属性派发的同款函数体：它必须被枚举成快照函数。
+    """
+    assert [n.name for n in snapshot_helpers(_SYNC_SNAPSHOT_HELPER_TWIN, "<control>")[2]] == [
+        "_repo_data_state"], (
+        "对照组（静态属性派发的同款函数体）不再被枚举成快照函数：这一族的差异就不是派发形态了")
+    missing = tmp_path / "not-checked-out" / "tasks.json"
+    probe_globals = {"__name__": "method_value_probe", "Path": Path, "os": os,
+                     "REPO_DATA_TASKS": missing,
+                     "attrgetter": __import__("operator").attrgetter}
+    for tag, source in _METHOD_VALUE_FORMS:
+        names = _data_bound_names(ast.parse(source))
+        assert names == {"REPO_DATA_TASKS"}, (
+            "%s 里尺子认出的名字是 %s，不再是那条 data 路径常量：这一族的落点变了（或合成源码与"
+            "判据脱钩了，那这枚钉子就是假的）" % (tag, sorted(names)))
+        assert unguarded_read_sites(source, tag) == [], (
+            "%s 的读点已经看得见，清单里该删这一条" % tag)
+        assert not snapshot_helpers(source, tag)[2], (
+            "%s 的动态那半条已经覆盖，清单里该删这一条" % tag)
         node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef))
         namespace = dict(probe_globals)
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<probe>", "exec"), namespace)

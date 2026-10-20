@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.test_ci_history_depth import (WORKFLOWS_DIR, workflow_run_bodies,
+from tests.test_ci_history_depth import (WORKFLOWS_DIR, workflow_files, workflow_run_bodies,
                                          workflow_with_face)
 from tests.test_machine_read_pointers import strip_py_prose
 
@@ -268,8 +268,9 @@ def _workflow_release_steps() -> list:
 def _gate_token_hits(workflows_dir=None) -> list:
     """返回**每一格真会被 Actions 执行**的地方里出现了本机闸门命令的文件名清单。
 
-    射程：`.github/workflows/*.yml` 全部文件、全部作业的全部步骤的 `run:` 正文（剥掉行首 `#`），
-    加上 `with:` 里**落在可执行字段**的那几格值（键名名单是
+    射程：`.github/workflows/` 下 `*.yml` **与 `*.yaml`** 全部文件（两种扩展名在 Actions 里等价；
+    只收一种的话，存成 `.yaml` 的那份永久落在禁面外，见 #131）、全部作业的全部步骤的 `run:` 正文
+    （剥掉行首 `#`），加上 `with:` 里**落在可执行字段**的那几格值（键名名单是
     `test_ci_history_depth._WITH_KEYS_EXECUTABLE`，判序与红话都在 `workflow_run_bodies` 里）——
     YAML 注释在 `safe_load` 那一层就不存在了，run 里的行注释由 `workflow_run_bodies` 剥掉。
     所以注释里教人"本机上先跑 `python tools/pre_tag_gate.py …`"与 docs/ 里那两句必抄的命令都不在
@@ -278,7 +279,7 @@ def _gate_token_hits(workflows_dir=None) -> list:
     `with:` 那一格从前又是"凡是值都算"，把面铺到根本不会被执行的输入上。两面都不是这格要的形状。
     """
     root = Path(workflows_dir) if workflows_dir else WORKFLOWS_DIR
-    files = sorted(root.glob("*.yml"))
+    files = workflow_files(root)
     assert files, "%s 里一份 workflow 都没有：这把禁判据在空转，红话得由人来更新" % root
     return [f.name for f in files
             if GATE_TOKEN in workflow_run_bodies(f, where=str(f), withs=True)]
@@ -440,6 +441,36 @@ def test_an_unregistered_with_key_goes_red_with_the_layer_that_caught_it(tmp_pat
         "「" + case_id + "」的红话没点名是哪个键名（读到 " + message[:200] + "）：" + why)
 
 
+def test_an_executable_with_field_carrying_a_non_scalar_goes_red(tmp_path):
+    """反例（#131）：可执行字段的值是映射/列表时**不许静默跳过**，必须当场红。
+
+    旧写法在 A 层 `if isinstance(value, str)` 不成立就直接 `continue`：`with: script:` 的值写成
+    `{inline: 1}` 时，闸门命令藏在结构化值里根本不进面，而这把禁全绿。判不了就说判不了——
+    红话必须点名键名与"不是标量"，下一步才是人去看那个 action 怎么消费结构化输入。
+    """
+    d = _synth_workflows(tmp_path, ["echo ok"], withs=[("script", "{inline: 1}")])
+    with pytest.raises(AssertionError) as excinfo:
+        _gate_token_hits(d)
+    message = str(excinfo.value)
+    assert "script" in message and "不是标量" in message, (
+        "非标量的可执行字段没有当场红（读到 " + message[:200] + "）：结构化值里的命令仍在面外")
+    assert "dict" in message, "红话没说清读到的是哪种结构化值（" + message[:200] + "）"
+
+
+def test_a_yaml_extension_workflow_is_inside_the_ban_surface(tmp_path):
+    """反例（#131）：`.yaml` 与 `.yml` 等价，禁面必须两种都收。
+
+    只 glob `*.yml` 时，把同一条命令写进 `tests.yaml` 就永久落在面外——所有手抄名单、条数钉、
+    `with:` 快照都照绿，而 CI 真会执行它。这里用同一条命令各存一种扩展名，两份都必须被点名。
+    """
+    command = ["python tools/pre_tag_gate.py --expect v0.0.0"]
+    assert _gate_token_hits(_synth_workflows(tmp_path / "yml", command,
+                                             name="tests.yml")) == ["tests.yml"]
+    assert _gate_token_hits(_synth_workflows(tmp_path / "yaml", command,
+                                             name="tests.yaml")) == ["tests.yaml"], (
+        "`.yaml` 扩展名的 workflow 不在禁面里：换一个后缀就能把闸门命令抄回 CI")
+
+
 def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     """**改前钉什么**：CI 里有一步在跑全量闸门 `tools/pre_tag_gate.py`，只在 tag 事件跑，
     并且排在 `gh release create` 与签名三步**之前**。
@@ -503,7 +534,7 @@ def test_ci_step_is_narrowed_to_what_ci_can_actually_judge():
     assert not sign or at < sign[0], "窄检查排在签名步骤之后：红得不够早，白烧 runner"
 
     hits = _gate_token_hits()
-    exec_keys = sorted({k for f in WORKFLOWS_DIR.glob("*.yml")
+    exec_keys = sorted({k for f in workflow_files()
                         for k in workflow_with_face(f, where=str(f))})
     assert not hits, (
         f"全量发版闸门又被抄回 CI 真正会被执行的地方（{hits}）：{GATE_TOKEN} 在那次 checkout 里判不到"
