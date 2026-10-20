@@ -20,6 +20,24 @@ OK_PREFIX = "✓ "
 FAIL_PREFIX = "✗ 错误: "
 SUSPEND_PREFIX = "⏸ "
 
+
+def with_pause_marker(text: str) -> str:
+    """把一段文本投影成挂起出口的文本。前缀只在本模块拼。"""
+    return SUSPEND_PREFIX + str(text)
+
+
+def ensure_pause_marker(text: str, suspended: bool) -> str:
+    """按结构化判据补齐挂起前缀，幂等；非挂起原样返回。
+
+    帧的 summary 与模型的文本投影共用这一处，调用方不许自己比对这个前缀。
+    """
+    body = str(text)
+    if not suspended:
+        return body
+    marker = with_pause_marker("")
+    return body if body.startswith(marker) else marker + body
+
+
 SUSPEND_TAIL = ("〔执行已经停在断点：断点之前那几步是**真金白银跑过的**，不要重跑；"
                 "把上面那句原样问用户，拿到答案后从断点继续。〕")
 
@@ -84,7 +102,7 @@ class ToolResponse:
         if self.suspended:
             question = str(self.prompt or "").strip() or "（工具没有说清要问用户什么）"
             tail = f"。建议: {self.hint}" if self.hint else ""
-            return f"{SUSPEND_PREFIX}需要用户输入：{question}{SUSPEND_TAIL}{tail}"
+            return with_pause_marker(f"需要用户输入：{question}{SUSPEND_TAIL}{tail}")
         if self.success:
             return f"✓ {self.data}"
         return f"✗ 错误: {self.error}。建议: {self.hint}"
