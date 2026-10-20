@@ -699,7 +699,7 @@ def test_the_jvm_bench_and_the_shipped_core_are_one_and_the_same_copy():
                       / "fenever" / "assistant" / "core").glob("*.java"))
     assert shipped == ["ApkDigest.java", "ApkDownloader.java", "ExportName.java",
                        "ExportRedeem.java", "MiniJson.java", "ReleasePlan.java",
-                       "ScheduleBoard.java"], \
+                       "ScheduleBoard.java", "TaskCard.java"], \
         f"上线模块的判断核与名单对不上（现在是 {shipped}）：先确认谁被加/删，再改这条"
 
     benched = sorted(p.name for p in bench.CORE_PKG_DIR.glob("*.java"))
