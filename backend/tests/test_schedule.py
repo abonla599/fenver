@@ -243,7 +243,9 @@ def test_a_model_forged_owner_is_ignored(isolated_schedule):
     """
     from app.tools.executor import execute_tool
 
-    out = execute_tool("plan_add", {"text": "模型栽的一条", "user_id": "victim"},
+    # at 只是让它走"信息充足"的直通分支；缺时间信息的挂起由 #153 的契约用例覆盖。
+    out = execute_tool("plan_add", {"text": "模型栽的一条", "at": "09:00",
+                                    "user_id": "victim"},
                        user_id="attacker")
     assert out.startswith("✓"), out
     assert [i["text"] for i in schedule.plan("attacker")] == ["模型栽的一条"]
