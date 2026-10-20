@@ -683,6 +683,103 @@ def test_live_appjs_override_names_a_path_and_never_skips_the_check(tmp_path):
         "覆盖路径里已经有这一枚串还被放行：装机侧这一格被绕过了"
 
 
+# ------------------------------------------- #72：装机侧覆盖路径的两条 fail-closed
+# `--live-appjs` 是"精确路径覆盖"，不是"跳过这一格"的开关。下面两组反例锁的是它
+# 另外两种看起来像判据、实际不是的形状：相对路径（按 CWD 解析，可能正好读到线上那份包）
+# 与**本版判据根本不读**时仍然传了它（一个不生效的开关）。两者都必须退 2。
+
+def test_relative_live_appjs_override_is_refused_instead_of_resolved_against_cwd(
+        tmp_path, monkeypatch):
+    """相对路径不许按进程 CWD 解析：那正是"读回生产包"的那条路。
+
+    造一份诱饵：把 CWD 下的同名相对路径指向**带本版那枚串**的假包。若工具把它当路径
+    打开，结论会是 rc=1（already-present）；正确行为是根本不开它，直接以
+    `live-appjs-relative-path` 退 2。同时钉住空串：旧写法 `override if override else
+    默认` 会把 `--live-appjs ""` 静默当成"没给"，于是又回去读缺省的真 dist\\。
+    """
+    root = _fake_repo(tmp_path / "repo", version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",),
+                      live_markers=("0.34.2",))
+    (root / LIVE_APP_JS).unlink()
+    decoy = tmp_path / LIVE_APP_JS
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("/* 诱饵：相对路径按 CWD 解析就会读到这一份 */\n"
+                     "/* release-marker-v0.35.0 */\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    relative = str(LIVE_APP_JS)
+
+    rc, lines = rm.evaluate(str(root), "v0.35.0", relative)
+    assert rc == 2, "相对路径被按 CWD 解析了（诱饵里带本版标记，读到的会是 already-present）：%s" % lines
+    assert any("token=live-appjs=unreadable" in ln and "live-appjs-relative-path" in ln
+               for ln in lines), lines
+    assert not any("live-appjs-missing" in ln for ln in lines), \
+        "相对路径被标成「文件不存在」：运维会照着去补一份根本不缺的文件：%s" % lines
+    assert not any("already-present" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+    assert rm.main(["--repo-root", str(root), "--expect", "v0.35.0",
+                    "--live-appjs", relative]) == 2, "命令行这一层把相对路径放过去了"
+
+    empty_rc, empty_lines = rm.evaluate(str(root), "v0.35.0", "")
+    assert empty_rc == 2 and any("live-appjs-empty-override" in ln for ln in empty_lines), \
+        "空覆盖值被静默当成「没给」，于是又回去读缺省的真 dist\\：%s" % empty_lines
+
+
+def test_live_appjs_override_that_the_verdict_would_not_use_is_refused(tmp_path):
+    """本版判据不读装机侧时传了 `--live-appjs` ⇒ 退 2，不许静默忽略。
+
+    两种形状：installer 版（versionName 已追平）与裸跑的在途 server-only 形状
+    （`bare-shape=server-only-marker-ahead`，按设计不读装机侧）。不传覆盖都是绿的；
+    传了就必须红——否则操作者会以为"我已经指认了装机包、这一格核过了"，而那个路径
+    一个字节都没被读过。
+    """
+    clean = tmp_path / "hand-built-live.js"
+    clean.write_text("/* 干净的一份装机包副本 */\n", encoding="utf-8")
+
+    installer = _fake_repo(tmp_path / "installer", version_name="0.35.0", markers=("0.35.0",),
+                           notes=("v0.34.2", "v0.35.0"))
+    ok_rc, ok_lines = _run(installer, expect="v0.35.0")
+    assert ok_rc == 0, "installer 版本来就不该读装机侧，不带覆盖却是红的：%s" % ok_lines
+    rc, lines = _run(installer, expect="v0.35.0", live=str(clean))
+    assert rc == 2, "不生效的覆盖开关被静默忽略了（绿灯是假的）：%s" % lines
+    assert any("token=live-appjs=unused" in ln and "scope=installer" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+    bare = _fake_repo(tmp_path / "bare", version_name="0.34.2",
+                      markers=("0.34.2", "0.35.0"), notes=("v0.34.2", "v0.35.0"),
+                      server_only=("v0.35.0",))
+    (bare / LIVE_APP_JS).unlink()          # 裸跑按设计不读它
+    assert _run(bare)[0] == 0, "裸跑在途形状本该绿"
+    bare_rc, bare_lines = _run(bare, live=str(clean))
+    assert bare_rc == 2, "裸跑这一支不读装机侧，覆盖开关却被当成判据：%s" % bare_lines
+    assert any("token=live-appjs=unused" in ln
+               and "bare-shape=server-only-marker-ahead" in ln for ln in bare_lines), bare_lines
+    assert not any("verdict=PASS" in ln for ln in bare_lines), bare_lines
+
+
+def test_a_directory_at_the_live_appjs_path_is_labeled_not_a_file(tmp_path):
+    """路径在、但不是普通文件（传了目录）不许标成 `live-appjs-missing`。
+
+    "路径写错了"和"文件还没生成"是两种处置：前者要去改 `--live-appjs`，后者要去把包
+    放回来。标错会让运维照着 `missing` 去补一份本来就存在的目录。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2", "0.35.0"),
+                      notes=("v0.34.2", "v0.35.0"), server_only=("v0.35.0",))
+    live = root / LIVE_APP_JS
+    live.unlink()
+    live.mkdir()
+    rc, lines = _run(root, expect="v0.35.0")
+    assert rc == 2, lines
+    assert any("live-appjs-not-a-file" in ln for ln in lines), lines
+    assert not any("live-appjs-missing" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_the_default_live_path_is_absolute_even_for_a_relative_repo_root():
+    """`--repo-root` 可以是相对的，但缺省装机侧路径不许跟着 CWD 漂（#72）。"""
+    assert os.path.isabs(rm.live_appjs_path("some/relative/root"))
+
+
 # --------------------------------- #71：说明领先这一条也要吃同一把 scope 尺子
 def test_ahead_server_only_note_leaves_the_bare_run_green(tmp_path):
     """发版准备提交 `docs/releases/v0.35.0.md`（带 `scope: server-only`）的那一刻，**裸跑**

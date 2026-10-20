@@ -122,6 +122,7 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # ---- 形态判读复用 `tools/release_marker.py` 的那把尺子（#67），不写第三份 scope 正则 ----
@@ -156,14 +157,48 @@ APK_CACHE_ENV_VAR = "APK_CACHE_DIR"
 # 清单里那串摘要的形状：与 releases.py:64 `_MANIFEST_SHA_RE` 逐字相同。
 # 大小写敏感：需要"再加工一下才像真的"的值不算数。
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# 版本号形状：与 releases.py:66 `_VERSION_SHAPE_RE` 逐字相同。
+# 版本号形状：与 releases 的 `_VERSION_SHAPE_RE` 逐字相同。
 _VERSION_SHAPE_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
+# 清单里下载地址的自家域集合：与 releases.SELF_HOST_DOMAINS 是同一个集合。
+# 运行时 `_manifest_ok` 对 url 的要求不止"是个地址"——必须是 https + 这两个域之一；
+# 少了这一格，闸门会把一份运行时必拒的清单判成 ok（#60）。
+SELF_HOST_DOMAINS = frozenset({"ai.fenever.xyz", "www.fenever.xyz"})
+# 一份 APK 的体积上限：与 releases.APK_MAX_BYTES 同值。运行时把 `size` 当"必填且
+# 在 (0, 上限]" 的整数，闸门也必须照同一把尺子判。
+APK_MAX_BYTES = 16 * 1024 * 1024
+# 清单里 `apk_name` 的前缀：与 releases.ASSET_PREFIX / `asset_names(version)[0]` 同形。
+# 只写在这里一次，`asset_name()` 与运行时新名的一致性由行为差分锁钉住（#60）。
+ASSET_PREFIX = "fenver-"
 
 
 def normalize_version(text) -> str:
-    """`v0.35` 与 `0.35` 是同一个版本：剥掉前导的 v（与 releases.py:436 同一句话）。"""
+    """`v0.35` 与 `0.35` 是同一个版本：剥掉前导的 v。
+
+    与 `releases.normalize_version` 逐字同义（#60），但这里**不 import 后端 app**：
+    闸门是 `tools/` 下的独立脚本，要能在没有 backend 依赖的机器上直接跑。两边不是
+    各写一套规矩，而是同一句话的两份副本——漂移由
+    `backend/tests/test_v0350_release_materials_gate.py` 的行为差分锁钉住（同一份
+    语料喂两边，逐值比较），改了一边不改另一边会红。
+    """
     value = str(text or "").strip()
     return value[1:] if value[:1] in ("v", "V") else value
+
+
+def asset_name(version: str) -> str:
+    """这一版在清单里该写的 `apk_name`：`fenver-<version>.apk`。
+
+    与 `releases.asset_names(version)[0]` 同形（运行时也只认新名做宣告；旧名只用于
+    读历史发布）。前缀只在 `ASSET_PREFIX` 写一次，漂移由差分锁钉住。
+    """
+    return ASSET_PREFIX + version + ".apk"
+
+
+def _is_self_hosted_url(url) -> bool:
+    """这个地址是不是我们自家域名上的 https 出口（与 releases._is_self_hosted_url 同义）。"""
+    if not isinstance(url, str) or not url:
+        return False
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and parts.hostname in SELF_HOST_DOMAINS
 
 
 def runtime_manifest_path(repo_root: str) -> str:
@@ -187,7 +222,13 @@ def seed_manifest_path(repo_root: str) -> str:
 def package_path_for(repo_root: str, version: str) -> str:
     """这一版在盘上的字节：$APK_CACHE_DIR > <repo_root>/data/apk，文件名 `<版本>.apk`。
 
-    照 `apk_cache.path_for`：版本形状不认识就回空串（调用方按"没有可用的包"处理）。
+    落点与 `apk_cache.path_for` 同源，**版本形状比它严**，这是有意为之（#60）：
+    `apk_cache.path_for` 认 `0.35.0-beta` 这种宽形状并肯拼出路径，而清单形状关用的是
+    `releases._VERSION_SHAPE_RE`（`_VERSION_SHAPE_RE` 逐字相同的一条），`0.35.0-beta`
+    在那里就已被判死。若这一层改按 apk_cache 的宽形状拼，就会出现"清单根本宣告不了的
+    版本，闸门却在盘上替它验包"的第二真相——所以这里只认清单认的版本，其余回空串
+    （调用方按"没有可用的包"处理）。这条严格性由
+    `test_the_version_shape_is_deliberately_stricter_than_apk_cache` 钉住。
     """
     if not _VERSION_SHAPE_RE.match(version or ""):
         return ""
@@ -240,10 +281,16 @@ def load_announcement(repo_root: str):
 
 
 def _announcement_shape(data: dict):
-    """形状关（照 `releases._manifest_ok` 的必需几格）：version / sha256 / apk_name。
+    """形状关：与 `releases._manifest_ok` 的必需几格逐格对齐。
 
-    只取顺序闸要用得上的三格：体积（size）与下载地址（url）由运行时自己那一条把关，
-    这里重复一遍只会多一个会走样的第二真相。
+    必需格是 version / apk_name / sha256 / **size / url**（#60）。size 与 url 不是
+    "运行时自己会把关、这里不必重复"的旁证：运行时 `_manifest_ok` 对它们逐字判死，
+    清单过了这一关、运行时却因 `size`/`url` 502，正是这道顺序闸唯一不能有的形状——
+    它会打印 `apk-materials=ok`，然后手机侧「检查更新失败」。
+
+    这里刻意不 import 后端 app（闸门要在没有 backend 依赖的机器上独立跑），所以是
+    `releases._manifest_ok` 的一份**逐格副本**；两份用同一份语料喂的行为差分锁在
+    `backend/tests/test_v0350_release_materials_gate.py`，改了一边不改另一边会红。
     """
     version = normalize_version(data.get("version"))
     if not version or not _VERSION_SHAPE_RE.match(version):
@@ -251,9 +298,15 @@ def _announcement_shape(data: dict):
     sha = data.get("sha256")
     if not isinstance(sha, str) or not _SHA_RE.match(sha):
         return False, "sha256 不是 64 位小写十六进制"
-    want_name = "fenver-%s.apk" % version          # 与 releases.asset_names 的新名同形
+    want_name = asset_name(version)          # 与 releases.asset_names(version)[0] 同形
     if data.get("apk_name") != want_name:
         return False, "apk_name 与 version 对不上：%r（应为 %r）" % (data.get("apk_name"), want_name)
+    size = data.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > APK_MAX_BYTES:
+        return False, "size 不像一个 APK：%r" % (data.get("size"),)
+    url = data.get("url")
+    if not _is_self_hosted_url(url):
+        return False, "url 不是我们自家域名上的 https 地址：%r" % (data.get("url"),)
     return True, ""
 
 
