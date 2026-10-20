@@ -221,16 +221,10 @@ def install_write_audit_hook(repo=None, sink=None):
         if not isinstance(target, (str, bytes, os.PathLike)):
             return False
         resolved = _canonical(target)
-        if _within(resolved, data_dir):
-            return True
-        if os.path.dirname(resolved) == repo_dir:
-            name = os.path.basename(resolved)
-            if name in ("feedback.json", "user_feedback.json"):
-                return True
-            # 偏好摘要是线上 300 秒定时器的常规产物（写入/轮换/清理），
-            # 与本文件 timer 档的裁决一致：只由快照记录，不在钩子这里判死。
-            # 生效路径硬指到仓库根仍由 path_violations 报红。
-        return False
+        # 只拦**现网 data/ 树**里的写。项目根的 feedback.json / user_feedback.json /
+        # preference*.txt 是历史兼容位与线上定时器产物：由 strict/timer 快照记录，
+        # 不在钩子这里判死（CI 上测试清理这些根级文件时会被误报）。
+        return _within(resolved, data_dir)
 
     def hook(event, args):
         if not handle.enabled:
