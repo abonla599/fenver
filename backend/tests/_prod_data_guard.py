@@ -227,8 +227,9 @@ def install_write_audit_hook(repo=None, sink=None):
             name = os.path.basename(resolved)
             if name in ("feedback.json", "user_feedback.json"):
                 return True
-            if name.startswith("preference") and name.endswith(".txt"):
-                return True
+            # 偏好摘要是线上 300 秒定时器的常规产物（写入/轮换/清理），
+            # 与本文件 timer 档的裁决一致：只由快照记录，不在钩子这里判死。
+            # 生效路径硬指到仓库根仍由 path_violations 报红。
         return False
 
     def hook(event, args):
