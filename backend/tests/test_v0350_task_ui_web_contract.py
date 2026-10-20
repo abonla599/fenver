@@ -63,6 +63,8 @@ EMIT_SIDE = (APP_PY / "main.py", APP_PY / "core" / "streaming.py",
 TASK_API_FUNCS = ("listTasks", "getTask", "answerTask")
 
 # 任务面这一组函数与 onEvent 之间不许有调用边：卡片状态只从 GET 来，流不是它的第二真源。
+# 下面那张表只用来判"列名函数在 onEvent 体里的直接调用 name("；别名 / forEach 传递 /
+# 表外新增的函数都不在射程（见文件头「仍漏清单」）。
 TASK_FACE_FUNCS = ("taskStatusText", "taskProgressLine", "taskWaitingLine", "taskStatusLine",
                    "taskCardView", "paintTaskCard", "taskErrorLine", "renderTaskList",
                    "paintTasks", "openTaskDetail", "loadTasks", "submitTaskAnswer")
@@ -264,7 +266,11 @@ def _task_module_source() -> str:
 
 
 def _task_face_source() -> str:
-    """任务面整组函数（纯函数 + 接线函数）：判"一条帧都不读"的射程就是这一整组。"""
+    """任务面整组函数（纯函数 + 接线函数）：判"任务面源码不挂流事件"的范围就是这一整组。
+
+    锁的读法只认 evt / onEvent / streamChat 这几个词与 `type` 字面量比较（见文件头
+    「仍漏清单」）；这一句限定的是**被扫的源码范围**，不是识别形状的射程。
+    """
     src = _app_source()
     extra = [n for n in TASK_FACE_FUNCS if n not in (
         "taskStatusText", "taskProgressLine", "taskWaitingLine", "taskStatusLine",
