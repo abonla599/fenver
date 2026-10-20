@@ -165,16 +165,17 @@ def test_the_audit_hook_blocks_a_write_into_a_watched_data_dir(tmp_path):
         outside.write_text("{}", encoding="utf-8")
         with pytest.raises(guard.ProductionDataWriteError):
             os.replace(outside, data / "moved-in.json")
-        with pytest.raises(guard.ProductionDataWriteError):
-            (fake / "preference-u_probe.txt").write_text("x", encoding="utf-8")
+        # 偏好摘要是线上定时器产物：钩子不拦，只由会话快照的 timer 档记录。
+        # 这与 `watched()` 的边界一致；硬编码生效路径仍由 path_violations 报红。
+        (fake / "preference-u_probe.txt").write_text("x", encoding="utf-8")
     finally:
         handle.disable()
 
     assert target.read_bytes() == before, "被拦下的写竟然改了字节"
     assert not (tmp_path / "moved-out.json").exists()
     assert not (data / "moved-in.json").exists()
-    assert not (fake / "preference-u_probe.txt").exists()
-    assert len(sink) == 4, f"拦截记录应为四条：{sink}"
+    assert (fake / "preference-u_probe.txt").exists(), "timer 档的写入不该被钩子拦"
+    assert len(sink) == 3, f"严格档拦截记录应为三条：{sink}"
 
 
 def _main_guard_lines(source):
