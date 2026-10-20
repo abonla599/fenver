@@ -1027,14 +1027,12 @@ if ($DryRun) {
 # and backend/tests/test_swap_package_disable_threw_handler.py is the lock that
 # bites when it comes back.
 #
-# The two statements inside the try deliberately stay at COLUMN 0. PowerShell is not
-# indentation-sensitive, so this behaves identically on 5.1; and three ordering locks
-# locate this step by a line starting at column 0 (disable-verify _window,
-# marker_gate _marker_gate_ok, all_or_nothing_move's same-volume precheck), so
-# re-indenting them is a lock-breaking edit rather than a cosmetic one.
+# The ordering locks locate this step by the command text, never by column, so the
+# two statements below are indented like any other try body. PowerShell is not
+# indentation-sensitive, so this behaves identically on 5.1.
 try {
-Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
-$script:watchdogDisabled = $true
+    Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
+    $script:watchdogDisabled = $true
 } catch {
     # Captured before the DISABLE-THREW token is built; the lock in
     # test_swap_package_disable_threw_handler.py pins that order. It is NOT

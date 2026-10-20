@@ -358,7 +358,8 @@ def test_r3_approval_timeout_never_default_allow():
     负向锁：把 consume_ticket 里的超时检查删掉，这条测试红。
 
     2026-10-16 v0.35 A2 的适配（判据一字没动）：票据表现在以 sha256 摘要为键（与盘上
-    同一个形状，抄 auth.py:141-152 的"凭据只存摘要"），做旧那一步因此要先算摘要。
+    同一个形状，抄 `auth.py` 的 `hash_token` / `hash_secret` 那条"凭据只存摘要"），
+    做旧那一步因此要先算摘要。
     "超时不许被消费"这一句断言与它防的东西完全不变；A2 另加了一条跨重启的重放锁，
     见 tests/test_v0350_a2_approval_persistence.py。
     """
@@ -397,7 +398,8 @@ def test_r3_no_default_allow_grep_lock():
     那句中文是"绝不默认放行"，所以 OR 链的最后一项永远为假——原写法能抓到的唯一东西是
     "有人往注释里写了英文 default"，与它 docstring 声称要防的事（executor 里加超时自动
     放行）没有关系。v0.35 A2 给这份文件加了 `_default_path()`（与其余 13 份存储同一个
-    命名惯例，见 task_store.py:267、config_store.py:94），那个恒真的 OR 项第一次被踩断，
+    命名惯例，`task_store` / `config_store` 各有一份 `_default_path()`），那个恒真的 OR
+    项第一次被踩断，
     于是这条红在**一个它本该放过的改动**上——那就是"绿得没有意义"的现场证据。
 
     现在的判据对着真正的形状，三条都是内容断言：

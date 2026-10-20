@@ -98,7 +98,8 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 ## 射程（写清楚，别让它长成第二份真相）
 
 - 只读 `steps[].run`。作业级 `defaults:`、`jobs.<id>.uses:`（可复用 workflow 的调用点）不在
-  射程内；今天四份里没有这种形状，而 `_jobs_of` 遇到**既没有 `steps` 也不是 `uses:`** 的作业
+  射程内；今天目录里的每一份里都没有这种形状，而 `_jobs_of` 遇到**既没有 `steps` 也不是
+  `uses:`** 的作业
   会判红而不是放过——认不出就说认不出，不假装"没有作业要判"。
 - `workflow_run_bodies(..., withs=True)` 多出来的那一格**只收真会被执行的 `with:` 值**：键名
   落在 `_WITH_KEYS_EXECUTABLE`（Actions 会把这个输入交给那个 action 去执行的那几个名字）里才算
@@ -110,7 +111,7 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
   `test_the_surface_carries_no_job_level_with_entry_today` 钉着"今天必须看不见"。
 - **判据认的是"命中标记"，不是"读没读历史"这件事本身**（#92a 修复轮把这句钉死：上一版在两份
   workflow 的注释和参数化锁的 docstring 里写的是"凡 run 正文读仓库历史的 job 都必须
-  fetch-depth: 0"，比实测宽——那是本会话第三次同一句错）。准确的说法只有一句：**run 正文命中
+  fetch-depth: 0"，比实测宽）。准确的说法只有一句：**run 正文命中
   `HISTORY_READING_MARKERS` 里任一条标记的 job，才必须 `fetch-depth: 0`**。条数钉见
   `test_the_marker_count_and_each_markers_own_counterexample_are_pinned`；注释里不许出现"任何
   git 命令"这种句子，也不许把清单写成"已穷尽"。
@@ -178,7 +179,7 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
 
 `WORKFLOWS_DIR_UNDER_TEST`（#92a 起取代 #90a 的 `TESTS_YML_UNDER_TEST`：泛化后判的是**一个
 目录**而不是一个文件，所以口子跟着换成目录级；沿用
-`test_v0350_release_materials_gate.py:35` 的 `PRE_TAG_GATE_PATH` 惯例）让 (a) 与覆盖自检指向
+`test_v0350_release_materials_gate.py` 的 `PRE_TAG_GATE_PATH` 惯例）让 (a) 与覆盖自检指向
 仓库外的变异副本；**默认路径就是仓内真实 workflow 目录**，CI 上从不设这个变量 ⇒ 没有绕过
 路径，生产代码里也没有读它的地方。(b) 跟着**它自己所在的那棵树**走（`REPO_ROOT` 由本文件
 位置算出），所以把它拷进一份真浅克隆里就能就地变红。四枚反例（加一步 `git log` 不带
@@ -269,7 +270,7 @@ _TOOTH_ID_BY_LABEL = {label: tooth_id
 _LABEL_BY_TOOTH_ID = {tooth_id: label
                       for label, _pattern, tooth_id, _lines in HISTORY_READING_MARKERS}
 
-# 收集期就把目录摊开 ⇒ 一份 workflow 一个参数化 id（今天四份 ⇒ 四条）。目录为空时
+# 收集期就把目录摊开 ⇒ 一份 workflow 一个参数化 id（目录里有几份就几条）。目录为空时
 # `WORKFLOW_NAMES` 为空，上面那条参数化锁不成立也别静默：**覆盖自检**那条会红（见它的 docstring）。
 WORKFLOW_NAMES = sorted({p.name for p in WORKFLOWS_DIR.glob("*")
                          if p.is_file() and p.suffix in (".yml", ".yaml")})
@@ -692,7 +693,7 @@ def test_the_workflow_sweep_actually_sees_the_history_readers():
     写错、标记集合被削光、tests.yml 那份被改名——四种都让它一条用例都不生成或全部静默
     通过，而 CI 依旧绿。这一条就把"覆盖在场"本身钉住：
 
-    1. 判据指向的目录存在、枚举非空（今天四份）；
+    1. 判据指向的目录存在、枚举非空（目录里至少有一份）；
     2. 枚举结果里**至少有一份**作业在 run 正文命中标记集合；
     3. 今天这两份必须在名单里：`tests.yml`（run 正文命中 `python -m pytest` 那条标记 ⇒ 间接
        读历史）与 `gitleaks.yml`（命中 `gitleaks detect` 那条 ⇒ 直接扫全历史）。#92a 修复轮

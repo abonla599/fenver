@@ -2,7 +2,8 @@
 
 起因是 `memory_manager.adjust_weights` 的 docstring 写着"权重直接影响检索排序
 （memory_router 按 relevance*weight 排序）"，而两处 sort 键都只有 `relevance_score`
-（`memory_router.py:72,93`），真存储那条路更是压根不再排序、直接用 chroma 的距离序。
+（`memory_router.py` 里两处 sort 键都只有 `relevance_score`），真存储那条路更是
+压根不再排序、直接用 chroma 的距离序。
 也就是说反馈调过的权重只落在数字上，没人读——被赞过的记忆并不会更容易被召回。
 
 fake 与 real 两路各自有反例测试：这是本项目跨用户泄露之后定下的规矩，只测其中一路

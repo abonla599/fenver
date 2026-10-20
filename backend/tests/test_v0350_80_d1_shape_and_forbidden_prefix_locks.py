@@ -1,7 +1,8 @@
 """工单 #80：给已经落地的 D1 各补一把**会红的锁**（读数点形状锁 + `⏸`/`SUSPEND_PREFIX` 禁字锁）。
 
 D1 是这条纪律：**全站只许一种"停在断点 / 成败"的判据 = 读结构化那两格**
-（`outcome.ok` / `outcome.suspended`，唯一赋值点 `executor.py:197` 与 `:181`）。代码侧 #76a/#76b
+（`outcome.ok` / `outcome.suspended`，唯一赋值点是 `execute_tool_detailed` 返回
+`ToolOutcome` 时的 `ok=bool(response.success)` 与 `suspended=bool(...)`）。代码侧 #76a/#76b
 已经把四个读数点改对了；本文件**不改 app 侧任何判据**，只负责"改回去的那一刻必须红"。
 
 工单 #83（两轮）动的都是**这两把锁自己**的四件事，app 代码零改动；第一轮逐条在本机
@@ -23,8 +24,8 @@ D1 是这条纪律：**全站只许一种"停在断点 / 成败"的判据 = 读�
 2417 passed / 14 skipped / rc=0）：
 * #76a 的审查员把四处判据换成 `startswith("⏸ ")` —— 全量绿；
 * #76b 的审查员把 `react_agent.py` 那一处摘回父版的 `startswith("✓")` —— 全量照样绿。
-根因不在测试写得薄，而在**等价性是执行器替所有读法兜住的**：`executor.py:251-256` 那道
-fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`executor.py:82` 的
+根因不在测试写得薄，而在**等价性是执行器替所有读法兜住的**：`_settle_suspension` 那道
+fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`clip_for_model` 的
 `clip_for_model` 又是**保头**裁剪（预算 4000、省略说明约 57 字 ⇒ head≈2600），前缀那两三个
 字符永远裁不掉。于是在真执行器下面"文本前缀判据"与"结构化判据"今天恒等 ——
 **这一族回归在行为层面结构上不可见**，只有读源码形状的锁读得到。审查员那句
@@ -36,14 +37,16 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
    那一层）、换成**别的变量**（`ok=tool_ok`）或任何从文本前缀算出来的值 —— 立刻红，文案给出
    `文件:行号` 与"应为 `ok=bool(outcome.ok)`、实得 …"。因为口径是**逐字**那个形状，这一条对
    变量间接的**套层深度不敏感**（#83 实测：`feed_a = str(...).startswith("✓")` →
-   `feed_b = feed_a` → `ok=feed_b` 两跳喂进 `react_agent.py:212`，红的那句是
+   `feed_b = feed_a` → `ok=feed_b` 两跳喂进 `react_agent.py` 的 `ok=bool(outcome.ok)`
+   读数点，红的那句是
    "读数点的 ok= 不再是结构化那一格：应为 `ok=bool(outcome.ok)`，实得 `ok=feed_b`"）。
    这份"逐字"确实**比语义严**：`ok=outcome.ok`（去掉 `bool(...)` 包裹）也会红 ——
    `_slot_shape_ok` 要的是那一次 `bool` 调用，裸读是 `Attribute` 不是 `Call`（#80 审查员实测过
    这枚变异）。这是**有意付的维护税**，换一把确定的牙；"顺手放宽成允许裸读"等于把这把锁做回
    没牙的样子，#83 明确不做。
    **它不收**的那一类：既不带你那两格属性、也不带关键字的**纯位置写法**（
-   `react_agent.py:217` 兜底支那种）—— 那一侧只有下面孪生判据**一跳之内**的射程：覆盖
+   `react_agent.py` 兜底异常支那种 `guard.record_outcome(tool_name, False)`）—— 那一侧
+   只有下面孪生判据**一跳之内**的射程：覆盖
    `=`/`:` 赋值**以及** walrus 目标与下标/属性实参的基名回溯，**两跳以上仍然漏**（仍漏清单见
    `test_d1_read_points_are_never_fed_by_a_text_prefix` 的边界段）。
 2. **禁字锁**（`test_d1_pause_prefix_*` 那三条）：`backend/app/**` 里除 `tools/response.py`
@@ -59,8 +62,8 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
 `test_machine_read_pointers.py` 的"豁免引擎自己也要有牙"那一族）。反例走 `ast.parse` 现造的
 字符串，**不改任何源文件**。真实文件的四枚变异实验另在 #80 的 commit 正文里逐条记录。
 
-不许碰的两条承重（动了上面那段"恒等"的论证就得重写）：`executor.py:251-256` 的 fail-closed、
-`executor.py:82` 的保头裁剪。本文件只读源码、不 import 任何 app 模块，所以它与 `data/` 之间
+不许碰的两条承重（动了上面那段"恒等"的论证就得重写）：`_settle_suspension` 的 fail-closed、
+`clip_for_model` 的保头裁剪。本文件只读源码、不 import 任何 app 模块，所以它与 `data/` 之间
 没有可写路径。
 
 范围与口径上的五个取舍，写死在这里免得下一个人猜：
@@ -72,8 +75,8 @@ fail-closed 先把"挂起却自报 success=True"的矛盾形状折成失败，`e
   ① 测试侧那三处 `startswith("⏸ ")` 断的是**回灌给模型的文本**、不是记账判据，合法，不在射程内。
      三处都在 `test_v0350_76a_suspend_consumer_third_state.py`，且是同一句
      `assert tool_msgs and tool_msgs[-1]["content"].startswith("⏸ ")`。#83 第二轮按拍板 B 把互引
-     **降级成"文件名 + 这句话的字面片段"**，不再写行号：那组数字在两单之间已经漂过两次（#80
-     原文 `:262/:311/:362` → 第一轮 grep 复核时 `:276/:326/:377`），而第一轮一边声明"按提交后
+     **降级成"文件名 + 这句话的字面片段"**，不再写行号：原文那组数字在两单之间已经漂过两次
+     （换过一版行号仍与第一轮自留的另一组并存），而第一轮一边声明"按提交后
      状态记"、一边在文件头 ② 留着另一组数并存 —— 这就是行号锚无人钉的现行证据。认那**句话的
      字面文本**才是口径，理由见下条。
   ② 扫描集合是 `backend/app/**/*.py` 去掉唯一豁免文件，**按扩展名收**。#83 实读
@@ -109,8 +112,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_DIR = REPO_ROOT / "backend" / "app"
 
 # ---------------------------------------------------------------- 锁一：四个读数点的形状
-# 落锁时实读复核（无漂移）：pipeline.py:306-307、streaming.py:478-479、react_agent.py:212、
-# task_agent.py:178-179。这份名单是**清单**而不是锚点：条数与每处形状一律由 AST 核对。
+# 落锁时实读复核（无漂移）：pipeline / streaming / react_agent / task_agent 各自的
+# `ok=bool(outcome.ok)` 与 `suspended=bool(outcome.suspended)` 读数点。这份名单是
+# **清单**而不是锚点：条数与每处形状一律由 AST 核对。
 READ_POINT_FILES = (
     "backend/app/pipeline.py",
     "backend/app/core/streaming.py",
@@ -157,8 +161,9 @@ def _is_structured_read_point(call: ast.Call) -> bool:
     判据是两条任一成立：带了 `ok=` / `suspended=` 任一关键字；或实参子树里直接读了
     `outcome.ok` / `outcome.suspended`（把结构化那格改成位置写法也算读数点，照样锁死）。
 
-    **故意不收**的那一处：`react_agent.py:217` 的兜底异常支 `guard.record_outcome(tool_name, False)`。
-    那里压根没有 outcome 这个对象（异常不是挂起），而 `guardrails.py:156-159` 写明了
+    **故意不收**的那一处：`react_agent.py` 的兜底异常支
+    `guard.record_outcome(tool_name, False)`。那里压根没有 outcome 这个对象（异常不是
+    挂起），而 `record_outcome` docstring 里 `suspended` 做成关键字限定参数那段写明了
     `suspended` 是关键字限定参数、位置第三位留给 `estimated_tokens` —— 把它算进读数点等于逼
     那条支传一个它没有的东西。它仍然受下面"不许把前缀喂进记账"那一条的管束。
     """
@@ -506,7 +511,8 @@ NON_CODE_EXEMPTIONS = (
         "kind": "函数 docstring",
         "reason": "`execute_tool` 的散文在**描述**挂起时文本投影长什么样（那句 "
                   "`⏸ 需要用户输入：…`），它既不读这个前缀、也不是任何判据的输入；#80 落锁时"
-                  "实读在 executor.py:154。这句话一改、或这段散文被搬进可执行代码，本条立刻红 ——"
+                  "实读在 `execute_tool` 的 docstring（就是本条目 `must_contain` 那句所在）。"
+                  "这句话一改、或这段散文被搬进可执行代码，本条立刻红 ——"
                   " 豁免只覆盖『非代码位置 + 原句未改』这一种情况，不覆盖整个文件。",
     },
 )

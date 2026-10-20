@@ -10,7 +10,8 @@ case5 (frequency cap = 1): tool_received_answer = 0   consumed = true
 retry → accepted:false / refuse_code=consumed_breakpoint / fresh_start_required:true
 ```
 
-更糟的是 `tools/executor.py:326-329`：审批票据接不过一次挂起，所以一条同时声明
+更糟的是 `tools/executor.py` 的 `_dispatch` 里那道组合闸（同时声明 `suspends` 与
+`requires_approval` 就在派发处拒绝）：审批票据接不过一次挂起，所以一条同时声明
 `suspends:True` 与 `requires_approval:True` 的工具**必然**是"被拒 + 被烧"——那正是
 A4 要交付的第一个真工具，必须在 A4 之前关掉。
 
@@ -21,7 +22,8 @@ A4 要交付的第一个真工具，必须在 A4 之前关掉。
 一条贯穿全文件的纪律：**判据不许由被测对象自己申报。**"答案到底递没递进工具"这件事
 记在夹具闭包的四本假账上（`received`=工具收到答案、`spent`=真跑了第 1~3 步、
 `calls`=进过函数体、`lies`=自报道具盖在**它自己那一份返回响应上**的 tool_ran 与对象
-本身——工单 #39 钉"`executor.py:307` 那处无条件覆盖压得住自报"的用例用它取证前提），
+本身——工单 #39 钉"`_dispatch` 里 `resp.tool_ran = ran` 那处无条件覆盖压得住自报"
+的用例用它取证前提），
 外加执行器新吐出的 `tool_ran`（来自 `_dispatch` 里"func 到底被
 调用没有"这一处事实，不是来自 ok/success）。
 
@@ -434,16 +436,17 @@ def test_tool_ran_is_true_when_the_tool_suspends_again(t37_tools):
     assert len(t37_tools["received"]) == 1
 
 
-# ---------- 工单 #39：`:307` 的无条件覆盖必须压得住工具在响应上的自报 ----------
+# ---------- 工单 #39：那处无条件覆盖必须压得住工具在响应上的自报 ----------
 
 def test_tool_ran_self_declared_false_from_the_body_is_overwritten(t37_tools):
     """工单 #39：工具体返回时在自己响应上盖 `tool_ran=False`，执行器必须仍报 **True**。
 
-    钉的是 `executor.py:307` 那句**无条件**覆盖（`resp.tool_ran = ran`）。把这一句改成
-    "工具自报就采信"（`resp.tool_ran = getattr(resp, "tool_ran", ran)`），红的是下面
+    钉的是 `_dispatch` 里那句**无条件**覆盖 `resp.tool_ran = ran`（唯一赋值点）。把这一句
+    改成 "工具自报就采信"（`resp.tool_ran = getattr(resp, "tool_ran", ran)`），红的是下面
     `lie["obj"].tool_ran is True` 与 `o.tool_ran is True` 两句：自报的 False 原样留在
     那个进到 `_ret` 的对象上——#37 的判据就此退化成"由被测对象自报"。工具只要盖一句
-    "没跑"，编排器（`orchestrator.py:386`）就不烧断点，一枚真的把答案递进过工具的断点
+    "没跑"，编排器里读 `tool_ran` 决定是否消费断点的那一处就不烧断点，一枚真的把答案
+    递进过工具的断点
     能被再递一遍、副作用落两次——#33 那道门从另一侧被重新打开。
     前两句是前提取证而不是走过场：`calls` 证明函数体真进了；`lie["stamped"] is False`
     配上 `lie["obj"]` 正是进到 `_ret` 的那同一个对象，证明谎言确实写在撞覆盖的那一份
@@ -455,7 +458,7 @@ def test_tool_ran_self_declared_false_from_the_body_is_overwritten(t37_tools):
     lie = t37_tools["lies"][0]
     assert lie["stamped"] is False, "前提没成立：道具没把 tool_ran=False 盖在自己的返回上"
     assert lie["obj"].tool_ran is True, (
-        "自报的 False 原样留在这个进到 `_ret` 的对象上——`:307` 已不是无条件覆盖")
+        "自报的 False 原样留在这个进到 `_ret` 的对象上——那处唯一赋值已不是无条件覆盖")
     assert o.tool_ran is True, (
         "跑过函数体的工具自报 tool_ran=False 就被采信：consume-stamp / 副作用记账"
         "被一句自报躲掉，判据成了被测对象自报")
@@ -464,12 +467,12 @@ def test_tool_ran_self_declared_false_from_the_body_is_overwritten(t37_tools):
 def test_tool_ran_self_declared_false_on_a_suspended_response_is_overwritten(t37_tools):
     """工单 #39：挂起出口（返回 `suspended=True` 的响应）自盖 `tool_ran=False` 仍必须 **True**。
 
-    同一处守卫（`:307`），走 `:396` 那一支的另一个形状：`_settle_suspension` 对
-    "success=False + prompt 非空"的合规挂起**原样透传同一个对象**，所以工具盖在挂起
-    响应上的谎言同样撞在那处覆盖上。改成"自报就采信"，红的是 `lie["obj"].tool_ran`
-    与 `o.tool_ran` 两句："这一枚答案确实递进过工具"（递进去之后又差一个答案的那一支）
-    被工具自己一句话抹掉。
-    另一类挂起——`raise ToolSuspended`——的响应对象由执行器自己构造（`:404-405`），
+    同一处守卫（`resp.tool_ran = ran`），走 `_settle_suspension` 原样透传合规挂起对象
+    那一支的另一个形状：它对"success=False + prompt 非空"的合规挂起**原样透传同一个
+    对象**，所以工具盖在挂起响应上的谎言同样撞在那处覆盖上。改成"自报就采信"，红的是
+    `lie["obj"].tool_ran` 与 `o.tool_ran` 两句："这一枚答案确实递进过工具"（递进去之后
+    又差一个答案的那一支）被工具自己一句话抹掉。
+    另一类挂起——`raise ToolSuspended`——的响应对象由执行器自己构造，
     工具体没有任何机会往上面盖字；自报与覆盖相撞只发生在工具**返回自己的**
     ToolResponse 这两支（正常 / 挂起），上一条钉住前一支，本条钉住后一支。
     `o.suspended is True` 钉形状没被折坏：tool_ran 与 suspended 回答的是两个问题
@@ -483,7 +486,7 @@ def test_tool_ran_self_declared_false_on_a_suspended_response_is_overwritten(t37
     assert o.suspended is True, (
         "这一挂的形状被折坏了：撞覆盖的那个对象必须还是合规挂起响应")
     assert lie["obj"].tool_ran is True, (
-        "挂起响应上自报的 False 越过了 `:307`——同一处覆盖不再是无条件的")
+        "挂起响应上自报的 False 越过了那处唯一赋值——同一处覆盖不再是无条件的")
     assert o.tool_ran is True, (
         "停在断点不等于没进函数体：采信自报 False 会把'答案递进去过、又差一个答案'"
         "折成'没递进去'，断点能被再递一遍")
@@ -494,12 +497,18 @@ def test_tool_ran_self_declared_true_never_fires_behind_a_gate(t37_tools):
     `tool_ran` 恒 **False**——哪怕这件道具一旦被真调用就会在自己响应上盖 `tool_ran=True`。
 
     正控段先证明盖章机制真的在工作（`lies` 里确有 stamped=True 那一条、函数体确进了），
-    随后四次被挡：工具体从没执行，它那句"跑了"**压根没被写下**——`:307` 的覆盖与
-    "自报就采信"在这一支不可能有区别。所以把 `:307` 改成采信自报时本条保持绿，这正是要
-    在 docstring 里写明白的形状：它不是白测，它红的是**另一族**变异（`executor.py:196`
-    的默认读法翻成 True、或任一闸门出口的 `ran=False` 被改成 True），第一句
-    `o.tool_ran is False` 就红。结论钉的是不对称本身：覆盖只在函数体真的跑过时才有
-    对手；被闸门挡下的那些 False 是世界事实，不是"没来得及说谎"。
+    随后四次被挡：工具体从没执行，它那句"跑了"**压根没被写下**——那处唯一赋值与
+    "自报就采信"在这一支不可能有区别。所以把 `resp.tool_ran = ran` 改成采信自报时
+    本条保持绿，这正是要在 docstring 里写明白的形状：它不是白测，它红的是**另一族**变异
+    （任一闸门出口的 `ran=False` 被改成 True），第一句 `o.tool_ran is False` 就红。
+
+    #41 更正：原文这里还声称"`execute_tool_detailed` 里 `tool_ran =
+    bool(getattr(response, "tool_ran", False))` 的默认值翻成 True"也会被本条杀掉——
+    那句是假的。四个被挡出口都显式贴了 `resp.tool_ran = False`，属性存在时
+    `getattr` 的默认值根本轮不到；翻默认值本条照旧全绿。默认值本身另有理由
+    （响应对象不带这格时按"没进函数体"处理），但**本条不守它**，别把这条绿当成守住了。
+    结论钉的是不对称本身：覆盖只在函数体真的跑过时才有对手；被闸门挡下的那些 False
+    是世界事实，不是"没来得及说谎"。
     """
     # 正控：真调用时盖章机制在工作——否则下面的 False 只是"道具坏了"的假绿。
     o = ex.execute_tool_detailed("t37_lie_gate", {"item": "拿铁"}, user_id="u_lie_gate_ok")
@@ -560,7 +569,8 @@ def test_a_resume_that_actually_delivered_the_answer_is_still_consumed(t37_tools
 
 
 def test_the_trusted_failed_breakpoint_still_refuses_a_consumed_one(t37_tools, stub):
-    """锁内信任复核（`orchestrator.py:503,542-551`）那一族的直接判据：consumed 一律不接。
+    """锁内信任复核（`_trusted_failed_breakpoint` 里读 `consumed` 那一族）的直接判据：
+    consumed 一律不接。
 
     手工把一枚可信游标标成 consumed 后，failed 分支必须回 `consumed_breakpoint`，且
     `spent`/`received` 一本都不许多——"被闸门拒了、游标仍可信"绝不允许顺带把第 1~3 步

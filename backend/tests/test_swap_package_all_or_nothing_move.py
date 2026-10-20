@@ -150,7 +150,7 @@ def test_volume_mismatch_is_a_precheck_not_a_step_five_surprise():
         "卷比对必须取两条路径各自的根"
     assert re.search(r"PRECHECK fail stage-volume", CODE), "对不上要按预检失败收场（一条都不许动）"
     i_vol = _line_of(r"GetPathRoot\(\$StageDir\)", PS1)
-    assert i_vol < _line_of(r"^Disable-ScheduledTask -TaskPath", PS1), \
+    assert i_vol < _line_of(r"^\s*Disable-ScheduledTask -TaskPath", PS1), \
         "卷检查必须在停用看门狗之前：发现得太晚就等于把生产停在半路"
     assert i_vol < _line_of(r"Stop-Process -Id \$p\.ProcessId -Force", PS1), \
         "更要早于第一次真正停服：预检失败时生产须原封不动"

@@ -287,7 +287,8 @@ def test_tickets_are_cleaned_up_on_create():
 
     2026-10-16 v0.35 A2 的适配（**判据一字没动**，改了两处入口）：
     1. 票据表的键从明文 ticket_id 换成 sha256 摘要（盘上与内存同一个形状，抄的是
-       auth.py:141-152 那条"凭据只存摘要"的纪律）。所以"把这一张做旧"要先算摘要再进表。
+       `auth.py` 的 `hash_token` / `hash_secret` 那条"凭据只存摘要"的纪律）。
+       所以"把这一张做旧"要先算摘要再进表。
     2. A2 之后 get/consume/record 三个入口**也会扫**，于是"用 get_ticket(tid) is None
        来验建票扫没扫"会自己把那张旧票扫掉——负向锁当场空转（实跑：删掉建票里的
        `_sweep_locked(now)`，这一条照样绿）。所以判据改回直接看表，顺带把 A2 新开的

@@ -125,8 +125,8 @@ def _idx(pattern: str, lines: list, lo: int = 0, hi: int = None, last: bool = Fa
     return hits[-1] if last else hits[0]
 
 
-DISABLE_RE = r"^Disable-ScheduledTask -TaskPath"
-BACKUP_FLAG_RE = r"^\$script:backupDone = \$true"
+DISABLE_RE = r"^\s*Disable-ScheduledTask -TaskPath"
+BACKUP_FLAG_RE = r"^\s*\$script:backupDone = \$true"
 RESTORE_CALL_RE = r"^\s*\$restore = Restore-WatchdogTask\b"
 SAFETY_RE = r"^\s*Stop-AfterFailure\s+'"
 # 启用后的回读：`$<var> = Get-WatchdogTaskState -TaskToRead $task`（#155）
@@ -135,11 +135,10 @@ READBACK_RE = re.compile(
 
 
 def _window(text: str):
-    """返回 (code_lines, disable 行, backupDone 行)；找不到或找到多于一处都算不合格。
+    r"""返回 (code_lines, disable 行, backupDone 行)；找不到或找到多于一处都算不合格。
 
-    disable 那一句必须**恰好一处且顶格**：marker gate 与 all-or-nothing 两份锁都用
-    `^Disable-ScheduledTask -TaskPath` 判序，缩进一下就把它们变成"找不到这一步"的红，
-    症状还很难查。
+    disable 那一句必须**恰好一处**：marker gate 与 all-or-nothing 两份锁也按命令文本
+    判序，三处都允许行首缩进（`^\s*`），只认那句命令本身。
     """
     lines = _code_lines(text)
     if len(lines) != len(text.splitlines()):
@@ -252,7 +251,7 @@ def _verdict_ok(text: str) -> bool:
         return False
 
     # disable 成功之后才登记"这台看守是我按下去的"
-    i_flag = _idx(r"^\$script:watchdogDisabled = \$true", lines, lo, hi)
+    i_flag = _idx(r"^\s*\$script:watchdogDisabled = \$true", lines, lo, hi)
     if i_flag is None or i_flag <= lo:
         return False
 
