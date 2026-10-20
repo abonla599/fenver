@@ -7,6 +7,8 @@
 一趟。量过的数是源站 2~18ms、走隧道单趟 ttfb 300~430ms——慢的不是应用，是趟数。
 所以带版本号的资源给一年 immutable，不带版本号的仍旧 no-cache。
 """
+import base64
+import hashlib
 import os
 import re
 import sys
@@ -68,6 +70,15 @@ _REF = re.compile(r'\b(?:src|href)="[^"?]*\.(?:css|js|png|jpe?g|svg|webmanifest)
 _QUERY_TOKEN_RE = re.compile(r"[0-9]+")
 
 _TOKEN = ""
+
+# 页内会执行的内联脚本（CSP 哈希的射程）：`src=` 的由 `'self'` 管，不在此列。
+_INLINE_SCRIPT_RE = re.compile(r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\s*>",
+                               re.IGNORECASE | re.DOTALL)
+_SCRIPT_SRC_ATTR_RE = re.compile(r"\bsrc\s*=", re.IGNORECASE)
+_SCRIPT_TYPE_RE = re.compile(
+    r"""\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""", re.IGNORECASE)
+_JS_SCRIPT_TYPES = {"", "text/javascript", "application/javascript", "module",
+                    "text/ecmascript", "application/ecmascript"}
 
 
 def _newest_mtime() -> float:
@@ -142,6 +153,55 @@ def stamp_assets(html: str) -> str:
     return _REF.sub(one, html)
 
 
+def inline_script_hashes(html: str):
+    """这一页每一段**会执行的内联脚本**的 CSP 哈希（sha256 → base64，按出现顺序去重）。
+
+    必须在 `__ASSET_TOKEN__` 被替换成水印**之后**调用：`/app` 唯一那段内联脚本里就写着
+    `window.__ASSETS__ = "<水印>"`，水印一变，哈希就得跟着变。这里量的是"这一次真要发
+    出去的字节"，不是模板文件——写死哈希的那条路在换版时不会报错，只会让整页脚本在
+    浏览器里一条拒绝、全哑。
+    带 `src=` 的脚本由 `'self'` 管；`type` 不是 JS 的块（JSON-LD 之类）浏览器不执行，
+    也不该混进 script-src。
+    """
+    found = []
+    for match in _INLINE_SCRIPT_RE.finditer(html):
+        attrs, code = match.group("attrs"), match.group("body")
+        if _SCRIPT_SRC_ATTR_RE.search(attrs):
+            continue
+        type_match = _SCRIPT_TYPE_RE.search(attrs)
+        if type_match:
+            mime = next(g for g in type_match.groups() if g is not None)
+            if mime.split(";", 1)[0].strip().lower() not in _JS_SCRIPT_TYPES:
+                continue
+        digest = hashlib.sha256(code.encode("utf-8")).digest()
+        found.append(base64.b64encode(digest).decode("ascii"))
+    return list(dict.fromkeys(found))
+
+
+def content_security_policy(script_hashes=()) -> str:
+    """全站唯一那一份 CSP 字面量；`script_hashes` 是当前文档内联脚本的 sha256。
+
+    为什么是"运行时算哈希"而不是 nonce：HTML 允许缓存 30 秒（`PAGE_CACHE`）。nonce
+    若每响应随机，头与身虽在**同一次**渲染里一致，但"缓存里的头/身"这种边角要把
+    一致性寄在浏览器与边缘的缓存实现上；而这里的内联脚本只随水印变，水印又是进程内
+    算一次（`asset_token()` 的 `_TOKEN` 缓存），于是"进程内稳定的 sha256"既满足
+    缓存，也满足换版：重启后 mtime 变 → 水印变 → 正文变 → 哈希在同一趟渲染里重算。
+    每一条指令的代价见 `site_headers` 的注释。
+    """
+    scripts = " ".join(["'self'", *[f"'sha256-{h}'" for h in script_hashes]])
+    return (
+        "default-src 'self'; "
+        f"script-src {scripts}; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self' https://api.bochaai.com/v1/web-search https://api.tavily.com/search; "
+        "frame-src 'none'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+
+
 def rewritten_html(source: StarletteFileResponse, token: str,
                    if_none_match: str = "") -> Response:
     """HTML（以及要盖水印的 sw.js）出门前的那一次改写，连带把条件请求保住。
@@ -153,20 +213,28 @@ def rewritten_html(source: StarletteFileResponse, token: str,
     "改版后有一小会儿是坏的"从等人刷新变成自己好回来。
     `sw.js` 继续 no-cache：它是注册的入口，晚一步发现新版就等于再等一次开页面。
     自己算 ETag 是为了条件请求：整页 HTML 三十多 KB，丢了它每次导航都全量重发。
+
+    CSP（#143）也挂在这一趟里：`script-src` 的 sha256 量的是**替换完水印之后**的
+    内联脚本文本，且与正文同一次渲染产出。`asset_token()` 进程内只算一次，所以同一
+    进程里每一响应的哈希稳定；重启后水印变、正文变、哈希跟着重算，头与身不会拆家。
     """
     with open(source.path, "rb") as fh:
         raw = fh.read().decode("utf-8")
     is_page = source.path.endswith(".html")
-    body = stamp_assets(raw).replace("__ASSET_TOKEN__", token).encode("utf-8")
+    text = stamp_assets(raw).replace("__ASSET_TOKEN__", token)
+    hashes = inline_script_hashes(text) if is_page else ()
+    body = text.encode("utf-8")
     etag = f'"st-{zlib.crc32(body):08x}-{len(body):x}"'
     cache = PAGE_CACHE if is_page else "no-cache"
     if etag in if_none_match:
-        return site_headers(Response(status_code=304, headers={"ETag": etag}), cache=cache)
+        return site_headers(Response(status_code=304, headers={"ETag": etag}),
+                            cache=cache, script_hashes=hashes)
     return site_headers(Response(content=body, media_type=source.media_type,
-                                 headers={"ETag": etag}), cache=cache)
+                                 headers={"ETag": etag}),
+                        cache=cache, script_hashes=hashes)
 
 
-def site_headers(response, cache: str = "no-cache"):
+def site_headers(response, cache: str = "no-cache", script_hashes=()):
     """全站响应共用的一组头，字面量只这一份：/app、/admin、/site 的静态资源走
     RevalidatingStaticFiles，官网 index.html 走 FileResponse，两头都收口在这里。
 
@@ -178,11 +246,31 @@ def site_headers(response, cache: str = "no-cache"):
     - `PAGE_CACHE`：HTML，允许晚 30 秒，且页面带着自己的水印去对账、不对就自己重载；
     - `"no-cache"`：裸地址与旧水印的资源、以及 `sw.js`。宁可多问一趟也不把人钉在一份
       旧文件上——旧 URL 一旦被允许长缓存，就直接复刻 2026-09-17 那次"改了没生效"。
+
+    CSP 自 #143 起是一整组（此前只有 frame-src/object-src，等于对"页面里被塞进一段
+    <script>"一个字都没说）。每一条都是取舍，不是模板抄来的：
+    - `default-src 'self'`：兜住 manifest / 字体 / 媒体这些没单列的取处；前端不引任何 CDN。
+    - `script-src 'self' 'sha256-…'`：7 个外链脚本全部同源；唯一那段内联脚本的哈希由
+      `rewritten_html` 对替换后的正文现算（见 `inline_script_hashes`）。**没有
+      'unsafe-inline'**——有它，哈希就等于白算。
+    - `style-src 'self' 'unsafe-inline'`：PWA 页本身没有内联 style，但头是全站共用的：
+      /admin/index.html 有 11 处 `style=`、/site/probe.html 有 `<style>` 块。把它们迁进
+      CSS 之前这条只能留着（为兼容 admin/probe 保留，收紧不在本票射程）。
+    - `img-src 'self' data: blob:`：附件预览与聊天图片走 objectURL（app.js / api.js 的
+      `URL.createObjectURL`），没有 `blob:` 预览就整片空白；`data:` 留给粘贴的 data URI。
+      模型回复里的外链图片会被挡掉——有意为之（挡追踪像素），要放开得先有人明确同意。
+    - `connect-src 'self' …`：app.js 的「直连搜索」真的从浏览器 POST 到
+      api.bochaai.com / api.tavily.com（`searchDirect`）；不列出这两个源，那一档会在
+      控制台里静默变哑。其余请求一律 /v1 同源。
+    - `frame-src 'none'`：全站零 iframe（2026-09-19 grep 确认），它挡的是"WebView 里
+      @JavascriptInterface 会挂到每个 frame"这条路。
+    - `object-src 'none'`：没有插件/内嵌 PDF 需求，堵 <object>/<embed> 这条执行面。
+    - `base-uri 'self'`：被注入的 <base> 不能把相对脚本地址挪去别处。
+    - `form-action 'self'`：表单全是同源 JS 提交，注入一个外站 action 也送不出去。
+    service worker 的注册走 script-src 的回落（同源 sw.js），因此不需要单列 worker-src。
     """
     response.headers["Cache-Control"] = cache
-    # 全站零 iframe（2026-09-19 grep 确认），所以这条不会碰坏任何东西；
-    # 它挡的是"WebView 里 @JavascriptInterface 会挂到每个 frame"这条路。
-    response.headers["Content-Security-Policy"] = "frame-src 'none'; object-src 'none'"
+    response.headers["Content-Security-Policy"] = content_security_policy(script_hashes)
     return response
 
 
