@@ -3,7 +3,8 @@ r"""换包脚本「停用看门狗」那一步的三条契约（v0.34.2 收口�
 事故一（判据读错了属性）：`deploy/swap-package.ps1` disable 之后拿 `(Get-ScheduledTask).State`
 当判决，不等于 `'Disabled'` 就 throw。可是**任务正有一次实例在跑时，即使停用成功，State 照样
 报 Running**——停用只拦今后的触发器，不停已经在跑的那一次。而崩溃守护每隔一分钟就醒一次
-（deploy/register-watchdog.ps1:145 的 RepetitionInterval=1min），deploy/watchdog-hidden.vbs:35
+（计划任务的 RepetitionInterval=1min；那个注册脚本是本机专属、刻意被 .gitignore 排除，
+不是仓库文件），deploy/watchdog-hidden.vbs:35
 又是 `waitOnReturn=True`（wscript 等 watchdog.ps1 跑完才退出，实例的存活时间就是这一次检查的
 时长），于是"换包正好撞在醒来之后那一秒"根本不是小概率。现网真就这么红的：
 `DISABLED state=Running` → `throw 'watchdog did not actually disable ...'` → PSEXIT=1，

@@ -206,3 +206,69 @@ def test_mutation_removing_the_second_witness_turns_the_lock_red():
     back = PS1.replace("[System.IO.Directory]::Move('$Backup', '$Live')",
                        "Move-Item -LiteralPath '$Backup' -Destination '$Live'", 1)
     assert not recipe_ok(back), "把回滚第 4 步退回 Move-Item，配方锁必须红"
+
+
+# ------------------------------------------------------------------ #49：health 赢，但必须留痕
+PROCESS_VIEW_TOKEN = "Write-Output ('PROCESS-VIEW=unproven health-build=ok marker=ok')"
+
+
+def _process_view_ok(text: str) -> bool:
+    """#49：/health 答出目标 build 时判成功，但验收后必须补一行 PROCESS-VIEW=unproven。
+
+    判据不许改健康判据本身：`$asked.build -eq $ExpectedVersion` 与 `$livePid = -1`
+    必须原样还在；新增的只是 flag 与那一行，且必须在 HEALTH build= 与 ACCEPT
+    marker-lines= 之后、Enable-ScheduledTask 之前（健康与标记都成立才配说
+    health-build=ok marker=ok）。
+    """
+    try:
+        i_init = _line_of(r"^\$processViewUnproven = \$false$", text)
+        i_ask = _line_of(r"\$asked = Get-HealthOnce", text)
+        i_fail = _line_of(r"Stop-AfterFailure 'started-check'", text)
+        i_health = _line_of(r"^\s*Write-Output \('HEALTH build='", text)
+        i_accept = _line_of(r"^\s*Write-Output \('ACCEPT marker-lines=", text, last=True)
+        i_token = _line_of(r"^\s*Write-Output \('PROCESS-VIEW=unproven health-build=ok marker=ok'\)$", text)
+        i_enable = _line_of(r"^\s*Enable-ScheduledTask -TaskPath", text, last=True)
+        i_enabled = _line_of(r"^\s*Write-Output \('ENABLED state='", text, last=True)
+    except AssertionError:
+        return False
+    block = _between(text, r"\$asked = Get-HealthOnce", i_fail)
+    if not re.search(r"\$asked\.build -eq \$ExpectedVersion", block):
+        return False
+    if "$livePid = -1" not in block or "$processViewUnproven = $true" not in block:
+        return False
+    if not (i_init < i_ask < i_fail < i_health < i_accept < i_enable < i_enabled < i_token):
+        return False
+    lines = text.splitlines()
+    before = [ln for ln in lines[:i_token] if ln.strip()]
+    after = [ln for ln in lines[i_token + 1:] if ln.strip()]
+    if not before or before[-1].strip() != "if ($processViewUnproven) {":
+        return False
+    if not after or after[0].strip() != "}":
+        return False
+    return True
+
+
+def test_health_fallback_prints_process_view_unproven_after_acceptance():
+    """#49：/health 认下来的那条路要留一行 PROCESS-VIEW=unproven，供台账/运维 grep。
+
+    判成功本身不变（build 全等是交付事实），但"进程列表没看见它"不许静默：
+    这一行只在 flag 为真时打印，且排在 HEALTH 与 ACCEPT 两个事实之后。
+    """
+    assert _process_view_ok(PS1), (
+        "PROCESS-VIEW=unproven 这行不在、无条件打印、排到了 ACCEPT 之前，或 "
+        "health 判据被顺手改了（$asked.build -eq $ExpectedVersion / $livePid = -1 必须原样）")
+
+
+def test_mutation_dropping_the_process_view_trace_reds_the_lock():
+    """牙印（#49）：删掉 flag 赋值、删掉 token、或把 token 移到 ACCEPT 之前，必须红。"""
+    assert _process_view_ok(PS1), "真文件必须先绿"
+    no_flag = PS1.replace("        $processViewUnproven = $true\n", "", 1)
+    assert no_flag != PS1, "样本没生效：flag 赋值形状与本票假设不一致"
+    assert not _process_view_ok(no_flag), "删掉 flag 赋值后，留痕锁必须红"
+    no_token = PS1.replace("    Write-Output ('PROCESS-VIEW=unproven health-build=ok marker=ok')\n", "", 1)
+    assert no_token != PS1, "样本没生效：token 行形状与本票假设不一致"
+    assert not _process_view_ok(no_token), "删掉 PROCESS-VIEW 行后，留痕锁必须红"
+    unguarded = PS1.replace("if ($processViewUnproven) {\n    Write-Output ('PROCESS-VIEW=unproven health-build=ok marker=ok')\n}",
+                            "Write-Output ('PROCESS-VIEW=unproven health-build=ok marker=ok')", 1)
+    assert unguarded != PS1, "样本没生效：条件包裹形状与本票假设不一致"
+    assert not _process_view_ok(unguarded), "无条件打印 PROCESS-VIEW 必须红（那会在正常路径说谎）"

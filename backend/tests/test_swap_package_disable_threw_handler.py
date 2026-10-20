@@ -316,7 +316,12 @@ def _branches_and_failsafe(text: str) -> bool:
 
 
 def _token_line_ok(text: str) -> bool:
-    """(iv) 这条路留下一行 token，且它只报读到的原始答案、不自报分类。"""
+    """(iv) 这条路留下一行 token，且它只报读到的原始答案、不自报分类。
+
+    #48：所有字段都必须经 Format-TokenField 出线（单行 + 哨兵），不许再直接
+    拼接 `$disableProbe.EnabledSource` / `$disableError`。全空 `via=` 与多行
+    异常会把"一行一个 token"这条约定破坏掉，而那正是运维唯一能 grep 的证据。
+    """
     ctx = _ctx(text)
     if ctx is None:
         return False
@@ -332,10 +337,18 @@ def _token_line_ok(text: str) -> bool:
         return False
     if _idx(re.escape(_ERROR_CAPTURE), ctx["handler"]) > i:
         return False
-    for field in ("' via=' + $disableProbe.EnabledSource", "' state=' + $disableProbe.State",
-                  "' instances=' + $disableProbe.Instances", "' error=' + $disableError"):
+    for field in ("' via=' + (Format-TokenField -Value $disableProbe.EnabledSource",
+                  "' state=' + (Format-TokenField -Value $disableProbe.State",
+                  "' instances=' + (Format-TokenField -Value $disableProbe.Instances",
+                  "' error=' + (Format-TokenField -Value $disableError"):
         if field not in token:
             return False
+    if "Format-TokenField -Value $disableProbe.Enabled -Sentinel 'True'" not in token:
+        return False
+    if token.count("-Sentinel 'no-answer'") != 3:
+        return False
+    if token.count("(") != token.count(")"):
+        return False
     # 分类不许自报（判据由被测对象自己说 = 它可以不说）
     if re.search(r"(guard|branch|owns|verdict)=", token):
         return False
@@ -346,7 +359,71 @@ def _token_line_ok(text: str) -> bool:
     return True
 
 
+def _formatter_ok(text: str) -> bool:
+    """#48 的哨兵本体：null/空白 -> 哨兵，所有空白（含 CR/LF）折成一个空格。"""
+    body = _func_body(text, "Format-TokenField")
+    if body is None:
+        return False
+    joined = "\n".join(body)
+    for needle in ("$null -eq $Value", "return $Sentinel", "$text -eq ''",
+                   "[regex]::Replace($text, '\\s+', ' ')"):
+        if needle not in joined:
+            return False
+    # 不许用 -not / 真值判断：那正是 #51 实测出 FALSE/FALSE/TRUE 的写法方向。
+    if re.search(r"(?<![\w-])-not\b", joined):
+        return False
+    return True
+
+
 # ------------------------------------------------------------------ 生成的只读探针
+_TOKEN_PROBE = r"""$ErrorActionPreference = 'Stop'
+__FORMATTER__
+$cases = @(
+    [pscustomobject]@{ Name='null-probe'; Probe=$null; Error="first`r`nsecond" },
+    [pscustomobject]@{ Name='empty-fields'; Probe=[pscustomobject]@{ Enabled=$null; EnabledSource=''; State=''; Instances=$null }; Error="alpha`nbeta" },
+    [pscustomobject]@{ Name='normal'; Probe=[pscustomobject]@{ Enabled=$false; EnabledSource='settings-enabled'; State='Disabled'; Instances=0 }; Error='boom' }
+)
+foreach ($c in $cases) {
+    $disableProbe = $c.Probe
+    $disableError = $c.Error
+    'CASE ' + $c.Name
+__TOKEN_LINE__
+}
+# Counterexample: the PRE-#48 raw concatenation, run with the same null probe and
+# multi-line error. This is fixed in the probe, not read from the script, so the
+# red side cannot be moved together with the code under test.
+$disableProbe = $null
+$disableError = "first`r`nsecond"
+'CASE old-raw-shape'
+Write-Output ('DISABLE-THREW enabled=' + $disableProbe.Enabled + ' via=' + $disableProbe.EnabledSource + ' state=' + $disableProbe.State + ' instances=' + $disableProbe.Instances + ' error=' + $disableError)
+'PROBE_DONE'
+"""
+
+
+def _token_probe_source(text: str):
+    """#48 的机器探针：只抄 Format-TokenField 函数体与脚本自己那行 token。"""
+    body = _func_body(text, "Format-TokenField")
+    ctx = _ctx(text)
+    if body is None or ctx is None:
+        return None
+    hits = [i for i, ln in enumerate(ctx["handler"]) if _TOKEN_LINE.match(ln)]
+    if len(hits) != 1:
+        return None
+    token = ctx["handler"][hits[0]].strip()
+    if "\n" in token or "\r" in token:
+        return None
+    if "Format-TokenField" not in token:
+        return None
+    src = (_TOKEN_PROBE
+           .replace("__FORMATTER__", "\n".join(body))
+           .replace("__TOKEN_LINE__", "    " + token))
+    if "__" in src or token not in src:
+        return None
+    if not src.isascii():
+        return None
+    return src
+
+
 def _probe_case_lines() -> str:
     rows = []
     for name, enabled, source, _expect in _CASES:
@@ -547,6 +624,66 @@ def test_disable_threw_token_is_printed_once_before_the_branches_and_claims_no_o
         "DISABLE-THREW 那行不在、不止一处、排到了分支之后、自己报了分类结论，"
         "或者 $disableError 不是进 catch 第一句抓下来的：运维从换包那一行输出里"
         "就分不出「看守还在」与「开关没答话」")
+    assert _formatter_ok(PS1), (
+        "#48：Format-TokenField 不再把 null/空白换成哨兵，或不再折叠 CR/LF，"
+        "或退回了 -not / 真值判断（那正是机器答 FALSE/FALSE/TRUE 的那条写法）")
+
+
+def _probe_cases(stdout: str) -> dict:
+    """把 CASE 头之后、下一个 CASE/PROBE_DONE 之前的物理行归到该 case。"""
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    out, cur = {}, None
+    for ln in lines:
+        if ln.startswith("CASE "):
+            cur = ln[5:]
+            out[cur] = []
+        elif ln == "PROBE_DONE":
+            cur = None
+        elif cur is not None:
+            out[cur].append(ln)
+    return out
+
+
+def test_machine_disable_threw_token_is_one_line_with_fail_closed_sentinels(tmp_path):
+    """#48 的机器判据：探针为空、字段为空、异常多行 —— 三种都只产出一行 token。
+
+    全空 via= 时代结束：via=no-answer 是显式哨兵；enabled=True 是 fail-closed
+    默认（与 Get-WatchdogTaskState 读不到时的方向一致）；多行异常折成一个空格。
+    同一份探针里还固定着改前那种裸拼接，用同样的输入演示它确实劈成两行、且
+    via= 是空的——红绿两侧都由这台机器回答，不是文本推断。
+    """
+    src = _token_probe_source(PS1)
+    assert src is not None, "探针源码生不出来：Format-TokenField 或 token 行抽不出来"
+    path = tmp_path / "probe-disable-threw-token.ps1"
+    path.write_text(src, encoding="ascii")
+    proc = _exec_probe(path)
+    assert proc.returncode == 0, f"探针 rc={proc.returncode}：{proc.stderr[:400]}"
+    cases = _probe_cases(proc.stdout)
+
+    null_line = cases.get("null-probe")
+    assert null_line is not None and len(null_line) == 1, (
+        f"探针为空 + 多行异常时 token 劈成了 {null_line}：一行一个 token 的约定被破坏")
+    for field in ("enabled=True", "via=no-answer", "state=no-answer",
+                  "instances=no-answer", "error=first second"):
+        assert field in null_line[0], f"空探针那一行少了哨兵 {field}：{null_line[0]}"
+
+    empty_line = cases.get("empty-fields")
+    assert empty_line is not None and len(empty_line) == 1, (
+        f"字段全空 + 多行异常时 token 劈成了 {empty_line}")
+    for field in ("enabled=True", "via=no-answer", "state=no-answer",
+                  "instances=no-answer", "error=alpha beta"):
+        assert field in empty_line[0], f"空字段那一行少了哨兵 {field}：{empty_line[0]}"
+
+    normal_line = cases.get("normal")
+    assert normal_line is not None and normal_line[0] == (
+        "DISABLE-THREW enabled=False via=settings-enabled state=Disabled "
+        "instances=0 error=boom"), f"正常读数被改写：{normal_line}"
+
+    old = cases.get("old-raw-shape")
+    assert old is not None and len(old) >= 2, (
+        f"改前那种裸拼接竟然只产出一行（{old}）：本文件的反例失效，红绿分工不成立")
+    assert "enabled= via= state= instances=" in old[0], (
+        f"反例没有复现「全空 via=」：{old[0]}")
 
 
 def test_probe_is_wired_to_the_scripts_own_predicates_and_stays_read_only():
@@ -724,6 +861,35 @@ def test_mutation_handler_that_enables_the_task_directly_turns_the_write_lock_re
         _handler_asks_the_machine(direct)
     assert "Enable-ScheduledTask" in str(exc.value), f"红的理由必须是「自己动手写任务」：{exc.value}"
     assert not _branches_and_failsafe(direct), "兜底不再登记停用归属，归属这条也必须一起红"
+
+
+def test_mutation_raw_token_concatenation_reds_the_single_line_lock():
+    """牙印（#48）：把任一字段退回裸拼接，#48 的单行/哨兵锁必须红。
+
+    这不是风格问题：裸拼接在 $disableProbe 为 $null 时打出 `via= `，而多行异常
+    会把这个 token 劈成两行——两者都会让那行唯一的证据读不出来。
+    """
+    assert _token_line_ok(PS1), "真文件必须先绿"
+    raw_via = PS1.replace(
+        "' via=' + (Format-TokenField -Value $disableProbe.EnabledSource -Sentinel 'no-answer')",
+        "' via=' + $disableProbe.EnabledSource", 1)
+    assert raw_via != PS1, "样本没生效：via 字段的形状与本票假设不一致"
+    assert not _token_line_ok(raw_via), "把 via 退回裸拼接，单行/哨兵锁必须红"
+    raw_error = PS1.replace(
+        "' error=' + (Format-TokenField -Value $disableError -Sentinel 'none')",
+        "' error=' + $disableError", 1)
+    assert raw_error != PS1, "样本没生效：error 字段的形状与本票假设不一致"
+    assert not _token_line_ok(raw_error), "把 error 退回裸拼接，单行锁必须红"
+    assert _formatter_ok(PS1) and _formatter_ok(raw_via), "只动 token 行的样本不该碰坏 formatter"
+
+
+def test_mutation_formatter_using_not_truthiness_reds_the_sentinel_lock():
+    """牙印（#48）：把 $null/空判断换成 -not 真值判断，哨兵锁必须红。"""
+    assert _formatter_ok(PS1), "真文件必须先绿"
+    drifted = PS1.replace("if ($null -eq $Value) { return $Sentinel }",
+                          "if (-not $Value) { return $Sentinel }", 1)
+    assert drifted != PS1, "样本没生效：formatter 的 null 判断形状与本票假设不一致"
+    assert not _formatter_ok(drifted), "换成 -not 真值判断后，formatter 锁必须红"
 
 
 def _weakened(pred2: str) -> str:
