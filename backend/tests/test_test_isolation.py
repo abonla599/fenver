@@ -37,13 +37,14 @@ def test_real_memory_store_is_not_what_tests_open():
         "都会改到真数据上。conftest 需要设 CHROMA_DB_PATH。")
 
 
-def test_env_isolation_covers_every_redirectable_store():
-    """conftest 声称能指走的存储，就得真的指走了。
+def _redirectable_env_vars():
+    """派生清单：产品代码声明可被环境变量指走的每一份存储。
 
-    清单**从 `paths.DATA_PATH_ENV_VARS` 派生**，不再手抄一份：这一处此前抄过一遍，
-    而产品代码每加一份存储都要靠人记得来这儿补一行——不补就正好是这次的 bug 形状
-    （CHROMA_DB_PATH 漏了指走，本机测试直接摸到用户那 71 条真实记忆）。
-    派生之后，加存储而忘在 conftest 补一行，红的就是这一条。
+    唯一来源是 `paths.DATA_PATH_ENV_VARS`，不再手抄：这一处此前抄过一遍，而产品
+    代码每加一份存储都要靠人记得来这儿补一行——不补就正好是这次的 bug 形状
+    （CHROMA_DB_PATH 漏了指走，本机测试直接摸到用户那 71 条真实记忆；v0.34.3 的
+    APK_CACHE_DIR / RELEASE_MANIFEST_PATH 又是一次同形漏网）。派生之后，加存储而
+    忘在 conftest 补一行，红的就是这一条。
 
     反馈与偏好那两份例外：它们在导入期就算成模块常量，conftest 走的是
     `monkeypatch.setattr(module, "FEEDBACK_FILE", …)`，环境变量指不走它们。
@@ -51,15 +52,83 @@ def test_env_isolation_covers_every_redirectable_store():
     from app.core.paths import DATA_PATH_ENV_VARS
 
     module_constanted = {"FEEDBACK_FILE", "PREFERENCE_FILE"}
-    covered = [v for v in DATA_PATH_ENV_VARS.values() if v not in module_constanted]
-    assert len(covered) >= 7, f"派生出来的清单短得不像话，这条锁在空转：{covered}"
-    missing = [v for v in covered if not os.getenv(v)]
-    assert not missing, f"这些存储在跑测试时没有被指走：{missing}"
+    return [v for v in DATA_PATH_ENV_VARS.values() if v not in module_constanted]
 
-    inside = [v for v in covered
-              if Path(os.environ[v]).resolve().is_relative_to(REPO_ROOT)]
+
+def _isolation_gaps(environ, repo_root=REPO_ROOT):
+    """(没被指走的, 被指进仓库里的) 两份清单；空 = 隔离墙完整。
+
+    写成纯函数是为了让反例直接喂一份合成环境进来——真去 delenv 再跑整个会话，
+    等于用"把墙上那块砖抽掉"来证明锁有牙，代价落在后续用例身上。
+    """
+    missing, inside = [], []
+    for var in _redirectable_env_vars():
+        value = str(environ.get(var) or "").strip()
+        if not value:
+            missing.append(var)
+        elif Path(value).resolve().is_relative_to(Path(repo_root).resolve()):
+            inside.append(var)
+    return missing, inside
+
+
+def test_env_isolation_covers_every_redirectable_store():
+    """conftest 声称能指走的存储，就得真的指走了。
+
+    判据本体在 `_isolation_gaps`，清单从 `paths.DATA_PATH_ENV_VARS` 派生（理由见
+    上面那个 helper）。这里只拿真实进程环境问一次。
+    """
+    covered = _redirectable_env_vars()
+    assert len(covered) >= 9, f"派生出来的清单短得不像话，这条锁在空转：{covered}"
+    # v0.34.3 的两块新砖：名单若被摘短（或派生源里删了它们），这里先红。
+    assert {"APK_CACHE_DIR", "RELEASE_MANIFEST_PATH"} <= set(covered), covered
+
+    missing, inside = _isolation_gaps(os.environ)
+    assert not missing, f"这些存储在跑测试时没有被指走：{missing}"
     assert not inside, (
         f"这些变量被指进了仓库内，重建/提交都会牵连到真实数据：{inside}")
+
+
+@pytest.mark.parametrize("var", ["APK_CACHE_DIR", "RELEASE_MANIFEST_PATH"])
+def test_the_isolation_lock_goes_red_when_a_release_hook_is_unpinned(var):
+    """反例：抽掉发版物料的任一只口子，派生锁必须当场点名它。
+
+    没有这一条，`_isolation_gaps` 少列了谁都不会有人知道——上面那条拿真实环境
+    问，而真实环境里只要 variable 还在，名单短一截也照样绿。
+    """
+    environ = dict(os.environ)
+    environ.pop(var, None)
+    missing, _inside = _isolation_gaps(environ)
+    assert var in missing, f"{var} 被摘掉后锁没报红：{missing}"
+
+
+@pytest.mark.parametrize("var, real", [
+    ("RELEASE_MANIFEST_PATH", Path("data") / "version.json"),
+    ("APK_CACHE_DIR", Path("data") / "apk"),
+])
+def test_the_isolation_lock_goes_red_when_a_release_hook_points_into_the_repo(var, real):
+    """反例的另一半：口子还在、但指进仓库——锁必须报"指进仓库"而不是绿。"""
+    environ = dict(os.environ)
+    environ[var] = str(REPO_ROOT / real)
+    _missing, inside = _isolation_gaps(environ)
+    assert var in inside, f"{var} 指进仓库后锁没报红：{inside}"
+
+
+def test_release_materials_resolve_away_from_the_real_data_tree():
+    """与 `test_real_memory_store_is_not_what_tests_open` 同形：解析结果不许是真落点。
+
+    判据写成"不等于真实路径"而不是"必须在某处之下"：将来合法重定向（比如把
+    APK 缓存挪到别的盘）不该被一并判红，真正要守的只有"别碰线上那一份"。
+    """
+    from app.core import apk_cache, releases
+
+    cases = (
+        ("发布清单", releases.runtime_manifest_path(), REPO_ROOT / "data" / "version.json"),
+        ("安装包缓存", apk_cache.cache_dir(), REPO_ROOT / "data" / "apk"),
+    )
+    for label, resolved, real in cases:
+        assert Path(resolved).resolve() != Path(real).resolve(), (
+            f"测试解析到的{label}是线上真实落点 {real}：构造假清单/假包会直接写进"
+            "线上 data/。conftest 需要用对应的环境变量指走。")
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/memory/list", "/v1/memory/stats"])

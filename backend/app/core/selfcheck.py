@@ -17,10 +17,21 @@
    这种项目别处当秘密的信息（memory_manager.py 对嵌入后端是同一口径）。
    所以这里只有状态、一句原因，和几个数字。**具体是哪个 provider 坏了，走日志**
    ——见 `log_startup_summary`，它只往 server.log 写，不出公网。
+③ **模型名在 web 出口还有一道兜底掩码（#121）。** 源头那句"不回显 label/model"
+   只覆盖我们自己写的文案；`memory_init_error` 是第三方异常原文（OpenAI 的
+   404 会写 `model text-embedding-3-small`），措辞不在我们手里。所以 `run()`
+   把详情再过 `_public_scrub`：已知模型名（provider 配置、`EMBEDDINGS_MODEL`、
+   运行中的嵌入后端）精确替换，三段以上连字符/下划线标识符按形状兜底，掩码是
+   明写的 `〈模型名已隐去〉`，句子其余部分照读。
+   这道网**只挂在 web 出口**，不进 `_scrub`：同一个 `_scrub` 还喂
+   `log_startup_summary`，而 server.log 里"现在用的是哪个模型/坏在哪一条"恰恰
+   是运维要看的（与 #112 拒绝把数据根登记进 logsanitizer 是同一个决定：出口
+   掩码不许把日志里那些可定位的行一起吞掉）。日志那条路继续只掩凭据与路径。
 """
 
 import json
 import os
+import re
 
 from app.core.pathmask import hide_paths
 
@@ -233,8 +244,71 @@ def _scrub(detail: str) -> str:
         return "（详情无法安全呈现）"
 
 
-def run() -> dict:
-    """逐项自检。任何一项抛异常都折算成 broken，绝不把异常透出到 /health 上。"""
+# 模型名的明写掩码。与路径掩码同一个口径：只盖那一段，句子其余部分照读。
+MODEL_MASK = "〈模型名已隐去〉"
+# 模型名的形状：连字符/下划线分隔的三段以上 ASCII 标识符（text-embedding-3-small、
+# all-MiniLM-L6-v2 都是这一族）。单段或两段（user_memories、qwen-max）不按形状认——
+# 那会把集合名和普通标识符一起吃掉；配置里的短名走下面那一档精确匹配。
+_MODEL_SHAPED = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+){2,}", re.IGNORECASE)
+
+
+def _known_model_names() -> list:
+    """这台机器可能出现在第三方异常里的模型名，长的优先。
+
+    三个来源都要问：provider 配置里的 model、嵌入配置的 `EMBEDDINGS_MODEL`、以及
+    已经起来的记忆后端自报的 `embed_model`。只认长度 >= 4 的串（`m` 这种一字母
+    别名会把详情里的普通字母一起吃掉，且它本身指认不出任何厂商）。
+    任何一源读不动都只跳过它：这道网是纵深防御，不许因为配置坏了把详情变成 500。
+    """
+    names = set()
+    env_model = (os.getenv("EMBEDDINGS_MODEL") or "").strip()
+    if env_model:
+        names.add(env_model)
+    try:
+        from app.core.providers import store as provider_store
+        for record in provider_store.all():
+            if isinstance(record, dict):
+                model = str(record.get("model") or "").strip()
+                if model:
+                    names.add(model)
+    except Exception:
+        pass
+    try:
+        from app.memory.memory_router import memory_manager
+        model = str(getattr(memory_manager, "embed_model", "") or "").strip()
+        if model:
+            names.add(model)
+    except Exception:
+        pass
+    return sorted((name for name in names if len(name) >= 4), key=len, reverse=True)
+
+
+def _public_scrub(detail: str) -> str:
+    """web 出口的第三层：先凭据与路径，再把模型名换成明写掩码（#121）。
+
+    只在 `run()` 里用，`log_startup_summary` 不走这里（理由见模块 docstring ③）。
+    已知名精确替换放在形状兜底之前：`qwen-max` 这类两段式只有精确档认得出；
+    形状档接住的是"配置里没登记、但一看就是模型名"的第三方原文。
+    """
+    text = _scrub(detail)
+    if not text:
+        return text
+    try:
+        for name in _known_model_names():
+            if name in text:
+                text = text.replace(name, MODEL_MASK)
+        return _MODEL_SHAPED.sub(MODEL_MASK, text)
+    except Exception:
+        return "（详情无法安全呈现）"
+
+
+def _evaluate() -> dict:
+    """逐项自检的原始结果（详情尚未经过 `_scrub`，更没有 web 模型名掩码）。
+
+    分成两层是为了 #121 那个决定：web 出口要加模型名掩码，日志出口不加。
+    混在一个 `run()` 里，server.log 的启动摘要就会跟着丢掉模型名——那是运维
+    排"哪一条 provider/嵌入后端坏了"唯一的定位线索（同一个理由见 #112）。
+    """
     checks = {}
     worst = OK
     for label, fn in CHECKS:
@@ -242,10 +316,25 @@ def run() -> dict:
             status, detail = fn()
         except Exception as e:                       # 自检本身坏了也要看得见
             status, detail = BROKEN, f"自检项异常：{type(e).__name__}"
-        checks[label] = {"status": status, "detail": _scrub(detail)}
+        checks[label] = {"status": status, "detail": detail}
         if _SEVERITY[status] > _SEVERITY[worst]:
             worst = status
     return {"status": worst, "checks": checks}
+
+
+def run() -> dict:
+    """逐项自检，返回 **web 出口** 的那一份：详情过 `_public_scrub`。
+
+    任何一项抛异常都折算成 broken，绝不把异常透出到 /health 上。
+    """
+    result = _evaluate()
+    return {
+        "status": result["status"],
+        "checks": {
+            label: {"status": item["status"], "detail": _public_scrub(item["detail"])}
+            for label, item in result["checks"].items()
+        },
+    }
 
 
 def log_startup_summary() -> None:
@@ -262,8 +351,11 @@ def log_startup_summary() -> None:
     """
     from app.core.providers import ProviderError, store as provider_store
 
-    result = run()
-    bad = {k: v for k, v in result["checks"].items() if v["status"] != OK}
+    # 走 `_evaluate` 而不是 `run()`：日志走日志口径（`_scrub`），不加 web 的
+    # 模型名掩码——server.log 里"是哪一个模型/哪一条配置坏了"必须还读得出来。
+    result = _evaluate()
+    bad = {k: {"status": v["status"], "detail": _scrub(v["detail"])}
+           for k, v in result["checks"].items() if v["status"] != OK}
     if bad and "模型服务" in result["checks"]:
         try:
             provider = provider_store.resolve()

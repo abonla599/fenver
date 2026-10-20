@@ -597,3 +597,125 @@ def test_the_exit_net_hides_paths_from_error_text_we_did_not_write(client, monke
     assert "〈路径已隐去〉" in item["detail"], item
     assert windows not in body and posix not in body, body
     assert not _DRIVE_PATH.search(body), body
+
+
+# ------------------------------------------------ #121：模型名在 web 出口没有兜底 --
+# #112 只给路径补了出口网：源头那两句冲突文案不再带模型名，但 `memory_init_error`
+# 里还会有**第三方**异常原文（嵌入接口的 404 就写着 model <名字>）。模型名同样是
+# "哪家在替我们做嵌入"的指纹，而且只靠"我们不写它"守不住别人写的句子。所以出口
+# 再加一层明写的模型名掩码，日志那条路不加（server.log 里要留着定位线索）。
+
+def _first_model_mask_detail(monkeypatch, detail):
+    """把一条带模型名的详情摆进 CHECKS，返回 (原始详情, /health 出口的那一份)。"""
+    monkeypatch.setattr(selfcheck, "CHECKS", (("第四个自检项", lambda: (BROKEN, detail)),))
+    raw = selfcheck._evaluate()["checks"]["第四个自检项"]["detail"]
+    public = run()["checks"]["第四个自检项"]["detail"]
+    return raw, public
+
+
+def test_a_fourth_detail_carrying_a_model_name_would_be_red_without_the_web_net(monkeypatch):
+    """#121 的"该红"反例：第四个自检项带模型名时，原始详情当场命中模型名形状。
+
+    这条锁的全部意义在于两半都跑：`raw` 必须是**真的**带模型名（否则出口那条
+    绿就是空转，随便一个只有中文的详情都能通过），而 web 出口只留明写掩码、
+    句子其余部分照读。只断言"最终没有模型名"而不证明反例会红，等于没锁。
+    """
+    canary = "vendorx-embed-9k"
+    raw, public = _first_model_mask_detail(
+        monkeypatch, f"上游 {canary} 拒绝握手（Error code: 401）")
+
+    assert canary in raw, "反例没造出来：原始详情本身不带模型名，这条锁在空转"
+    assert _MODEL_SHAPED.search(raw), raw
+    assert canary not in public, public
+    assert selfcheck.MODEL_MASK in public, public
+    # 只盖模型名那一段：判断所需的错误码与后半句必须还在。
+    assert "拒绝握手" in public and "Error code: 401" in public, public
+
+
+def test_the_web_net_masks_a_configured_model_name_the_shape_rule_cannot_see(monkeypatch):
+    """"任何来源"不只指形状：配置里的两段式短名（qwen-max）也要精确掩掉。
+
+    形状档只认三段以上，单靠它会把 `qwen-max` 这类常见模型标识留在公开详情里。
+    """
+    from app.core import providers
+
+    class _Store:
+        keys_path = "provider_keys.json"
+
+        @staticmethod
+        def all():
+            return [{"id": "p1", "label": "网关", "model": "qwen-max"}]
+
+    monkeypatch.setattr(providers, "store", _Store)
+    raw, public = _first_model_mask_detail(monkeypatch, "上游 qwen-max 返回 429")
+    assert "qwen-max" in raw
+    assert "qwen-max" not in public, public
+    assert selfcheck.MODEL_MASK in public and "返回 429" in public, public
+
+
+def test_the_web_net_catches_a_model_name_from_an_error_text_we_did_not_write(
+        monkeypatch):
+    """第三方异常原文是这条网存在的理由：措辞不在我们手里，不能靠源头不写。"""
+    from app.memory import memory_router
+
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "text-embedding-3-small")
+    monkeypatch.setattr(memory_router, "memory_manager", None, raising=False)
+    monkeypatch.setattr(
+        memory_router, "memory_init_error",
+        "Error code: 404 - model text-embedding-3-small not found", raising=False)
+
+    item = run()["checks"]["记忆后端"]
+    assert item["status"] == BROKEN, item
+    assert "text-embedding-3-small" not in item["detail"], item
+    assert selfcheck.MODEL_MASK in item["detail"], item
+    assert "Error code: 404" in item["detail"] and "not found" in item["detail"], item
+    assert not _MODEL_SHAPED.search(item["detail"]), item
+
+
+def test_the_log_summary_still_names_the_model_after_the_web_net(monkeypatch, capsys):
+    """#112 决定的复检：web 掩码只挂出口，server.log 里的模型名不许被一起吞掉。
+
+    运维排"哪条配置坏了"看的就是日志里那个 label / model；把 `_public_scrub`
+    塞进 `_scrub` 会让日志与公网一起失去定位线索——这正是 #112 拒绝把数据根
+    登记进 logsanitizer 的同一条理由。这里同时钉两半：日志里有，/health 里没有。
+    """
+    from app.core import providers
+
+    class _Store:
+        keys_path = "provider_keys.json"        # 不存在 → 密钥库那项非 ok，摘要必打
+
+        @staticmethod
+        def all():
+            return [{"id": "p1", "label": "公司网关-主", "model": "qwen-max-v2026"}]
+
+        @staticmethod
+        def resolve():
+            return {"id": "p1", "label": "公司网关-主", "model": "qwen-max-v2026"}
+
+    monkeypatch.setattr(providers, "store", _Store)
+    selfcheck.log_startup_summary()
+    out = capsys.readouterr().out
+    assert "公司网关-主" in out, out
+    assert "qwen-max-v2026" in out, "日志里的模型名被出口掩码吞了：\n" + out
+    assert "qwen-max-v2026" not in json.dumps(run(), ensure_ascii=False)
+
+
+def test_the_model_net_never_reaches_the_data_root_lines(capsys):
+    """#112 的复检之二：新加的模型网不许把"数据到底落在哪"那几行也盖掉。
+
+    测试数据根本身就长成模型名的形状（`ai-assistant-tests-…` 是三段以上连字符
+    标识符）。如果哪天有人把 `_public_scrub` 接到 paths 的启动日志或
+    logsanitizer 的登记表上，这一行会被咬掉——而运维查落点看的正是它。
+    """
+    from app.core import logsanitizer
+    from app.core.paths import data_root, log_data_locations
+
+    root = data_root()
+    assert root not in logsanitizer.registered_terms(), (
+        "数据根被登记进了 logsanitizer：server.log 里查落点的那几行会一起被打码")
+    assert logsanitizer.redact(root) == root, (
+        "日志脱敏器把数据根本身打码了：运维看不到数据到底落在哪")
+
+    log_data_locations()
+    out = capsys.readouterr().out
+    assert root in out, "启动摘要里的数据根被某层掩码吞了：\n" + out

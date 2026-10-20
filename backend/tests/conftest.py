@@ -47,6 +47,14 @@ os.environ["UPLOAD_DIR"] = os.path.join(_TEST_DATA_DIR, "uploads")
 # 判据由 tests/test_test_isolation.py 守着，新增可重定向的存储时那里会红。
 os.environ["CHROMA_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "chroma_db")
 
+# v0.34.3 补墙（#114）：发版物料的两只口子也必须在墙内。不指走时
+# `releases.runtime_manifest_path()` 解析到仓库 data/version.json——那是"告诉所有
+# 手机有新版本"的公开宣告；`apk_cache.cache_dir()` 解析到 data/apk——那是线上正在
+# 代管的字节。两者都由测试里随手构造的发布信息/假包写到。隔离判据从
+# paths.DATA_PATH_ENV_VARS 派生（见 test_test_isolation.py），漏掉哪一只都在那里红。
+os.environ["RELEASE_MANIFEST_PATH"] = os.path.join(_TEST_DATA_DIR, "version.json")
+os.environ["APK_CACHE_DIR"] = os.path.join(_TEST_DATA_DIR, "apk")
+
 # 任务账本同理：不指走的话，测试会把真 data/tasks.json 盖上戳。
 os.environ["TASKS_DB_PATH"] = os.path.join(_TEST_DATA_DIR, "tasks.json")
 # 偏好摘要与反馈原文也是导入期算成的模块常量，而且线上那个 300 秒定时器可能在
