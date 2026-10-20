@@ -1812,7 +1812,7 @@ async def list_all_tasks(principal: Principal = CurrentPrincipal):
     # 不在端点里再抄一份列表推导——抄的那份迟早和 getter 漂移。
     tasks = (list(task_store.values()) if is_admin
              else tasks_of(principal.user_id))
-    return {
+    body = {
         "total": len(tasks),
         "tasks": [
             {
@@ -1827,6 +1827,19 @@ async def list_all_tasks(principal: Principal = CurrentPrincipal):
             for t in tasks
         ]
     }
+    # ⭐ 工单 #36：任务行数没有上限，而"作废"不删行——唯一的删行路径是
+    # DELETE /v1/tasks/{id}，默认等待窗口 0（永不作废）下行数只增不减。所以给运维
+    # 一个**只读**的观察口：`stored_total` 是这份存储此刻握着的行数（也就是下一次
+    # 落盘会写进 data/tasks.json 的条目数），不是本次响应列出的行数（那是 total；
+    # 今天两者相等，将来分页后才会分开）。纯读 `len()`，不写盘、不删行。
+    #
+    # 只对 admin 报：全库行数对非属主也是跨用户信息，与任务详情那道"非属主与不存在
+    # 同一个 404"同一口径；普通用户的 total 仍然只是他自己看得见的那几行。
+    # 刻意不进 /health：那是"进程齐不齐"的检查清单（每项还要登记 _SEVERITY），
+    # 而这是一个随使用量增长、本身不代表故障的运维读数。
+    if is_admin:
+        body["stored_total"] = len(task_store)
+    return body
 
 @app.post("/v1/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, principal: Principal = CurrentPrincipal):
