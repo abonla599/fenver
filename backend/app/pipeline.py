@@ -317,7 +317,7 @@ class ChatPipeline:
                         })
                         if rich:
                             # 工单 #80 / #82：与流式那一支同构 —— 挂起时这里往 trace 步里报的
-                            # 也是 `ok:false`；第三态只借 summary 里那个 `⏸ ` 前缀表达（取自
+                            # 也是 `ok:false`；第三态只借 summary 里的挂起前缀表达（取自
                             # response.to_string；改取值，不造帧、不加键），卡片状态读 GET /v1/tasks/{id}，不读这一格。
                             trace_out.append(se.step_tool(tool_call.id, name, label,
                                                           outcome.ok, result,

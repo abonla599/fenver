@@ -20,9 +20,9 @@ from app.core import stream_events as se
 from app.core.guardrails import RoundGuard
 from app.core import approval
 from app.tools.executor import execute_tool_detailed, ToolOutcome
-# 第三态在帧里的**唯一**记号（工单 #82）。取自 response.py 那一份而不是在这里再写一遍：
-# 给模型的文本与给人的帧用同一个前缀，两个出口才不会各说各话。
-from app.tools.response import SUSPEND_PREFIX
+# 第三态在帧里的唯一记号（工单 #82）由 response.py 统一补齐：给模型的文本与给人的帧
+# 共用同一份前缀，两个出口才不会各说各话。
+from app.tools.response import ensure_pause_marker
 
 
 class StreamCancelled(Exception):
@@ -489,17 +489,15 @@ def stream_chat_events(
 
                 if rich:   # 两支都产出了 outcome（#76a），这里只判发不发帧
                     # ⭐ 工单 #82/#98 的结论（不是"待定"了）：第三态在既有帧里**只借
-                    # summary 这一格**表达——`⏸ ` 那句原文；ok 仍是 outcome.ok（挂起时
+                    # summary 这一格**承载挂起那句原文；ok 仍是 outcome.ok（挂起时
                     # False，冒充成功会让面板画对勾），七键形状一格不动，也不许把
                     # task_id/游标/问题塞进帧里。卡片要的"在等谁、能不能续"读的是
                     # GET /v1/tasks/{id}：帧上根本没有任务身份，拿它推任务状态只能推出
                     # 一份随进程没的假真相（stream_runs 的缓冲同理）。
-                    # 这一句是**保证**而非装饰：判据是 outcome.suspended，而 `⏸ ` 前缀
+                    # 这一句是**保证**而非装饰：判据是 outcome.suspended，而挂起前缀
                     # 只是它在文本投影里的影子（response.to_string）。影子将来被别的层
                     # 改写时，帧这一侧仍按判据说同一句话；给模型的 content 不动（result）。
-                    summary = result
-                    if outcome.suspended and not summary.startswith(SUSPEND_PREFIX):
-                        summary = SUSPEND_PREFIX + summary
+                    summary = ensure_pause_marker(result, outcome.suspended)
                     rframe = se.tool_result_frame(call_id, name, outcome.ok, summary,
                                                   elapsed_ms=outcome.elapsed_ms,
                                                   truncated=is_truncated)
