@@ -143,7 +143,7 @@
     <!-- ---------------- 任务 ---------------- -->
     <section class="sec hidden" id="secTasks">
       <h2>任务</h2>
-      <p class="pane-note">编排任务从 v0.24 起落盘：重启之后这张表还在，进程里跑的从来不是历史归档的全部。进行中的任务在恢复时会被标成“被重启打断”，不会自动续跑——要你手动重发。</p>
+      <p class="pane-note">编排任务从 v0.24 起落盘：重启之后这张表还在，进程里跑的从来不是历史归档的全部。进行中的任务在恢复时会被标成“被重启打断”，不会自动续跑——要你手动重发。「需要你输入」是任务停在断点上等人回答：问题原文只为这一种状态的行现读一次详情，回答入口只在任务发起人自己的 App / 网页里；本页只读，不提供代答。</p>
       <div class="task-list" id="taskList"></div>
     </section>
 
@@ -193,7 +193,7 @@
   <div id="detail" class="sheet hidden">
     <div class="card">
       <h2 id="detailTitle">任务</h2>
-      <div class="secret" id="detailText"></div>
+      <div class="task-detail" id="detailText"></div>
       <div class="foot">
         <button id="btnCloseDetail" class="btn btn-ghost btn-small" data-icon="check" data-label="关闭"></button>
       </div>
