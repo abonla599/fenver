@@ -400,8 +400,8 @@ a.trace-result-title:hover { text-decoration: underline; }
 /* v0.35 任务面的「需要你输入」卡片：视觉沿用上面那张审批卡（同一套圆角、边框、淡底），
    因为它答的是同一个问题——助手在外面卡住了，要人回一句话。区别在两处：问题原文来自
    GET /v1/tasks/{id} 而不是流里的帧，动作是一句自由文本而不是允许/拒绝。
-   .busy = 那一枪长阻塞 POST 还在途（服务端不会因为这条连接断了就停下），此时把输入
-   收起来、只留「执行中」那一句，免得人以为没反应又敲一遍。 */
+   .busy = 那一枪长阻塞 POST 还在途（服务端不会因为这条连接断了就停下）。此时输入留在
+   原地、只压暗并由提交那一侧禁用，不收起——收起后人就看不见自己在等什么。 */
 .msg-task { display: flex; flex-direction: column; gap: 6px;
             margin: 10px 0 0; padding: 10px 12px;
             border: 1px solid var(--line); border-radius: 8px;
@@ -417,7 +417,7 @@ a.trace-result-title:hover { text-decoration: underline; }
                      border: 1px solid var(--line); border-radius: 6px;
                      background: var(--bg); color: var(--text); }
 .task-answer.hidden { display: none; }
-.msg-task.busy .task-answer { display: none; }
+.msg-task.busy .task-answer { opacity: .55; }
 .task-state { margin: 0; color: var(--text-2); font-size: 12px; }
 .task-state.hidden { display: none; }
 /* 面板骨架：标题行 + 列表 + 卡片。列表条目按整行可点做（手机上按不准一行的右半截），
