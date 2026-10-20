@@ -30,6 +30,10 @@
         <button class="nav-item" id="navMemory"><span class="ni-ico">◈</span>长期记忆</button>
         <!-- 日程是一等功能，不藏在设置深处：设计稿 T0.1 的侧栏就是 会话/记忆/日程/设置。 -->
         <button class="nav-item" id="navSchedule"><span class="ni-ico">▤</span>日程</button>
+        <!-- 任务（v0.35 #133）：编排任务跑起来会挂在某一步等人给一个答案，此前双端唯一的
+             发起入口在管理页、且发不出答案，所以"用户能回答"这件事在 web 侧从没存在过。
+             和日程同一个理由——它是等人办事的地方，不该藏在设置深处。 -->
+        <button class="nav-item" id="navTask"><span class="ni-ico">◍</span>任务</button>
       </nav>
 
       <div class="search-box">
@@ -465,6 +469,38 @@
             <div class="sched-foot">
               <span class="dirty-note" id="schedDirty">尚无修改</span>
               <button class="btn-save" id="schedSaveBtn" disabled>保存</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 任务（v0.35 #133）：这一面只认 GET /v1/tasks/{id}，一个 SSE 帧都不读。
+             骨架留在 HTML（可访问性名字与静态文案），会变的部分（列表、问题原文、进度、
+             时限、状态句）全由 app.js 的 renderTaskList / paintTaskCard 铺：与日程同一个
+             理由——这里写死任何一条任务或任何一句问题，就等于和服务端各存一份真相。 -->
+        <section class="set-page hidden" data-page="tasks" id="paneTasks">
+          <div class="task-panel">
+            <div class="task-head">
+              <h3 class="sched-h1">任务</h3>
+              <button class="btn btn-ghost" id="taskRefresh" type="button">刷新状态</button>
+            </div>
+            <p class="errbar hidden" id="taskError" role="alert"></p>
+            <div class="empty hidden" id="taskEmpty">
+              <span class="big">◍</span>这里还没有编排任务<br>助手替你分几步办的事会记在这一页
+            </div>
+            <ul class="task-list" id="taskList"></ul>
+            <!-- 「需要你输入」卡片：形状照 v0.31 的审批卡片（一行标题 + 正文 + 动作），
+                 差别是本质性的：它由 GET 现读而不是流里的帧画，所以服务重启后它照旧
+                 在；它的动作是一句话而不是「允许/拒绝」，因为等的是内容不是授权。
+                 默认 hidden：状态不是 waiting_user 就没有这一格。 -->
+            <div class="msg-task hidden" id="taskCard" aria-live="polite">
+              <div class="task-card-head" id="taskCardHead"></div>
+              <div class="task-question" id="taskQuestion"></div>
+              <div class="task-meta"><span class="task-progress" id="taskProgress"></span><span class="task-waiting" id="taskWaiting"></span></div>
+              <form class="task-answer" id="taskAnswerForm">
+                <input id="taskAnswerInput" type="text" placeholder="照它问的那句回答" autocomplete="off">
+                <button class="btn btn-primary" id="taskAnswerBtn" type="submit">发送</button>
+              </form>
+              <p class="task-state hidden" id="taskState"></p>
             </div>
           </div>
         </section>
