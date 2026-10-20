@@ -302,7 +302,7 @@ def test_startup_window_is_polled_with_a_knob_not_a_hardcoded_sleep():
     assert polled(PS1), "起进程与 /health 两处等待都必须轮询、都吃 -StartTimeoutSeconds"
     default = int(re.search(r"\[int\] \$StartTimeoutSeconds = (\d+)", PS1).group(1))
     assert default >= 60, f"默认上限 {default}s 撑不住一次冷启动（实测约 20s，留一倍余量）"
-    assert not re.search(r"Start-Sleep -Seconds (1[0-9]|[2-9][0-9])\r?\n\$running = Get-LiveProcess", PS1), \
+    assert not re.search(r"Start-Sleep -Seconds (1[0-9]|[2-9][0-9])\r?\n\s*\$running = @\(Get-LiveProcess", PS1), \
         "写死的固定秒数不许回到起进程检查前面"
     # STARTED 必须在轮询循环之后、/health 判定之前：顺序反了就是"还没起来就验收"
     assert _line_of(r"\$bootDeadline = ", PS1) < _line_of(r"^Write-Output \('STARTED pid='", PS1) \

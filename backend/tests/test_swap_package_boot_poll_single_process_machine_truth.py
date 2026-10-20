@@ -34,6 +34,14 @@ r"""**机器形状锁**（ticket #50）：问这台机器——「换包轮询�
 $null 而 `@($running).Count` 是 1）——反例不读脚本，讲的全是机器事实，作用与那份
 「裸 `.Enabled`」对照一样：有人把写法改回去时，红的是判决锁，而这条把为什么红当场说给他听。
 
+**#52（第二轮）**：`@($running).Count` 对**字面量 `$null`** 也数成 1；今天安全仅仅因为
+`$running` 每轮都重新赋值。修法是把 `@()` 移到**赋值点**并过滤 `$null` 元素
+（`$running = @(Get-LiveProcess | Where-Object { $null -ne $_ })`），判决改读
+`$running.Count`。于是本文件同时抄**赋值表达式**与判决表达式进探针，并新增 literal-null
+三档：字面 `$null` -> FALSE、空数组 -> FALSE、`@($null)` -> TRUE（机器实测表
+FALSE/FALSE/TRUE）。**不许退回 `-not` 写法**：它在 0/1/2 进程上答 FALSE/FALSE/TRUE
+（零进程不再拉起、两个在跑还再拉一个），那是 #51 已经量过的危险方向。
+
 顺带钉住 `Stop-AfterFailure` 里那句重启判决（票面写作 `:493`，本文件从 `:474` 时代起盯它）：
 #51 之前它是裸 `.Count` 写法，三种进程数**碰巧**都对（0/1/2 → True/False/False）——一个进程时
 `.Count` 是 $null，而 `$null -eq 0` 是 False，于是分支不开。#51 把它改成
@@ -96,17 +104,25 @@ _BODY_HEAD = "function Get-LiveProcess {"
 _BODY_NEEDLE = "Get-CimInstance Win32_Process -Filter"
 
 # 三种形状的机器事实（2026-10-17 本机实测，见模块 docstring；**不读脚本内容**）。
+# #52 起另加 assigned_*：赋值点把结果变成数组并过滤 $null，raw 那几格仍描述
+# Get-LiveProcess 的原始返回值（#50 的展平事实不随赋值写法改变）。
 _SHAPE_FACTS = {
     "zero": {"is_array": "False", "is_null": "True", "count_is_null": "False",
              "count_value": "0", "wrapped_count": "0", "type_name": "NULL",
-             "first_pid": "NONE"},
+             "first_pid": "NONE", "assigned_is_array": "True", "assigned_count": "0"},
     "one": {"is_array": "False", "is_null": "False", "count_is_null": "True",
             "count_value": "NULL", "wrapped_count": "1", "type_name": _CIM_TYPE,
-            "cimclass": _CIM_CLASS, "first_pid": "4242"},
+            "cimclass": _CIM_CLASS, "first_pid": "4242",
+            "assigned_is_array": "True", "assigned_count": "1"},
     "two": {"is_array": "True", "is_null": "False", "count_is_null": "False",
             "count_value": "2", "wrapped_count": "2", "type_name": "System.Object[]",
-            "first_pid": "4242"},
+            "first_pid": "4242", "assigned_is_array": "True", "assigned_count": "2"},
 }
+
+# #52 的 literal-null 三档（机器判，不读脚本）：判决表达式只读 $running.Count。
+# 字面 $null 与空数组都是 FALSE；@($null) 是 TRUE —— 所以 "@() 包一层"不是恒等，
+# 赋值点必须把 $null 元素滤掉。
+_LITERAL_NULL_EXPECT = {"literal": "FALSE", "empty": "FALSE", "wrapped": "TRUE"}
 
 # 判决的机器事实：一个进程只有「再包一层」才看得见；裸写法在 0/2 上与它同答（所以旧用例
 # 集合 {0,2} 永远分不出来），只在 1 上分道。
@@ -138,18 +154,24 @@ function Get-CimInstance {
 __GET_LIVE_PROCESS__
 function Eval-Shape([string] $label, [int] $n) {
     $script:fakeCount = $n
-    $running = Get-LiveProcess
+    $raw = Get-LiveProcess
+    # __ASSIGN__ is the script's OWN assignment expression (ticket #52 moved the
+    # @() and the $null filter here). $raw keeps describing what the reader itself
+    # returned, which is what the #50 shape facts are about.
+    $running = __ASSIGN__
     'shape=' + $label
-    'is_array=' + ($running -is [array])
-    'is_null=' + ($null -eq $running)
-    'count_is_null=' + ($null -eq $running.Count)
-    'count_value=' + $(if ($null -eq $running.Count) { 'NULL' } else { [string] $running.Count })
-    'wrapped_count=' + (@($running).Count)
-    'type_name=' + $(if ($null -eq $running) { 'NULL' } else { $running.GetType().FullName })
-    'cimclass=' + $(if ($null -eq $running) { 'NULL' } else { [string] $running.CimClass.CimClassName })
-    'first_pid=' + $(if (@($running).Count -ge 1) { [string] (@($running)[0]).ProcessId } else { 'NONE' })
-    'poll_bare=' + $(if ($running.Count -ge 1) { 'TRUE' } else { 'FALSE' })
-    'poll_wrapped=' + $(if ((@($running).Count) -ge 1) { 'TRUE' } else { 'FALSE' })
+    'is_array=' + ($raw -is [array])
+    'is_null=' + ($null -eq $raw)
+    'count_is_null=' + ($null -eq $raw.Count)
+    'count_value=' + $(if ($null -eq $raw.Count) { 'NULL' } else { [string] $raw.Count })
+    'wrapped_count=' + (@($raw).Count)
+    'type_name=' + $(if ($null -eq $raw) { 'NULL' } else { $raw.GetType().FullName })
+    'cimclass=' + $(if ($null -eq $raw) { 'NULL' } else { [string] $raw.CimClass.CimClassName })
+    'first_pid=' + $(if (@($raw).Count -ge 1) { [string] (@($raw)[0]).ProcessId } else { 'NONE' })
+    'assigned_is_array=' + ($running -is [array])
+    'assigned_count=' + $running.Count
+    'poll_bare=' + $(if ($raw.Count -ge 1) { 'TRUE' } else { 'FALSE' })
+    'poll_wrapped=' + $(if ((@($raw).Count) -ge 1) { 'TRUE' } else { 'FALSE' })
     'poll_extracted=' + $(if __POLL_COND__ { 'TRUE' } else { 'FALSE' })
     'stop_bare=' + $(if ((Get-LiveProcess).Count -eq 0) { 'TRUE' } else { 'FALSE' })
     'stop_wrapped=' + $(if (@(Get-LiveProcess).Count -eq 0) { 'TRUE' } else { 'FALSE' })
@@ -159,6 +181,17 @@ function Eval-Shape([string] $label, [int] $n) {
 Eval-Shape 'zero' 0
 Eval-Shape 'one' 1
 Eval-Shape 'two' 2
+# #52 literal-null truth table: the PREDICATE alone, fed values fixed here (not read
+# from the script). Expected on this machine: FALSE / FALSE / TRUE.
+$running = $null
+'nullcase_literal=' + $(if __POLL_COND__ { 'TRUE' } else { 'FALSE' })
+$running = @()
+'nullcase_empty=' + $(if __POLL_COND__ { 'TRUE' } else { 'FALSE' })
+$running = @($null)
+'nullcase_wrapped=' + $(if __POLL_COND__ { 'TRUE' } else { 'FALSE' })
+# Counterexample fixed here: the OLD wrapping on a literal $null counts 1.
+$running = $null
+'old_wrap_literal=' + $(if ((@($running).Count) -ge 1) { 'TRUE' } else { 'FALSE' })
 'stub_calls=' + $script:stubCalls
 'psversion=' + $PSVersionTable.PSVersion.ToString()
 'probe_done=yes'
@@ -175,19 +208,47 @@ def _skip_machine() -> None:
                 "所以这道门的放行复跑必须在 Windows 现网机上做。")
 
 
-# ------------------------------------------------------------------ 抽脚本自己的两条判决
+# ------------------------------------------------------------------ 抽脚本自己的赋值与两条判决
 def _cond_at_if_line(line: str):
     m = _IF_LINE.match(line)
     return None if m is None else m.group("cond").strip()
 
 
+# #52 认下来的赋值形状：@() 必须在赋值点，且过滤字面 $null。只放行这三个原文，
+# 别的写法一律 None（调用方判红）——探针里拼的是生产代码，不放行就没有第二把尺子。
+_ALLOWED_ASSIGNMENTS = (
+    "@(Get-LiveProcess | Where-Object { $null -ne $_ })",
+    "@(Get-LiveProcess)",
+    "Get-LiveProcess",
+)
+
+
+def _poll_assignment(text: str):
+    """轮询里 `$running = ...` 的**右侧表达式原文**（脚本自己写的赋值）。
+
+    定位复用 `_boot_region` 的 read 行，只剥 `$running = ` 前缀。形状不在
+    `_ALLOWED_ASSIGNMENTS` 里就返回 None：探针拼的必须是生产那一句，宁可红。
+    """
+    reg = _boot_region(text)
+    if reg is None:
+        return None
+    line = reg["lines"][reg["read"]]
+    m = re.match(r"^\s*\$running = (?P<rhs>.+?)\s*$", line)
+    if m is None:
+        return None
+    rhs = m.group("rhs")
+    if rhs not in _ALLOWED_ASSIGNMENTS:
+        return None
+    return {"line": reg["read"], "expr": rhs}
+
+
 def _poll_predicate(text: str):
     """轮询里那句「看见进程没有」的**条件原文**（脚本自己写的表达式）。
 
-    定位：`_boot_region` 的顶格锚点给出 `$running = Get-LiveProcess` 那一行，再在循环体内
-    （读到该行之后、与 `while` 配平的那一行之前）找**恰好一条**条件里带 `$running` 的
-    `if (...) {`。零条、两条、或者条件里根本不带 `$running`，一律 None——两条就是两份真相，
-    本文件不知道该问哪一条，宁可不判。
+    定位：`_boot_region` 的顶格锚点给出 `$running = @(Get-LiveProcess ...)` 那一行，
+    再在循环体内（读到该行之后、与 `while` 配平的那一行之前）找**恰好一条**条件里带
+    `$running` 的 `if (...) {`。零条、两条、或者条件里根本不带 `$running`，一律 None——
+    两条就是两份真相，本文件不知道该问哪一条，宁可不判。
     """
     reg = _boot_region(text)
     if reg is None:
@@ -247,8 +308,8 @@ def _expr_is_safe(cond: str) -> bool:
     return "$running" in cond or "Get-LiveProcess" in cond
 
 
-def _build_probe_text(live_exe: str, poll_cond: str, stop_cond: str, body: str):
-    """把**脚本自己那两条判决 + 脚本自己那句读法**拼进探针，并证明拼进去的就是它们。
+def _build_probe_text(live_exe: str, assign_expr: str, poll_cond: str, stop_cond: str, body: str):
+    """把**脚本自己的赋值 + 两条判决 + 那句读法**拼进探针，并证明拼进去的就是它们。
 
     这一步是「探针跑的不是另一条表达式 / 另一段代码」的接线证明；任何一环不过就返回 None，
     调用方判红——绝不退回去跑一条更好写的表达式。
@@ -256,14 +317,19 @@ def _build_probe_text(live_exe: str, poll_cond: str, stop_cond: str, body: str):
     「if 中缺少 '('」，见 2026-10-17 第一次跑），补出来的形状与脚本原文逐字相同：
     脚本那句本来也是 `if (<cond>) {`，cond 自己不带外层括号。
     """
-    if body is None or not _expr_is_safe(poll_cond) or not _expr_is_safe(stop_cond):
+    if body is None or assign_expr not in _ALLOWED_ASSIGNMENTS:
+        return None
+    if not _expr_is_safe(poll_cond) or not _expr_is_safe(stop_cond):
         return None
     text = (_PROBE_TEMPLATE
             .replace("__LIVE_EXE__", live_exe)
+            .replace("__ASSIGN__", assign_expr)
             .replace("__POLL_COND__", "(" + poll_cond + ")")
             .replace("__STOP_COND__", "(" + stop_cond + ")")
             .replace("__GET_LIVE_PROCESS__", body))
     if "__" in text:
+        return None
+    if ("$running = " + assign_expr) not in text:
         return None
     for tag, cond in (("poll_extracted", poll_cond), ("stop_extracted", stop_cond)):
         needle = "'" + tag + "=' + $(if (" + cond + ") { 'TRUE' } else { 'FALSE' })"
@@ -281,7 +347,8 @@ def _build_probe_text(live_exe: str, poll_cond: str, stop_cond: str, body: str):
 # 归进最后一个 shape 段里（2026-10-17 第一次跑就是这么丢了 probe_done 的）。
 _SHAPE_KEYS = frozenset((
     "is_array", "is_null", "count_is_null", "count_value", "wrapped_count", "type_name",
-    "cimclass", "first_pid", "poll_bare", "poll_wrapped", "poll_extracted",
+    "cimclass", "first_pid", "assigned_is_array", "assigned_count",
+    "poll_bare", "poll_wrapped", "poll_extracted",
     "stop_bare", "stop_wrapped", "stop_extracted",
 ))
 
@@ -323,19 +390,20 @@ def _run_shape_probe(text: str, work: Path, tag: str = "script"):
     """在**仓库外**的 work 目录里生成并只读跑一次形状探针，返回 (shapes, kv, 探针源码)。"""
     if _POWERSHELL is None:
         _skip_machine()
+    assign = _poll_assignment(text)
     poll = _poll_predicate(text)
     stop = _stop_predicate(text)
     body = _reader_body(text)
-    if poll is None or stop is None or body is None:
+    if assign is None or poll is None or stop is None or body is None:
         return None
-    key = (poll["cond"], stop["cond"], body)
+    key = (assign["expr"], poll["cond"], stop["cond"], body)
     if key in _CACHE:
         return _CACHE[key]
     work.mkdir(parents=True, exist_ok=True)
     live = work / ("fake-live-exe-" + tag + ".bin")
     # 只是个占位文件，让 :493 那条条件的 Test-Path 那半边真的成立；探针从不执行它。
     live.write_bytes(b"MZ-fake-not-an-executable")
-    src = _build_probe_text(live.as_posix(), poll["cond"], stop["cond"], body)
+    src = _build_probe_text(live.as_posix(), assign["expr"], poll["cond"], stop["cond"], body)
     if src is None:
         return None
     path = work / ("probe-shape-" + tag + ".ps1")
@@ -346,7 +414,7 @@ def _run_shape_probe(text: str, work: Path, tag: str = "script"):
     out = (proc.stdout or b"").decode("utf-8", "replace")
     err = (proc.stderr or b"").decode("utf-8", "replace")
     result = {"rc": proc.returncode, "out": out, "err": err, "path": str(path),
-              "src": src, "poll": poll, "stop": stop, "body": body}
+              "src": src, "assign": assign, "poll": poll, "stop": stop, "body": body}
     _CACHE[key] = result
     return result
 
@@ -404,24 +472,31 @@ def _write_crlf_copy(work: Path, name: str, text: str) -> Path:
 
 @pytest.fixture(scope="module")
 def script_tables(tmp_path_factory):
-    """用**当前被锁的那份脚本**自己的两条判决跑一次探针，结果整个模块共用。"""
+    """用**当前被锁的那份脚本**自己的赋值与两条判决跑一次探针，结果整个模块共用。"""
     if _POWERSHELL is None:
         _skip_machine()
     work = tmp_path_factory.mktemp("boot-poll-shape")
     got = _machine_tables(PS1, work, "script")
     assert got is not None, (
-        "探针生不出来：两处判决有一句定位不到，或那句读法的函数体形状不对（判法见 "
-        "_poll_predicate / _stop_predicate / _reader_body）")
+        "探针生不出来：赋值/两处判决有一句定位不到，或那句读法的函数体形状不对（判法见 "
+        "_poll_assignment / _poll_predicate / _stop_predicate / _reader_body）")
     return got
 
 
 # ------------------------------------------------------------------ 静态四条
 def test_both_predicates_are_locatable_and_each_is_the_only_one():
-    """前提锁：轮询判决与重启判决都必须**恰好一条**，且都读 `.Count`。
+    """前提锁：赋值、轮询判决、重启判决都必须**恰好一条**，且判决都读 `.Count`。
 
-    「锚点找不到」与「同一段里出现两条真相」是两种红法，都要红：两条都抽不出来的话，
+    「锚点找不到」与「同一段里出现两条真相」是两种红法，都要红：任何一环抽不出来，
     本文件的机器锁就无从接线。
     """
+    assign = _poll_assignment(PS1)
+    assert assign is not None, (
+        "轮询里 `$running = ...` 的赋值表达式定位不到，或形状不在 _ALLOWED_ASSIGNMENTS 里"
+        "（#52：@() 必须在赋值点并过滤 $null）")
+    assert assign["expr"] == "@(Get-LiveProcess | Where-Object { $null -ne $_ })", (
+        f"赋值形状退回危险写法：{assign['expr']!r}——@($null) 会数成 1，"
+        "字面 $null 必须在这里被过滤掉")
     poll = _poll_predicate(PS1)
     assert poll is not None, (
         "轮询里那句「看见进程没有」的 if 定位不到（判法见 _poll_predicate：顶格 while 锚点 + "
@@ -432,6 +507,8 @@ def test_both_predicates_are_locatable_and_each_is_the_only_one():
         "全文件恰好一条条件里带 Get-LiveProcess 的 if）")
     assert "$running" in poll["cond"] and "Get-LiveProcess" in stop["cond"], (
         f"抽出来的不是那两条判决：poll={poll['cond']!r} stop={stop['cond']!r}")
+    assert "$running.Count -ge 1" == poll["cond"], (
+        "轮询判决必须只读赋值点保证过的数组的 .Count；回到 @($running) 包裹会把字面 $null 数成 1")
     body = _reader_body(PS1)
     assert body is not None, (
         "Get-LiveProcess 的函数体抄不出来（必须以 `function Get-LiveProcess {` 开头、"
@@ -439,16 +516,19 @@ def test_both_predicates_are_locatable_and_each_is_the_only_one():
 
 
 def test_probe_splices_the_scripts_own_reader_and_both_its_own_predicates():
-    """接线锁：探针跑的**就是脚本抽出来的那两条表达式和那段读法**，不是另一条好看的。
+    """接线锁：探针跑的**就是脚本抽出来的赋值、两条表达式和那段读法**，不是另一条好看的。
 
     没有这一条，机器那四条完全可以靠「另拼一条恒成立的表达式」恒绿。
     """
+    assign = _poll_assignment(PS1)
     poll = _poll_predicate(PS1)
     stop = _stop_predicate(PS1)
     body = _reader_body(PS1)
-    assert poll is not None and stop is not None and body is not None
-    src = _build_probe_text("C:/fake/dir/run_backend.exe", poll["cond"], stop["cond"], body)
+    assert assign is not None and poll is not None and stop is not None and body is not None
+    src = _build_probe_text("C:/fake/dir/run_backend.exe", assign["expr"],
+                            poll["cond"], stop["cond"], body)
     assert src is not None, "探针源码生不出来（_build_probe_text 的校验没过）"
+    assert "$running = " + assign["expr"] in src, "脚本自己那句赋值没有原样落到探针里"
     for needle in ((lambda tag, cond:
                     "'" + tag + "=' + $(if (" + cond + ") { 'TRUE' } else { 'FALSE' })")(t, c)
                    for t, c in (("poll_extracted", poll["cond"]), ("stop_extracted", stop["cond"]))):
@@ -473,12 +553,13 @@ def test_generated_probe_refuses_an_expression_that_is_not_bare():
     正控：脚本今天那两条必须过。反例：带 `;` / `{` / 反引号 / 换行 / 括号的非法形状必须被
     拒（返回 None）——少了这一条，「把脚本里的文本片段拼进生成的 .ps1」就是在拿生产机冒险。
     """
+    assign = _poll_assignment(PS1)
     poll = _poll_predicate(PS1)
     stop = _stop_predicate(PS1)
     body = _reader_body(PS1)
-    assert poll and stop and body
-    assert _build_probe_text("C:/f/a.bin", poll["cond"], stop["cond"], body) is not None, (
-        "正控：今天那两条表达式必须能拼进探针，否则护栏是在拒一切")
+    assert assign and poll and stop and body
+    assert _build_probe_text("C:/f/a.bin", assign["expr"], poll["cond"], stop["cond"], body) is not None, (
+        "正控：今天那句赋值与两条表达式必须能拼进探针，否则护栏是在拒一切")
     for bad in ("$running.Count -ge 1; Remove-Everything",
                 "$running.Count -ge 1 } else { $x",
                 "`$running.Count -ge 1",
@@ -486,8 +567,10 @@ def test_generated_probe_refuses_an_expression_that_is_not_bare():
                 "$running.Count -ge 1 > out.txt",
                 "$running.Count -ge 1 # comment"):
         assert _EXPR_SAFE.match(bad) is None, f"反例被放进来了：{bad!r}"
-        assert _build_probe_text("C:/f/a.bin", bad, stop["cond"], body) is None, (
+        assert _build_probe_text("C:/f/a.bin", assign["expr"], bad, stop["cond"], body) is None, (
             f"非法表达式竟然拼得出探针：{bad!r}")
+    assert _build_probe_text("C:/f/a.bin", "$running = $null", poll["cond"], stop["cond"], body) is None, (
+        "不在 _ALLOWED_ASSIGNMENTS 里的赋值形状必须被拒（句子里带不认识的赋值 = 换了生产代码）")
     assert _expr_is_safe("SomeStringWithoutAnyReference") is False, (
         "连 $running / Get-LiveProcess 都不带的表达式不是本票要问的那一条，必须拒")
 
@@ -499,12 +582,13 @@ def test_probe_cannot_touch_the_live_process_list_or_the_network():
     现网此刻就在这台机器的 8000 端口上服务，`dist\\run_backend\\run_backend.exe` 正是
     `Get-LiveProcess` 按全路径匹配的那个对象；本文件一次都不许真去查它。
     """
+    assign = _poll_assignment(PS1)
     poll = _poll_predicate(PS1)
     stop = _stop_predicate(PS1)
     body = _reader_body(PS1)
-    assert poll and stop and body
+    assert assign and poll and stop and body
     fake = "C:/fake/outside-the-repo/run_backend-probe-only.bin"
-    src = _build_probe_text(fake, poll["cond"], stop["cond"], body)
+    src = _build_probe_text(fake, assign["expr"], poll["cond"], stop["cond"], body)
     assert src is not None, "探针源码生不出来"
     assert src.isascii(), "生成的探针必须纯 ASCII：PS 5.1 会把带中文的无 BOM .ps1 错解码成语法错误"
     assert "Invoke-RestMethod" not in src and "127.0.0.1" not in src, (
@@ -550,9 +634,8 @@ def test_machine_the_scripts_own_poll_predicate_sees_exactly_one_process(script_
     """机器判据·本票本体：**脚本自己那条轮询判决**，在 0/1/2 三种形状上必须分别是
     FALSE / TRUE / TRUE。
 
-    一个进程（现网常态）那一档就是 #50 的洞：`$running.Count -ge 1` 在这里恒假，轮询破不出
-    循环、每次换包烧完 $StartTimeoutSeconds。判决的期望值写死在本文件（机器事实），
-    不是从脚本里读出来的——不许被测对象自报判决。
+    一个进程（现网常态）那一档就是 #50 的洞；#52 之后判决读的是赋值点保证过的数组，
+    赋值表达式来自脚本自己。判决的期望值写死在本文件（机器事实），不是从脚本里读出来的。
     """
     v = script_tables["v"]
     for shape, want in _POLL_EXPECT["extracted"].items():
@@ -561,8 +644,34 @@ def test_machine_the_scripts_own_poll_predicate_sees_exactly_one_process(script_
             f"脚本自己那句 {script_tables['ran']['poll']['cond']!r} 在 {shape} 个进程时"
             f"这台机器判成 {got}，应为 {want}。一个进程判成 FALSE 就是 ticket #50："
             "裸 CimInstance 的 .Count 是 $null，-ge 1 恒假，轮询永远破不出循环")
+    assert script_tables["ran"]["assign"]["expr"] == "@(Get-LiveProcess | Where-Object { $null -ne $_ })", (
+        "探针跑的赋值表达式不是脚本今天那一句：接线断了")
     assert v["poll"]["extracted"] == v["poll"]["wrapped"], (
         f"脚本那条判决与「包一层 @()」的写法不同答（{v['poll']}）：判决没在数元素，在猜形状")
+    assert "-not" not in script_tables["ran"]["poll"]["cond"], (
+        "判决退回 -not 写法：机器实测它在 0/1/2 上答 FALSE/FALSE/TRUE，"
+        "零进程不拉起、两个在跑还再拉一个")
+
+
+def test_machine_literal_null_is_not_counted_as_one(script_tables):
+    """#52 的机器判据：字面 $null / 空数组 / @($null) 分别是 FALSE / FALSE / TRUE。
+
+    这条表讲的是「@() 包一层不是恒等」：`@($null).Count` 是 1，所以赋值点必须把
+    `$null` 元素滤掉；而判决读 `$running.Count` 后，字面 `$null` 答 0（FALSE），
+    不会让轮询带着 `$livePid = $null` break。改前那种 `@($running)` 包裹在同一份
+    探针里作为反例固定下来（old_wrap_literal=TRUE），红绿两侧都是这台机器答的。
+    """
+    kv = script_tables["kv"]
+    for key, want in (("nullcase_literal", _LITERAL_NULL_EXPECT["literal"]),
+                      ("nullcase_empty", _LITERAL_NULL_EXPECT["empty"]),
+                      ("nullcase_wrapped", _LITERAL_NULL_EXPECT["wrapped"])):
+        got = kv.get(key)
+        assert got == want, (
+            f"{key} 在这台机器上答 {got}，应为 {want}（字面 $null/空数组/@($null) = "
+            "FALSE/FALSE/TRUE）：判决对字面 $null 的语义变了，先重跑探针再动判据")
+    assert kv.get("old_wrap_literal") == "TRUE", (
+        "旧的 @($running) 包裹对字面 $null 竟然不数 1：那 #52 的前提不成立，"
+        "本文件与赋值点的过滤都要重写")
 
 
 def test_machine_positive_control_and_the_counter_example_show_why_zero_and_two_cannot_tell(
@@ -619,41 +728,50 @@ def test_machine_the_restart_condition_fires_only_when_nothing_runs(script_table
 
 
 # ------------------------------------------------------------------ 牙印三条
-def test_mutation_unwrapping_the_poll_predicate_goes_red_on_the_machine(tmp_path):
-    """牙印一（形状-only 变异）：只把判决里的 `@(...)` 摘掉，别的一个字节不动。
+def test_mutation_unwrapping_the_poll_assignment_goes_red_on_the_machine(tmp_path):
+    """牙印一（#52 的形状-only 变异）：只把**赋值点**的 `@(...)` 摘掉，判决一个字节不动。
 
-    与「退回改动前那一份」的区别在这里：注释、try、stage 全都还在，**只有判决回到裸写法**。
-    红必须是这台机器判的：探针拿的是**副本自己**抽出来的表达式，于是 `one` 那一档答 FALSE，
-    阳性对照仍答 TRUE——形状参与判决，不是文本没匹配上。
+    与「退回改动前那一份」的区别在这里：注释、try、stage 全都还在，**只有赋值回到裸读**。
+    红必须是这台机器判的：探针拿的是**副本自己**抽出来的赋值表达式，于是 `one` 那一档
+    判决答 FALSE（裸 CimInstance 的 .Count 是 $null），阳性对照仍答 TRUE。
     """
-    poll = _poll_predicate(PS1)
-    assert poll is not None
-    wrapped_line = "if (" + poll["cond"] + ") {"
-    assert poll["cond"].startswith("@($running)"), (
-        f"真文件那句判决应当已经是包了一层的形状，实得 {poll['cond']!r}：那这条牙印没对象")
-    bare_line = "if ($running.Count -ge 1) {"
-    drifted = PS1.replace(wrapped_line, bare_line, 1)
+    assign = _poll_assignment(PS1)
+    assert assign is not None
+    assert assign["expr"] == "@(Get-LiveProcess | Where-Object { $null -ne $_ })", (
+        f"真文件那句赋值应当是包了一层并过滤 $null 的形状，实得 {assign['expr']!r}：这条牙印没有对象")
+    wrapped_line = "$running = " + assign["expr"]
+    drifted = PS1.replace(wrapped_line, "$running = Get-LiveProcess", 1)
     assert drifted != PS1, "变异样本没生效：replace 一个字节都没改"
-    copy = _write_crlf_copy(tmp_path, "swap-package-shape-only-unwrapped.ps1", drifted)
+    copy = _write_crlf_copy(tmp_path, "swap-package-assignment-unwrapped.ps1", drifted)
     on_disk = copy.read_text(encoding="utf-8")
     assert on_disk.replace("\r\n", "\n") == drifted.replace("\r\n", "\n"), "副本没落盘"
     assert SWAP_PS1.read_text(encoding="utf-8") == PS1, "仓库里那份被改了"
 
-    got = _poll_predicate(on_disk)
-    assert got is not None and got["cond"] == "$running.Count -ge 1", (
-        f"副本里抽出来的判决不对：{got}")
+    got = _poll_assignment(on_disk)
+    assert got is not None and got["expr"] == "Get-LiveProcess", (
+        f"副本里抽出来的赋值不对：{got}")
     tables = _machine_tables(on_disk, tmp_path, "unwrapped")
     assert tables is not None, "副本的探针生不出来"
     v = tables["v"]
     assert v["poll"]["extracted"]["one"] == "FALSE", (
-        "把 @() 摘掉之后这台机器仍然认出一个进程？那这条锁是空的：" + str(v["poll"]))
+        "把赋值的 @() 摘掉之后这台机器仍然认出一个进程？那这条锁是空的：" + str(v["poll"]))
+    assert tables["shapes"]["one"]["assigned_count"] != "1", (
+        f"裸读下来的 $running.Count 竟然还是 1：{tables['shapes']['one']}")
     assert v["poll"]["extracted"] == v["poll"]["bare"], (
-        "摘掉一层之后判决竟然不与「裸写法」同答：探针跑的不是副本那条表达式（接线断了）")
+        "摘掉赋值那一层之后判决竟然不与「裸写法」同答：探针跑的不是副本那条表达式（接线断了）")
     assert v["poll"]["wrapped"]["one"] == "TRUE", "阳性对照必须照旧为真，否则探针自己坏了"
     assert not _poll_sees_one_process(on_disk, tmp_path, "unwrapped-judgement"), (
-        "摘掉这一层，本票的核心判据必须红")
+        "摘掉赋值那一层，本票的核心判据必须红")
     assert _poll_sees_one_process(PS1, tmp_path, "control-judgement"), (
         "真文件必须先绿，否则上一条的红证明不了任何事")
+
+    unfiltered = PS1.replace(assign["expr"], "@(Get-LiveProcess)", 1)
+    assert unfiltered != PS1, "过滤样本没生效"
+    got_unfiltered = _poll_assignment(unfiltered)
+    assert got_unfiltered is not None and got_unfiltered["expr"] == "@(Get-LiveProcess)", (
+        "@() 但不过滤 $null 的样本应当仍可被抽出来（它是文本锁的反例，不是探针反例）")
+    assert "@(Get-LiveProcess | Where-Object { $null -ne $_ })" not in unfiltered, (
+        "把 $null 过滤器摘掉后，@() 仍会把 @($null) 数成 1——静态锁必须能看见")
 
 
 def test_mutation_the_restart_site_spellings_are_neutral_while_the_not_spelling_is_caught(tmp_path):

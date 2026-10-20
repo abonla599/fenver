@@ -8,7 +8,8 @@ r"""换包脚本**验收之后那段尾巴**的两处裸出口：step 8 的确�
   主流程最后一行附近**裸调**的（就在 `Write-Output 'SWAP-DONE'` 前一行人读的日志）。它吃的路径
   是 `data\watchdog-state.json`——本仓库自己的注释就写着"看门狗可能正在写这个文件"。这不是假设：
   `deploy/watchdog.ps1:585` 每一轮巡检都调 `Save-State`，巡检一分钟一次
-  （`register-watchdog.ps1:145` RepetitionInterval=1min），本机 2026-10-17 实测那份账的 mtime
+  （看门狗计划任务的 RepetitionInterval=1min；注册脚本是本机专属、刻意被 .gitignore 排除，
+  不是仓库文件），本机 2026-10-17 实测那份账的 mtime
   09:12:05 -> 09:13:05 -> 09:14:05（delta 60/59 秒，799 字节不变）。撤掉 try 之后这台机器当场
   演示（`test_mutation_unwrapping_the_budget_read_...`）：抛的是
   `Exception calling "ReadAllBytes" with "1" argument(s): The process cannot access the file

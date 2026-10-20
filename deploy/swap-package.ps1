@@ -38,8 +38,8 @@ after the live directory was moved aside - an auto-rollback there can turn one
 half-swap into two).
 
 Progress lines are one-token machine-parsable (PRECHECK / DISABLED / STOPPED /
-BACKUP / SWAPPED / HEALTH / ACCEPT / ENABLED / BUDGET / SWAP-DONE, plus
-ROLLBACK-MODE when -Rollback was used) so a future
+BACKUP / SWAPPED / HEALTH / ACCEPT / PROCESS-VIEW / ENABLED / BUDGET / SWAP-DONE,
+plus ROLLBACK-MODE when -Rollback was used) so a future
 automation can watch a swap without reading prose.
 Since the v0.34.2 abort fixes three more tokens carry the failure side, because
 an abort that prints nothing is how the crash guard got lost: DISABLED now
@@ -56,7 +56,11 @@ loop's own cadence, bounded by the window the loop already had, and gives up thr
 ABORT stage=boot-poll-threw) or final-enabled-read (the confirmation read right after the
 re-enable - it does not abort, it degrades into the ENABLED line below),
 DISABLE-THREW marks the disable call itself throwing: it prints those same four
-fields plus error=, and the stage token right after it says which of the three
+fields plus error= (ticket #48: each field is single-line and carries a sentinel
+when no value exists - enabled=True is fail-closed and via=no-answer says the
+switch never replied, so an all-empty "via=" can no longer be mistaken for an
+answer; a multi-line exception is collapsed to one physical line), and the stage
+token right after it says which of the three
 answers the switch actually gave - disable-threw-task-down (the guard really did
 go off, so this run owns it and hands it back), disable-threw-task-up (nothing
 was flipped, so no disable is owned), disable-threw-guard-state-unproven (the
@@ -68,6 +72,14 @@ different animal and the tokens say so: moved=yes with
 watchdog=left-disabled-by-design plus the printed ROLLBACK recipe, because a
 watchdog re-armed over a package nobody has accepted yet is not protection - it
 is a guardian for the thing under suspicion.
+PROCESS-VIEW=unproven health-build=ok marker=ok (ticket #49) is printed after
+acceptance and after the guard is back when the boot poll never saw the process
+and /health's build= was the only proof the package is up. It does not change
+the verdict; it exists so the missing process view is in the log instead of
+inferred from pid=-1.
+SNAPSHOT-RETENTION (ticket #62) is the one housekeeping token: state=off (keep<=0),
+absent, kept, ok or failed, with removed=N. It never changes the swap verdict and
+never deletes the snapshot this run wrote.
 
 THE POST-ACCEPTANCE TAIL DEGRADES INTO TOKENS INSTEAD OF DYING, and that is a rule, not a
 preference: past ACCEPT there is no failure allowed to leave the run token-less, because
@@ -118,10 +130,19 @@ cleanup may touch, so a copy meant to outlive the rollback package must sit wher
 does not go. The copies are copies: this step never moves or deletes an original, and a file it
 cannot read is reported unreadable rather than as zero records ("cannot read" and "read zero"
 are different verdicts, same rule as backend-entries=unproven above).
+Those copies would otherwise accumulate forever: data\ is inside the cleanup
+protection circle, so no generic cleanup will ever prune it (ticket #62). The ONE
+narrow rotation is Invoke-SnapshotRetention, called after a successful swap:
+it keeps the newest -SnapshotKeep stamps (default 10, 0 = off), NEVER deletes
+the stamp this run wrote, only touches direct children of data\swap-snapshots
+whose names are exactly yyyyMMdd-HHmmss, and stops on the first doubt
+(fail-closed) with SNAPSHOT-RETENTION state=failed. It runs after every SWAP-DONE
+precondition is met, and it can never turn a successful swap into a failure.
 backend/tests/test_swap_package_data_snapshot.py runs the WHOLE script against a fake
 project root with Start-Process / Stop-Process / the scheduled-task cmdlets stubbed to a log,
 and requires DATA-SAVED on the observed output BEFORE the first would-start entry - the
-ordering is proven by what this machine did, not by where the line sits.
+ordering is proven by what this machine did, not by where the line sits. The retention
+helper is exercised in the same file against tmp_path-only snapshot trees.
 
 Keep this file 100% ASCII. PowerShell 5.1 mis-decodes a UTF-8-no-BOM .ps1 with
 Chinese comments and dies on a syntax error - production then silently keeps
@@ -162,6 +183,15 @@ param(
     # clearing it is that the next real crash must not meet a spent allowance.
     # Set this only when the spent budget is itself evidence you want to read.
     [switch] $KeepBackendBudget,
+
+    # how many data\swap-snapshots\<stamp> directories to keep after a SUCCESSFUL
+    # swap (ticket #62). 10 is deliberately conservative: the copies are small
+    # (tasks.json + approvals.json), but they sit inside data\, which no cleanup
+    # pass may touch, so without a rotation they accumulate forever. 0 disables
+    # rotation entirely (the old behaviour). The snapshot this run just wrote is
+    # NEVER a deletion candidate, and any doubt stops the pruning (fail-closed) -
+    # see Invoke-SnapshotRetention for the exact rules.
+    [int] $SnapshotKeep = 10,
 
     # run every precheck and print the plan; touches no process and no file
     [switch] $DryRun,
@@ -240,7 +270,8 @@ $Backup = Join-Path $ProjectRoot ('dist\run_backend_old-' + $stamp)
 # _default_path), so a snapshot subdirectory is inert to the running service.
 $TasksJson       = Join-Path $ProjectRoot 'data\tasks.json'
 $ApprovalsJson   = Join-Path $ProjectRoot 'data\approvals.json'
-$DataSnapshotDir = Join-Path $ProjectRoot ('data\swap-snapshots\' + $stamp)
+$DataSnapshotRoot = Join-Path $ProjectRoot 'data\swap-snapshots'
+$DataSnapshotDir = Join-Path $DataSnapshotRoot $stamp
 
 $script:backupDone = $false
 # Whether THIS run currently holds the watchdog down. The restore machinery keys
@@ -255,6 +286,29 @@ function Add-Fail {
     # direct ArrayList mutation, never "return an array through the pipeline":
     # watchdog.ps1 documents a scalar-array flattening bug of the same shape.
     [void] $script:failures.Add($Line)
+}
+
+function Format-TokenField {
+    # One value inside a one-line machine token (ticket #48).
+    #
+    # Two shapes are forbidden and both were real: a $null/empty value printed as
+    # "via=" (the operator cannot tell "answered empty" from "never answered"), and
+    # an Exception.Message containing CR/LF splitting one token into two lines (the
+    # downstream reader then sees a second line with no token name at all). So:
+    #   - null or whitespace-only becomes the caller's SENTINEL, never "";
+    #   - every whitespace run (CR/LF/TAB included) collapses to one space;
+    #   - the result never ends with a newline.
+    # Deliberately not using -not / truthiness: #51 measured that spelling on this
+    # PowerShell and it answered FALSE/FALSE/TRUE on 0/1/2 processes, the dangerous
+    # direction. Explicit $null and empty checks keep the meaning readable.
+    # Prints nothing (assignment takes the WHOLE output stream - same rule as
+    # Get-WatchdogTaskState).
+    param($Value, [string] $Sentinel)
+    if ($null -eq $Value) { return $Sentinel }
+    $text = [string] $Value
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    if ($text -eq '') { return $Sentinel }
+    return $text
 }
 
 function Get-LiveProcess {
@@ -355,8 +409,10 @@ function Clear-BackendBudget {
     # because the swap itself had already succeeded and been guarded. The file's own
     # comment above says the watchdog may be mid-write to this exact path, and that
     # is a measurement, not a hedge: deploy/watchdog.ps1 calls Save-State at :585 on
-    # EVERY patrol, the patrol runs once a minute (register-watchdog.ps1:145
-    # RepetitionInterval=1min), and the live ledger's mtime here was sampled at
+    # EVERY patrol, and the patrol runs once a minute (that is the watchdog task's
+    # RepetitionInterval=1min; the registration script that sets it is machine-local
+    # and deliberately gitignored, so this file cites the fact, not a line number in
+    # an unshipped file), and the live ledger's mtime here was sampled at
     # 09:12:05 -> 09:13:05 -> 09:14:05 (delta exactly 60 s, 799 bytes unchanged) while
     # this ticket was being written. So a sharing violation here is a NORMAL outcome,
     # not an exotic one, and the odds of hitting it rise with every second the swap
@@ -585,6 +641,91 @@ function Save-RuntimeDataSnapshot {
         }
     }
     return [pscustomobject]@{ Ok = $true; Dir = $Dir; Tasks = $savedTasks; Approvals = $savedApprovals; Error = '' }
+}
+
+function Invoke-SnapshotRetention {
+    # Housekeeping for data\swap-snapshots (ticket #62). COPY-ONLY is a rule for the
+    # save path; this function is the ONE place in this script allowed to delete, and
+    # it only ever deletes a directory it can prove is a direct child of the snapshot
+    # root, named exactly yyyyMMdd-HHmmss, and older than the newest $Keep - never the
+    # snapshot this run just wrote, never a sibling of the root, never a file.
+    #
+    # WHY FAIL-CLOSED AND NOT ABORT: by the time this runs the swap has been accepted
+    # and the guard is back up, so deleting old copies is housekeeping, not a verdict.
+    # Everything uncertain - unreadable root, unreadable child list, a delete that
+    # throws, a reparse point - stops the pruning immediately and prints state=failed
+    # with the number already removed. The safest failure is "kept too many"; the one
+    # forbidden outcome is deleting something we could not prove is ours.
+    #
+    # WHY 10 AND NOT "keep the newest 1": these copies exist to make a rollback
+    # reversible, and the operator may need the copy from the release BEFORE the one
+    # being retired. A small ring is enough to stop unbounded growth while leaving the
+    # last few release windows intact. -SnapshotKeep 0 restores the old behaviour.
+    #
+    # Prints exactly one token; returns nothing. Never throws: a throw here would kill
+    # the run AFTER SWAP-DONE-worthy work, with no token at all.
+    param([string] $Root, [string] $CurrentDir, [int] $Keep)
+    if ($Keep -le 0) {
+        Write-Output ('SNAPSHOT-RETENTION state=off keep=' + $Keep + ' removed=0')
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Root)) {
+        Write-Output ('SNAPSHOT-RETENTION state=absent keep=' + $Keep + ' removed=0')
+        return
+    }
+    $rootFull = ''
+    $currentFull = ''
+    try {
+        $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+        if ($CurrentDir) { $currentFull = [System.IO.Path]::GetFullPath($CurrentDir).TrimEnd('\') }
+    } catch {
+        Write-Output ('SNAPSHOT-RETENTION state=failed keep=' + $Keep + ' removed=0 error=' + (Format-TokenField -Value $_.Exception.Message -Sentinel 'none'))
+        return
+    }
+    $dirs = @()
+    try {
+        $dirs = @(Get-ChildItem -LiteralPath $rootFull -Directory -ErrorAction Stop |
+            Where-Object { $_.Name -match '^[0-9]{8}-[0-9]{6}$' } |
+            Where-Object {
+                $parent = [System.IO.Path]::GetFullPath($_.Parent.FullName).TrimEnd('\')
+                $parent -ieq $rootFull
+            })
+    } catch {
+        Write-Output ('SNAPSHOT-RETENTION state=failed keep=' + $Keep + ' removed=0 error=' + (Format-TokenField -Value $_.Exception.Message -Sentinel 'none'))
+        return
+    }
+    $sorted = @($dirs | Sort-Object Name)
+    if ($sorted.Count -le $Keep) {
+        Write-Output ('SNAPSHOT-RETENTION state=kept keep=' + $Keep + ' removed=0 snapshots=' + $sorted.Count)
+        return
+    }
+    # Keep the NEWEST $Keep by name (the name IS the stamp) plus the current one even
+    # if it falls outside that window - "never delete the snapshot this run wrote" is
+    # absolute, not an emergent property of clock ordering.
+    $keepFull = @{}
+    foreach ($d in @($sorted | Select-Object -Last $Keep)) {
+        $keepFull[[System.IO.Path]::GetFullPath($d.FullName).TrimEnd('\')] = $true
+    }
+    if ($currentFull) { $keepFull[$currentFull] = $true }
+    $removed = 0
+    foreach ($d in $sorted) {
+        $full = [System.IO.Path]::GetFullPath($d.FullName).TrimEnd('\')
+        if ($keepFull.ContainsKey($full)) { continue }
+        if ($currentFull -and ($full -ieq $currentFull)) { continue }
+        if ((($d.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) { continue }
+        $parent = [System.IO.Path]::GetFullPath($d.Parent.FullName).TrimEnd('\')
+        if (-not ($parent -ieq $rootFull)) { continue }
+        try {
+            [System.IO.Directory]::Delete($full, $true)
+            $removed = $removed + 1
+        } catch {
+            # STOP here, keep everything else: fail-closed. The remaining candidates
+            # are still on disk and the next successful swap will try again.
+            Write-Output ('SNAPSHOT-RETENTION state=failed keep=' + $Keep + ' removed=' + $removed + ' error=' + (Format-TokenField -Value $_.Exception.Message -Sentinel 'none'))
+            return
+        }
+    }
+    Write-Output ('SNAPSHOT-RETENTION state=ok keep=' + $Keep + ' removed=' + $removed + ' snapshots=' + ($sorted.Count - $removed))
 }
 
 function Show-Rollback {
@@ -1051,7 +1192,15 @@ try {
     # carries the raw read so the line above ABORT says what the machine answered.
     # Which branch was taken is told by that branch's own stage token, never by a
     # field this handler computes about itself.
-    Write-Output ('DISABLE-THREW enabled=' + $disableProbe.Enabled + ' via=' + $disableProbe.EnabledSource + ' state=' + $disableProbe.State + ' instances=' + $disableProbe.Instances + ' error=' + $disableError)
+    # TICKET #48: every field goes through Format-TokenField. A null probe used to
+    # print "enabled= via= state= instances=" (four empty values, no way to tell
+    # "the switch answered empty" from "nothing answered at all") and a multi-line
+    # Exception.Message used to split the token across physical lines. The sentinels
+    # are chosen fail-CLOSED: an unknown enabled= answers True (same default as
+    # Get-WatchdogTaskState), and via=no-answer names exactly why that True is not
+    # proof the guard is up. "error=none" means the exception message was empty,
+    # which is itself a fact; it never means the disable succeeded.
+    Write-Output ('DISABLE-THREW enabled=' + (Format-TokenField -Value $disableProbe.Enabled -Sentinel 'True') + ' via=' + (Format-TokenField -Value $disableProbe.EnabledSource -Sentinel 'no-answer') + ' state=' + (Format-TokenField -Value $disableProbe.State -Sentinel 'no-answer') + ' instances=' + (Format-TokenField -Value $disableProbe.Instances -Sentinel 'no-answer') + ' error=' + (Format-TokenField -Value $disableError -Sentinel 'none'))
     if ($disableProbe -and -not $disableProbe.Enabled) {
         # (1) The switch says DOWN: the disable DID land even though the cmdlet threw,
         # so this run owns the disable. The flag goes on BEFORE the abort because it is
@@ -1206,6 +1355,11 @@ try {
     Stop-AfterFailure 'start' $_.Exception.Message
 }
 $livePid = 0
+# Ticket #49: true when the only evidence the new package is up is /health
+# answering the target build, because the process list never showed it. That is
+# an accepted success (see the fallback below), but the operator must be able to
+# see the missing corroboration in the log instead of inferring it from pid=-1.
+$processViewUnproven = $false
 $bootDeadline = (Get-Date).AddSeconds($StartTimeoutSeconds)
 # WHY THIS READ IS WRAPPED, AND WHY IT LEAVES THROUGH Stop-AfterFailure (#45).
 # Get-LiveProcess answers over CIM/WMI, and this file already documents twice
@@ -1274,7 +1428,28 @@ $bootPollFails = 0
 while ((Get-Date) -lt $bootDeadline) {
     Start-Sleep -Seconds 2
     try {
-        $running = Get-LiveProcess
+        # TICKET #52: the @() lives at the ASSIGNMENT, not at the predicate, and it
+        # also filters a literal $null element. Why both halves matter:
+        #   - #50's bug was a bare CimInstance arriving here and answering .Count as
+        #     $null, so a predicate on $running.Count alone was silently false with
+        #     exactly one process. @(...) at the assignment makes $running an array
+        #     on EVERY path out of the reader (measured: zero -> @(), one -> 1-element
+        #     array, two -> 2-element array).
+        #   - @() alone is not enough: @($null) counts 1 on this PowerShell. Today the
+        #     loop reassigns every pass, but a future "$running = $null" initialiser or
+        #     a path reaching the predicate without a fresh read would make the poll
+        #     "see" a process that does not exist, break with $livePid = $null, and
+        #     silently skip started-check ($livePid -eq 0 is false for $null). The
+        #     Where-Object drops a literal $null before it can become an element, so
+        #     the invariant is enforced at the site that creates the value.
+        # The predicate then reads $running.Count. Do NOT "tidy" this into the -not
+        # form: machine evidence on this box (2026-10-17, PS 5.1.26100.9549) is
+        # FALSE/FALSE/TRUE for 0/1/2 processes - it refuses to restart when the
+        # package is down and starts a second backend when two are already running.
+        # backend/tests/test_swap_package_boot_poll_single_process_machine_truth.py
+        # asks this machine about the assignment and the predicate (including a
+        # literal-$null case); do not simplify this back.
+        $running = @(Get-LiveProcess | Where-Object { $null -ne $_ })
         # Cleared only on a read that ANSWERED - see (3): this is what makes
         # "the poll could not look" and "the poll saw nothing" two different
         # verdicts instead of one guess.
@@ -1288,32 +1463,24 @@ while ((Get-Date) -lt $bootDeadline) {
         Write-Output ('READFAIL stage=boot-poll fails=' + $bootPollFails + ' error=' + $bootPollError)
         continue
     }
-    # ONE RUNNING PROCESS IS THE NORMAL CASE, AND IT ARRIVES HERE UNWRAPPED.
-    # Get-LiveProcess (:195-204) wraps its own pipeline in @(), but PowerShell
-    # enumerates function output element by element, so a one-element result
-    # lands on $running as a BARE CimInstance - and a bare CimInstance answers
-    # .Count as $null, which makes -ge 1 False. Measured on this box 2026-10-17
-    # (PS 5.1.26100.9549) with exactly one run_backend.exe serving, pid 126256:
-    # is_array=False, .Count=$null, ($running.Count -ge 1)=False, @($running) has
-    # 1 element. Do not eyeball this from scalar behaviour: an int answers .Count
-    # as 1 and $null answers it as 0 - the CimInstance is the exception, which is
-    # exactly why this survived two readers. Unbroken, the loop never breaks on
-    # the normal path: it burns the whole $StartTimeoutSeconds window on every
-    # swap, and the only pid it can then report is the /health sentinel below
-    # (-1) rather than the pid this loop exists to find.
-    # So re-wrap it, AT THE PREDICATE - the idiom this file already uses where it
-    # assigns $task, $stoppedPids and $stillListening, and the one watchdog.ps1
-    # uses against this same flattening bug (its :315 -is [array], :377, :480).
-    # The wrap is safe for the no-process case (measured: @(Get-LiveProcess)
-    # counts 0, and an $running freshly assigned from a command that emitted
-    # nothing also counts 0), but it is not a general identity - @($null) over a
-    # literal $null value counts 1 - so a future "$running = $null" initialiser
-    # plus a path that reaches this line without a fresh read would quietly
-    # change what the count means. The lock that asks the machine instead of the
-    # reader is backend/tests/
+    # ONE RUNNING PROCESS IS THE NORMAL CASE, and it is why the assignment above
+    # wraps in @(): PowerShell enumerates function output element by element, so a
+    # one-element reader result used to land here as a BARE CimInstance, and a bare
+    # CimInstance answers .Count as $null (measured on this box 2026-10-17, PS
+    # 5.1.26100.9549, with exactly one run_backend.exe serving, pid 126256:
+    # is_array=False, .Count=$null, ($running.Count -ge 1)=False, @($running) has 1
+    # element). Unbroken, the loop never breaks on the normal path: it burns the
+    # whole $StartTimeoutSeconds window on every swap, and the only pid it can then
+    # report is the /health sentinel below (-1) rather than the pid this loop exists
+    # to find. The assignment now guarantees an array, and the predicate reads that
+    # array's .Count directly. The filter in the assignment is #52: it keeps a
+    # literal $null from being counted as one element. At the predicate, a literal
+    # $null (if a future refactor ever reaches here without a fresh read) answers
+    # .Count = 0 - FALSE, fail-closed - instead of @($null).Count = 1. The lock that
+    # asks the machine instead of the reader is backend/tests/
     # test_swap_package_boot_poll_single_process_machine_truth.py and it goes red
-    # against an unwrapped predicate - do not "simplify" this back.
-    if (@($running).Count -ge 1) {
+    # against an unwrapped assignment - do not "simplify" this back.
+    if ($running.Count -ge 1) {
         $livePid = (@($running)[0]).ProcessId
         break
     }
@@ -1341,7 +1508,12 @@ if ($livePid -eq 0) {
     if ($asked -and $asked.build -eq $ExpectedVersion) {
         # -1 = up per /health, invisible to the process list. Deliberately not 0:
         # 0 is the value that means "declare failure and print the recipe".
+        # The verdict is unchanged (ticket #49 ruling: the build string baked in at
+        # build time is the world fact about what users are served); what changes
+        # is that the missing process view is recorded as its own flag and printed
+        # as a line after acceptance, so nobody has to infer it from -1.
         $livePid = -1
+        $processViewUnproven = $true
     } else {
         # One statement per line on purpose: PowerShell 5.1 ends a statement at a
         # newline even inside parens unless the line ends on an open operator, and
@@ -1471,6 +1643,17 @@ if ($finalProbe.ReadError) {
 }
 Write-Output ('ENABLED state=' + $finalProbe.State)
 
+# Ticket #49: the /health fallback above counts as success, but the missing
+# process view must survive in the one-line-per-token log. Printed only after
+# ALL three success facts hold - HEALTH build= (target), ACCEPT marker-lines=
+# (this release is served) and the re-enable above (the guard is back) - so the
+# line's health-build=ok marker=ok is earned, not asserted. If the re-enable
+# aborted, this line is never printed: the run did not succeed. Exact shape from
+# the ticket: PROCESS-VIEW=unproven health-build=ok marker=ok.
+if ($processViewUnproven) {
+    Write-Output ('PROCESS-VIEW=unproven health-build=ok marker=ok')
+}
+
 # ------------------------------------------------- step 9: hand the budget back
 # Comes AFTER re-enable and after both acceptance assertions: the counter is
 # only meaningless once we know the package we are guarding is the right one.
@@ -1482,4 +1665,12 @@ if ($KeepBackendBudget) {
 } else {
     Clear-BackendBudget -StatePath (Join-Path $ProjectRoot 'data\watchdog-state.json')
 }
+# Ticket #62: prune old swap-snapshot copies LAST, after acceptance, after the
+# guard is back and after the budget. Housekeeping must never be able to change
+# the swap verdict, so the helper swallows its own failures into a token and this
+# call is not wrapped in any abort path. It skips the snapshot this run wrote and
+# keeps the newest $SnapshotKeep (0 = rotation off). Nothing else in this script
+# deletes anything; this is the single, narrow exception, and it only deletes
+# direct children of data\swap-snapshots whose names are exactly yyyyMMdd-HHmmss.
+Invoke-SnapshotRetention -Root $DataSnapshotRoot -CurrentDir $DataSnapshotDir -Keep $SnapshotKeep
 Write-Output 'SWAP-DONE'

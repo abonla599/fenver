@@ -13,7 +13,7 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
 （"读不出来"和"读到零条"是两个判决，同 `Clear-BackendBudget` 的 backend-entries=unproven）；
 `Show-Rollback` 多出第 7 步，把"会被抹掉"和"往哪个方向恢复"写清楚。
 
-本文件判五件事（一件一组，机器判的居多）：
+本文件判六件事（一件一组，机器判的居多）：
 (1) **顺序问机器**：探针把脚本**自己的** step 0b 整段 + step 1 + 它自己的 dry-run 出口抄进
     生成的 .ps1（`Get-ScheduledTask` / `Get-LiveProcess` 是桩，`Start-Process` 根本不在探针里），
     真跑一遍，判**观测到的行序**——DATA-SAVED 在 `TASK` 之前、`DRYRUN would-save-data` 在
@@ -30,6 +30,11 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
     `PROBE_TAIL` 到不了、`DATA-SAVED` 一行都没有；
 (5) **ROLLBACK-HOWTO 7)** 存在、说清"抹掉"与"把 tasks.json 拷回去"的方向，而 1-6 步逐行与
     改前那份**一字不差**（对照锚点是字面 SHA `262b1224`，不是 `HEAD`——见 `_PINNED_PRE_CHANGE`）。
+(6) **#62 轮转**：`data\swap-snapshots` 无上限会无限堆积（又整个在 data\ 的禁清区里）。
+    默认保留最新 10 份（0 关闭）；只删严格 `yyyyMMdd-HHmmss` 的直接子目录；**绝不删当前
+    快照**；删除失败 fail-closed（停手、保留剩余）；调用点在验收/守护恢复/预算之后、
+    `SWAP-DONE` 之前，失败只打 token、绝不改换包判决。机器用例把整套函数跑在 tmp_path 的
+    假快照树上（含句柄按住一档），现网 `data\` 一个字节都不碰。
 
 安全边界（票面硬约束）：所有路径都是 tmp_path 下**手搓**的假项目根；探针里不出现
 `watchdog-state.json` / `data/version.json` / `data\apk` / `127.0.0.1` / `Invoke-RestMethod` /
@@ -225,8 +230,11 @@ def _copy_only_ok(text: str) -> bool:
             return False
         if not parts[1].startswith("$dest"):
             return False
+    snap_root = [ln for ln in _code_lines(text) if re.match(r"^\$DataSnapshotRoot = Join-Path ", ln)]
     snap_dir = [ln for ln in _code_lines(text) if re.match(r"^\$DataSnapshotDir = Join-Path ", ln)]
-    if len(snap_dir) != 1 or "data\\swap-snapshots" not in snap_dir[0]:
+    if len(snap_root) != 1 or "data\\swap-snapshots" not in snap_root[0]:
+        return False
+    if len(snap_dir) != 1 or "$DataSnapshotRoot" not in snap_dir[0] or "$stamp" not in snap_dir[0]:
         return False
     if re.search(r"Join-Path \$StageDir[^\n]*swap-snapshots|dist[\\\\/]+run_backend_old[^\n]*swap", text):
         return False
@@ -713,8 +721,155 @@ def test_machine_a_failed_copy_prints_data_save_fail_and_the_run_never_proceeds(
     assert "refusing to continue" in (got["err"] + got["out"]), f"中止的理由没说：{got['err'][:300]}"
 
 
-# ------------------------------------------------------------------ 牙印
-def test_mutation_teeth_moving_the_copy_and_zeroing_the_unproven_both_redden(tmp_path):
+# ------------------------------------------------------------------ #62：快照轮转
+_RETENTION_PROBE = r"""$ErrorActionPreference = 'Stop'
+$Root = $args[0]
+$Current = $args[1]
+$Keep = [int] $args[2]
+$LockPath = ''
+if ($args.Count -gt 3) { $LockPath = [string] $args[3] }
+$script:holder = $null
+if ($LockPath) { $script:holder = [System.IO.File]::Open($LockPath, 'Open', 'ReadWrite', 'None') }
+__FORMATTER__
+__RETENTION__
+Invoke-SnapshotRetention -Root $Root -CurrentDir $Current -Keep $Keep
+if ($script:holder) { $script:holder.Dispose() }
+'PROBE_DONE'
+"""
+
+
+def _retention_probe_source(text: str):
+    """只抄 Format-TokenField 与 Invoke-SnapshotRetention 的函数体（#62）。"""
+    formatter = _func_body(text, "Format-TokenField")
+    retention = _func_body(text, "Invoke-SnapshotRetention")
+    if formatter is None or retention is None:
+        return None
+    src = (_RETENTION_PROBE
+           .replace("__FORMATTER__", "\n".join(formatter))
+           .replace("__RETENTION__", "\n".join(retention)))
+    if "__" in src:
+        return None
+    if "\n".join(retention) not in src or "\n".join(formatter) not in src:
+        return None
+    if not src.isascii():
+        return None
+    return src
+
+
+def _run_retention(text: str, root: Path, current: Path, keep: int, work: Path, lock: Path = None):
+    src = _retention_probe_source(text)
+    assert src is not None, "轮转探针源码生不出来（两个函数体抄不出原文）"
+    path = _write_crlf(work, "probe-t62-retention.ps1", src)
+    args = (root, current, keep) if lock is None else (root, current, keep, lock)
+    rc, out, err = _run_powershell(path, *args)
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    token = [ln for ln in lines if ln.startswith("SNAPSHOT-RETENTION ")]
+    return {"rc": rc, "out": out, "err": err, "lines": lines, "token": token}
+
+
+def _seed_snapshots(root: Path, names):
+    root.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        d = root / name
+        d.mkdir()
+        (d / "tasks.json").write_bytes(b'{"tasks": {}}')
+        (d / "approvals.json").write_bytes(b'{"approvals": {}}')
+
+
+def _retention_ok(text: str) -> bool:
+    """静态形状：默认保守、0 关闭、只碰严格 stamp 名的直接子目录、跳过当前、失败即停。"""
+    body = _func_body(text, "Invoke-SnapshotRetention")
+    if body is None:
+        return False
+    joined = "\n".join(body)
+    for needle in ("$Keep -le 0", "state=off", "Get-ChildItem -LiteralPath $rootFull -Directory",
+                   "'^[0-9]{8}-[0-9]{6}$'", "ReparsePoint", "Directory]::Delete",
+                   "$currentFull", "state=failed"):
+        if needle not in joined:
+            return False
+    if "[System.IO.File]::Move" in joined or "Remove-Item" in joined:
+        return False
+    param = [ln for ln in _code_lines(text) if re.search(r"\[int\] \$SnapshotKeep = ", ln)]
+    if len(param) != 1 or "= 10" not in param[0]:
+        return False
+    call = [ln for ln in _code_lines(text) if re.search(r"Invoke-SnapshotRetention -Root \$DataSnapshotRoot", ln)]
+    if len(call) != 1:
+        return False
+    i_call = [i for i, ln in enumerate(_code_lines(text)) if "Invoke-SnapshotRetention -Root $DataSnapshotRoot" in ln][0]
+    i_accept = max(i for i, ln in enumerate(_code_lines(text)) if "Write-Output ('ACCEPT marker-lines=" in ln)
+    i_done = [i for i, ln in enumerate(_code_lines(text)) if ln.strip() == "Write-Output 'SWAP-DONE'"][0]
+    return i_accept < i_call < i_done
+
+
+def test_snapshot_retention_is_off_by_default_or_conservative_and_never_touches_the_current_one():
+    """#62 静态锁：默认保留 10 份；0 关闭；只认 yyyyMMdd-HHmmss 直接子目录；
+    跳过当前、失败即停；调用点在验收之后、SWAP-DONE 之前，且失败不许改换包判决。
+    """
+    assert _retention_ok(PS1), (
+        "快照轮转的形状变了：默认不再是保守的 10 份、0 不再关闭、或开始碰非 stamp 名/"
+        "非直接子目录/当前快照，或失败不再停止——这些每一条都是 data\\ 下误删的入口")
+    body = "\n".join(_func_body(PS1, "Invoke-SnapshotRetention") or [])
+    assert "Write-Output" in body and re.search(r"(?m)^\s*throw\b", body) is None, (
+        "轮转函数自己抛异常会把已验收的换包打成失败：它只能打 token 并返回")
+
+
+def test_machine_retention_keeps_the_newest_and_the_current_snapshot(tmp_path):
+    """#62 机器锁：keep=2 时删最旧的 3 份，保留最新 2 份与当前；非 stamp 目录/文件不动。"""
+    root = tmp_path / "swap-snapshots"
+    _seed_snapshots(root, ["20260101-000000", "20260101-000001", "20260101-000002",
+                           "20260101-000003", "20260101-000004"])
+    (root / "junk").mkdir()
+    (root / "readme.txt").write_text("keep me", encoding="utf-8")
+    current = root / "20260101-000004"
+    got = _run_retention(PS1, root, current, 2, tmp_path)
+    assert got["rc"] == 0, f"轮转探针没跑通 rc={got['rc']}: {got['err'][:300]}"
+    assert len(got["token"]) == 1, f"轮转必须恰好一行 token：{got['lines']}"
+    line = got["token"][0]
+    assert "state=ok" in line and "keep=2" in line and "removed=3" in line, line
+    left = sorted(p.name for p in root.iterdir() if p.is_dir() and p.name != "junk")
+    assert left == ["20260101-000003", "20260101-000004"], f"保留集合不对：{left}"
+    assert (root / "junk").is_dir() and (root / "readme.txt").is_file(), \
+        "非 stamp 目录/文件也被动了：轮转越界"
+    assert current.is_dir(), "当前快照被删了"
+
+
+def test_machine_retention_never_deletes_the_current_snapshot_even_when_it_is_old(tmp_path):
+    """#62 机器锁：当前那份即使落在 keep 窗口之外，也绝不许删（显式排除）。"""
+    root = tmp_path / "swap-snapshots"
+    names = ["20260101-000000", "20260101-000001", "20260101-000002",
+             "20260101-000003", "20260101-000004"]
+    _seed_snapshots(root, names)
+    current = root / "20260101-000000"
+    got = _run_retention(PS1, root, current, 2, tmp_path)
+    assert got["rc"] == 0, got["err"][:300]
+    line = got["token"][0]
+    assert "removed=2" in line, line
+    assert current.is_dir(), "当前快照被轮转删掉了——这是本票的硬红线"
+    left = sorted(p.name for p in root.iterdir() if p.is_dir())
+    assert left == ["20260101-000000", "20260101-000003", "20260101-000004"], left
+
+
+def test_machine_retention_zero_is_off_and_a_locked_candidate_stops_the_prune(tmp_path):
+    """#62 机器锁：keep=0 一份不删；删除中途失败时 fail-closed——已删的照实报，
+    剩下的全部保留，探针仍以 0 退出（轮转失败不许打死换包）。"""
+    root = tmp_path / "swap-snapshots"
+    names = ["20260101-000000", "20260101-000001", "20260101-000002",
+             "20260101-000003", "20260101-000004"]
+    _seed_snapshots(root, names)
+    current = root / "20260101-000004"
+    off = _run_retention(PS1, root, current, 0, tmp_path)
+    assert off["rc"] == 0 and "state=off" in off["token"][0] and "removed=0" in off["token"][0], off
+    assert sorted(p.name for p in root.iterdir()) == names, "keep=0 竟然删了东西"
+
+    holder = root / "20260101-000000" / "tasks.json"
+    got = _run_retention(PS1, root, current, 2, tmp_path, lock=holder)
+    assert got["rc"] == 0, f"轮转失败把探针打死了 rc={got['rc']}: {got['err'][:300]}"
+    line = got["token"][0]
+    assert "state=failed" in line and "removed=0" in line, line
+    assert (root / "20260101-000000").is_dir(), "失败时反而删掉了被句柄按住的目录"
+    assert (root / "20260101-000001").is_dir() and (root / "20260101-000002").is_dir(), \
+        "fail-closed 没有停手：后面的候选也该留着"
+
     """牙印一（把复制改成搬走）与牙印二（把 unproven 换成 0）：两枚样本各造一份仓库外
     CRLF 副本，**红归对人**——另一枚样本上对方的锁照旧绿。"""
     # --- 牙印一：Copy -> Move ---

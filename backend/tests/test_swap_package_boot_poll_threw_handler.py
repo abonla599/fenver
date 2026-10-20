@@ -118,7 +118,7 @@ _BOOT_OPEN = re.compile(r"^\$livePid = 0$")
 _BOOT_DEADLINE = re.compile(r"^\$bootDeadline = \(Get-Date\)\.AddSeconds\(\$StartTimeoutSeconds\)$")
 _LOOP = re.compile(r"^while \(\(Get-Date\) -lt \$bootDeadline\) \{$")
 _SLEEP = re.compile(r"^\s*Start-Sleep -Seconds 2$")
-_READ = re.compile(r"^\s*\$running = Get-LiveProcess$")
+_READ = re.compile(r"^\s*\$running = (?:@\()?Get-LiveProcess")
 _STARTED = re.compile(r"^Write-Output \('STARTED pid='")
 _EMPTY_IF = re.compile(r"^if \(\$livePid -eq 0\) \{$")
 _TRY_OPEN = re.compile(r"^\s*try\s*\{$")
@@ -504,7 +504,7 @@ def _build_harness(region_text: str, stage_required: bool = True):
     """把脚本自己那段轮询原文塞进探针；校验不过一律 None（绝不退回去跑「另一段」）。"""
     if not region_text or not region_text.strip():
         return None
-    if "$running = Get-LiveProcess" not in region_text:
+    if "$running = Get-LiveProcess" not in region_text and "$running = @(Get-LiveProcess" not in region_text:
         return None
     if "STARTED pid=" in region_text:
         return None
@@ -648,7 +648,7 @@ def test_poll_read_is_locatable_and_the_locks_are_not_judging_an_empty_set():
     「锚点找不到」与「锚点找到了但内容不对」必须是两种红法。"""
     ctx = _poll_ctx(PS1)
     assert ctx is not None, (
-        "轮询那句 `$running = Get-LiveProcess` 没有被 try 包住（或 try 与循环、循环与 STARTED "
+        "轮询那句 `$running = @(Get-LiveProcess ...)` 没有被 try 包住（或 try 与循环、循环与 STARTED "
         "的相对位置不对）：本票要堵的就是这个——裸的那一句在 $ErrorActionPreference='Stop' "
         "下会把一次已经改完名的换包判死在没有 ABORT stage=、没有看守登记、没有回滚配方的地方")
     s, e = ctx["span"]
@@ -712,7 +712,7 @@ def test_probe_is_wired_to_the_scripts_own_poll_lines_and_cannot_touch_productio
     assert harness is not None, "探针源码生不出来（_build_harness 的校验没过）"
     ctx = _poll_ctx(PS1)
     assert ctx is not None
-    for needle in ("$running = Get-LiveProcess", "} catch {", "$_.Exception.Message",
+    for needle in ("$running = @(Get-LiveProcess", "} catch {", "$_.Exception.Message",
                    _READFAIL, "Stop-AfterFailure '" + _STAGE + "'",
                    "while ((Get-Date) -lt $bootDeadline) {", "$bootPollError = ''"):
         assert needle in harness, f"脚本自己的那一行没有原样落到探针里：{needle!r}"
