@@ -13,3 +13,6 @@
 # start-ai-stack.bat 与 .ps1 同族：shell:startup 直接喂给 cmd.exe 的开机入口脚本，
 # 同样只靠本机 autocrlf 兜着。仓库里没有 .cmd，不写没证据的模式。
 *.bat text eol=crlf
+# wscript 的开机隐藏入口与 .bat/.ps1 同族：检出的字节形状会被直接执行，
+# 不依赖检出机的 core.autocrlf。
+*.vbs text eol=crlf
