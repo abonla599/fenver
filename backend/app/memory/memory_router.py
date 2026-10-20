@@ -33,7 +33,10 @@ else:
         memory_manager = MemoryManager()
         print("✅ 记忆模块使用 ChromaDB 持久化存储")
     except Exception as e:
-        memory_init_error = str(e)
+        # 保留异常对象本身而不是 str(e)：自检要靠 `dim_conflict` 属性把"没配嵌入"
+        # 与"真的坏了"分开（见 app/core/selfcheck.py）。转成字符串就只剩文案，
+        # 判据只能退回字符串匹配。f-string 与 _client_detail 对异常对象照样工作。
+        memory_init_error = e
         print(f"❌ MemoryManager 初始化失败，记忆接口将返回 503: {e}")
 
 # ---------- 用于 CI 环境的简易内存存储（始终创建） ----------
