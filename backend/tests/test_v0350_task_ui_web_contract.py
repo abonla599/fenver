@@ -893,8 +893,10 @@ def test_an_answer_in_flight_cannot_write_into_the_new_identity_page():
                input: __el("taskAnswerInput").value,
                card_busy: __el("paneTasks").querySelector(".msg-task").classList.contains("busy") };
     """
-    out = _run_node(_identity_source() + "\n" + _js_function(_app_source(), "submitTaskAnswer"),
-                    driver)
+    app = _app_source()
+    tail = "\n".join(_js_function(app, n) for n in
+                     ("paintTasks", "openTaskDetail", "loadTasks", "submitTaskAnswer"))
+    out = _run_node(_identity_source() + "\n" + tail, driver)
     assert out["err"] == "" and out["err_hidden"] is True, out
     assert out["calls"] == [], f"换人后旧请求还去重读了任务：{out['calls']}"
     assert out["answering"] is False and out["card_busy"] is False, out
