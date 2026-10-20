@@ -47,7 +47,11 @@
                  **线上那份包读不到（新克隆 / CI / `dist/` 被清）⇒ 退 2 fail-closed**，
                  绝不当成"里面没有"——默认成 absent 等于在任何没有 `dist/` 的机器上把这一版事故
                  静默放成绿灯；要指认别的路径用 `--live-appjs <path>`（精确路径覆盖，
-                 **不是**一个"跳过这一格"的布尔开关）
+                 **不是**一个"跳过这一格"的布尔开关）。这个路径**必须是绝对路径**：
+                 相对路径会按进程 CWD 解析，在生产机上可能正好指回真正在服务的那份包
+                 （看起来指认了别的副本，实际读的是线上），所以相对 / 空一律退 2，
+                 不按"没给"处理；本版判据不读装机侧时带了它同样退 2——一个不生效的
+                 开关不许看起来像一条判据
     任意两枚标记之间**不得互为子串**：`Select-String -SimpleMatch` 数的是子串命中，
     `release-marker-v0.34.1` 会命中 `release-marker-v0.34.10` 那一行，于是"看起来是两枚
     不同的标记"其实是一枚两边都有的假判据
@@ -308,7 +312,16 @@ def collisions(marker_a, marker_b):
 
 
 def live_appjs_path(repo_root, override=None):
-    return override if override else os.path.join(repo_root, LIVE_APP_JS_RELPATH)
+    """装机侧 app.js 的路径：缺省是 `<repo_root>/dist/...`（**绝对化**），覆盖值原样返回。
+
+    缺省路径绝对化是有意的：`--repo-root` 本人可以是相对路径，而紧跟着的 `os.path.isfile`
+    会按进程 CWD 解析——那会让"读的是传进来的那棵树"这句承诺在换一个 CWD 后失效。
+    覆盖值不在这里归一化：`read_live_appjs` 要先判它是不是绝对路径，归一化会把这条
+    拒绝理由抹掉（#72）。
+    """
+    if override is not None:
+        return str(override)
+    return os.path.join(os.path.abspath(repo_root), LIVE_APP_JS_RELPATH)
 
 
 def read_live_appjs(repo_root, override=None):
@@ -318,8 +331,23 @@ def read_live_appjs(repo_root, override=None):
     默认成 absent 就等于在任何没有 `dist\\` 的机器（新克隆、CI、清过盘）上把两侧都有的空转
     验收静默放成绿灯——那正是本文件要拦的事故，不能由判据自己制造。调用方拿到 reason
     一律退 2（fail-closed）。只读，不写、不建目录、不碰网络。
+
+    覆盖值的两条 fail-closed（#72）：
+    - **相对路径一律拒绝**。`os.path.isfile` 按进程 CWD 解析，而本工具就常在生产机的
+      仓库根跑：`--live-appjs dist/run_backend/...` 看起来是"另一份副本"，实际读到的
+      正是线上那份包（判据于是把"线上已有这枚串"洗成"没有"）。拒绝的 token 与
+      "文件不存在"分开（`live-appjs-relative-path` / `live-appjs-empty-override`），
+      否则运维会照着 `live-appjs-missing` 去补一份根本不缺的文件。
+    - 路径在、但不是普通文件（例如传了个目录）标成 `live-appjs-not-a-file`，不标 missing。
     """
     path = live_appjs_path(repo_root, override)
+    if override is not None:
+        if not str(override).strip():
+            return None, path, "live-appjs-empty-override"
+        if not os.path.isabs(str(override)):
+            return None, path, "live-appjs-relative-path:%s" % path
+    if os.path.isdir(path):
+        return None, path, "live-appjs-not-a-file:%s" % path
     if not os.path.isfile(path):
         return None, path, "live-appjs-missing:%s" % path
     try:
@@ -334,6 +362,8 @@ def evaluate(repo_root, expect=None, live_appjs=None):
     `live_appjs` 只换服务端那一版才会用到（装机侧路径覆盖，形状同 `swap-package.ps1` 读的
     那份）；有安装包那一版**不读** `dist\\`——它的 versionName 已经追平，标记天然就在已装的
     那份包里，把"不在装机侧"套到它头上就是把 v0.34.2 这种已上线的形状判成红。
+    也正因为它只在那一支生效，**带了却不生效**（installer 形态、或裸跑的在途形状）要当场
+    退 2 而不是静静忽略（#72）：操作者以为指认了装机包、判据却根本没读它，绿灯就是假的。
     """
     lines = []
     try:
@@ -420,6 +450,18 @@ def evaluate(repo_root, expect=None, live_appjs=None):
                    "把 build.gradle 的 versionName 追平到 v%s 再核标记；如果这一版其实只换服务端，"
                    "那就在 docs/releases/v%s.md 补 scope 标记，而不是 bump 版本号"
                    % (target, declared, SCOPE_SERVER_ONLY, target, target)]
+
+    if live_appjs is not None and (not server_only or bare_marker_ahead):
+        # `--live-appjs` 是给「带 --expect 的只换服务端版」那一支用的；其余形态下装机侧
+        # 根本不进判据。静默忽略它等于让操作者以为"我已经指认了装机包、这一格核过了"，
+        # 而实际上那枚路径一个字节都没被读过——一个不生效的开关比没有这个开关更危险（#72）。
+        return 2, ["RELEASE-MARKER verdict=UNKNOWN token=live-appjs=unused scope=%s "
+                   "target=v%s bare-shape=%s —— 带了 --live-appjs，但这一版的判据不读装机侧"
+                   "（只有「带 --expect 的只换服务端版」会读）：这个开关在本版不生效，"
+                   "不能让它看起来像一条已经核过的判据。去掉 --live-appjs 重跑；若这一版"
+                   "其实只换服务端，先按它自己的发版说明核形态"
+                   % (SCOPE_SERVER_ONLY if server_only else SCOPE_INSTALLABLE, target,
+                      "server-only-marker-ahead" if bare_marker_ahead else "none")]
 
     marker = marker_for(target)
     lines.append("RELEASE-MARKER declared=v%s target=v%s scope=%s marker=%s"
@@ -570,14 +612,18 @@ def main(argv=None):
                              "decides whether versionName must have reached it; "
                              "default = build.gradle versionName")
     parser.add_argument("--live-appjs", default=None, dest="live_appjs",
-                        help="path of the INSTALLED package's app.js, used only by a "
-                             "server-only release to prove the marker is not already live; "
-                             "default = <repo-root>\\dist\\run_backend\\_internal\\app\\web\\static\\app.js. "
+                        help="ABSOLUTE path of the INSTALLED package's app.js, used only by a "
+                             "server-only release checked with --expect to prove the marker is not "
+                             "already live; default = <repo-root>\\dist\\run_backend\\_internal\\app\\web\\static\\app.js. "
                              "This is an exact-path override for reading a different package, "
                              "NOT a switch that skips the check: an unreadable live copy fails "
-                             "closed with rc=2.")
+                             "closed with rc=2, and so do a relative/empty path (it would resolve "
+                             "against the CWD, which on the production machine may be the live "
+                             "package itself) and an override this release's verdict would not use.")
     args = parser.parse_args(argv)
-    rc, lines = evaluate(args.repo_root, args.expect, args.live_appjs)
+    # 相对 --repo-root 也归一化：否则缺省装机侧路径会跟着进程 CWD 漂（#72）。
+    root = os.path.abspath(args.repo_root)
+    rc, lines = evaluate(root, args.expect, args.live_appjs)
     for line in lines:
         print(line)
     return rc

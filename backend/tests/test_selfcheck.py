@@ -174,6 +174,73 @@ def test_missing_data_directory_is_broken(monkeypatch, tmp_path):
     assert selfcheck._check_data_paths.__doc__, "判据为什么在这儿，得写下来"
 
 
+# ------------------------------------------------ #64：数据落点那一句必须从单源推导
+# 事故形状：`resolve_all_data_paths()` 从 15 份长到 16 份（v0.35 A2 的审批票据），
+# `/health` 的 "16 处可写" 跟着变了，但没有任何东西证明那个数字是**数出来的**——
+# 下一份存储加进来时，把实现改成写死 "16" 也照样绿，直到线上报出一个假数字。
+# 判据因此不在期望里写 15/16，而是每次从路径单源现算。
+
+def _data_paths_detail_verdict(detail, rows) -> str:
+    """#64 的判据本体：`detail` 必须是按**当下** rows 推导出的那一整句。
+
+    返回空串=绿；否则是一句可复核的违规说明。写成函数是为了让"删一条/改措辞"
+    两个反例也走同一个判据，而不是在测试里另写一套 if。
+    """
+    expected = "%d 处可写" % len(rows)
+    if detail != expected:
+        return "detail=%r，按当下 resolve_all_data_paths()（%d 份）应是 %r" % (
+            detail, len(rows), expected)
+    return ""
+
+
+def test_health_data_path_count_is_derived_from_the_single_source(client, monkeypatch):
+    """`/health` 的 "N 处可写" 必须等于 `resolve_all_data_paths()` 当下的条数。
+
+    反例 A（删一份存储）：期望值跟着单源少一，写死 15/16 的实现当场红。
+    反例 B（改详情措辞）：数字仍是新的那个、只是换了词 ⇒ 同一个判据也要红，
+    证明它比的是推导出来的整句，不是"数字碰巧对上"。
+    """
+    from app.core import paths
+
+    rows = list(paths.resolve_all_data_paths())
+    item = client.get("/health").json()["checks"]["数据落点"]
+    assert item["status"] == OK, item
+    assert _data_paths_detail_verdict(item["detail"], rows) == "", (
+        "线上那一句不是按路径单源推导的：%s" % item["detail"])
+
+    monkeypatch.setattr(paths, "resolve_all_data_paths", lambda: rows[:-1])
+    detail = client.get("/health").json()["checks"]["数据落点"]["detail"]
+    assert _data_paths_detail_verdict(detail, rows[:-1]) == "", (
+        "少了一份存储，详情却没跟着走（写死的计数）：%r" % detail)
+    assert detail != "%d 处可写" % len(rows), "删掉一份存储后计数没变，判据没在看单源"
+
+    assert _data_paths_detail_verdict("%d 处可用" % (len(rows) - 1), rows[:-1]) != "", (
+        "只改措辞、数字仍对，判据却判绿了：它比的不是推导出来的整句")
+
+
+def test_health_data_path_detail_names_every_broken_path_it_reports(monkeypatch, tmp_path):
+    """落点那一句不只要数对，还要**逐份用上**这些路径：换一个落点就要跟着换。
+
+    合成两份：第一份目录在、第二份不在 ⇒ BROKEN 且只点名第二份；把第二份补回去就绿。
+    这条与上面那条合起来，锁的是"计数与路径都来自 `resolve_all_data_paths()`"。
+    """
+    from app.core import paths
+
+    good = tmp_path / "good"
+    good.mkdir()
+    rows_ok = [("甲", str(good / "a.json")), ("乙", str(good / "b.json"))]
+    monkeypatch.setattr(paths, "resolve_all_data_paths", lambda: rows_ok)
+    status, detail = selfcheck._check_data_paths()
+    assert (status, detail) == (OK, "2 处可写"), (status, detail)
+
+    rows_bad = [("甲", str(good / "a.json")), ("乙", str(tmp_path / "gone" / "b.json"))]
+    monkeypatch.setattr(paths, "resolve_all_data_paths", lambda: rows_bad)
+    status, detail = selfcheck._check_data_paths()
+    assert status == BROKEN, detail
+    assert "乙" in detail and "甲" not in detail, (
+        "坏的那一份没被点名（或把好的也一起点名了）：%s" % detail)
+
+
 def test_a_label_that_happens_to_contain_a_key_shape_is_scrubbed(monkeypatch, tmp_path):
     """/health 是免鉴权的公开端点，而管理员给配置起的名字是人手打的。
 

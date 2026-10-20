@@ -122,18 +122,25 @@ def materials(tmp_path, monkeypatch):
     return {"root": fake_root, "manifest": manifest, "apk_dir": apk_dir, "seed": seed}
 
 
-def write_manifest(path, version=VERSION, sha=None, apk_name=None, omit_sha=False):
-    """手搭一份**假**清单（形状照 data/version.json 的那几格）。"""
+def write_manifest(path, version=VERSION, sha=None, apk_name=None, omit_sha=False,
+                   size=7805351, url="https://ai.fenever.xyz/site/android.apk", drop=()):
+    """手搭一份**假**清单（形状照 data/version.json 的那几格）。
+
+    `drop` 里的键整个缺席（而不是写成 None）：形状关要分得开"没写这一格"与"写了 null"，
+    两者都该被拒，但反例的形状不同（#60）。
+    """
     body = {
         "version": version,
         "apk_name": apk_name if apk_name is not None else "fenver-%s.apk" % version,
         "sha256": sha if sha is not None else "a" * 64,
-        "size": 7805351,
-        "url": "https://ai.fenever.xyz/site/android.apk",
+        "size": size,
+        "url": url,
         "changelog": "v%s" % version,
     }
     if omit_sha:
         body.pop("sha256")
+    for key in drop:
+        body.pop(key, None)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(body), encoding="utf-8")
@@ -212,6 +219,146 @@ def test_passes_when_package_present_digest_and_version_match(materials, monkeyp
     assert code == 0, "物料齐、摘要对、版本对，闸门却不放行：%s" % out
     assert "apk-materials=ok" in out
     assert "verdict=PASS" in out
+
+
+# ------------------------------------------- #60：运行时要求的另外两格（size / url）
+# 事故形状：`_announcement_shape` 只核 version / sha256 / apk_name，而运行时
+# `releases._manifest_ok` 还逐字判 size 与 url。清单缺 size/url 时闸门打印
+# `apk-materials=ok`，运行时却在自己的形状关判死 ⇒ 手机侧「检查更新失败」，而发版
+# 那一刻没有任何东西变红。下面三层锁：真跑闸门（红）、与运行时同语料差分（防漂）、
+# 以及把"闸门比 apk_cache 严"这一句写成可执行的反例。
+
+_DROP = object()          # 整格缺席，区别于"写了 null"
+
+
+def _shape_body(changes=None):
+    """基础形状 + 改动；`_DROP` 表示删掉那一格。版本/摘要/apk_name 都取真形状。"""
+    body = {
+        "version": VERSION,
+        "apk_name": "fenver-%s.apk" % VERSION,
+        "sha256": "a" * 64,
+        "size": 7805351,
+        "url": "https://ai.fenever.xyz/site/android.apk",
+    }
+    for key, value in (changes or {}).items():
+        if value is _DROP:
+            body.pop(key, None)
+        else:
+            body[key] = value
+    return body
+
+
+_SHAPE_CASES = [
+    ("size-ok", {}),
+    ("size-missing", {"size": _DROP}),
+    ("size-null", {"size": None}),
+    ("size-bool", {"size": True}),
+    ("size-zero", {"size": 0}),
+    ("size-negative", {"size": -1}),
+    ("size-string", {"size": "7805351"}),
+    ("size-over-limit", {"size": 16 * 1024 * 1024 + 1}),
+    ("url-ok-www", {"url": "https://www.fenever.xyz/site/android.apk"}),
+    ("url-missing", {"url": _DROP}),
+    ("url-null", {"url": None}),
+    ("url-http", {"url": "http://ai.fenever.xyz/site/android.apk"}),
+    ("url-foreign-host", {"url": "https://example.com/site/android.apk"}),
+    ("url-lookalike-host", {"url": "https://ai.fenever.xyz.evil.test/site/android.apk"}),
+    ("url-not-a-string", {"url": 7805351}),
+    ("version-v-prefix-ok", {"version": "v" + VERSION}),
+]
+
+
+@pytest.mark.parametrize("label,kwargs", [
+    ("size-missing", {"drop": ("size",)}),
+    ("size-zero", {"size": 0}),
+    ("size-over-limit", {"size": 16 * 1024 * 1024 + 1}),
+    ("url-missing", {"drop": ("url",)}),
+    ("url-foreign-host", {"url": "https://example.com/site/android.apk"}),
+])
+def test_unruntime_manifest_shape_refuses_even_when_package_digest_matches(
+        materials, monkeypatch, capsys, label, kwargs):
+    """反例：盘上的包**真的在、摘要也真的对**，只坏 size/url ⇒ 闸门必须拒绝。
+
+    少了这一条，这五种清单都会走到 `apk-materials=ok`：闸门说"可以宣告"，运行时却
+    按 `releases._manifest_ok` 判死，用户看到的是「检查更新失败」。
+    """
+    gate = _load_gate()
+    sha = write_apk(materials["apk_dir"], version=VERSION)
+    write_manifest(materials["manifest"], version=VERSION, sha=sha, **kwargs)
+    code = run_gate(gate, monkeypatch, materials)
+    out = capsys.readouterr().out
+    assert code == 2, "%s：运行时必拒的清单被闸门放行了（这正是 #60 要拦的假绿）：%s" % (label, out)
+    assert "apk-materials=REFUSED token=manifest-unreadable" in out, (label, out)
+    assert "形状不对" in out, "%s：拒绝的理由没落在形状上：%s" % (label, out)
+    assert "verdict=PASS" not in out, out
+
+
+def test_manifest_shape_agrees_with_the_runtime_on_the_same_corpus():
+    """同一份语料喂两边：闸门与 `releases._manifest_ok` 的布尔结论必须逐项相同。
+
+    这是"两份副本"的防漂锁：只在闸门里加 size/url 的判定还不够——哪天运行时改了
+    （比如不再要求 https），闸门会继续用旧规矩判，而两边的绿/红从那一刻起各说各话。
+    """
+    from app.core import releases
+
+    gate = _load_gate()
+    accepted = 0
+    for label, changes in _SHAPE_CASES:
+        body = _shape_body(changes)
+        gate_ok, gate_why = gate._announcement_shape(body)
+        runtime_ok, runtime_why = releases._manifest_ok(body)
+        assert gate_ok == runtime_ok, (
+            "%s：闸门=%r（%s）运行时=%r（%s）—— 同一份清单两个答案"
+            % (label, gate_ok, gate_why, runtime_ok, runtime_why))
+        accepted += 1 if gate_ok else 0
+    assert accepted >= 2, "语料里的正控少于两条：这条差分锁会把两边都写成恒红"
+
+
+def test_apk_name_is_derived_from_the_runtime_asset_names_not_a_second_prefix():
+    """`apk_name` 的新名只有一个来源：与 `releases.asset_names(version)[0]` 同形。
+
+    闸门里硬编码的 `"fenver-"` 如果和运行时漂开，清单会被闸门判死、运行时却接受
+    （或反过来）；旧名 `ai-assistant-native-*` 是**可读**的资产名，但不是清单该宣告的
+    名字——两边都必须只认新名。
+    """
+    from app.core import releases
+
+    gate = _load_gate()
+    assert gate.ASSET_PREFIX == releases.ASSET_PREFIX
+    for version in ("0.34.2", "0.35", "1.0.0"):
+        assert gate.asset_name(version) == releases.asset_names(version)[0]
+    legacy = "ai-assistant-native-%s.apk" % VERSION
+    assert releases.asset_names(VERSION)[1] == legacy, "旧名不再是 asset_names 的兜底名"
+    body = _shape_body({"apk_name": legacy})
+    assert not gate._announcement_shape(body)[0]
+    assert not releases._manifest_ok(body)[0]
+
+
+def test_the_version_shape_is_deliberately_stricter_than_apk_cache():
+    """`:package_path_for` 的注释说"比 apk_cache 严"——这里把差异钉成可执行的事实。
+
+    `apk_cache.path_for` 肯给 `0.35.0-beta` 拼路径，而清单形状关（releases 与闸门
+    同一条正则）根本不会让这种版本走到拼路径那一步。如果哪天有人把闸门改成照抄
+    apk_cache 的宽形状，这条会红：那是给一个清单宣告不了的版本验包的第二真相。
+    """
+    from app.core import apk_cache, releases
+
+    gate = _load_gate()
+    assert not releases._VERSION_SHAPE_RE.match("0.35.0-beta")
+    assert apk_cache.path_for("0.35.0-beta") != "", "apk_cache 不再接受带后缀的版本，注释该重写"
+    assert gate.package_path_for(str(REPO_ROOT), "0.35.0-beta") == ""
+
+
+def test_normalize_version_agrees_with_the_runtime():
+    """闸门里那份 `normalize_version` 是 `releases.normalize_version` 的副本（#60）。
+
+    不 import 后端是刻意的（工具要独立跑），但副本必须逐值同义；这一格就是漂移锁。
+    """
+    from app.core import releases
+
+    gate = _load_gate()
+    for raw in ("v0.35.0", "0.35.0", " V0.35 ", "v", "", None, "0.35.0-beta", 0.35):
+        assert gate.normalize_version(raw) == releases.normalize_version(raw), repr(raw)
 
 
 # ---------------------------------------------------------------- 显式退出闸门
