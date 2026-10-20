@@ -402,9 +402,10 @@ def test_the_pointer_scanner_reads_enough_real_pointers():
     # --no-versionname-check` 的 run 正文；闸门自己「用法」那一节写的也是这一行，但它在
     # 模块 docstring 里（按本文件口径不算机器读引用）、release_marker.py 那条是注释、
     # deploy/*.ps1 没有这个串——所以 #90b 之后这个 token 在整套名单里**再没有任何机器读的出处**。
-    # 改后钉的是 `"backend/requirements.txt"` 而且**同时钉它来自 workflow**：CI 真会 exec 的
-    # 那行 `pip install … -r backend/requirements.txt` 里 pip 真会打开这个文件，比原来那一枚
-    # 还硬一格（原来那枚的出处是 echo 出来的文案，这一枚是真参数）。红法和改前同一件事：
+    # 改后钉的是 `"backend/requirements.txt"` 而且**同时钉它来自 workflow**：CI 里
+    # `python tools/check_requirements_lock.py backend/requirements.txt backend/requirements.lock`
+    # 真会打开它做一致性检查（#146 起安装那一步改为 `-r backend/requirements.lock`），
+    # 比原来那一枚还硬一格（原来那枚的出处是 echo 出来的文案，这一枚是真参数）。红法和改前同一件事：
     # `_from_workflows` 的读法坏了、`run:` 正文不再被抽、或 workflows 目录形状变了。
     # 补偿控制（不归这把尺子管，写在这里是因为"少了一道"这件事必须看得见）：
     #   · 闸门文件仍在 CI 那次 checkout 里 —— `test_v0331_pre_tag_gate_contract.py` 用

@@ -7,10 +7,14 @@ CI 是按 requirements.txt 从零装包的，所以少声明一条就在收集�
 import ast
 import pathlib
 import re
+import subprocess
 import sys
 
 BACKEND_APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 REQUIREMENTS = pathlib.Path(__file__).resolve().parents[1] / "requirements.txt"
+LOCK = pathlib.Path(__file__).resolve().parents[1] / "requirements.lock"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+LOCK_CHECKER = REPO_ROOT / "tools" / "check_requirements_lock.py"
 
 # 导入名与发行包名不一致的情况
 IMPORT_TO_DIST = {"fitz": "pymupdf", "yaml": "pyyaml", "PIL": "pillow", "cv2": "opencv-python",
@@ -84,13 +88,19 @@ def test_optional_deps_are_actually_optional_in_code():
 
 
 def test_there_is_exactly_one_dependency_manifest():
-    """依赖清单只许有一份，而且 CI 与 Docker 必须装同一份。
+    """依赖清单只许有一份，而且 CI / Docker / 锁三边必须是同一套版本。
 
     仓库根原先躺着一份 118 行的 pip freeze 转储（UTF-16、零注释），`Dockerfile`
     COPY 的正是它，而 CI 装的是 `backend/requirements.txt` —— 两份的 numpy、
     onnxruntime、fastapi 版本互不相同。症状不是报错，是"容器里跑出来的行为和
     CI 绿的那套不是一回事"，而且没人会去查：两边都装得上，都起得来。
     这属于本仓反复栽的那种第二个事实来源，只不过这次藏在依赖声明里。
+
+    #146 之后多了一把锁：CI 不再现场解析清单，而是装 `backend/requirements.lock`
+    （跨平台 + 逐包哈希）；Docker 仍装清单，但清单里的 7 条宽区间已经钉成精确版本。
+    两边装的是不是同一套，由 `tools/check_requirements_lock.py` 在 CI 里判（本文件
+    下面两条用例守着它有牙）。所以这里仍要求根目录不长出第二份清单，并要求 CI 的
+    run 正文同时点得到清单与锁——只装锁而不读清单，清单改了 CI 不会红。
     """
     root = pathlib.Path(__file__).resolve().parents[2]
     stray = [p.name for p in root.glob("requirements*.txt")]
@@ -106,7 +116,12 @@ def test_there_is_exactly_one_dependency_manifest():
 
     ci = workflow_run_bodies(root / ".github" / "workflows" / "tests.yml",
                              where="tests.yml 的 run 正文（#94 W 片）")
-    assert "backend/requirements.txt" in ci, "CI 装依赖那一步不再读这份清单，这条锁就管不到它了"
+    assert "backend/requirements.txt" in ci, \
+        "CI 的依赖锁检查不再读这份清单，这条锁就管不到它了"
+    assert "backend/requirements.lock" in ci, \
+        "CI 不再从锁装包：清单与锁分家时没有任何一步会红，锁就成了摆设"
+    assert "--require-hashes" in ci, \
+        "CI 从锁装包却没开 --require-hashes：锁里的哈希只是注释，索引上的产物换了也没人知道"
     # 解释器也要一致：容器此前用 3.11，而 CI/venv/打包用的都是 3.12
     assert re.search(r"FROM python:3\.12", dockerfile), \
         "容器的 Python 版本又和 CI/打包那份错开了（chromadb 对上限敏感）"
@@ -172,3 +187,66 @@ def test_installed_versions_satisfy_the_declared_ranges():
         "这些包装的版本不在清单区间里，本机结论与 CI 不是一回事：" + "; ".join(drift)
         + "\n用 `venv\\Scripts\\python.exe -m pytest backend/tests/ -q` 跑（那份与 CI 对齐），"
           "或者 `pip install -r backend/requirements.txt` 把当前解释器拉回来。")
+
+
+def _run_lock_checker(manifest, lock):
+    """跑 CI 里那同一个检查器（不在这里另抄一份近似逻辑）。"""
+    return subprocess.run([sys.executable, str(LOCK_CHECKER), str(manifest), str(lock)],
+                          cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60)
+
+
+def test_the_lock_matches_the_manifest_and_is_fully_hashed():
+    """CI 装的那把锁必须与本清单同版本，且每条都带形状合法的 sha256 哈希。
+
+    锁是依赖的第三个事实来源：#146 之前只有清单和 Dockerfile，两边各装一套的教训
+    写在上面那条用例里。现在 CI 只装锁，所以"清单改了锁没重编"必须红——判据就是
+    `tools/check_requirements_lock.py`，CI 里跑的是同一份实现，这里跑它而不是重写一遍。
+    """
+    assert LOCK.is_file(), f"依赖锁不存在：{LOCK}（CI 已改成从它装包）"
+    proc = _run_lock_checker(REQUIREMENTS, LOCK)
+    assert proc.returncode == 0, (
+        "依赖锁与清单分家了（CI 会装上一套清单里没写的环境）：\n"
+        + (proc.stderr or proc.stdout).strip()
+        + "\n改完清单请重编锁，命令见 backend/requirements.txt 顶部的注释。")
+
+
+def test_the_lock_check_goes_red_when_the_manifest_or_lock_drifts(tmp_path):
+    """两枚反例：清单改了版本没重编锁、锁里丢了哈希——检查器都必须红。
+
+    不钉包名/版本号（它们每升一次就漂）：从真物里取第一条精确钉版，把 patch 号 +1
+    当成"清单漂了"的合成输入；锁那侧则把第一条的哈希行整段摘掉。两枚都只改副本，
+    真物不动——红的必须是检查器，不是被改坏的真文件。
+    """
+    manifest_text = REQUIREMENTS.read_text(encoding="utf-8-sig")
+    pin = re.search(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([0-9]+)\.([0-9]+)\.([0-9]+)$",
+                    manifest_text, re.MULTILINE)
+    assert pin, "清单里找不到可改的 x.y.z 钉版，反例造不出来"
+    bumped = f"{pin.group(1)}=={pin.group(2)}.{pin.group(3)}.{int(pin.group(4)) + 1}"
+    drifted_manifest = tmp_path / "requirements.txt"
+    drifted_manifest.write_text(manifest_text[:pin.start()] + bumped + manifest_text[pin.end():],
+                                encoding="utf-8-sig")
+    proc = _run_lock_checker(drifted_manifest, LOCK)
+    assert proc.returncode == 1 and "版本分家" in proc.stderr, (
+        "清单改了一个版本、锁没重编，检查器却放行了——CI 会装旧的一套而绿灯。实得 rc="
+        + str(proc.returncode) + "，stderr=" + proc.stderr[:300])
+
+    lock_lines = LOCK.read_text(encoding="utf-8-sig").splitlines()
+    stripped, removed, i = [], False, 0
+    while i < len(lock_lines):
+        line = lock_lines[i]
+        if not removed and "==" in line and line.rstrip().endswith("\\"):
+            stripped.append(line.rstrip()[:-1].rstrip())   # 第一条包声明，去掉续行反斜杠
+            i += 1
+            while i < len(lock_lines) and "--hash=" in lock_lines[i]:
+                i += 1
+            removed = True
+            continue
+        stripped.append(line)
+        i += 1
+    assert removed, "锁里找不到哈希行，反例造不出来"
+    hashless_lock = tmp_path / "requirements.lock"
+    hashless_lock.write_text("\n".join(stripped) + "\n", encoding="utf-8-sig")
+    proc = _run_lock_checker(REQUIREMENTS, hashless_lock)
+    assert proc.returncode == 1 and "哈希" in proc.stderr, (
+        "锁里丢了一条哈希，检查器却放行——`pip install --require-hashes` 在那一条上"
+        "等于没开。实得 rc=" + str(proc.returncode) + "，stderr=" + proc.stderr[:300])
