@@ -51,6 +51,13 @@ def _inline_scripts(html: str):
 
 
 def _sha256_b64(text: str) -> str:
+    """按浏览器的口径算：HTML 解析时 CRLF/CR 先统一成 LF，再对脚本正文做哈希。
+
+    这里不加这一步，测试与服务端会一起按磁盘原始字节算 CRLF 哈希、一起绿；而浏览器
+    拿到的是规范化后的文本，头里的哈希对不上，整页脚本被拒。2026-10-21 更新日志页
+    就是这样停在“正在载入…”的。
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode("ascii")
 
 
@@ -211,6 +218,21 @@ def test_only_the_probe_page_may_connect_beyond_self_and_the_search_sources():
             f"{path} 的 connect-src 不该跟着探测页放开：{got}——"
             "放开 https 只属于 /site/probe.html 这一页的既定用途")
         assert "https:" not in got, f"{path} 出现了通配 https:，全站口径被放开了"
+
+
+def test_crlf_and_lf_scripts_hash_the_same_because_the_browser_normalizes_them():
+    """行尾不是脚本文本的一部分：同一段脚本的 CRLF 与 LF 版本必须得到同一个哈希。
+
+    这条不依赖本机检出的行尾，也不借服务端实现自证：两种文本各算一次，要求相等；
+    同时用一个只改行尾的反例确认它不是把空集合比了两次。Windows 检出（CRLF）与
+    Linux CI（LF）必须给出同一份 CSP，否则同一版在一边能跑、另一边整页脚本被拒。
+    """
+    lf = "<script>\nvar answer = 42;\n</script>"
+    crlf = lf.replace("\n", "\r\n")
+    assert crlf != lf
+    assert web_router.inline_script_hashes(lf) == web_router.inline_script_hashes(crlf), (
+        "同一段脚本只换行尾就换了 CSP 哈希：浏览器会按 LF 算，头里的 CRLF 哈希必被拒")
+    assert web_router.inline_script_hashes(lf) == [_sha256_b64(lf[len("<script>"):-len("</script>")])]
 
 
 def test_a_one_byte_change_in_the_body_breaks_the_match():

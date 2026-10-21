@@ -173,6 +173,12 @@ def inline_script_hashes(html: str):
             mime = next(g for g in type_match.groups() if g is not None)
             if mime.split(";", 1)[0].strip().lower() not in _JS_SCRIPT_TYPES:
                 continue
+        # 浏览器解析 HTML 时先把 CRLF/CR 统一成 LF，再按规范化后的脚本文本对 CSP
+        # 哈希；服务端若按文件原始字节算，Windows 上 CRLF 的检出会让头里的哈希与
+        # 浏览器算出的永远差一个 \r，整页内联脚本被拒（2026-10-21 更新日志页实测：
+        # 页面停在“正在载入…”且 /site/changelog.json 一次都没发出）。这里必须用
+        # 浏览器看到的那份文本，不是磁盘上的原始字节。
+        code = code.replace("\r\n", "\n").replace("\r", "\n")
         digest = hashlib.sha256(code.encode("utf-8")).digest()
         found.append(base64.b64encode(digest).decode("ascii"))
     return list(dict.fromkeys(found))
