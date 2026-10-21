@@ -543,8 +543,7 @@ def _run_tool(name: str, raw_arguments: str, user_id: str = None) -> ToolOutcome
     留这一层而不是在调用点直接写 detailed 那一条，为的是把"非富路径"这个意思留在名字
     里：它和 _run_tool_detailed 的差别只在调用方取哪几格（文本 vs 整包），不在执行本身。
     两个分支于是产出同一个形状，读数点只有一处，"停在断点"不必再由文本前缀猜；那条纯
-    文本投影本身还在 `executor.execute_tool` 里（`execute_tool_detailed(...).text`），
-    留给只要文本的调用方。
+    文本投影本身仍在执行器的 detailed 入口里（`ToolOutcome.text`），留给只要文本的调用方。
     """
     return _run_tool_detailed(name, raw_arguments, user_id=user_id)
 
