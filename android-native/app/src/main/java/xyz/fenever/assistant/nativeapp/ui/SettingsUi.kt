@@ -142,7 +142,8 @@ private const val ABOUT_REPO_URL = "https://github.com/abonla599/fenver"
 private const val ABOUT_LICENSE = "Apache-2.0"
 
 @Composable
-fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
+fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
+                  onOpenPage: (String?) -> Unit,
                   onRequireAuth: (String) -> Unit, onOpenUrl: (String) -> Unit,
                   onModelsChanged: () -> Unit, onLoggedOut: () -> Unit,
                   canExport: Boolean) {
@@ -152,7 +153,10 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     var identityTick by remember { mutableIntStateOf(0) }          // 名单/身份变了就 ++
     var note by remember { mutableStateOf("") }                     // 网页的 setStatus 落点
     var noteErr by remember { mutableStateOf(false) }
-    var providers by remember { mutableStateOf(listOf<ModelInfo>()) }
+    // 弹层每次打开都会重新进组合，若从空列表起算，第一帧必然先画「读取中」再跳成
+    // 真实模型（真机反馈：设置页会闪一下）。ChatScreen 冷启动已经拉过 /v1/models，
+    // 这里直接用它当首帧，后台刷新照旧。
+    var providers by remember { mutableStateOf(cachedProviders) }
     var serverDefault by remember { mutableStateOf<String?>(null) }
     var memoryCount by remember { mutableStateOf("") }
     var scheduleVal by remember { mutableStateOf("") }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
@@ -164,10 +168,10 @@ fun SettingsSheet(page: String, onOpenPage: (String?) -> Unit,
     val pageScroll = scrollByPage.getOrPut(page) { ScrollState(0) }
 
     fun setStatus(t: String, err: Boolean = false) { note = t; noteErr = err }
-    /* 首拉有没有回来过：设置页一进来 providers 是空的，那不等于"服务端没有模型"。
+    /* 首拉有没有回来过：缓存为空时 providers 也是空的，那不等于"服务端没有模型"。
      * v0.28.2 真机反馈 2 的第二半——把"还没读到"说成「服务端还没有可用的模型」，
-     * 人会去添加重复的模型服务；读取中就说读取中。 */
-    var modelsLoaded by remember { mutableStateOf(false) }
+     * 人会去添加重复的模型服务；读取中就说读取中。有缓存时直接算已加载。 */
+    var modelsLoaded by remember { mutableStateOf(cachedProviders.isNotEmpty()) }
     fun reloadProviders() {
         scope.launch {
             runCatching { val r = Api.models(); providers = r.models; serverDefault = r.default }

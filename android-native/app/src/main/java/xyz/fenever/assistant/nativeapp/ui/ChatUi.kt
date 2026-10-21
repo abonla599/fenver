@@ -1542,6 +1542,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     .background(MaterialTheme.colorScheme.surface)) {
                     SettingsSheet(
                         page = settingsPage ?: "",
+                        cachedProviders = providers,
                         onOpenPage = { settingsPage = it },
                         onRequireAuth = { mode -> settingsPage = null; onRequireAuth(mode) },
                         onOpenUrl = onOpenUrl,
