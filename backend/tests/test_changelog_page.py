@@ -709,6 +709,39 @@ def test_the_homepage_links_to_the_changelog():
     assert 'href="/changelog"' in index, "首页没有指向更新日志页的链接"
 
 
+def test_the_web_offers_no_apk_download_except_the_single_latest_endpoint():
+    """官网/网页端只许有一个 APK 下载出口：`/site/android.apk`（服务端按最新清单代取）。
+
+    这条不是"页面上看着只有一颗按钮"：扫描随包发布的全部 HTML 的 href，任何
+    `*.apk` 或 `releases/download/...` 只要不是那一个同源端点就算违例。历史版本
+    只能留在更新日志的文字里，不能变成可点的下载入口——否则"官网只能下载最新版"
+    就只是当前这一版恰好没写旧链接的巧合。
+    """
+    web_roots = [
+        REPO_ROOT / "backend" / "app" / "web" / "site",
+        REPO_ROOT / "backend" / "app" / "web" / "static",
+        REPO_ROOT / "backend" / "app" / "web" / "admin",
+    ]
+    offenders = []
+    surfaces_with_endpoint = []
+    for root in web_roots:
+        for path in root.rglob("*.html"):
+            html = _strip_html_comments(path.read_text(encoding="utf-8", errors="replace"))
+            hrefs = re.findall(r'href="([^"]+)"', html)
+            for href in hrefs:
+                if href.endswith(".apk") or "/releases/download/" in href:
+                    if href != "/site/android.apk":
+                        offenders.append((path.relative_to(REPO_ROOT).as_posix(), href))
+            if 'href="/site/android.apk"' in html:
+                surfaces_with_endpoint.append(path.relative_to(REPO_ROOT).as_posix())
+
+    assert not offenders, (
+        "官网/网页端出现了除 /site/android.apk 以外的 APK 下载入口；"
+        "旧包与站外 release 下载链接必须清掉：" + repr(offenders))
+    assert "backend/app/web/site/index.html" in surfaces_with_endpoint
+    assert "backend/app/web/site/changelog.html" in surfaces_with_endpoint
+
+
 def test_the_dead_github_hyperlinks_are_gone_from_the_web():
     """整张随包发布的 Web（官网 + PWA + 管理台）不许再有可点的 github.com 链接。
 
