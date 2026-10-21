@@ -403,9 +403,12 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         #     不豁免，这是"照旧红"，不是"放行"）；
         #   · app.js 里最新那枚标记也领先 versionName。还没补行的那一刻它不领先，那一刻仓库里
         #     没有任何机器可读的东西说清"该领先的是哪一枚"，形态判读归 --expect 那一路；
-        #   · 那份说明的版本号是 versionName 的紧邻下一版（下一补丁 / 下一 minor 的 .0 / 下一
-        #     major 的 .0.0）。跳号不换 target：app.js 里任何一枚更大的标记都能让"最新"领先，
-        #     但只有紧邻的那一版才是裸跑能替人读的在途形状；确要发跳号的一版用 --expect 明示。
+        #   · 那份说明的版本号是紧邻的下一版（下一补丁 / 下一 minor 的 .0 / 下一 major 的
+        #     .0.0）。基线取"机器已经声明过的最高版本"：versionName 与比候选更低的那些发版
+        #     说明里最高的一个。只换服务端的版本可以连续发（0.35.1 之后还有 0.35.2），而
+        #     versionName 按规矩一直停在 0.35.0；拿它当基线会把第二个服务端补丁误判成跳号。
+        #     跳号不换 target：app.js 里任何一枚更大的标记都能让"最新"领先，但只有紧邻的
+        #     那一版才是裸跑能替人读的在途形状；确要发跳号的一版用 --expect 明示。
         # 成立时 target = 那份说明的版本，判据随之变成「app.js 里最新 marker == 那个领先的版本」
         # ——等号右边取自**说明**而不是取自标记，所以一枚领先却对不上说明的标记（领先到别的版本
         # 号）在这里仍然是红的。"恰好一行""不得互为子串"由 installer 那一支原样复用。
@@ -420,7 +423,11 @@ def evaluate(repo_root, expect=None, live_appjs=None):
             newest_marker = max((v for _, v in found), key=version_key, default=None)
             if note_is_server_only and newest_marker is not None \
                     and version_key(newest_marker) > version_key(declared):
-                if is_next_version(declared, newest_note):
+                baseline = max(
+                    [declared] + [n for n in notes if version_key(n) < version_key(newest_note)],
+                    key=version_key,
+                )
+                if is_next_version(baseline, newest_note):
                     target = newest_note
                     bare_marker_ahead = True
                 else:
