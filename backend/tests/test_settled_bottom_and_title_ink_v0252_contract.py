@@ -5,8 +5,8 @@
    streamText 刚置 null 时 layoutInfo 里还是流式气泡的旧高度，算出的 offset
    偏小，贴的是已经消失的那只气泡的底；长回答的结尾悬在视口外，用户"想看刚
    回复的答案还得往下扒"。网页的权威语义是两条分开的：流式 paint() 本来贴底
-   才跟随（app.js:1556），落定 renderMessages 无条件 scrollTop=scrollHeight
-   （app.js:1323）。安卓落定必须"随帧重贴直到高矮量实"，单发一次不算贴底。
+   才跟随（`app.js` 的流式贴底分支），落定 renderMessages 无条件 scrollTop=scrollHeight
+   （`app.js` 的 `scrollTop=scrollHeight` 落定分支）。安卓落定必须"随帧重贴直到高矮量实"，单发一次不算贴底。
 ② 顶栏 .topbar 标题 Text 没写 color，Compose 落到默认纯黑，深色主题下黑字压
    在深蓝黑玻璃底上几乎看不见。网页 h1 走 --text（主题墨色），安卓必须显式跟
    MaterialTheme.colorScheme.onSurface。
@@ -118,7 +118,7 @@ def test_native_streaming_follow_still_gated_on_already_at_bottom():
     """生成期间仍是"本来贴底才跟随"：上翻阅读不被拽回（网页 paint() 的 stick 闸，不许丢）。"""
     body = _settle_effect_body(_kt_code())
     assert re.search(r"lastVisible\s*<\s*total\s*-\s*2", body), \
-        "流式贴底闸门没了：每个 token 都把上翻阅读的人拽回底部（网页 app.js:1556 不这样）"
+        "流式贴底闸门没了：每个 token 都把上翻阅读的人拽回底部（网页的流式贴底分支不这样）"
 
 
 # ---------- ② 顶栏标题：显式主题墨色，不许落成默认纯黑 ----------

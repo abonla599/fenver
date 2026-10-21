@@ -224,7 +224,7 @@ def test_native_stop_button_asks_the_server_to_cancel_this_run():
 def test_the_resume_stop_and_history_words_are_identical_on_both_ends():
     """断线重连 / 取历史 / 已停止三句话，安卓与网页必须逐字一致——不许各造各的句子。
 
-    网页是唯一出处（api.js:142 / app.js:1662 / app.js:1588,1597）；正对照同时钉住"网页那句
+    网页是唯一出处（`api.js` 的续播入口与 `app.js` 的 `Last-Event-ID` 分支）；正对照同时钉住"网页那句
     还在"，防的是有人改安卓时顺手把网页也改了、两头一起漂。
     """
     js = _read(STATIC / "api.js") + _read(STATIC / "app.js")

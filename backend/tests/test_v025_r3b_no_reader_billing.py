@@ -13,7 +13,7 @@ config_store.stream_no_reader_grace_seconds / 环境变量 STREAM_NO_READER_GRAC
 close() 一条正阻塞在 read 上的连接在这套 SDK 下不可证明地即时。所以这里的
 数字判据是"create() 次数恰好是起飞的那几轮"，而不是"token 增量为 0"。
 
-第二条红线是 R3b-3：今天两个客户端（api.js:160-185）只认 content/done/error，
+第二条红线是 R3b-3：旧版客户端（`api.js` 的 `onEvent` 分发）只认 content/done/error，
 其余帧**静默丢弃**；流若以一个看不懂的帧收尾，旧客户端会当作"没 done"→
 retryable → 把整轮重发进 /v1/chat——R3 的 cancelled 终帧恰好落进这个洞里，
 这正是要修的回归。因此：被停掉的流最后一帧**可读**的必须是带新字段
@@ -220,7 +220,7 @@ def _old_client_parse(payloads):
 
     返回值就是旧客户端的行为分叉："done" 正常收尾；"error" 报错且不重发；
     "RESEND_WHOLE_TURN" —— 那是洞：finished 为空 → throw retryable=true →
-    app.js:1588 把整轮重发进 /v1/chat，再付一次钱。R3b-3 的全部意义在
+    `app.js` 的 `Last-Event-ID` 重发分支把整轮重发进 /v1/chat，再付一次钱。R3b-3 的全部意义在
     任何被停掉的流都不许走到这个返回值上。
     """
     finished = None
@@ -510,7 +510,7 @@ def test_stopped_streams_end_in_a_frame_old_clients_honor(client, real_stream,
 
 def test_regenerate_style_second_ask_is_a_real_paid_call(client, real_stream,
                                                          clean_usage):
-    """app.js:1464 的"重新生成"= PUT 截断会话 + 原样再问一次。不许任何机制把它"优化"掉。
+    """`app.js` 的"重新生成"入口= PUT 截断会话 + 原样再问一次。不许任何机制把它"优化"掉。
 
     形状与线上一致：第一轮流完，把会话替换回只剩那条用户消息，再发 /v1/chat/stream。
     钉三点：create() 两次、账本两行钱（calls 增量 1 不是 0）、落盘是两轮各自的助手消息。

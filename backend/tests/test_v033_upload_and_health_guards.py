@@ -393,7 +393,7 @@ def test_health_response_shape_is_unchanged_for_the_probes(monkeypatch, client):
 
     真正解析这个端点的：deploy/watchdog.ps1（读 checks.*.status 与 .detail）、
     deploy_local/swap_backend_v028.py（读 status 与 checks.*.status）、
-    app.js:2735 与 android Api.kt（读 build）。status/build/checks 三个键与
+    `app.js` 与 Android `Api.kt` 读 `build` 的那一处。status/build/checks 三个键与
     每项的 status/detail 两个字段必须都在，watchdog 那条 foreach 才不会空转。
     """
     secretish = {"id": "p1", "label": "网关", "model": "m"}

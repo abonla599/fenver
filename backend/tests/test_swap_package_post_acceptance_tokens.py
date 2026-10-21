@@ -7,7 +7,7 @@ r"""换包脚本**验收之后那段尾巴**的两处裸出口：step 8 的确�
   `[System.IO.File]::WriteAllText($StatePath, $json, $enc)` **都不在 try 里**，而这个函数是在
   主流程最后一行附近**裸调**的（就在 `Write-Output 'SWAP-DONE'` 前一行人读的日志）。它吃的路径
   是 `data\watchdog-state.json`——本仓库自己的注释就写着"看门狗可能正在写这个文件"。这不是假设：
-  `deploy/watchdog.ps1:585` 每一轮巡检都调 `Save-State`，巡检一分钟一次
+  `deploy/watchdog.ps1` 每一轮巡检里的 `Save-State`，巡检一分钟一次
   （看门狗计划任务的 RepetitionInterval=1min；注册脚本是本机专属、刻意被 .gitignore 排除，
   不是仓库文件），本机 2026-10-17 实测那份账的 mtime
   09:12:05 -> 09:13:05 -> 09:14:05（delta 60/59 秒，799 字节不变）。撤掉 try 之后这台机器当场
@@ -114,7 +114,7 @@ sha256 `a6772ba1cc9a4048abeb1001077fd0c62f1beba7fca0234a35a9bea823cf65a0`；换�
 `_boot_region` 用的是 `$livePid = 0` / `while ((Get-Date) -lt $bootDeadline) {` /
 `$running = Get-LiveProcess` / `STARTED pid=` 四个顶格锚点，只看轮询那一段，不看
 `Stop-AfterFailure` 里的重启 if），所以 #51 把那处改成 `@(Get-LiveProcess).Count` 不会移动
-本文件任何锚点；本文件也不碰 `test_swap_package_disable_verify.py:341` 那条判据的射程
+本文件任何锚点；本文件也不碰 `test_swap_package_disable_verify.py` 那条重启判决判据的射程
 （`$restore = Restore-WatchdogTask` 的缩进层级）。
 
 没有 `powershell.exe` 就 skip 机器那几条，静态那几条照跑照判（惯例同上面几份锁）。

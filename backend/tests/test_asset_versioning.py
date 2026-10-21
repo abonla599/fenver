@@ -284,7 +284,7 @@ def test_stamp_assets_is_idempotent_and_leaves_the_worker_alone():
 # ---------- 6. `?v=` 是来客可控的输入，而它会被拼进 JS 字面量：只认服务端自己那一枚 ----------
 # 这一节防的不是"今天有人打线上"，而是"下一版又写回一个不校验的 token"：水印那一条
 # 占位符（`__ASSET_TOKEN__`）落在 `static/index.html:753` 的 `window.__ASSETS__ = "…"`
-# 与 `static/sw.js:9` 的 `const V = "…"`，两处都是**字符串字面量内部**，所以查询串里任何
+# 与 `sw.js` 的 `const V = "…"`，两处都是**字符串字面量内部**，所以查询串里任何
 # 一个引号都是一次逃逸。写 `rewritten_html` 的人当时只想"带水印的 URL 走 immutable"，
 # 没说出口的假设是"那个值是我们自己生成的"。判据与理由见 web_router._query_token。
 

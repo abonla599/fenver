@@ -8,7 +8,7 @@
 1. **口径**：只认 `app.core.schedule.today()` 那一份"今天"——提醒功能用的就是它，
    第二套定义迟早会在跨零点时给出两个不同的"今天"；星期几同样不许写死。
 2. **形状**：走 `ChatPipeline._append_system` 进**那一条** system。前端
-   （`app/web/static/app.js:178`）会带着用户自己的 persona 当 `messages[0]`，
+   （`app.js` 的 persona 注入分支）会带着用户自己的 persona 当 `messages[0]`，
    所以既不能插出第二条 system，也不能把它盖掉或换到它前面。
 3. **两条路**：非流式 `process` 与流式 `/v1/chat/stream` 都要在**实际发给模型的
    那份 messages** 上验到，只测 `inject_context` 本身等于什么都没接上。
@@ -23,7 +23,7 @@ from app.core import schedule
 from app.pipeline import ChatPipeline
 from tests import conftest
 
-# 前端 persona 的形状（app/web/static/app.js:178 把它 unshift 成 messages[0]）。
+# 前端 persona 的形状（`app.js` 把 persona unshift 成 messages[0] 的那一处）。
 PERSONA = "你是考研规划助手，只用中文回答。"
 
 

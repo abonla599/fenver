@@ -4,7 +4,7 @@
 987654321×123456789"，它回的是「我无法调用外部计算器工具」——那是实话。
 非流式的 ChatPipeline 一直把 tools 传给模型（`ChatPipeline` 里构造模型调用参数那段），
 而前端只走
-`/v1/chat/stream`（api.js:70），那条路上的 `stream_chat` 连 `tools` 形参都没有。
+`/v1/chat/stream`（`api.js` 的 `/v1/chat/stream` 调用），那条路上的 `stream_chat` 连 `tools` 形参都没有。
 
 这个文件存在的意义还包括：conftest 的 autouse 夹具把 `streaming.stream_chat`
 整个换成假函数，所以真函数在别的用例里从没执行过——这里每个用例都先 reload 拿回
