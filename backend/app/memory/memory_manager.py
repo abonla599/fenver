@@ -436,7 +436,7 @@ class MemoryManager:
     def decay_weights(self, user_id: str, decay_factor: float = 0.95):
         # 归属下推给 chroma，与 search_memory/owned_ids/get_user_memories 同一套口径：
         # 原先这里 get() 拉整库再在 Python 里挑，等于把"别人的记忆也搬进本进程"，
-        # 条数与体积都不封顶（本文件 :389 的 docstring 早就写了该下推）。
+        # 条数与体积都不封顶（`search_memory` 的 docstring 早就写了该下推）。
         all_data = self.collection.get(where={"user_id": user_id})
         ids_to_update = []
         new_metadatas = []

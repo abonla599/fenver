@@ -685,7 +685,8 @@ def self_hosted_apk_url(origin: str) -> str:
        端口、userinfo 或第二段路径。本地开发用 http://localhost:8000 时这里必然回空串
        ——那正是想要的：老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的
        GitHub 地址换成一条用不了的。
-    2. **域**必须在 `SELF_HOST_DOMAINS` 里（见本文件 :55 那段注释：「清单里的下载地址
+    2. **域**必须在 `SELF_HOST_DOMAINS` 里（见本文件 `SELF_HOST_DOMAINS` 上方那段注释：
+       「清单里的下载地址
        只许落在这两个域上，别的一律判死」）。这一层以前只在清单校验
        （`_is_self_hosted_url` ← `_manifest_ok`）那条路上生效，换地址这条路上漏了——
        而这条路的输入是**请求自己的 Host 头**（`main._self_origin` 取 Host + X-Forwarded-Proto，

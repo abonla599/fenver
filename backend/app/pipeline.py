@@ -298,7 +298,8 @@ class ChatPipeline:
                         print(f"[Pipeline] 调用工具: {name}({args})")
                         label = _tool_label(name, args)
                         # 工单 #76a：两支都产出 ToolOutcome —— 记账判据只许读结构化那一格
-                        # （outcome.suspended，唯一赋值点 executor.py:181）。非富那支不再退回
+                        # （outcome.suspended，执行器在 `ToolOutcome` 上统一赋值的那一格）。
+                        # 非富那支不再退回
                         # 纯文本投影，否则"停在断点问用户"在这一条路上又被读成一次失败。
                         outcome = execute_tool_detailed(name, args, user_id=self.user_id)
                         result = outcome.text

@@ -195,7 +195,8 @@ class ToolOutcome(NamedTuple):
     - `suspended`：这一次调用**没跑完也没失败**，它停在断点等用户给一个答案。
       读法纪律：`ok=False` 只说明"没产出结果"，**不**说明"失败了"；想知道是哪一种，
       只看 `suspended`。把挂起读成失败，代价是把"问用户要验证码"记进失败退避
-      （`guardrails.py:177-180`），两次就把这个工具在本轮熔断，用户永远续不上。
+      （`guardrails.record_outcome` 里 `fails >= fail_threshold` 那一支），两次就把
+      这个工具在本轮熔断，用户永远续不上。
     - `suspension`：续跑要的整包状态，只在 suspended 时非空：
       `{"tool_name", "arguments", "prompt", "resume_state", "can_resume"}`。
       `arguments` 是**服务端这一侧**的调用参数（不是模型事后能改的那一份），续跑时
@@ -209,13 +210,14 @@ class ToolOutcome(NamedTuple):
     唯一赋值点给出——不是从 `ok`/`success` 猜的（被审批闸门、频控、缺身份挡下的续跑，
     `ok` 同样是 False，却压根没进函数体）。编排器据此决定"要不要把这枚断点标成已消费"：
     只有真的把答案交给了工具（副作用可能已落地）才许标，被闸门挡下的那种必须留着能再递。
-    默认 False = 没走到函数体。除 `orchestrator.py:386` 那一处消费点外，既有读者（`pipeline.py`、
-    `streaming.py`、`react_agent.py`、`task_agent.py`、`main.py:974`）都不读这一格，与它们无关。
+    默认 False = 没走到函数体。除 `orchestrator` 续跑分支里 `if outcome.tool_ran:` 那一处
+    消费点外，既有读者（`pipeline.py`、`streaming.py`、`react_agent.py`、`task_agent.py`、
+    `main` 的 `/v1/approval/confirm` 执行分支）都不读这一格，与它们无关。
 
     两个新格都带默认值：`tool_ran` 加在 `suspension` 之前而不是最末尾，是因为 `suspended`
     与 `suspension` 必须保持是 `_fields` 的最后两格（那条形状锁见
     `tests/test_v0350_a3_suspendable_tool_protocol.py`）；前五格（text/ok/artifacts/
-    truncated/elapsed_ms）的位置与含义一字未动，既有构造点（本文件与 `streaming.py:549/:554`）
+    truncated/elapsed_ms）的位置与含义一字未动，既有构造点（本文件与 `streaming` 的两条返回）
     全是关键字写法。
     """
     text: str
@@ -433,7 +435,8 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
     # ⭐⭐ 工单 #37 选项 b：既声明可挂起（suspends）又声明需审批（requires_approval）的工具，
     # 现在**不被支持**，无论有没有票据，都在派发处响亮拒绝。理由（写死在这里，别让下一个
     # 接手的人再推一遍）：审批票据接不过一次挂起——
-    #   ① 任务面（TaskAgent/Orchestrator）从不带 granted_ticket（见 task_agent.py:162 那段），
+    #   ① 任务面（TaskAgent/Orchestrator）从不带 granted_ticket（见 `task_agent` 里
+    #      "执行工具走执行器"那段），
     #      所以第一次调用就会被下面那道审批闸门挡在函数体之前，工具压根挂不起来，永远拿不到
     #      断点；② 就算退一步、由带票据的 confirm 那条路让它挂起，续跑时那张票要么已被消费
     #      （一次性，A2 判据钉着）、要么明文 id 不落盘（A2 只存 sha256 摘要，服务端事后取不回
