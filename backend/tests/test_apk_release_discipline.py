@@ -164,6 +164,22 @@ def test_released_apks_are_signed_with_one_pinned_key():
             assert leak not in gradle, f"{mod} 的 gradle 里出现了写死的密钥材料：{leak}"
 
 
+def test_signature_guard_compares_against_a_previous_release_that_has_an_apk():
+    """签名守卫的参照必须是最近一个**带 APK**的正式版，不能是只换服务端的那一版。
+
+    2026-10-22 v0.35.4 实测：v0.35.1–v0.35.3 全是 server-only、Release 里没有 APK，
+    发布流却按"最近一个正式 Release"取到 v0.35.3，然后在"没有可下载的 .apk 资产"
+    处退出，整个 Release 建不出来。参照的选择条件里必须带资产过滤。
+    """
+    raw = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    workflow = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+    assert "releases?per_page=50" in workflow, "上一版列表又缩回 20 条：连续多个 server-only 版会把带包的那版挤出窗口"
+    assert "and ([.assets[]? | select(.name | endswith(" in workflow, (
+        "签名守卫的上一版选择没有过滤 APK 资产：server-only 版会把守卫挡在起跑线")
+    assert "length > 0))][0].tag_name" in workflow, (
+        "上一版选择没有要求至少一个 APK 资产：找不到可比的包时仍会整个 Release 失败")
+
+
 def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
     """签名四项 + storeType 必须待在 signingConfigs 里，buildTypes 只许引用它。
 
