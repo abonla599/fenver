@@ -228,12 +228,12 @@ jobs:
             exit 1
           fi
           echo "本次构建签名指纹: $new_fp"
-          # 上一正式版 = tag 不等于本次、非草稿非预发布里最近的一个。
-          # v0.21/v0.22 资产虽名带 -debug，但覆盖安装判的是签名，不比文件名，
-          # 所以拿"最近发布"的证书指纹当参照正是题意。
+          # 上一正式版 = 最近一个**带 APK 资产**的正式 Release。
+          # 只换服务端的版本（v0.35.1-v0.35.3）没有 APK，不能拿它当签名参照；
+          # 跳过它们，继续往前找最近一个真正能安装的包。
           tag="${GITHUB_REF_NAME}"
-          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
-            --jq "[.[] | select(.tag_name != \"${tag}\" and .draft == false and .prerelease == false)][0].tag_name // empty")
+          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=50" \
+            --jq "[.[] | select(.tag_name != \"${tag}\" and .draft == false and .prerelease == false and ([.assets[]? | select(.name | endswith(\".apk\"))] | length > 0))][0].tag_name // empty")
           if [ -z "$prev" ]; then
             echo "::warning::找不到上一正式版（首次发布？），本次跳过签名守卫"
             exit 0
