@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
@@ -81,6 +82,12 @@ fun SessionDrawer(tick: Int, currentId: String,
     LaunchedEffect(tick) {
         loading = true; error = null
         try { sessions = Api.listSessions() }
+        catch (e: CancellationException) {
+            // 抽屉/页面离开组合时 LaunchedEffect 会被取消；这是正常生命周期，不是
+            // 加载失败。把它当错误会显示 Compose 的 "coroutine scope left the
+            // composition"，而用户看到的就是一条莫名其妙的红字。
+            throw e
+        }
         catch (e: Exception) {
             if (e is xyz.fenever.assistant.nativeapp.ApiException && e.status == 401) {
                 // 与 ChatUi.logoutIf401 同律：只忘当前身份，不清全机清单
@@ -221,12 +228,16 @@ fun SessionDrawer(tick: Int, currentId: String,
                 TextButton(onClick = {
                     pendingDelete = null
                     scope.launch {
-                        runCatching { Api.deleteSession(target.session_id) }
-                            .onSuccess {
-                                sessions = sessions.filter { it.session_id != target.session_id }
-                                onDeleted(target.session_id)
-                            }
-                            .onFailure { error = it.message }
+                        try {
+                            Api.deleteSession(target.session_id)
+                            sessions = sessions.filter { it.session_id != target.session_id }
+                            onDeleted(target.session_id)
+                        } catch (e: CancellationException) {
+                            // 删除请求在抽屉随组合退出时被取消：不是删除失败，不写红字。
+                            throw e
+                        } catch (e: Exception) {
+                            error = e.message
+                        }
                     }
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
