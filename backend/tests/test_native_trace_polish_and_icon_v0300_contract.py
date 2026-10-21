@@ -294,9 +294,9 @@ def test_version_bumped_and_release_notes_brief():
     gradle = _text(BUILD)
     # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
     # v0.28.0 推到 48，v0.28.1 推到 49，v0.28.2 推到 50，v0.28.3 推到 51，v0.29.0 推到 52，
-    # v0.29.1 推到 53，v0.29.2 推到 54，v0.30.0 推到 55，v0.31.0 推到 56，v0.32.0 推到 57，v0.33.0 推到 58，v0.33.1 推到 59，v0.34.0 推到 60、v0.34.1 只换服务端没推、v0.34.2 推到 61、v0.35.0 推到 62。下面断的是现在那一格。
-    assert "versionCode 62" in gradle and 'versionName "0.35.0"' in gradle, \
-        "gradle 那一格漂了：这一版应是 62 / 0.35.0，且必须与 docs/releases/v0.35.0.md 同时存在"
+    # v0.29.1 推到 53，v0.29.2 推到 54，v0.30.0 推到 55，v0.31.0 推到 56，v0.32.0 推到 57，v0.33.0 推到 58，v0.33.1 推到 59，v0.34.0 推到 60、v0.34.1 只换服务端没推、v0.34.2 推到 61、v0.35.0 推到 62、v0.35.4 推到 65。下面断的是现在那一格。
+    assert "versionCode 65" in gradle and 'versionName "0.35.4"' in gradle, \
+        "gradle 那一格漂了：这一版应是 65 / 0.35.4，且必须与 docs/releases/v0.35.4.md 同时存在"
     doc = _text(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)
