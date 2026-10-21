@@ -140,7 +140,7 @@ class RoundGuard:
         """记录一次工具调用的结果，三态：挂起 / 成功 / 失败（+ 估算 token）。
 
         ⭐ v0.35 工单 #29（A3 的第三态在这里落地）：`suspended=True` 时**不读 `ok`**。
-        按 `ToolOutcome` 的读法纪律（`tools/executor.py:93-102`），`ok=False` 只说明
+        按 `ToolOutcome` 的读法纪律（`tools/executor.py` 里那段文档），`ok=False` 只说明
         "没产出结果"，不说明"失败了"；想知道是哪一种，只看 `suspended`。把挂起读成失败
         记进退避账，代价是同一工具在本轮两次就熔断——用户两次"请把验证码发我"之后再
         也续不上。
@@ -155,7 +155,8 @@ class RoundGuard:
 
         `suspended` 做成**关键字限定**参数、默认 False，不是第 3 个位置参数：工单 #76a 已把三条
         聊天路径与 task_agent 的调用点接上这一格，两参写法 `record_outcome(name, ok)` 今天在 app 里
-        只剩 react_agent.py:217 那条兜底异常支（异常不是挂起；#76b 已把该文件的成败判据换成
+        只剩 `react_agent` 里那条兜底异常支的 `guard.record_outcome(tool_name, False)`
+        （异常不是挂起；#76b 已把该文件的成败判据换成
         `outcome.ok`），于是 `estimated_tokens` 的位置与含义必须一字不变——挪成位置参数就静默把 token 数读成布尔。
 
         可用性探测已剔除的工具不进熔断计数（它们根本不会被调用到这里）。

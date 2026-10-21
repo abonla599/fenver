@@ -705,7 +705,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     这与"用户消息先落盘"是同一条原则。
 
     终帧纪律（R3b-3）：被停掉的流在 cancelled 之后必须再补一条 type:"done"
-    的缓冲帧收尾。旧 PWA（api.js:160-185）只认 content/done/error，其余静默
+    的缓冲帧收尾。旧 PWA（`api.js` 的 SSE 解析）只认 content/done/error，其余静默
     丢；流若以一个旧客户端看不懂的帧收尾，它按"没 done"判 retryable，会把
     整轮重发进 /v1/chat 再付一次钱——那正是本版要堵的洞。停的信息放进 done
     的新字段（status/stopped_reason/resumable），旧解析器不受影响。

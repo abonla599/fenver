@@ -15,9 +15,9 @@ Enable a logged-in user whose *one* token has been evicted/expired to re-login a
 
 ## Background (root-cause chain, from sde-debug)
 
-1. Server design: `MAX_SESSION_TOKENS = 8` per account silently FIFO-evicts the oldest token on each new login (auth.py:43, 327-332). Frequent logins across phone + web today legitimately produced 401s.
-2. Shell defect (the real bug): any 401 anywhere triggers `Prefs.clearAuth()`, which wipes **all** local identities — tokens, `providerId` (= "模型丢失"), `lastSessionId` (= "会话丢失"). Sites: `ChatUi.kt` `logoutIf401()` (line ~238) and `SessionListUi.kt` 401 branch (line ~84).
-3. Misleading copy: "未登录或令牌已失效：请在「设置 → 账户」重新注册" (native `SettingsUi.kt:916` + web `app.js` `memoryListErrorText`) steers users to *register a new account*, making old-account sessions appear permanently lost. Server data is intact.
+1. Server design: the per-account `MAX_SESSION_TOKENS` cap silently FIFO-evicts the oldest token on each new login (`auth.py`, the token-table trim). Frequent logins across phone + web today legitimately produced 401s.
+2. Shell defect (the real bug): any 401 anywhere triggers `Prefs.clearAuth()`, which wipes **all** local identities — tokens, `providerId` (= "模型丢失"), `lastSessionId` (= "会话丢失"). Sites: `ChatUi.kt` `logoutIf401()` and the `SessionListUi.kt` 401 branch.
+3. Misleading copy: "未登录或令牌已失效：请在「设置 → 账户」重新注册" (native `SettingsUi.memoryListErrorText` + web `app.js` `memoryListErrorText`) steers users to *register a new account*, making old-account sessions appear permanently lost. Server data is intact.
 
 Refuted hypotheses: server data dir moved; APK signing drift (CI apksigner fingerprints identical since v0.23.17); backend auth regression between v0.25→v0.28 (no auth code diff); corrupt APK install (Updater verifies SHA-256 and rejects 3xx).
 

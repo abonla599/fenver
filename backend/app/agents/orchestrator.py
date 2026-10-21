@@ -8,8 +8,9 @@ from .task_store import (IllegalTaskTransition, Task, TaskStatus, can_transition
                          claim_execution, expire_parked_task, is_executing,
                          is_waiting_timed_out, release_execution, save,
                          sweep_timed_out_parks, waiting_timeout_info, task_store)
-# 认领那一跳要用的锁就是那份存储自己那把（改表与落盘同锁，task_store.py:274）。
-# 跨模块引一个下划线开头的名字在本仓有先例（`app/web/web_router.py:24` 引
+# 认领那一跳要用的锁就是那份存储自己那把（改表与落盘同锁，见 `task_store.save()`
+# 的 docstring）。
+# 跨模块引一个下划线开头的名字在本仓有先例（`app/web/web_router.py` 顶部引
 # `auth_router._client_ip`），而这里的理由更硬：判"这条任务在不在等人"与写它的那一跳
 # 必须在**同一把**锁里，另起一把只是把窗口从一处搬到两处。
 from .task_store import _lock as _store_lock
@@ -39,7 +40,7 @@ TOOL_SUSPENSION_KIND = "tool_suspension"
 # 为什么状态不够、必须另有一张表：一个 RUNNING 的任务有两种截然不同的下场——
 #   ① 上一次进程被打断留下的（`restore()` 给它 `interrupted_by_restart`）：再进来的人
 #      续跑它是**设计如此**，跳转表那条 `running → running` 自环就是为它开的
-#      （task_store.py:69 的注释）；
+#      （`task_store.ALLOWED_TRANSITIONS` 上方那段跳转表注释）；
 #   ② 本进程另一条请求**正跑在这一秒**：再进来的人做什么都是错的。
 # 审查员复现出来的正是 ② 被当成 ①：第一条答案把任务从 waiting_user 翻成 RUNNING，
 # 第二条因此看不见 waiting_user，掉进那句通用的"恢复任务 … 进度: 0/1"，把整条子任务
@@ -93,7 +94,8 @@ def _tool_suspension(task: Task) -> Optional[Dict[str, Any]]:
 # 缺陷原文：编排器先认领（`_claim_execution`）、这一趟可能抛，而 `_record_failure` 写
 # `FAILED` 时 `set_status` **刻意留着**那份游标（它是"上次停在哪儿"的证据，撕了它只会让
 # 下一个接手的人更瞎）。留下来的状态就是 `failed` + `kind=="tool_suspension"`，而改动前
-# 的 FAILED 分支（原 `orchestrator.py:164-165`）**一眼都不看游标**就进通用续跑——
+# 的 FAILED 分支（`task.error = error_msg` + `set_status(FAILED)` 两行裸写）
+# **一眼都不看游标**就进通用续跑——
 # `can_resume=False` 只是个标签、不是一道闸，于是已经付过钱的第 1~3 步（查店、加购、
 # 发验证码）再烧一遍，验证码再发一遍。审查员量到的就是那两行：`SPENT before=1 after=2`。
 #
@@ -392,7 +394,8 @@ class Orchestrator:
                 # 没挂起就把它当这一步的结果往下走，**包括 ok=False**：续跑被闸门
                 # 拒了（缺身份/超频控/需审批）也是一句要交给模型看的话，与两条聊天
                 # 路径同一条纪律——"绝不因为一次工具没跑成就把整条流打断"
-                # （streaming.py:544 那句）。打断它的是"替用户编一个答案"，不是
+                # （`streaming` 里"绝不因为一次工具没跑成就把整条流打断"那句）。
+                # 打断它的是"替用户编一个答案"，不是
                 # "如实说这一步没成"。
                 #
                 # ⭐ 工单 #33 第三句 + 工单 #37 收口：这一包断点**真的递进工具了**才就地
@@ -512,7 +515,7 @@ class Orchestrator:
 
             # ⭐ 这一句原来不是一个方法，而是两行裸写：`task.error = error_msg` +
             # `task.set_status(TaskStatus.FAILED)`。后一行就是审查员那枚 500 的抛点
-            # （改动前的 :317）——`except` 块里再抛一次 `IllegalTaskTransition`，外面
+            # ——`except` 块里再抛一次 `IllegalTaskTransition`，外面
             # 没有第二层 try，它直接飘出 run()、飘出 /v1/agent/orchestrate。任务已经
             # 被并发的那一路跑完、或被 /v1/tasks/{id}/cancel 取消之后，终态不出边，
             # 这一跳必然被拒；拒了要说得出话，不能崩。判据与"为什么一格都不改"写在
@@ -571,7 +574,8 @@ class Orchestrator:
         `claims_breakpoint=False` 的那几路（pending / 被重启打断的 running / 游标不是
         工具断点的 waiting_user）照旧进来占位并跑，与改动前逐字同形：
         "被打断过、可以由人接着跑"本来就是跳转表给 running → running 那条自环留的口子
-        （task_store.py:69），这一格不改它，只把"另一条请求正跑着"这一种从里面分出去。
+        （`task_store.ALLOWED_TRANSITIONS` 的 `running → running` 自环注释），这一格
+        不改它，只把"另一条请求正跑着"这一种从里面分出去。
         ⭐ `failed` 不在 `claims_breakpoint=False` 那几路里了：改动前它会走进这一路、
         然后从第 1 步重烧（工单 #33）；现在它在 `run` 里就被
         `_trusted_failed_breakpoint` 分成"可信 → 带答案走 claims_breakpoint=True"与
@@ -785,7 +789,8 @@ class Orchestrator:
 
         ⚠️ 给 A4 的一句话，别说反：`answer_required` 这一格里 `can_resume` 报的是
         **False**，因为 A1 的不变式是"`can_resume` 为真 ⟺ 此刻状态是 `waiting_user``"
-        （`task_store.py:214`），而这条任务是 `failed`。**能不能带答案来接**读的是
+        （`task_store.Task.set_status` 里 `can_resume = target is TaskStatus.WAITING_USER`
+        那一格），而这条任务是 `failed`。**能不能带答案来接**读的是
         `reason == "answer_required"` 与 `fresh_start_required is False` 那两格，不是
         `can_resume`。把 `can_resume` 在这里翻成 True 才是真出事——那等于让 GET
         `/v1/tasks/{id}` 对一条 `failed` 记录许诺"它在等人"，而盘上那格与状态机从此
@@ -947,7 +952,8 @@ class Orchestrator:
         """把一次工具挂起落到任务上。能接回去 → waiting_user；接不回去 → 如实 failed。
 
         为什么必须有这个分叉，而不是"凡挂起一律 waiting_user"：A1 那份存储有条不变式
-        `can_resume ⟺ status 是 waiting_user`（task_store.py:190 与 :263 两处同一判据）。
+        `can_resume ⟺ status 是 waiting_user`（`task_store.Task.set_status` 里
+        `can_resume` 那一格与状态跳转同批写）。
         把一次**没人接得住**的挂起写成 waiting_user，等于让 GET /v1/tasks 对用户许诺
         "给个答案就能续"，而那个答案递进去只会被执行器拒掉——任务就永远挂在里面，
         比一句"这一步没做成"更坑人。failed 带原因才是实话（提案 §四 判据 4 反向的那一半：

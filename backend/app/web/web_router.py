@@ -110,8 +110,8 @@ def _query_token(scope) -> str:
 
     为什么必须校验（2026-10-08 安全收口）：这个值不是"用来比对的输入"，它是**要被拼进
     页面和 worker 的那段 JS 的字面量**。`rewritten_html` 把它原样 `replace` 到
-    `__ASSET_TOKEN__` 的位置上，落点是 `static/index.html:753` 的
-    `window.__ASSETS__ = "…"` 与 `static/sw.js:9` 的 `const V = "…"`。取的是
+    `__ASSET_TOKEN__` 的位置上，落点是 `static/index.html` 里的
+    `window.__ASSETS__ = "…"` 与 `static/sw.js` 的 `const V = "…"`。取的是
     `scope["query_string"]` 的原始字节（不经 Starlette 解码，也就任何形状都可能进来），
     于是 `?v=A"B` 就把一行 `window.__ASSETS__ = "A"B";` 发到了别人浏览器里——一次查询
     参数反射。写这行的人当时只想"让带水印的 URL 走 immutable"，没意识到同一个值还有
@@ -447,8 +447,8 @@ def install_site(app: FastAPI) -> None:
 
     为什么不是 app.mount("/", ...)：根 Mount 的 .path 是空串,而它会部分匹配一切
     路径,让 Starlette 的 redirect_slashes 不再运行——/health/、/docs/ 一起变 404,
-    未匹配的 POST 从 404 变 405。backend/tests/test_auth_endpoints.py:296 钉的正是
-    尾斜杠语义,那是安全测试,不该为一个落地页付账。
+    未匹配的 POST 从 404 变 405。backend/tests/test_auth_endpoints.py 里带斜杠变体的
+    那条安全测试钉的正是尾斜杠语义,不该为一个落地页付账。
     """
     @app.get("/", include_in_schema=False)
     async def site_index():

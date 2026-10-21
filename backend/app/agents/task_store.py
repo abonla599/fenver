@@ -56,8 +56,8 @@ class TaskStatus(str, Enum):
     # ⭐ v0.35 A1：本轮跑到某一步停下来、要等人给一个答案。**这是本版新增的唯一一个
     # 状态字面量**，而且是刻意只有一个：提案 §四 v0.35 那行列的 `needs_input` 与
     # `resumable` 都没有落地——`resumable` 这个词在本仓已经有两个别的含义
-    # （`core/stream_runs.py:248` 的函数 `resumable()`、`:291/:301` 的 JSON 布尔
-    # `resumable`，以及安卓壳 `Api.kt:144/553` 那个不是一回事的 Boolean），再拿它当
+    # （`core/stream_runs.py` 里的 `resumable()` 函数与 JSON 字段 `resumable`，
+    # 以及安卓壳 `Api.kt` 里那个不是一回事的 Boolean），再拿它当
     # 状态名等于让下一个读代码的人猜是哪一面。"能不能续跑"在这份存储里是**布尔字段**
     # `can_resume`，不是状态。"超时不响应"也不是新状态：提案 §四写的是 needs_input，
     # 而它的语义（挂起保活、不是失败）就是 waiting_user 本身，用一个状态说一句话。
@@ -207,7 +207,8 @@ class Task:
         """标记任务为已取消。走状态机（v0.35 A1）：终态上的"再取消一次"现在会抛。
 
         两个调用点本来就不在终态上调它（`/cancel` 端点先经 `cancel_task` 那道
-        **同锁**的终态 + 执行权判据，orchestrator.py:110 是在 RUNNING 的循环里），
+        **同锁**的终态 + 执行权判据，`orchestrator` 是在 RUNNING 的循环里读
+        `task.cancelled` 才调它），
         所以这不是行为变化，是把"只有非终态能被取消"这句一直存在的口头约定变成
         代码里的判据。
 
@@ -307,7 +308,8 @@ class Task:
             "waiting_since": self.waiting_since,
         }
         # ⭐ 工单 #33 的判别器：**只在真的定论过的时候才多这一格**。
-        # 为什么不是无条件写：A1 那条迁移锁（`test_v0350_a1_task_state.py:322`）钉的是
+        # 为什么不是无条件写：A1 那条迁移锁（`test_v0350_a1_task_state.py` 里"键集与
+        # A1 交付的那一份逐字相同"那条）钉的是
         # "一条老记录读回来再写盘，键集与 A1 交付的那一份逐字相同"——未定论的记录多出一格
         # `end_reason: null` 就是把那句判据改掉，而那条锁守的正是"下一次落盘不许丢历史数据"。
         # 缺键 = 没有原因，本来就是这条记录的真话（`from_dict` 那侧读不到就回 None，
@@ -407,7 +409,8 @@ def save(task: "Task") -> "Task":
     """把一份内存改动落到盘上：显式一步，而不是在 getter 里藏写盘。
 
     这份文件开头承诺的补法就是它。走 `__setitem__` 因此顺带拿到既有的两条纪律
-    （改表与落盘同一把锁 :133 区域、原子替换 _write_unlocked），这里不再写第二套。
+    （改表与落盘同一把锁——`__setitem__` 里那把 `_lock`、原子替换 `_write_unlocked`），
+    这里不再写第二套。
 
     任务还没进存储时**不落盘**：那时候 `task_store[id] = task` 等于把一个半成品当成
     新条目插进表里（并触发一次全量写盘），而调用方接下来还会再放一次。
@@ -487,7 +490,7 @@ def release_execution(task_id: str) -> None:
 #
 # 一条诚实的边界（与 `orchestrator._EXECUTING` 那段同一个形状）：这一族的判据是
 # **本进程内存里的那张表**。多 worker 各持一份 tasks.json 的内存视图，作废与续跑
-# 都只在自己那一进程内串行；现网是单进程（`run_backend.py:63` 那句 `uvicorn.run`
+# 都只在自己那一进程内串行；现网是单进程（`run_backend.py` 里那句 `uvicorn.run`
 # 不带 workers），跨进程的同一枚停点还归不了一。已作为 follow-up 上报，不属于这一格。
 
 

@@ -7,7 +7,7 @@
 改这一份文件要先读懂的一条约束：**老字段不许变形**。`success` 仍然是 bool、
 `to_string()` 的 ✓/✗ 两支仍然逐字节不变、`__init__` 的前五个参数仍然是位置可传的。
 第三态一律由**新增的、带默认值的**字段说，因为本协议的既有读者遍布
-（`executor.py:137` 读 `bool(response.success)`、两条聊天路径与 ReAct 读 `to_string()`
+（`execute_tool_detailed` 里读 `bool(response.success)`、两条聊天路径与 ReAct 读 `to_string()`
 的文本），让老字段变成三态等于要求所有人在同一轮里认新形状。
 """
 from typing import Any, Optional
@@ -49,8 +49,8 @@ class ToolSuspended(Exception):
 
     这条异常**绝不允许飘出执行器**：`_dispatch` 就地接住、折成一个 `suspended=True` 的
     `ToolResponse`（见 `executor.py` 的 `_settle_suspension`）。理由是向后兼容的承重墙，
-    不是洁癖——所有既有调用侧都写着兜底 `except Exception`（`streaming.py:553`、
-    `pipeline.py`、`react_agent.py:215`），异常一旦外飘就立刻被折成一句"工具执行错误"，
+    不是洁癖——所有既有调用侧都写着兜底 `except Exception`（`streaming` 的非富路径、
+    `pipeline.py`、`react_agent` 的 `except`），异常一旦外飘就立刻被折成一句"工具执行错误"，
     第三态当场退化回失败态，正是这一版要拆掉的形状。工具要挂起就 raise，
     raise 出去的东西由执行器负责变成值。
     """
