@@ -248,7 +248,7 @@ def test_new_stream_frames_carry_run_id_and_sequence(client):
     """协议锁：每一帧都有 `id: <run_id>:<seq>`，data 里带 seq/run_id。
 
     同时钉向后兼容——start/content/done 三个旧事件名不许被换掉：两个客户端
-    （api.js:171-173、Api.kt parseFrame）都按 data.type 分发，改了名字等于
+    （`api.js` 的帧分发、`Api.kt` 的 `parseFrame`）都按 data.type 分发，改了名字等于
     在客户端 lane 合入之前先把线上打断。
     """
     res = client.post("/v1/chat/stream", json={

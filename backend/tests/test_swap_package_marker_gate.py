@@ -21,7 +21,7 @@
 `dist_new\\run_backend` 当暂存包，形状照 onedir 布局），把 `-ProjectRoot` 指过去，于是
 脚本读的全是 tmp_path 下的东西：真 `dist\\`、真 `data\\`、真进程都不在射程里。
 非 Windows 上行为层跳过、文本层照跑（惯例与理由同
-test_v0340_swap_path_normalization.py:68——CI 是 ubuntu，硬断言会把锁变成 CI 红）。
+`test_v0340_swap_path_normalization.py` 的 CI 平台分支——CI 是 ubuntu，硬断言会把锁变成 CI 红）。
 
 工单 #63 的旁注（skip 数不是判据）：整套用例的 skipped 数跟着**本机产物**走，不跟代码走——
 `data/apk/` 里有没有那一版包（test_update_channel 的种子摘要锁；同一件事另由

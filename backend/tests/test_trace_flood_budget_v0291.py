@@ -23,7 +23,7 @@ THINKING_FLUSH_SECONDS / THINKING_TOTAL_MAX / TRACE_STEPS_MAX / TRACE_CHARS_MAX 
 帧，② 会红——那是缺口被堵上的信号，按新形状改断言即可，不是测试坏了。
 
 另：计划里那句「…中间 N 步已省略…」在**服务端源码里并不存在**——服务端产的是结构化
-步（kind=omitted + count），文案是两个客户端各自渲染的（app.js:1415、ChatUi.kt:2102），
+步（kind=omitted + count），文案是两个客户端各自渲染的（`app.js` 与 `ChatUi.kt` 各自的 omitted 文案渲染），
 双端文案一致性已由 `test_process_trace_contract.py` 里那组文案锁守着，本文件不重复钉。
 
 THINKING_FLUSH_SECONDS（0.4）这里不测：时间触发只是「面板别长时间没动静」的下限，

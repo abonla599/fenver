@@ -61,7 +61,7 @@ def _run_dryrun(stage_dir: str, cwd: Path) -> list:
     """-DryRun 实跑一次，返回所有 PRECHECK 行（失败也拿得到，退出码由调用方不管）。
 
     非 Windows 上跳过而不是断言失败：现网脚本只在这台机器上跑，但 CI 是 ubuntu-latest
-    （.github/workflows/tests.yml:5）且整目录收 backend/tests/，这里硬断言会让三条行为锁
+    （`.github/workflows/tests.yml` 的 runner 声明）且整目录收 backend/tests/，这里硬断言会让三条行为锁
     把 CI 变红、把发版闸口堵死。跳过只发生在行为层三条，文本层三条照跑（顺序与禁用的
     写法在任何平台都判得动）——惯例与理由同 test_v033_data_root_lock.py 的平台分支。
     """

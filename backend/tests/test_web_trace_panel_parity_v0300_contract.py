@@ -9,7 +9,7 @@ CI 里没有 JS 与 Kotlin 的测试运行器，所以把 app.js / style.css / i
 的**源码当文本读**，纯函数（traceSummaryText / fmtTraceSecs / isTouchPrimary）交给 node
 真跑。所有文本判据都先剥注释：注释里那句「原来打的是 ✓」不该冒充成"代码里还有 ✓"。
 
-一条口径先说清楚：模型清单里那枚「当前项 ✓」（app.js:850、ChatUi.kt 的选择模型页）
+一条口径先说清楚：模型清单里那枚「当前项 ✓」（`app.js` 的当前项标记与 `ChatUi.kt` 的选择模型页）
 **不在本轮收口范围内**——双端都还留着同一枚勾，本身是对齐的。这里的禁字范围只到
 过程面板（traceStepNode → paintTrace 那一段）与它用的 CSS。
 """
