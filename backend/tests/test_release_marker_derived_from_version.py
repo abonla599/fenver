@@ -1024,6 +1024,34 @@ def test_bare_run_refuses_a_skipped_version_even_when_the_marker_matches(tmp_pat
     assert any("token=bare-shape=server-only-marker-ahead" in ln for ln in ok_lines), ok_lines
 
 
+def test_consecutive_server_only_releases_are_measured_from_the_previous_note(tmp_path):
+    """只换服务端的版本可以连续发：第二个补丁的基线是上一份说明，不是一直不动的 versionName。
+
+    v0.35.1 与 v0.35.2 都声明 server-only，versionName 仍停在 0.35.0。旧写法拿 versionName
+    当基线，会把 v0.35.2 误判成跳号（0.35.0 → 0.35.2），于是仓库在第二个服务端补丁上永远
+    绿不了。正例证明基线会取到 0.35.1；反例（0.35.1 → 0.35.3）证明这不是"最新说明一律放行"。
+    """
+    _fake_repo(tmp_path, version_name="0.35.0",
+               markers=("0.35.0", "0.35.1", "0.35.2"),
+               notes=("v0.35.0", "v0.35.1", "v0.35.2"),
+               server_only=("v0.35.1", "v0.35.2"),
+               live_markers=("0.35.0",))
+    rc, lines = _run(tmp_path)
+    assert rc == 0, "连续的服务端补丁被误判成跳号：%s" % lines
+    assert "target=v0.35.2" in lines[0] and "marker=release-marker-v0.35.2" in lines[0], lines
+
+    skipped = _fake_repo(tmp_path / "skipped", version_name="0.35.0",
+                         markers=("0.35.0", "0.35.1", "0.35.3"),
+                         notes=("v0.35.0", "v0.35.1", "v0.35.3"),
+                         server_only=("v0.35.1", "v0.35.3"),
+                         live_markers=("0.35.0",))
+    skipped_rc, skipped_lines = _run(skipped)
+    assert skipped_rc == 1, skipped_lines
+    assert any("token=bare-shape=version-jump" in ln and "note=v0.35.3" in ln
+               for ln in skipped_lines), skipped_lines
+    assert not any("verdict=PASS" in ln for ln in skipped_lines), skipped_lines
+
+
 def test_non_canonical_release_note_version_is_not_endorsed(tmp_path):
     """#140 第三格：`v0.34.03` 不是 `v0.34.3` 的另一种写法。
 
