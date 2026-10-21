@@ -160,8 +160,12 @@ fun SessionDrawer(tick: Int, currentId: String,
 
         LazyColumn(Modifier.fillMaxWidth().weight(1f),
             contentPadding = PaddingValues(bottom = 8.dp)) {
-            if (error != null) item {
-                Text(error!!, fontSize = 12.5.sp, color = MaterialTheme.colorScheme.error,
+            // Compose 在组合退出时用这条取消文案结束抽屉的协程；它已经在 catch 里
+            // 按 CancellationException 重新抛出。这里再挡一层：任何路径把这条无害的
+            // 取消消息写进 error 时都不该长成给用户看的红字。
+            val shownError = error?.takeUnless { it.contains("left the composition") }
+            if (shownError != null) item {
+                Text(shownError, fontSize = 12.5.sp, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
             }
             if (visible.isEmpty()) item {
