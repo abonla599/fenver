@@ -132,22 +132,52 @@ internal var reenterRequested = false
  * 首帧必然先画一帧等待态（"正在读取…/计算中…"）再跳成真值——这就是"打开设置卡一下"
  * 的观感来源。这里把上一次成功读到的值按 owner 存一份，重进直接用它起算，后台照常
  * 刷新；换身份（owner 变了）整份失效，绝不把上一个人的条数/清单画给下一个人。
- * 缓存只当首帧初值用，不是第二真相：刷新成功即覆盖，失败留着旧值但错误照说。 */
+ * 缓存只当首帧初值用，不是第二真相：刷新成功即覆盖，失败留着旧值但错误照说。
+ *
+ * v0.36.1 审查批三条：
+ * ① 属主校验——在途刷新协程被换身份取消之前，若已完成网络等待、只剩同步尾巴，
+ *   尾巴可能在 adopt() 清空之后落一笔旧 owner 的缓存。凡按 owner 隔离的写入
+ *   一律走下面带 who 的 setter：落笔前比对当前 owner，不一致就丢。
+ *   cacheBytes 是设备级事实（不随身份失效），不在这套闸里。
+ * ② 跨线程可见性——写入发生在后台协程恢复的那一拍，读取发生在组合帧；
+ *   字段统一 @Volatile（cacheBytes 是 long，没有它连"理论上的撕裂"都不该赌）。
+ * ③ loaded 位——"加载过且为空"和"还没加载"是两回事：0 供应商/0 记忆的人
+ *   重进不该再闪一帧"正在读取…"。memoryItemsLoaded/provListLoaded 按 owner
+ *   记录"这份清单回来过"，adopt() 换人时一并作废。 */
 private object SettingsCache {
-    var owner = ""                              // 这份缓存属于谁；"" = 还没人写过
-    var memoryCount = ""                        // 「N 条」/「50+ 条」/""
-    var scheduleVal = ""                        // 「N 天有安排」/""
-    var memoryItems: List<JsonObject> = emptyList()   // 记忆页首帧（仅未搜索那一份）
-    var provShared: List<ProvRow> = emptyList()       // 模型服务页首帧（共享）
-    var provMine: List<ProvRow> = emptyList()         // 模型服务页首帧（我的）
-    var provMyDefault: String? = null
-    var cacheBytes = -1L                        // 设备级事实，不随身份失效；-1 = 从没算过
+    @Volatile var owner = ""                    // 这份缓存属于谁；"" = 还没人写过
+    @Volatile var memoryCount = ""              // 「N 条」/「50+ 条」/""
+    @Volatile var scheduleVal = ""              // 「N 天有安排」/""
+    @Volatile var memoryItems: List<JsonObject> = emptyList()   // 记忆页首帧（仅未搜索那一份）
+    @Volatile var memoryItemsLoaded = false     // 未搜索清单回来过没有（空清单也算回来过）
+    @Volatile var provShared: List<ProvRow> = emptyList()       // 模型服务页首帧（共享）
+    @Volatile var provMine: List<ProvRow> = emptyList()         // 模型服务页首帧（我的）
+    @Volatile var provMyDefault: String? = null
+    @Volatile var provListLoaded = false        // 模型清单回来过没有（0 供应商也算）
+    @Volatile var cacheBytes = -1L              // 设备级事实，不随身份失效；-1 = 从没算过
 
     fun adopt(who: String) {
         if (owner == who) return
         owner = who
         memoryCount = ""; scheduleVal = ""; memoryItems = emptyList()
+        memoryItemsLoaded = false
         provShared = emptyList(); provMine = emptyList(); provMyDefault = null
+        provListLoaded = false
+    }
+
+    // 按 owner 隔离的写入全部经这四扇闸：调用方在 launch/组合时扣下当时的 who，
+    // 落笔时 owner 已经换了人 = 这一笔属于旧身份，直接丢。
+    fun setMemoryCount(who: String, v: String) { if (owner == who) memoryCount = v }
+    fun setScheduleVal(who: String, v: String) { if (owner == who) scheduleVal = v }
+    fun setMemoryItems(who: String, v: List<JsonObject>) {
+        if (owner == who) { memoryItems = v; memoryItemsLoaded = true }
+    }
+    fun setProviders(who: String, shared: List<ProvRow>, mine: List<ProvRow>,
+                     default: String?) {
+        if (owner == who) {
+            provShared = shared; provMine = mine; provMyDefault = default
+            provListLoaded = true
+        }
     }
 }
 
@@ -196,6 +226,9 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
     // v0.36.1：先把缓存认领到当前身份（换人整份作废），再用它当首帧初值——
     // 命中缓存时这一帧直接是旧真值，后台刷新只负责把它变得更准，不再有空窗。
     SettingsCache.adopt(Prefs.currentEntry()?.userId ?: "")
+    // v0.36.1 审查批：这一次组合对应的属主。凡是要往 SettingsCache 落笔的协程/回调
+    // 都扣下它，写前经 setter 比对——换身份后在途刷新的同步尾巴不许写进新人的缓存。
+    val cacheOwner = SettingsCache.owner
     var memoryCount by remember { mutableStateOf(SettingsCache.memoryCount) }
     var scheduleVal by remember { mutableStateOf(SettingsCache.scheduleVal) }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
 
@@ -234,7 +267,9 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
                     val arr = (el as? JsonObject)?.get("memories") as? JsonArray
                     val c = if (arr == null) "" else
                         if (arr.size >= 50) "50+ 条" else "${arr.size} 条"
-                    if (c.isNotEmpty()) { memoryCount = c; SettingsCache.memoryCount = c }
+                    // 审查批：这路协程在途时换身份，adopt() 已把缓存清空——
+                    // 回包尾巴只能经 owner 校验落笔，旧 owner 的那一笔直接丢。
+                    if (c.isNotEmpty()) { memoryCount = c; SettingsCache.setMemoryCount(cacheOwner, c) }
                 }
             }
         }
@@ -271,12 +306,12 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
                 "persona" -> PersonaPage(onNote = { setStatus(it) },
                     onClose = { onOpenPage(null) })
                 "memory" -> MemoryPage(onCountChanged = { memoryCount = it;
-                        SettingsCache.memoryCount = it },
+                        SettingsCache.setMemoryCount(cacheOwner, it) },
                     onNote = { setStatus(it, true) })
                 "schedule" -> SchedulePage(onNote = { t, err -> setStatus(t, err) },
                     onRequireAuth = onRequireAuth,
                     onValChanged = { scheduleVal = it
-                        if (it.isNotEmpty()) SettingsCache.scheduleVal = it })
+                        if (it.isNotEmpty()) SettingsCache.setScheduleVal(cacheOwner, it) })
                 "feedback" -> FeedbackPage(onNote = { t, err -> setStatus(t, err) },
                     onClose = { onOpenPage("") })
                 "reminders" -> RemindersPage(onNote = { t, err -> setStatus(t, err) })
@@ -1208,11 +1243,14 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
     var query by remember { mutableStateOf("") }      // state.memoryQuery（已提交）
     var qInput by remember { mutableStateOf("") }
     var addInput by remember { mutableStateOf("") }
+    // 审查批：这一页对应的属主——adopt() 已在 SettingsSheet 组合期跑过，
+    // 这里扣下当时的 owner，写缓存前 setter 会比对；换身份后旧 owner 的在途尾巴落不了笔。
+    val who = SettingsCache.owner
     var items by remember { mutableStateOf(SettingsCache.memoryItems) }
-    // v0.36.1：首帧不许落在「loading=true 且空列表」的白屏上。有缓存先画缓存
-    // （loading 直接false起算，后台刷新回来整体替换）；只有进程内头一次进来
-    // 才走"正在读取…"。刷新失败时列表不清空，错误单独用 err 说。
-    var loading by remember { mutableStateOf(SettingsCache.memoryItems.isEmpty()) }
+    // v0.36.1：首帧不许落在「loading=true 且空列表」的白屏上。
+    // 审查批加 loaded 位：0 条时 memoryItems 也是空列表——"加载过且为空"与"还没加载"
+    // 必须分得开，否则重进又要闪一帧"正在读取…"。memoryItemsLoaded 只认真正回来过。
+    var loading by remember { mutableStateOf(!SettingsCache.memoryItemsLoaded) }
     var err by remember { mutableStateOf("") }
 
     fun reload() {
@@ -1228,7 +1266,9 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
                 if (query.isBlank()) {
                     // 只有"未搜索"那一份进缓存：搜索结果不进首帧，别把一次过滤
                     // 当成这个人的全部记忆留给下一次。
-                    SettingsCache.memoryItems = items
+                    // setMemoryItems 顺带把 memoryItemsLoaded 置真（0 条也算加载过），
+                    // owner 校验在 setter 里：换身份后这一笔被丢弃。
+                    SettingsCache.setMemoryItems(who, items)
                     onCountChanged(if (items.size >= 50) "50+ 条" else "${items.size} 条")
                 }
             } catch (e: Exception) {
@@ -1257,8 +1297,12 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
         Text(err, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
             modifier = Modifier.padding(vertical = 6.dp))
     }
-    // v0.36.1：真正的第一次（没缓存可画）说"正在读取…"，而不是整屏空白等人；
-    // 判空只发生在加载完成之后（下面那条空态照旧被 !loading 挡着）。
+    // v0.36.1 + 审查批 loaded 位：
+    // - 没加载过（loading && 空 && 无错）：显示"正在读取记忆…"。
+    // - 加载过且为空（!loading && 空 && 无错）：显示空态，不再闪"正在读取"。
+    // - 首次失败（err 非空 && !loaded）：错误文案保留在上面的 Text(err) 行里。
+    // 判据用 loading/items.isEmpty()/err.isEmpty()，不另加状态——memoryItemsLoaded
+    // 已写进缓存，loading 初值由它决定，这里只需维持原有两分支。
     if (loading && items.isEmpty() && err.isEmpty()) {
         Text("正在读取记忆…", fontSize = 14.sp, color = text3Color(),
             modifier = Modifier.padding(vertical = 8.dp))
@@ -1360,14 +1404,16 @@ private data class Preset(val label: String, val baseUrl: String, val model: Str
 private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChanged) {
     val scope = rememberCoroutineScope()
     val admin = Prefs.role == "admin"
+    // 审查批：这一页对应的属主，adopt() 已在 SettingsSheet 组合期跑过。
+    val who = SettingsCache.owner
     // v0.36.1：旧版每次进这一页 remember 都从空列表起算，等于"清空再 reload"——
     // 重进先闪一帧空架。现在初值吃按 owner 存的上一份清单，后台刷新整体替换；
-    // provLoaded 只有真拿到过回包才置真，骨架只在进程内首次（无缓存）出现。
+    // 审查批加 provListLoaded 位：0 供应商时两份清单也都是空——
+    // "加载过且为空"与"还没加载"必须分得开，否则重进又要闪一帧"正在读取模型服务…"。
     var shared by remember { mutableStateOf(SettingsCache.provShared) }
     var mine by remember { mutableStateOf(SettingsCache.provMine) }
     var myDefault by remember { mutableStateOf<String?>(SettingsCache.provMyDefault) }
-    var provLoaded by remember { mutableStateOf(
-        SettingsCache.provShared.isNotEmpty() || SettingsCache.provMine.isNotEmpty()) }
+    var provLoaded by remember { mutableStateOf(SettingsCache.provListLoaded) }
     var presets by remember { mutableStateOf(listOf<Preset>()) }
     var err by remember { mutableStateOf("") }
     // 表单：editingId 空串 → 新建；formScope="admin"/"mine" 决定走哪面
@@ -1410,9 +1456,9 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
                     }
                 }
                 provLoaded = true
-                SettingsCache.provShared = shared
-                SettingsCache.provMine = mine
-                SettingsCache.provMyDefault = myDefault
+                // setProviders 顺带把 provListLoaded 置真（0 供应商也算加载过）；
+                // owner 校验在 setter 里：换身份后这一笔被丢弃。
+                SettingsCache.setProviders(who, shared, mine, myDefault)
             }.onFailure {
                 // 后台刷新失败：已显示的清单原样留着（缓存不许被一次失败抹掉），
                 // 但错误必须照说——吞错误才是这里真正要防的事故。

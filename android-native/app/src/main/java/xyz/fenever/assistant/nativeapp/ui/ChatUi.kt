@@ -321,6 +321,13 @@ val CHAT_SUGGESTIONS = listOf(
  * 是因为条目会在贴过之后再长高（操作行晚一拍才挂出来）：高度会撒谎，边界不会。 */
 private const val MAX_SCROLL_OFFSET = Int.MAX_VALUE / 2
 
+/* v0.36.1 审查批：落定贴底的**有界**校正上限——补贴最多 3 轮帧检，一轮都不许多。
+ * 这条常量存在的意义就是可被静态锁钉死：判据是"校正有界而非无限"，
+ * 写死 3、且贴底效果里除了这一个 repeat 之外不许出现任何随帧循环
+ * （没有 while(true)、没有 repeat(24)、没有别的 repeat）。
+ * 不许把它改大，更不许借它复活 24 帧循环——那正是 v0.36.1 首帧批砍掉的东西。 */
+private const val MAX_BOTTOM_CORRECTIONS = 3
+
 /* 第 7 轮真机反馈改判：第 4 轮为赶跑"点一下就浮出且关不掉的粘贴气泡"，把整屏
  * 文字工具条换成了空壳——代价是键盘开着时长按输入框也什么都出不来，想粘贴没门。
  * 用户钦定：键盘弹着的时候长按要出「粘贴/全选/选择」那套系统工具条。空壳拆掉，
@@ -643,18 +650,26 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 的无条件 scrollTop=scrollHeight）。
             // v0.36.1 改判：从前这里是一条最多 24 帧的随帧重贴循环，而切会话
             // messages 整屏替换那一拍也会触发它——一进会话就要连贴十几帧的"回底"，
-            // 正是首帧观感卡顿的组成部分。改成两拍单发：先把最后一项拉进视口，
-            // 下一帧亲眼量一次；只有底边还没进视口（条目事后长高那一族）才补一次
-            // 夹到滚动边界。判据与收工条件沿用同一份真相（last 底边 ≤ 视口底）。
+            // 正是首帧观感卡顿的组成部分。收敛成"先把最后一项拉进视口，下一帧量一次"。
+            // v0.36.1 审查批再收敛半步：只量一次的话，操作行/图片在量过之后才长高时，
+            // 尾巴还是可能再藏进输入卡。改成【有界】短校正：最多
+            // MAX_BOTTOM_CORRECTIONS(=3) 轮帧检，每轮量一次底边、没进视口才补一发
+            // 夹边界；最后一项已经不在视口里（用户上翻走开）就立刻收手，不跟他抢滚动。
+            // 有界性证据（静态锁钉死，见 test_native_ui_smoothness_v0361）：整个落定
+            // 分支只有这一枚 repeat(MAX_BOTTOM_CORRECTIONS)，没有 while、没有别的
+            // repeat——计数器轮数写死在常量里，不随布局结果续期，绝不是 24 帧循环复活。
             listState.scrollToItem(total - 1, 0)
-            withFrameNanos { }
-            val now = listState.layoutInfo
-            val t = now.totalItemsCount
-            if (t == 0) return@LaunchedEffect
-            val last = now.visibleItemsInfo.lastOrNull { it.index == t - 1 }
-            // 1.6.8 的 ListItemInfo 没有 .end：底边就是 offset + size。
-            val settledIn = last != null && last.offset + last.size <= now.viewportEndOffset
-            if (!settledIn) listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
+            repeat(MAX_BOTTOM_CORRECTIONS) {
+                withFrameNanos { }
+                val now = listState.layoutInfo
+                val t = now.totalItemsCount
+                if (t == 0) return@LaunchedEffect
+                val last = now.visibleItemsInfo.lastOrNull { it.index == t - 1 }
+                // 1.6.8 的 ListItemInfo 没有 .end：底边就是 offset + size。
+                if (last == null) return@LaunchedEffect   // 已离近底：这轮校正不归它管
+                if (last.offset + last.size <= now.viewportEndOffset) return@LaunchedEffect
+                listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
+            }
         } else {
             val lastVisible = first.visibleItemsInfo.lastOrNull()?.index ?: -1
             if (lastVisible < total - 2) return@LaunchedEffect
@@ -771,11 +786,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     /* app.js pullFromHistory：断线续不上、或服务端判这一轮不可续播时，去会话历史里取回
      * 已经落库的助手回复。关键是"不重发生成"：那一轮的钱要么已经花、要么被服务端的轮次
      * 边界钱闸停在了边界，结果都在 sessions 里；重发只会再付一次、再落一条一样的助手消息。
-     * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。 */
+     * 取回只渲染，不再 PUT 覆盖——历史里那条就是这一轮的最终版。
+     * v0.36.1 审查批：这条也是「请求→落地」路径，照 openSession 补守卫——出发时扣下
+     * 请求号与当时的会话 id，回包（以及失败分支）落地前两样都必须还是当前的，否则整包
+     * 丢弃。断线取回往往慢，期间用户完全可能切了会话；旧会话的答案绝不能追加到
+     * 新会话的屏幕上（那是脱敏之外的第二种"串门"）。 */
     suspend fun pullFromHistory() {
         setStatus("这一轮接不上了，正在去会话里取回结果…")
+        val epochAtRequest = sessionEpoch
+        val sidAtRequest = sessionId
         try {
-            val d = Api.getSession(sessionId)
+            val d = Api.getSession(sidAtRequest)
+            if (epochAtRequest != sessionEpoch || sidAtRequest != sessionId) return
             val lastAssistant = d.messages.lastOrNull { it.role == "assistant" }
             if (lastAssistant != null) {
                 messages = messages + UiMsg("assistant", lastAssistant.content,
@@ -791,6 +813,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             }
         } catch (e: Exception) {
             NetMinder.noteFailure(e)
+            // 失败分支同样守卫：切了会话就别把旧会话的取回报错甩在新屏上。
+            if (epochAtRequest != sessionEpoch || sidAtRequest != sessionId) return
             messages = messages + UiMsg("assistant",
                 "⚠️ " + (e.message ?: "取回失败"), transient = true)
             if (!logoutIf401(e)) setStatus(e.message ?: "", true)
