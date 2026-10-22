@@ -2330,20 +2330,27 @@ private fun TracePanel(items: List<TraceItem>, expanded: Boolean, liveLabel: Str
     val clockKey = running?.id?.ifEmpty { running.label } ?: "live"
     val startedAt = remember(clockKey) { android.os.SystemClock.elapsedRealtime() }
     val chevron by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
-    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            IconTraceEye(text3Color(), Modifier.size(14.dp))
-            Text((if (expanded) "收起 " else "查看 ") + "$steps 个步骤" +
-                    if (pages > 0) " · $pages 个网页" else "",
-                fontSize = 12.sp, color = text3Color(),
-                modifier = Modifier.weight(1f))
-            IconChevronDown(text3Color(), Modifier.size(14.dp).rotate(chevron))
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                IconTraceEye(text3Color(), Modifier.size(14.dp))
+                Text((if (expanded) "收起 " else "查看 ") + "$steps 个步骤" +
+                        if (pages > 0) " · $pages 个网页" else "",
+                    fontSize = 12.sp, color = text3Color(),
+                    modifier = Modifier.weight(1f))
+                IconChevronDown(text3Color(), Modifier.size(14.dp).rotate(chevron))
+            }
+            if (expanded) items.forEach { TraceStepRow(it, onOpenUrl) }
+            if (liveLabel != null) TraceLiveBar(status, startedAt)
         }
-        if (expanded) items.forEach { TraceStepRow(it, onOpenUrl) }
-        if (liveLabel != null) TraceLiveBar(status, startedAt)
     }
 }
 
@@ -2352,7 +2359,6 @@ private fun TracePanel(items: List<TraceItem>, expanded: Boolean, liveLabel: Str
 @Composable
 private fun TraceLiveBar(label: String, startedAt: Long) {
     val scheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(8.dp)
     val spin by rememberInfiniteTransition(label = "livebar")
         .animateFloat(0f, 360f,
             infiniteRepeatable(tween(900), RepeatMode.Restart), label = "spin")
@@ -2365,10 +2371,7 @@ private fun TraceLiveBar(label: String, startedAt: Long) {
             delay(100)
         }
     }
-    Row(Modifier.fillMaxWidth()
-        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
-        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
-        .padding(horizontal = 10.dp, vertical = 6.dp),
+    Row(Modifier.fillMaxWidth().padding(top = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         IconStepBusy(scheme.primary, spin, Modifier.size(14.dp))
@@ -2398,7 +2401,6 @@ private const val APPROVAL_REJECT_TEXT = "拒绝"
 private fun ApprovalCard(state: ApprovalState,
                          onDecision: ((String) -> Unit)?) {
     val scheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(8.dp)
     val resolved = state.resolved
     // 超时自动置灰：票据 expires_at 到点后卡片不再可操作（不重复弹）。
     LaunchedEffect(state.ticketId, state.expiresAt) {
@@ -2412,26 +2414,34 @@ private fun ApprovalCard(state: ApprovalState,
             onDecision?.invoke("__timeout__")
         }
     }
-    Column(Modifier.fillMaxWidth()
-        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
-        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
-        .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(APPROVAL_TITLE, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+    FenverCard(
+        modifier = Modifier.fillMaxWidth(),
+        color = scheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(APPROVAL_TITLE, style = MaterialTheme.typography.labelLarge,
             color = scheme.onSurface)
-        Text(state.planSummary, fontSize = 12.sp, color = scheme.onSurfaceVariant,
+        Spacer(Modifier.height(4.dp))
+        Text(state.planSummary, style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically) {
-            val btnAlpha = if (resolved) 0.5f else 1f
-            Text(APPROVAL_REJECT_TEXT, fontSize = 13.sp, color = scheme.onSurfaceVariant.copy(alpha = btnAlpha),
-                modifier = Modifier.clickable(enabled = !resolved) { onDecision?.invoke("reject") }
-                    .padding(horizontal = 12.dp, vertical = 5.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(APPROVAL_ALLOW_TEXT, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                color = scheme.primary.copy(alpha = btnAlpha),
-                modifier = Modifier.clickable(enabled = !resolved) { onDecision?.invoke("allow") }
-                    .padding(horizontal = 12.dp, vertical = 5.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FenverButton(
+                text = APPROVAL_REJECT_TEXT,
+                onClick = { onDecision?.invoke("reject") },
+                kind = FenverButtonKind.Secondary,
+                enabled = !resolved,
+                modifier = Modifier.weight(1f),
+            )
+            FenverButton(
+                text = APPROVAL_ALLOW_TEXT,
+                onClick = { onDecision?.invoke("allow") },
+                kind = FenverButtonKind.Primary,
+                enabled = !resolved,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
@@ -2447,34 +2457,36 @@ private fun TaskWaitingCard(view: TaskCard.View, draft: String, busy: Boolean,
                             error: String, onDraft: (String) -> Unit,
                             onSubmit: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(8.dp)
     val canSubmit = !busy && draft.trim().isNotEmpty()
-    Column(Modifier.fillMaxWidth()
-        .background(scheme.surfaceVariant.copy(alpha = 0.7f), shape)
-        .border(BorderStroke(1.dp, scheme.outline.copy(alpha = 0.6f)), shape)
-        .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    FenverCard(
+        modifier = Modifier.fillMaxWidth(),
+        color = scheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+    ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(TaskCard.TITLE, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            Text(TaskCard.TITLE, style = MaterialTheme.typography.labelLarge,
                 color = scheme.onSurface, modifier = Modifier.weight(1f))
             if (view.state.isNotEmpty())
-                Text(view.state, fontSize = 11.sp, color = text3Color())
+                Text(view.state, style = MaterialTheme.typography.labelSmall,
+                    color = text3Color())
         }
         if (view.question.isNotEmpty())
-            Text(view.question, fontSize = 13.sp, lineHeight = 19.sp,
+            Text(view.question, style = MaterialTheme.typography.bodyMedium,
                 color = scheme.onSurfaceVariant)
         val meta = listOf(view.progress, view.waiting)
             .filter { it.isNotEmpty() }.joinToString(" · ")
         if (meta.isNotEmpty())
-            Text(meta, fontSize = 11.sp, color = text3Color())
+            Text(meta, style = MaterialTheme.typography.labelSmall, color = text3Color())
+        Spacer(Modifier.height(4.dp))
         BasicTextField(
             value = draft, onValueChange = onDraft, enabled = !busy,
             textStyle = TextStyle(fontSize = 14.sp, lineHeight = 21.sp,
                 color = scheme.onSurface),
             cursorBrush = SolidColor(scheme.primary),
             modifier = Modifier.fillMaxWidth()
-                .background(scheme.surface, RoundedCornerShape(10.dp))
-                .border(BorderStroke(1.dp, scheme.outline), RoundedCornerShape(10.dp))
+                .background(scheme.surface, RoundedCornerShape(12.dp))
+                .border(BorderStroke(1.dp, scheme.outline), RoundedCornerShape(12.dp))
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { if (canSubmit) onSubmit() }),
@@ -2489,12 +2501,13 @@ private fun TaskWaitingCard(view: TaskCard.View, draft: String, busy: Boolean,
         if (error.isNotEmpty())
             Text(error, fontSize = 11.sp, lineHeight = 16.sp, color = scheme.error)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Text(if (busy) "提交中…" else "提交", fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                color = scheme.primary.copy(alpha = if (canSubmit) 1f else 0.5f),
-                modifier = Modifier
-                    .clickable(enabled = canSubmit) { onSubmit() }
-                    .padding(horizontal = 12.dp, vertical = 5.dp))
+            FenverButton(
+                text = if (busy) "提交中…" else "提交",
+                onClick = onSubmit,
+                kind = FenverButtonKind.Primary,
+                enabled = canSubmit,
+                modifier = Modifier.width(104.dp),
+            )
         }
     }
 }

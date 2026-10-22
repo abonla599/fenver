@@ -1,5 +1,6 @@
 package xyz.fenever.assistant.nativeapp.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -68,8 +69,6 @@ import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ScheduleItemDto
 import xyz.fenever.assistant.nativeapp.Prefs
-import xyz.fenever.assistant.nativeapp.theme.FenverTokens
-import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
 
 /* 日程页（v0.23 R3 · T2.7）= 网页 backend/app/web/static/{index.html#paneSchedule,
@@ -278,17 +277,18 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
         head = {
             Row(verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("日程", fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.3.sp, color = MaterialTheme.colorScheme.onSurface)
+                Text("日程", style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface)
                 if (day.isNotEmpty()) {
-                    Text(ScheduleBoard.dayLabel(day, today), fontSize = 12.5.sp,
-                        letterSpacing = 0.4.sp, color = text3Color(),
+                    Text(ScheduleBoard.dayLabel(day, today),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = text3Color(),
                         modifier = Modifier.padding(bottom = 2.dp))
                 }
             }
             Spacer(Modifier.height(2.dp))
-            Text("「今天」取服务端日期", fontSize = 12.5.sp,
-                letterSpacing = 0.4.sp, color = text3Color())
+            Text("「今天」取服务端日期", style = MaterialTheme.typography.bodySmall,
+                color = text3Color())
         },
         calendar = {
             val floor = if (today.isEmpty()) -1 else (ScheduleBoard.monthOf(today)
@@ -300,7 +300,7 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                 CalNav("‹", "上个月", floor < 0 || at <= floor) { moveMonth(-1) }
                 Text(if (floor < 0) "" else ScheduleBoard.monthTitle(
                     SchedState.viewYear, SchedState.viewMonth),
-                    fontSize = 15.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.4.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
                 CalNav("›", "下个月", floor < 0) { moveMonth(1) }
@@ -308,7 +308,7 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                 for (w in ScheduleBoard.WEEK_HEAD) {
-                    Text(w, fontSize = 10.5.sp, letterSpacing = 0.5.sp, color = text3Color(),
+                    Text(w, style = MaterialTheme.typography.labelSmall, color = text3Color(),
                         textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
                 }
             }
@@ -345,10 +345,11 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("▤", fontSize = 26.sp, color = text3Color(),
                         modifier = Modifier.alpha(0.8f))
-                    Text("这天还没有安排", fontSize = 14.sp, color = text3Color(),
-                        textAlign = TextAlign.Center)
-                    Text("点下面「添加一项」记下第一件", fontSize = 14.sp, color = text3Color(),
-                        textAlign = TextAlign.Center)
+                    Text("这天还没有安排", style = MaterialTheme.typography.bodyMedium,
+                        color = text3Color(), textAlign = TextAlign.Center)
+                    Text("点下面「添加一项」记下第一件",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = text3Color(), textAlign = TextAlign.Center)
                 }
             } else {
                 // 换天在途时清单不再整块消失：旧内容置灰禁点地留着，新数据回来整体替换
@@ -358,11 +359,12 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                     Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp,
                         top = 22.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(ScheduleBoard.groupTitle(day, today), fontSize = 12.5.sp,
-                            letterSpacing = 0.4.sp, color = text3Color())
+                        Text(ScheduleBoard.groupTitle(day, today),
+                            style = MaterialTheme.typography.bodySmall, color = text3Color())
                         Text(ScheduleBoard.countText(SchedState.items.size,
                             SchedState.items.count { it.done }),
-                            fontSize = 12.5.sp, color = text3Color(), modifier = Modifier.alpha(0.75f))
+                            style = MaterialTheme.typography.bodySmall, color = text3Color(),
+                            modifier = Modifier.alpha(0.75f))
                     }
                     SchedState.items.forEachIndexed { index, item ->
                         Staggered(index) {
@@ -433,46 +435,50 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
     )
 }
 
-/** 面板外壳：18 圆角 + 1px 细描边 + 强玻璃底（.sched-panel）。 */
+/** 面板外壳：surface 底 + 1px 发丝线 + 16 圆角，不再有玻璃底、模糊与阴影。 */
 @Composable
 private fun SchedPanel(head: @Composable () -> Unit, calendar: @Composable () -> Unit,
                        error: String, body: @Composable () -> Unit, addLabel: String,
                        onAdd: () -> Unit, dirty: Boolean, saving: Boolean,
                        savedTick: Int, onSave: () -> Unit) {
-    Column(Modifier.fillMaxWidth()
-        .clip(RoundedCornerShape(18.dp))
-        .background(glassStrong())
-        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(18.dp))) {
-        Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) { head() }
-        calendar()
-        if (error.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.08f))
-                .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
-                    RoundedCornerShape(12.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp)) {
-                Text("⚠ " + error, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.error)
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp)) {
+                head()
             }
+            calendar()
+            if (error.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.08f))
+                    .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.25f),
+                        RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)) {
+                    Text("⚠ " + error, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+            body()
+            Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outline))
+            Row(Modifier.fillMaxWidth().heightIn(min = 54.dp)
+                .clickable(onClick = onAdd)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("＋", fontSize = 17.sp, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
+                Text(addLabel.substring(1), style = MaterialTheme.typography.bodyMedium,
+                    color = text3Color())
+            }
+            SchedFoot(dirty = dirty, saving = saving, savedTick = savedTick, onSave = onSave)
         }
-        body()
-        Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outline))
-        Row(Modifier.fillMaxWidth().heightIn(min = 54.dp)
-            .clickable(onClick = onAdd)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("＋", fontSize = 17.sp, color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
-            Text(addLabel.substring(1), fontSize = 15.sp, color = text3Color())
-        }
-        SchedFoot(dirty = dirty, saving = saving, savedTick = savedTick, onSave = onSave)
     }
 }
-
-@Composable
-private fun glassStrong(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) FenverTokens.LGlassStrong else FenverTokens.GlassStrong
 
 /** .cal-nav：翻月/翻年那一排。不可用时只降透明度，位置不动 —— 钮会跳位比看不见更难用。 */
 @Composable
@@ -497,7 +503,8 @@ private fun CalCell(iso: String, today: String, has: Boolean, sel: Boolean,
     val isToday = ScheduleBoard.isToday(iso, today)
     Column(modifier.height(44.dp)
         .clip(RoundedCornerShape(12.dp))
-        .background(if (sel) accentSoft() else Color.Transparent, RoundedCornerShape(12.dp))
+        .background(if (sel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+            RoundedCornerShape(12.dp))
         .border(1.dp, if (sel) MaterialTheme.colorScheme.primary else Color.Transparent,
             RoundedCornerShape(12.dp))
         .then(if (clickable) Modifier.clickable(onClick = onClick) else Modifier.focusable())
@@ -517,8 +524,7 @@ private fun CalCell(iso: String, today: String, has: Boolean, sel: Boolean,
         Box(Modifier.padding(top = 3.dp).size(4.dp).clip(CircleShape)
             .background(when {
                 !has -> Color.Transparent
-                sel -> MaterialTheme.colorScheme.primary
-                else -> accent2()
+                else -> MaterialTheme.colorScheme.primary
             }, CircleShape))
     }
 }
@@ -551,14 +557,15 @@ private fun ItemRow(item: SchedItem, editing: Boolean, interactive: Boolean,
                     if (item.done) Text("✓", fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onPrimary)
                 }
-                Text(item.text, fontSize = 15.sp, color = if (item.done) text3Color()
-                else MaterialTheme.colorScheme.onSurface,
+                Text(item.text, style = MaterialTheme.typography.bodyMedium,
+                    color = if (item.done) text3Color()
+                    else MaterialTheme.colorScheme.onSurface,
                     textDecoration = if (item.done) androidx.compose.ui.text.style.TextDecoration.LineThrough
                     else null,
                     modifier = Modifier.weight(1f))
                 Text(if (item.at.isEmpty()) ScheduleBoard.NO_TIME else item.at,
-                    fontSize = 12.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = FontFamily.Monospace, letterSpacing = 0.4.sp,
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = FontFamily.Monospace,
                     modifier = Modifier.alpha(if (item.at.isEmpty()) 0f else 1f)
                         .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(999.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant,
@@ -731,7 +738,7 @@ private fun Staggered(index: Int, content: @Composable () -> Unit) {
         .offset(y = if (shown) 0.dp else 6.dp)) { content() }
 }
 
-/** .sched-foot：dirty 提示 + 「保存」。bg-soft 那一层，与清单区用一条上边线切开。 */
+/** .sched-foot：dirty 提示 + 「保存」。与清单区用一条上边线切开，同一张 surface。 */
 @Composable
 private fun SchedFoot(dirty: Boolean, saving: Boolean, savedTick: Int, onSave: () -> Unit) {
     var savedFlash by remember { mutableStateOf(false) }
@@ -742,8 +749,7 @@ private fun SchedFoot(dirty: Boolean, saving: Boolean, savedTick: Int, onSave: (
             savedFlash = false
         }
     }
-    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
-        .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0f))
+    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
         .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween) {
@@ -753,25 +759,15 @@ private fun SchedFoot(dirty: Boolean, saving: Boolean, savedTick: Int, onSave: (
         } else {
             Text(if (dirty) "● 有未保存修改 · 保存将整日替换" else "尚无修改",
                 fontSize = 12.5.sp, letterSpacing = 0.4.sp,
-                color = if (dirty) accent2() else text3Color())
+                color = if (dirty) MaterialTheme.colorScheme.primary else text3Color())
         }
         val enabled = dirty && !saving
-        Box(Modifier.clip(RoundedCornerShape(999.dp))
-            .alpha(if (enabled) 1f else 0.35f)
-            .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(999.dp))
-            .then(if (enabled) Modifier.clickable(onClick = onSave) else Modifier.focusable())
-            .padding(horizontal = 26.dp, vertical = 10.dp)) {
-            Text(if (saving) "保存中…" else "保存", fontSize = 14.5.sp,
-                fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp,
-                color = MaterialTheme.colorScheme.onPrimary)
-        }
+        FenverButton(
+            text = if (saving) "保存中…" else "保存",
+            onClick = onSave,
+            kind = FenverButtonKind.Primary,
+            enabled = enabled,
+            modifier = Modifier.width(104.dp),
+        )
     }
 }
-
-@Composable
-private fun accentSoft(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft
-
-@Composable
-private fun accent2(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) FenverTokens.LAccent2 else FenverTokens.Accent2
