@@ -1388,7 +1388,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     title = topTitle,
                     leading = {
                         FenverTopBarAction(onClick = { scope.launch { drawerState.open() } }) {
-                            IconMenu(MaterialTheme.colorScheme.onSurfaceVariant,
+                            FenverIcon(FenverIcon.Menu,
+                                MaterialTheme.colorScheme.onSurfaceVariant,
                                 Modifier.size(20.dp))
                         }
                     },
@@ -1398,7 +1399,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                 text = currentProvider()?.name ?: "选择模型",
                                 onClick = { modelMenuOpen = true; attachOpen = false },
                                 trailing = {
-                                    IconChevronDown(MaterialTheme.colorScheme.onSurfaceVariant,
+                                    FenverIcon(FenverIcon.ChevronDown,
+                                        MaterialTheme.colorScheme.onSurfaceVariant,
                                         Modifier.size(14.dp))
                                 },
                             )
@@ -1744,9 +1746,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             Row(Modifier.fillMaxWidth().padding(10.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 val tileInk = MaterialTheme.colorScheme.onSurfaceVariant
-                                AttachTile({ IconCamera(tileInk, Modifier.size(17.dp)) }, "相机") { attachOpen = false; camera.launch(null) }
-                                AttachTile({ IconImage(tileInk, Modifier.size(17.dp)) }, "图片") { attachOpen = false; picker.launch("image/*") }
-                                AttachTile({ IconFile(tileInk, Modifier.size(17.dp)) }, "文件") { attachOpen = false; picker.launch("*/*") }
+                                AttachTile({ FenverIcon(FenverIcon.Camera, tileInk, Modifier.size(17.dp)) }, "相机") { attachOpen = false; camera.launch(null) }
+                                AttachTile({ FenverIcon(FenverIcon.Image, tileInk, Modifier.size(17.dp)) }, "图片") { attachOpen = false; picker.launch("image/*") }
+                                AttachTile({ FenverIcon(FenverIcon.File, tileInk, Modifier.size(17.dp)) }, "文件") { attachOpen = false; picker.launch("*/*") }
                             }
                         }
                     }
@@ -1805,7 +1807,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         }
                     },
                 ) {
-                    IconArrowDown(MaterialTheme.colorScheme.onSurface, Modifier.size(20.dp))
+                    FenverIcon(FenverIcon.ArrowDown, MaterialTheme.colorScheme.onSurface, Modifier.size(20.dp))
                 }
             }
         }
@@ -1880,14 +1882,16 @@ private fun AttRow(items: List<AttItem>, onRemove: (AttItem) -> Unit) {
                 Box(Modifier.size(30.dp).background(hoverBg(), RoundedCornerShape(6.dp)),
                     contentAlignment = Alignment.Center) {
                     val attInk = MaterialTheme.colorScheme.onSurfaceVariant
-                    if (a.kind == "image") IconImage(attInk, Modifier.size(16.dp))
-                    else IconFile(attInk, Modifier.size(16.dp))
+                    if (a.kind == "image") FenverIcon(FenverIcon.Image, attInk, Modifier.size(16.dp))
+                    else FenverIcon(FenverIcon.File, attInk, Modifier.size(16.dp))
                 }
                 Text(a.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 110.dp))
                 Text(fmtSize(a.size), fontSize = 11.sp, color = text3Color())
-                Text("×", fontSize = 16.sp, color = text3Color(),
-                    modifier = Modifier.clickable { onRemove(a) }.padding(horizontal = 4.dp))
+                Box(Modifier.clickable { onRemove(a) }.padding(horizontal = 4.dp).size(18.dp),
+                    contentAlignment = Alignment.Center) {
+                    FenverIcon(FenverIcon.Close, text3Color(), Modifier.size(14.dp))
+                }
             }
         }
     }
@@ -2029,8 +2033,8 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                     GhostCircleButton(onClick = onToggleVoice,
                         fill = if (voiceMode) scheme.primaryContainer else null,
                         stroke = if (voiceMode) scheme.primary else scheme.outline) {
-                        if (voiceMode) IconKeyboard(scheme.primary, Modifier.size(19.dp))
-                        else IconVoiceWave(scheme.onSurfaceVariant, Modifier.size(19.dp))
+                        if (voiceMode) FenverIcon(FenverIcon.Keyboard, scheme.primary, Modifier.size(19.dp))
+                        else FenverIcon(FenverIcon.VoiceWave, scheme.onSurfaceVariant, Modifier.size(19.dp))
                     }
                 }
                 Box(Modifier.weight(1f).heightIn(min = 42.dp).then(voiceMod)
@@ -2039,7 +2043,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                     if (gateOn) {
                         if (voiceMode) Row(horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically) {
-                            IconMic(scheme.onSurfaceVariant, Modifier.size(17.dp))
+                            FenverIcon(FenverIcon.Mic, scheme.onSurfaceVariant, Modifier.size(17.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("按住说话", fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -2086,7 +2090,8 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                     GhostCircleButton(onClick = onToggleAttach,
                         rotation = if (attachOpen) 45f else 0f,
                         stroke = if (attachOpen) scheme.primary else scheme.outline) {
-                        IconPlus(if (attachOpen) scheme.primary else scheme.onSurfaceVariant,
+                        FenverIcon(FenverIcon.Plus,
+                            if (attachOpen) scheme.primary else scheme.onSurfaceVariant,
                             Modifier.size(19.dp))
                     }
                 }
@@ -2100,8 +2105,8 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                     GhostCircleButton(onClick = onToggleVoice,
                         fill = if (voiceMode) scheme.primaryContainer else null,
                         stroke = if (voiceMode) scheme.primary else scheme.outline) {
-                        if (voiceMode) IconKeyboard(scheme.primary, Modifier.size(19.dp))
-                        else IconVoiceWave(scheme.onSurfaceVariant, Modifier.size(19.dp))
+                        if (voiceMode) FenverIcon(FenverIcon.Keyboard, scheme.primary, Modifier.size(19.dp))
+                        else FenverIcon(FenverIcon.VoiceWave, scheme.onSurfaceVariant, Modifier.size(19.dp))
                     }
                     // 模型钮（对标图 2 的 Auto）：点开全屏「选择模型」页（见 ChatScreen 根层）
                     if (chipVisible) ModelChip(chipModel, onToggleChip)
@@ -2114,14 +2119,14 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                             .padding(start = 12.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            IconStop(scheme.onSurface, Modifier.size(13.dp))
+                            FenverIcon(FenverIcon.Stop, scheme.onSurface, Modifier.size(13.dp))
                             Text("停止", fontSize = 14.sp, color = scheme.onSurface)
                         }
                     } else {
                         GhostCircleButton(onClick = onToggleAttach,
                             rotation = if (attachOpen) 45f else 0f,
                             stroke = if (attachOpen) scheme.primary else scheme.outline) {
-                            IconPlus(if (attachOpen) scheme.primary else scheme.onSurfaceVariant,
+                            FenverIcon(FenverIcon.Plus, if (attachOpen) scheme.primary else scheme.onSurfaceVariant,
                                 Modifier.size(19.dp))
                         }
                         if (canSend) {
@@ -2129,7 +2134,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                             GhostCircleButton(onClick = onSend, size = 40.dp,
                                 fill = scheme.primary,
                                 stroke = Color.Transparent) {
-                                IconArrowUp(scheme.onPrimary, Modifier.size(20.dp))
+                                FenverIcon(FenverIcon.ArrowUp, scheme.onPrimary, Modifier.size(20.dp))
                             }
                         }
                     }
@@ -2315,7 +2320,7 @@ private fun ModelChip(chipModel: String, onToggleChip: () -> Unit) {
         text = chipModel,
         onClick = onToggleChip,
         trailing = {
-            IconChevronDown(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(14.dp))
+            FenverIcon(FenverIcon.ChevronDown, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(14.dp))
         },
     )
 }
@@ -2335,9 +2340,10 @@ private fun ModelPickerScreen(models: List<Pair<String, String>>, currentId: Str
         Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
             Text("选择模型", fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
                 color = scheme.onSurface, modifier = Modifier.align(Alignment.Center))
-            Text("×", fontSize = 26.sp, color = scheme.onSurface,
-                modifier = Modifier.align(Alignment.CenterEnd)
-                    .clickable(onClick = onClose).padding(8.dp))
+            Box(Modifier.align(Alignment.CenterEnd)
+                .clickable(onClick = onClose).padding(8.dp)) {
+                FenverIcon(FenverIcon.Close, scheme.onSurface, Modifier.size(22.dp))
+            }
         }
         Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
             models.forEach { (id, name) ->
@@ -2357,7 +2363,7 @@ private fun ModelPickerScreen(models: List<Pair<String, String>>, currentId: Str
                         color = if (cur) scheme.primary else scheme.onSurface,
                         fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal,
                         modifier = Modifier.weight(1f))
-                    if (cur) Text("✓", fontSize = 18.sp, color = scheme.primary)
+                    if (cur) FenverIcon(FenverIcon.Check, scheme.primary, Modifier.size(18.dp))
                 }
             }
             if (models.isEmpty())
@@ -2496,8 +2502,8 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
             // 是 PRD R1-AC 明确要求原生补上的唯一有意偏差，核对记录见 T2.3 文档。
             if (!mine && isLastAssistant) ToolBtn("重新生成", enabled = !streaming) { onRegen() }
             if (!mine) {
-                ToolBtn("👍", on = m.feedback == 1) { onFeedback(1) }
-                ToolBtn("👎", on = m.feedback == -1) { onFeedback(-1) }
+                ToolBtn(icon = FenverIcon.ThumbUp, on = m.feedback == 1) { onFeedback(1) }
+                ToolBtn(icon = FenverIcon.ThumbDown, on = m.feedback == -1) { onFeedback(-1) }
             }
             ToolBtn("删除") { onDelete() }
         }
@@ -2508,22 +2514,26 @@ private fun UiMsg.textOrEmpty(): String = content
 
 
 /* .msg-tools button：无边、透明底、12px text-3、padding 3/8、圆角 7；.on 吃强调色对。
- * enabled=false 是 R1 的"流式中编辑置灰"：字色再淡一档、不吃点击，按钮还在原位。 */
+ * enabled=false 是 R1 的"流式中编辑置灰"：字色再淡一档、不吃点击，按钮还在原位。
+ * icon 非空时这一枚是纯图标钮（👍/👎 那两枚换进 Fenver 图标语言后就是 ThumbUp/ThumbDown），
+ * 文字钮照旧：同一语义全 App 只用 FenverIcon 里那一枚。 */
 @Composable
-private fun ToolBtn(label: String, on: Boolean = false, enabled: Boolean = true,
+private fun ToolBtn(label: String = "", icon: FenverIcon? = null,
+                    on: Boolean = false, enabled: Boolean = true,
                     onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val ink = when {
+        !enabled -> text3Color().copy(alpha = 0.35f)
+        on -> scheme.primary
+        else -> text3Color()
+    }
     Box(Modifier.background(
             if (on) scheme.primaryContainer else Color.Transparent,
             RoundedCornerShape(7.dp))
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
         .padding(horizontal = 8.dp, vertical = 3.dp)) {
-        Text(label, fontSize = 12.sp,
-            color = when {
-                !enabled -> text3Color().copy(alpha = 0.35f)
-                on -> scheme.primary
-                else -> text3Color()
-            })
+        if (icon != null) FenverIcon(icon, ink, Modifier.size(16.dp))
+        else Text(label, fontSize = 12.sp, color = ink)
     }
 }
 
@@ -2563,7 +2573,7 @@ private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded:
 private fun TraceThinkingNow() {
     Row(verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        IconThinkingDots(text3Color(), thinkingPhase(), Modifier.size(22.dp))
+        FenverIcon(FenverIcon.ThinkingDots, text3Color(), Modifier.size(22.dp), phase = thinkingPhase())
         Text("正在思考", fontSize = 12.sp, color = text3Color())
     }
 }
@@ -2626,12 +2636,12 @@ private fun TracePanel(items: List<TraceItem>, expanded: Boolean, liveLabel: Str
             Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                IconTraceEye(text3Color(), Modifier.size(14.dp))
+                FenverIcon(FenverIcon.TraceEye, text3Color(), Modifier.size(14.dp))
                 Text((if (expanded) "收起 " else "查看 ") + "$steps 个步骤" +
                         if (pages > 0) " · $pages 个网页" else "",
                     fontSize = 12.sp, color = text3Color(),
                     modifier = Modifier.weight(1f))
-                IconChevronDown(text3Color(), Modifier.size(14.dp).rotate(chevron))
+                FenverIcon(FenverIcon.ChevronDown, text3Color(), Modifier.size(14.dp).rotate(chevron))
             }
             if (expanded) items.forEach { TraceStepRow(it, onOpenUrl) }
             if (liveLabel != null) TraceLiveBar(status, startedAt)
@@ -2659,7 +2669,7 @@ private fun TraceLiveBar(label: String, startedAt: Long) {
     Row(Modifier.fillMaxWidth().padding(top = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        IconStepBusy(scheme.primary, spin, Modifier.size(14.dp))
+        FenverIcon(FenverIcon.StepBusy, scheme.primary, Modifier.size(14.dp), rotation = spin)
         Text(label, fontSize = 12.sp, color = scheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
@@ -2836,9 +2846,9 @@ private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
                 // 状态标记改成画出来的：✓/✗/▋ 这些字形在部分设备上没有，
                 // 缺字就成实心方块（v0.30 用户截图里那条"只有方块的气泡"）。
                 when {
-                    t.pending -> IconStepBusy(text3Color(), spin, Modifier.size(14.dp))
-                    t.ok -> IconStepDone(scheme.primary, Modifier.size(14.dp))
-                    else -> IconStepFailed(scheme.error, Modifier.size(14.dp))
+                    t.pending -> FenverIcon(FenverIcon.StepBusy, text3Color(), Modifier.size(14.dp), rotation = spin)
+                    t.ok -> FenverIcon(FenverIcon.StepDone, scheme.primary, Modifier.size(14.dp))
+                    else -> FenverIcon(FenverIcon.StepFailed, scheme.error, Modifier.size(14.dp))
                 }
                 Text(t.label.ifEmpty { t.name.ifEmpty { "工具调用" } },
                     fontSize = 13.sp, color = scheme.onSurface,
@@ -2855,7 +2865,7 @@ private fun TraceStepRow(t: TraceItem, onOpenUrl: (String) -> Unit) {
         "search" -> Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                IconTraceEye(scheme.primary, Modifier.size(14.dp))
+                FenverIcon(FenverIcon.TraceEye, scheme.primary, Modifier.size(14.dp))
                 // W3：步带 source 时在标题行尾追加「 · 来自 X」；没有就连前缀一起省，
                 // 与 PWA traceStepNode 的 search 臂逐字同文案。
                 val src = searchSourceName(t.source)
@@ -2926,7 +2936,10 @@ private fun AttPreview(a: AttItem) {
             .border(BorderStroke(1.dp, scheme.outline), CircleShape)
             .padding(horizontal = 10.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("📄 ${a.name}", fontSize = 12.sp, color = scheme.onSurfaceVariant)
+            // 📄 字形换进图标语言：File 一枚 + 文件名（取不到缩略图时的降级胶囊原语义）
+            FenverIcon(FenverIcon.File, scheme.onSurfaceVariant, Modifier.size(14.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(a.name, fontSize = 12.sp, color = scheme.onSurfaceVariant)
         }
     }
     if (a.kind != "image") { tag(); return }

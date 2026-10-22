@@ -64,7 +64,8 @@ def test_doubao_three_state_input_card():
         "三态判据（对标图 1→2）：键盘起/有字/生成中才展开成两行，收起是单胶囊"
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT), \
         "第 13 轮改判：键盘起着只写「发消息…」，不再提示长按语音（语音只在键盘收起时）"
-    assert "IconVoiceWave(" in CHAT, "声纹钮（图 1/2 左侧 ·)) 图标）：语音模式开关"
+    # v0.36.1 图标语言批：声纹钮改走统一入口（锚点跟着调用改读，判据不变）
+    assert "FenverIcon(FenverIcon.VoiceWave" in CHAT, "声纹钮（图 1/2 左侧 ·)) 图标）：语音模式开关"
     assert "GhostCircleButton(onClick = onCamera)" not in CHAT, \
         "相机钮从输入条退役（图 1 里没有它）；＋面板的相机 tile 照旧"
     assert '"发消息或按住说话…"' in CHAT and '"按住说话"' in CHAT
@@ -75,8 +76,10 @@ def test_model_button_opens_fullscreen_picker():
     assert re.search(r"if \(modelMenuOpen\) \{[\s\S]{0,200}ModelPickerScreen\(", CHAT), \
         "模型页挂在根层整屏盖上，不是输入卡下挂的小面板"
     page = re.search(r"fun ModelPickerScreen\([\s\S]*?\n\}", CHAT).group(0)
-    assert "选择模型" in page and "×" in page and "✓" in page, \
-        "页三件套：居中标题、右上 ×、当前项 ✓"
+    # v0.36.1 图标语言批：右上 × 与当前项 ✓ 从字形换成画出来的（锚点读统一入口，三件套判据不变）
+    assert "选择模型" in page and "FenverIcon(FenverIcon.Close" in page \
+        and "FenverIcon(FenverIcon.Check" in page, \
+        "页三件套：居中标题、右上画出来的 ×、当前项画出来的 ✓"
     assert "fillMaxSize" in page and "verticalScroll" in page
     assert "AnimatedVisibility(visible = modelMenuOpen" not in CHAT, \
         "旧下挂小面板退役——同一开关不许有两个出口"

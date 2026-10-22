@@ -142,9 +142,10 @@ def test_ime_kit_is_declared_before_send_now():
 # 缺字风险分两档，不搞一刀切：
 #   BAN_EVERYWHERE —— ▋ ▾ ▸ 这三个几何标记，真机已经判过字体里就是没有（那条
 #     "只剩一个绿方块的气泡"就是 ▋），全文件禁，一个字符串字面量都不许留。
-#   BAN_IN_PANEL  —— ✓ ✗ 是 Unicode 常见符号，模型选择页那枚「当前项」勾（ChatUi.kt
-#     的 Text("✓"）与日程页）被 v0.23.11 的老契约钉着，不是本轮要动的东西；这一档
-#     只在本面板的三块体（光标 / 步骤行 / 面板头）里禁——那儿才是用户这次看到的界面。
+#   BAN_IN_PANEL  —— ✓ ✗ 是 Unicode 常见符号；v0.30 那轮模型选择页/日程页还留着
+#     Text("✓"），由 v0.23.11 的老契约钉着。v0.36.1 图标语言批把这两处也换成
+#     画出来的 Check，老契约的锚点同批改读 FenverIcon——本档因此只防面板内回退，
+#     全文件层面的"字形当图标"由 test_native_fenver_icon_language_v0361_contract 拦。
 BAN_EVERYWHERE = ["▋", "▾", "▸"]
 BAN_IN_PANEL = BAN_EVERYWHERE + ["✓", "✗"]
 
@@ -175,10 +176,12 @@ def test_no_status_mark_depends_on_a_font_that_may_not_have_it():
     assert "Text(" not in cursor, "光标又回到打字形：缺字就是那块绿方块"
     assert "background(" in cursor and "Box(" in cursor, "光标改成画的竖条"
     step = _body(src, "private fun TraceStepRow")
-    for icon in ("IconStepDone", "IconStepFailed", "IconStepBusy"):
+    # v0.36.1 图标语言批：三态标记改走统一入口 FenverIcon（锚点跟着调用改读，判据不变——
+    # 状态标记仍然必须是画出来的，不许退回字形）。
+    for icon in ("FenverIcon.StepDone", "FenverIcon.StepFailed", "FenverIcon.StepBusy"):
         assert icon in step, f"步前标记少了画出来的 {icon}：三态里有一态又靠字形了"
     panel = _body(src, "private fun TracePanel")
-    assert "IconChevronDown" in panel and "rotate(" in panel, \
+    assert "FenverIcon.ChevronDown" in panel and "rotate(" in panel, \
         "展开箭头仍是 ▾/▸ 字形"
     for name, body in (("BlinkCursor", cursor), ("TraceStepRow", step), ("TracePanel", panel)):
         got = _glyph_literals(body, BAN_IN_PANEL)

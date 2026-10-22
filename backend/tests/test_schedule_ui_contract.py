@@ -430,8 +430,13 @@ def test_month_and_year_navigation_is_clamped_to_today_on_both_ends():
     nav = _kt_fn(kt, "fun moveMonth(")
     assert "ScheduleBoard.shiftMonth(" in nav, "原生没走同一份翻月算式"
     assert "return" in nav and "monthIndex(anchor[0], anchor[1])" in nav, "原生翻月没夹下界"
-    for glyph, label in (("«", "上一年"), ("‹", "上个月"), ("›", "下个月"), ("»", "下一年")):
-        assert f'CalNav("{glyph}", "{label}"' in kt, f"原生少了 {label} 那颗钮"
+    # v0.36.1 图标语言批：CalNav 的字形参数换成 FenverIcon 枚举报（四颗钮与其标签
+    # 一字不许少的判据不变，只是"«‹›»"从打字体改成画图标）。
+    for icon, label in (("FenverIcon.ChevronDoubleLeft", "上一年"),
+                        ("FenverIcon.ChevronLeft", "上个月"),
+                        ("FenverIcon.ChevronRight", "下个月"),
+                        ("FenverIcon.ChevronDoubleRight", "下一年")):
+        assert f'CalNav({icon}, "{label}"' in kt, f"原生少了 {label} 那颗钮"
 
 
 def test_grid_is_not_rebuilt_while_a_day_switch_is_in_flight():

@@ -111,8 +111,9 @@ def test_model_chip_next_to_plus_when_collapsed():
         "收起态与展开态下行共用同一枚 ModelChip（两处调用点）"
     chip = re.search(r"private fun ModelChip\(chipModel: String, onToggleChip: \(\) -> Unit\)"
                      r"[\s\S]*?\n\}", CHAT)
-    assert chip and "onToggleChip" in chip.group(0) and "IconChevronDown" in chip.group(0), \
-        "ModelChip 是独立组件：点开全屏选模型页的回调原样接线"
+    assert chip and "onToggleChip" in chip.group(0) \
+        and "FenverIcon(FenverIcon.ChevronDown" in chip.group(0), \
+        "ModelChip 是独立组件：点开全屏选模型页的回调原样接线（下拉人字走图标统一入口）"
     assert "fun ModelPickerScreen(" in CHAT and \
         re.search(r"if \(modelMenuOpen\) \{[\s\S]{0,200}ModelPickerScreen\(", CHAT), \
         "第 12 轮全屏选模型页不回退（它保持 fillMaxSize 整屏盖上）"

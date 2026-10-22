@@ -88,23 +88,31 @@ def test_at_bottom_is_measured_from_the_layout_not_guessed():
 # ---------- ② 悬浮回底箭头：!atBottom 出现，点一下夹到边界 ----------
 
 def test_floating_jump_to_bottom_button_exists_and_acts():
+    # v0.36.1 图标批锚点搬家（意图不变，读法跟着调用改）：悬浮箭头仍钉在 !atBottom 门控里，
+    # 只是图标从 IconArrowDown(...) 换成统一入口 FenverIcon(FenverIcon.ArrowDown, ...)。
     code = _kt_code()
-    m = re.search(r"AnimatedVisibility\(\s*visible\s*=\s*!atBottom[\s\S]*?IconArrowDown[\s\S]*?\n            \}",
-                  code)
-    assert m, "找不到 !atBottom 门控、内含 IconArrowDown 的 AnimatedVisibility：悬浮回底箭头没了"
+    m = re.search(
+        r"AnimatedVisibility\(\s*visible\s*=\s*!atBottom[\s\S]*?FenverIcon\.ArrowDown[\s\S]*?\n            \}",
+        code)
+    assert m, "找不到 !atBottom 门控、内含 FenverIcon.ArrowDown 的 AnimatedVisibility：悬浮回底箭头没了"
     block = m.group(0)
     assert "Alignment.BottomCenter" in block, "箭头不再悬在输入卡上方居中（参考图豆包同款）"
     assert "composerPx" in block, "箭头高度不再按 composer 实测高度让位——会骑在输入卡上"
     assert "MAX_SCROLL_OFFSET" in block, "点击动作不再是【夹到滚动边界】"
-    assert "IconArrowDown" in block, "箭头图标丢了"
+    assert "FenverIcon(FenverIcon.ArrowDown" in block, "箭头图标丢了"
 
 
 def test_arrow_down_icon_is_the_mirrored_up_arrow():
+    # 图标语言收口后几何只有一份、住在 drawArrowDown；fun IconArrowDown 仍在（薄包装），
+    # 这一条改读几何函数本体，杆 + 人字头的同构判据原样。
     icons = _strip_kotlin_comments(
         _read(SHELL / "java" / "xyz" / "fenever" / "assistant" / "nativeapp" / "ui" / "Icons.kt"))
-    m = re.search(r"fun IconArrowDown\(tint: Color[^\n]*\n([\s\S]*?)\n    \}", icons)
-    assert m, "Icons.kt 里没有 IconArrowDown：ChatUi 的箭头钮编不过"
-    body = m.group(1)
+    assert "fun IconArrowDown(" in icons, "Icons.kt 里薄包装 IconArrowDown 没了：旧契约的名字门"
+    m = re.search(r"FenverIcon\.ArrowDown -> drawArrowDown\(", icons)
+    assert m, "FenverIcon 的分发臂没有指向 drawArrowDown：回底箭头不走统一入口"
+    m2 = re.search(r"private fun DrawScope\.drawArrowDown\(tint: Color[\s\S]*?\n\}", icons)
+    assert m2, "Icons.kt 里没有 drawArrowDown 的几何本体"
+    body = m2.group(0)
     assert "seg(" in body and "poly(" in body, "下箭头应当是杆 + 人字头（与 IconArrowUp 同构）"
 
 

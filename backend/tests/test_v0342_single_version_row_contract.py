@@ -32,9 +32,11 @@ from tests.test_schedule_ui_contract import _native                   # noqa: E4
 
 REPO = Path(__file__).resolve().parents[2]
 
-VERSION_ROW = 'SetRow("ⓘ", "版本"'
-UPDATE_ROW = 'SetRow("↻", "检查更新"'
-NEXT_ROW = 'SetRow("☾", "外观"'
+# v0.36.1 图标语言批：行首字形换成 FenverIcon 枚举报（锚点跟着调用改读，
+# 「三行各切一段、只报壳版本号」的判据一个字没动）。
+VERSION_ROW = 'SetRow(FenverIcon.Info, "版本"'
+UPDATE_ROW = 'SetRow(FenverIcon.Refresh, "检查更新"'
+NEXT_ROW = 'SetRow(FenverIcon.Moon, "外观"'
 
 
 def _ui() -> str:
