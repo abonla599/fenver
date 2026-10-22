@@ -72,6 +72,7 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
     // 抽屉先显示 ChatScreen 已预取的列表，再在后台刷新；不在打开时清空重拉。
     LaunchedEffect(initialSessions) { sessions = initialSessions }
     LaunchedEffect(tick) {
+        if (tick == 0) return@LaunchedEffect
         loading = sessions.isEmpty()
         error = onRefreshSessions()
         loading = false
