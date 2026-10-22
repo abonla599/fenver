@@ -250,17 +250,25 @@ def test_launcher_art_is_present_at_every_density():
             assert color_type == 6, f"{name} 不是 RGBA：透明层会带一层黑底"
 
 
-def test_adaptive_icon_background_is_the_gradient_not_a_stale_color():
-    """底色从 @color 换成 @drawable 的渐变；旧的那格色值必须一起删掉。
+def test_adaptive_icon_background_is_the_solid_surface():
+    """v0.36 极简：底色是实心 Surface #121317，渐变与旧色值一起删掉。
 
-    留着 #7030E0 那一格就是留一份"对不上的真相"：下次谁照它改图标就改错了地方。
+    双色图层没了，但旧渐变两端留着就是第二份"对不上的真相"：下次谁照它改图标
+    就改错了地方。monochrome 是 Android 13 主题图标唯一的入口，缺了整层退回彩色。
     """
     for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
         xml = _strip_xml_comments(_text(RES / "mipmap-anydpi-v26" / name))
         assert "@drawable/ic_launcher_background" in xml, f"{name} 还指着纯色那格"
         assert "@color/ic_launcher_background" not in xml
         assert "@mipmap/ic_launcher_foreground" in xml
-    assert (RES / "drawable" / "ic_launcher_background.xml").is_file()
+        assert "<monochrome" in xml, f"{name} 没补主题图标层：Android 13 只认这一层"
+        assert '<monochrome android:drawable="@mipmap/ic_launcher_foreground"' in xml, \
+            f"{name} 的 monochrome 没指向前景：主题图标会画成空块"
+    bg = _strip_xml_comments(_text(RES / "drawable" / "ic_launcher_background.xml"))
+    assert "#121317" in bg, "底色不是极简 token 的 Surface"
+    assert "gradient" not in bg, "渐变回来了：极简图标只用实心底"
+    for stale in ("#0E7C86", "#7030E0"):
+        assert stale not in bg, f"旧渐变端 {stale} 还留在底色里"
     # 剥注释再查：colors.xml 里留着的那段说明文字正好提到这个格子名，
     # 不剥就是一句"解释"把自己判成"还留着定义"。
     colors = _strip_xml_comments(_text(RES / "values" / "colors.xml"))
@@ -277,7 +285,10 @@ def test_icons_are_generated_from_a_script_not_hand_edited():
     tool = raw.decode("ascii")
     # 脚本里必须真的画的是同一套东西（气泡 + 思考轨迹 + 火花），不是随手贴一张图
     assert "Get-SparkPath" in tool and "Add-RoundedRect" in tool
-    assert "#0E7C86" in tool and "#7030E0" in tool, "渐变两端换了色，图标与主题就分家了"
+    assert "#121317" in tool and "#3DD598" in tool, "图标配色与极简 token 分家了"
+    assert "#F2F3F5" in tool, "气泡描边不是极简 token 的 Text"
+    for stale in ("#0E7C86", "#7030E0"):
+        assert stale not in tool, f"旧渐变端 {stale} 还留在生成脚本里"
 
 
 def test_web_icon_and_manifest_still_agree():
@@ -287,7 +298,11 @@ def test_web_icon_and_manifest_still_agree():
     manifest = _text(WEB_MANIFEST)
     assert '"1024x1024"' in manifest.replace(" ", "") or "1024x1024" in manifest
     assert "Fenver" in manifest, "名字被图标改版顺手改掉：test_brand_surface 那把锁认的就是这个"
-    assert (RES / "drawable-nodpi" / "app_icon.png").is_file(), "App 内品牌位没了"
+    app_icon = RES / "drawable-nodpi" / "app_icon.png"
+    assert app_icon.is_file(), "App 内品牌位没了"
+    w, h, color_type = _png_head(app_icon)
+    assert (w, h) == (512, 512), f"app_icon.png 是 {w}x{h}，App 内品牌位应是 512x512"
+    assert color_type == 6, "app_icon.png 不是 RGBA"
 
 
 def test_version_bumped_and_release_notes_brief():
