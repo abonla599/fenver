@@ -57,34 +57,23 @@ import xyz.fenever.assistant.nativeapp.SessionSummary
  * 非活动行没有删除钮，长按兜底；活动行才露「×」。 */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun SessionDrawer(tick: Int, currentId: String,
+fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSummary>,
                   onNewChat: () -> Unit, onOpen: (String) -> Unit,
                   onMemory: () -> Unit, onSettings: () -> Unit,
                   onModelService: () -> Unit, onDeleted: (String) -> Unit,
-                  onLoggedOut: () -> Unit, onClose: () -> Unit) {
+                  onRefreshSessions: suspend () -> String?, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var sessions by remember { mutableStateOf<List<xyz.fenever.assistant.nativeapp.SessionSummary>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
+    var sessions by remember { mutableStateOf(initialSessions) }
+    var loading by remember { mutableStateOf(initialSessions.isEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var search by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<xyz.fenever.assistant.nativeapp.SessionSummary?>(null) }
 
-    // 抽屉每次拉开 tick++ 再拉一遍：和网页侧栏一样，不留缓存快照
+    // 抽屉先显示 ChatScreen 已预取的列表，再在后台刷新；不在打开时清空重拉。
+    LaunchedEffect(initialSessions) { sessions = initialSessions }
     LaunchedEffect(tick) {
-        loading = true; error = null
-        try { sessions = Api.listSessions() }
-        catch (e: CancellationException) {
-            // 抽屉/页面离开组合时 LaunchedEffect 会被取消；这是正常生命周期，不是
-            // 加载失败。把它当错误会显示 Compose 的 "coroutine scope left the
-            // composition"，而用户看到的就是一条莫名其妙的红字。
-            throw e
-        }
-        catch (e: Exception) {
-            if (e is xyz.fenever.assistant.nativeapp.ApiException && e.status == 401) {
-                // 与 ChatUi.logoutIf401 同律：只忘当前身份，不清全机清单
-                xyz.fenever.assistant.nativeapp.Prefs.forgetCurrent(); onLoggedOut()
-            } else error = e.message
-        }
+        loading = sessions.isEmpty()
+        error = onRefreshSessions()
         loading = false
     }
 
@@ -157,8 +146,9 @@ fun SessionDrawer(tick: Int, currentId: String,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
                 if (visible.isEmpty()) item {
-                    // 网页 renderSessions 的两句空态，逐字
-                    Text(if (kw.isNotEmpty()) "没有匹配的会话" else "还没有会话",
+                    // 网页 renderSessions 的空态文案；预取未回来时先说在读取。
+                    Text(if (loading && kw.isEmpty()) "正在读取会话…"
+                         else if (kw.isNotEmpty()) "没有匹配的会话" else "还没有会话",
                         fontSize = 12.sp,
                         color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
@@ -256,7 +246,7 @@ private fun SessionDrawerRow(s: xyz.fenever.assistant.nativeapp.SessionSummary,
     val title = s.title.ifBlank { "新对话" }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
         .then(if (active) Modifier.background(
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 1f / 3f))
+            MaterialTheme.colorScheme.primaryContainer)
         else Modifier)
         .combinedClickable(onClick = onOpen, onLongClick = onDelete)
         .padding(start = 16.dp, end = 8.dp),

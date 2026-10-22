@@ -32,12 +32,19 @@ def _strip_kotlin_line_comments(src: str) -> str:
 
 
 def test_no_clearauth_on_401_paths():
-    """两条 401 登出路径只许 forgetCurrent，不许 clearAuth（注释除外）。"""
+    """401 登出路径只许 forgetCurrent，不许 clearAuth（注释除外）。
+
+    v0.36.0 起抽屉不再自己发 /v1/sessions：它把刷新交给 ChatUi 的
+    refreshSessionsNow()，401 仍由 logoutIf401() 走 forgetCurrent。判据跟着
+    搬家——抽屉必须真的是委托（onRefreshSessions），不能另起一套 401 处理。
+    """
     for f in (CHATUI_KT, SESSION_LIST_KT):
         code = _strip_kotlin_line_comments(_read(f))
         assert "Prefs.clearAuth()" not in code, f.name + "：401 路径仍在清空全机身份"
     assert "Prefs.forgetCurrent()" in _strip_kotlin_line_comments(_read(CHATUI_KT))
-    assert "Prefs.forgetCurrent()" in _strip_kotlin_line_comments(_read(SESSION_LIST_KT))
+    drawer = _strip_kotlin_line_comments(_read(SESSION_LIST_KT))
+    assert "onRefreshSessions" in drawer, "抽屉不再委托 ChatUi 刷新会话"
+    assert "Api.listSessions" not in drawer, "抽屉又自己发 /v1/sessions，401 会绕开 forgetCurrent"
 
 
 def test_clearauth_kept_only_for_base_url_switch():

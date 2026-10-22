@@ -12,6 +12,7 @@ PAIRS = {
     "Line": ("--fv-line", "#262a31"),
     "Text": ("--fv-text", "#f2f3f5"),
     "Text2": ("--fv-text-2", "#a1a6b0"),
+    "Text3": ("--fv-text-3", "#6f747e"),
     "Accent": ("--fv-accent", "#3dd598"),
     "Ai": ("--fv-ai", "#7c83ff"),
     "Danger": ("--fv-danger", "#f87171"),
@@ -31,3 +32,5 @@ def test_native_and_web_share_the_same_tokens():
         native = "#" + m.group(1)[2:].lower()
         assert native == expected, (name, native, expected)
         assert re.search(re.escape(var) + r"\s*:\s*" + re.escape(expected), css, re.I), var
+    assert "--fv-accent-soft: rgba(61, 213, 152, .12)" in css
+    assert "val AccentSoft = Color(0x1F3DD598)" in theme
