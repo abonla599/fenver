@@ -1,8 +1,8 @@
 {
-  "version": "0.35.5",
-  "apk_name": "fenver-0.35.5.apk",
-  "sha256": "9dda3f4143575c764b6ecc5c99376a05397b249451367e599d3eedf32f062bdb",
-  "size": 7816599,
+  "version": "0.36.0",
+  "apk_name": "fenver-0.36.0.apk",
+  "sha256": "cfb2b177bee61420113b07e9c09ebe930b15808269c585485ab02cd8c978cc0c",
+  "size": 7827275,
   "url": "https://ai.fenever.xyz/site/android.apk",
-  "changelog": "v0.35.5"
+  "changelog": "v0.36.0"
 }
