@@ -95,13 +95,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -159,14 +157,9 @@ import xyz.fenever.assistant.nativeapp.StoredMessage
 import xyz.fenever.assistant.nativeapp.StreamNeedHistoryException
 import xyz.fenever.assistant.core.TaskCard
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
-import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
 import xyz.fenever.assistant.nativeapp.theme.FenverTokens
-import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
-import xyz.fenever.assistant.nativeapp.theme.glassColor
-import xyz.fenever.assistant.nativeapp.theme.glassStrongColor
 import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
-import xyz.fenever.assistant.nativeapp.theme.userBubbleBrush
 
 /* 聊天主屏 —— 逐块对位旧壳加载的网页（backend/app/web/static）：
  * index.html 的 .topbar/.messages/.composer 结构，style.css 移动端那档数值
@@ -297,14 +290,20 @@ private fun closePendingTrace(steps: List<TraceItem>): List<TraceItem> = steps.m
 /* 一条已落地的消息。transient = 网页 runStream 失败那条 ⚠️ 气泡：看得见，
  * 但 replaceMessages/outbound 都把它滤掉，不发给服务端、不混进上下文。
  * trace/traceExpanded（v0.29.0）：这条回答的过程步与面板开合。开合记在消息上
- * 而不是组件里——LazyColumn 把条目滚出视口就销毁组合，记在组件上会丢用户点开的选择。 */
+ * 而不是组件里——LazyColumn 把条目滚出视口就销毁组合，记在组件上会丢用户点开的选择。
+ * localId：还没拿到服务端 message_id 的消息（本地用户消息、⚠️ 占位）在列表里
+ * 也要有稳定且唯一的 key——同一句话连发两次时，内容哈希会撞成同一个 key。 */
+private val localMsgSeq = java.util.concurrent.atomic.AtomicLong(0L)
+private fun nextLocalMsgSeq(): Long = localMsgSeq.incrementAndGet()
+
 data class UiMsg(val role: String, val content: String,
                  val messageId: String? = null, val model: String? = null,
                  val feedback: Int? = null,
                  val attachments: List<AttItem> = emptyList(),
                  val transient: Boolean = false,
                  val trace: List<TraceItem> = emptyList(),
-                 val traceExpanded: Boolean = false)
+                 val traceExpanded: Boolean = false,
+                 val localId: Long = nextLocalMsgSeq())
 
 /* 网页 .suggestions 的四枚 chips（app.js SUGGESTIONS 逐字）。点击只填输入框、不发送。
  * 2026-09-28 真机反馈：原来四条偏"技术演示"，换成日常真会问的事。 */
@@ -1204,27 +1203,30 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             )
         },
     ) {
-        AiGlowBackground {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             Column(Modifier.fillMaxSize()) {
-                // ---------- .topbar：☰ + 标题；玻璃底 + 1px 下边框 ----------
-                Row(Modifier.fillMaxWidth().background(glassColor())
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.clickable { scope.launch { drawerState.open() } }
-                        .padding(6.dp)) {
-                        IconMenu(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(18.dp))
-                    }
-                    Text(topTitle, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        // 网页 .topbar h1 走的是 --text（深底浅字 / 浅底深字），这里必须跟着
-                        // 主题走 onSurface；不写 color 时它落的是默认纯黑——深色主题下黑字压
-                        // 在深蓝黑玻璃底上几乎看不见（真机反馈「标题纯黑色不好辨认」）。
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f))
-                }
-                Box(Modifier.fillMaxWidth().height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline))
+                // ---------- 顶栏：56dp，菜单 44dp 可点区，右侧模型胶囊 ----------
+                FenverTopBar(
+                    title = topTitle,
+                    leading = {
+                        FenverTopBarAction(onClick = { scope.launch { drawerState.open() } }) {
+                            IconMenu(MaterialTheme.colorScheme.onSurfaceVariant,
+                                Modifier.size(20.dp))
+                        }
+                    },
+                    actions = {
+                        if (providers.any { it.usable }) {
+                            FenverChip(
+                                text = currentProvider()?.name ?: "选择模型",
+                                onClick = { modelMenuOpen = true; attachOpen = false },
+                                trailing = {
+                                    IconChevronDown(MaterialTheme.colorScheme.onSurfaceVariant,
+                                        Modifier.size(14.dp))
+                                },
+                            )
+                        }
+                    },
+                )
 
                 // ---------- .messages：padding 14/12/6，条目间 gap 22 ----------
                 LazyColumn(Modifier.weight(1f).fillMaxWidth().imePadding()
@@ -1235,7 +1237,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     if (messages.isEmpty() && !busy && streamText == null) item {
                         EmptyHero()
                     }
-                    itemsIndexed(messages) { index, m ->
+                    itemsIndexed(messages, key = { _, m -> m.messageId ?: "local-${m.localId}" }, contentType = { _, m -> m.role }) { index, m ->
                         MessageRow(
                             m = m,
                             isLastAssistant = m.role == "assistant" &&
@@ -1445,19 +1447,22 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             }
                         }
                     }
-                    // .attach-menu：卡片下方玻璃面板（网页 DOM 顺序就在 .input-card 之后）
+                    // .attach-menu：卡片下方的 surface 面板（网页 DOM 顺序就在 .input-card 之后）
                     AnimatedVisibility(visible = attachOpen,
                         enter = fadeIn(tween(140)) + slideInVertically(tween(140)) { it / 3 }) {
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp)
-                            .background(glassStrongColor(), RoundedCornerShape(16.dp))
-                            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                                RoundedCornerShape(16.dp))
-                            .padding(10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            val tileInk = MaterialTheme.colorScheme.onSurfaceVariant
-                            AttachTile({ IconCamera(tileInk, Modifier.size(17.dp)) }, "相机") { attachOpen = false; camera.launch(null) }
-                            AttachTile({ IconImage(tileInk, Modifier.size(17.dp)) }, "图片") { attachOpen = false; picker.launch("image/*") }
-                            AttachTile({ IconFile(tileInk, Modifier.size(17.dp)) }, "文件") { attachOpen = false; picker.launch("*/*") }
+                        FenverSurface(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            shape = RoundedCornerShape(16.dp),
+                        ) {
+                            Row(Modifier.fillMaxWidth().padding(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                val tileInk = MaterialTheme.colorScheme.onSurfaceVariant
+                                AttachTile({ IconCamera(tileInk, Modifier.size(17.dp)) }, "相机") { attachOpen = false; camera.launch(null) }
+                                AttachTile({ IconImage(tileInk, Modifier.size(17.dp)) }, "图片") { attachOpen = false; picker.launch("image/*") }
+                                AttachTile({ IconFile(tileInk, Modifier.size(17.dp)) }, "文件") { attachOpen = false; picker.launch("*/*") }
+                            }
                         }
                     }
                     // .model-menu 第 12 轮改版：输入卡下挂的小面板退役，点模型钮改出
@@ -1502,18 +1507,19 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .padding(bottom = with(LocalDensity.current) { composerPx.toDp() } + 14.dp),
             ) {
-                Box(Modifier.size(40.dp)
-                    .shadow(8.dp, CircleShape)
-                    .background(glassStrongColor(), CircleShape)
-                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        CircleShape)
-                    .clickable {
+                FenverSurface(
+                    modifier = Modifier.size(40.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    shape = CircleShape,
+                    contentAlignment = Alignment.Center,
+                    onClick = {
                         scope.launch {
                             val t = listState.layoutInfo.totalItemsCount
                             if (t > 0) listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
                         }
                     },
-                    contentAlignment = Alignment.Center) {
+                ) {
                     IconArrowDown(MaterialTheme.colorScheme.onSurface, Modifier.size(20.dp))
                 }
             }
@@ -1567,7 +1573,7 @@ private fun EmptyHero() {
                 RoundedCornerShape(16.dp))) {
             AiBrandMark(54)
         }
-        Text("开始一段对话", fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+        Text("开始一段对话", style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurface)
     }
 }
@@ -1620,23 +1626,19 @@ internal fun hoverBg(): Color =
  * 占位符跟着键盘走：键盘没起「发消息或按住说话…」（长按即说），起了「输入消息…」。
  * 录音中整屏由 VoiceScreen 接管（见 ChatScreen 根层），输入位只留手势锚点。 */
 
-/* 圆形图标钮：按下缩一点（无涟漪不糊），可选填充/描边色/整枚旋转/彩色光晕。
- * 发送钮就是它的「渐变填充 + 品牌色光晕 + 40dp」特化版，一族按钮同一只手筋。 */
+/* 圆形图标钮：按下缩一点（无涟漪不糊），可选填充/描边色/整枚旋转。
+ * 发送钮是它的 40dp 实心 primary 特化版，一族按钮同一只手筋；不再有彩色光晕。 */
 @Composable
 private fun GhostCircleButton(onClick: () -> Unit, size: Dp = 38.dp, rotation: Float = 0f,
-                              fill: Color? = null, fillBrush: Brush? = null,
+                              fill: Color? = null,
                               stroke: Color = MaterialTheme.colorScheme.outline,
-                              glow: Color? = null,
                               content: @Composable () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.9f else 1f, tween(120), label = "btnScale")
     Box(Modifier.size(size)
         .graphicsLayer { scaleX = scale; scaleY = scale; rotationZ = rotation }
-        .then(if (glow != null) Modifier.shadow(9.dp, CircleShape, clip = false,
-            ambientColor = glow, spotColor = glow) else Modifier)
-        .then(if (fillBrush != null) Modifier.background(fillBrush, CircleShape)
-              else Modifier.background(fill ?: Color.Transparent, CircleShape))
+        .background(fill ?: Color.Transparent, CircleShape)
         .border(BorderStroke(1.dp, stroke), CircleShape)
         .clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center) { content() }
@@ -1726,9 +1728,12 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                 selection = TextRange(start + text.length)))
         },
     )
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-        color = scheme.surface, border = BorderStroke(1.dp, scheme.outline),
-        shadowElevation = 6.dp) {
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth(),
+        color = scheme.surface,
+        border = BorderStroke(1.dp, scheme.outline),
+        shape = RoundedCornerShape(12.dp),
+    ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             // 输入位行：锚点 Box 三态同一个节点——收起/展开切换不销毁它，
             // 已按下的手指不会半路丢录音状态机（第 11 轮锚点槽位教训）。
@@ -1835,13 +1840,11 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                                 Modifier.size(19.dp))
                         }
                         if (canSend) {
-                            // 发送：40dp 渐变圆钮 + 品牌色光晕；深主题深字、浅主题白字（网页同规则）
+                            // 发送：40dp 实心 primary 圆钮，无光晕；字色跟着 onPrimary。
                             GhostCircleButton(onClick = onSend, size = 40.dp,
-                                fillBrush = aiPrimaryBrush(),
-                                glow = if (isWebLight()) Color(0x592451D6) else Color(0x595C8CFF),
+                                fill = scheme.primary,
                                 stroke = Color.Transparent) {
-                                IconArrowUp(if (isWebLight()) Color.White
-                                            else FenverTokens.BtnPrimaryInk, Modifier.size(20.dp))
+                                IconArrowUp(scheme.onPrimary, Modifier.size(20.dp))
                             }
                         }
                     }
@@ -2019,22 +2022,17 @@ private fun readClipText(ctx: android.content.Context): String? {
 }
 
 /* 模型切换钮（ⒶAuto）：第 13 轮起收起态也挂——用户点名「不然我进去了怎么找到」，
- * 就贴在 ＋ 左边；展开态下行照旧。点开全屏「选择模型」页（ModelPickerScreen）。 */
+ * 就贴在 ＋ 左边；展开态下行照旧。点开全屏「选择模型」页（ModelPickerScreen）。
+ * 外观收编到 FenverChip，触控区与顶栏那枚同源。 */
 @Composable
 private fun ModelChip(chipModel: String, onToggleChip: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    Row(Modifier.background(scheme.surfaceVariant, CircleShape)
-        .border(BorderStroke(1.dp, scheme.outline), CircleShape)
-        .clickable(onClick = onToggleChip)
-        .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(chipModel, fontSize = 13.sp, maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            color = scheme.onSurface,
-            modifier = Modifier.widthIn(max = 110.dp))
-        IconChevronDown(scheme.onSurface.copy(alpha = 0.7f), Modifier.size(13.dp))
-    }
+    FenverChip(
+        text = chipModel,
+        onClick = onToggleChip,
+        trailing = {
+            IconChevronDown(MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(14.dp))
+        },
+    )
 }
 
 /* ---------------- 全屏「选择模型」页（第 12 轮，对标豆包图 3） ----------------
@@ -2169,27 +2167,24 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
             )
             }
         } else {
-            val shape = if (mine) RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp,
-                bottomEnd = 6.dp, bottomStart = 20.dp)
-            else RoundedCornerShape(topStart = 6.dp, topEnd = 20.dp,
-                bottomEnd = 20.dp, bottomStart = 20.dp)
-            val bubbleMod = if (mine) Modifier
-                .widthIn(max = 320.dp)
-                .background(userBubbleBrush(), shape)
-            else Modifier
-                .fillMaxWidth()
-                .background(scheme.surfaceVariant, shape)
-                .border(BorderStroke(1.dp, scheme.outline), shape)
-            Column(bubbleMod.padding(
-                horizontal = if (mine) 15.dp else 16.dp,
-                vertical = if (mine) 10.dp else 12.dp)) {
-                // 过程面板排在正文上方（网页 .msg-trace 同位）：历史落定态默认折叠，
-                // 点标题行展开。只有助手消息带得到 trace。
-                if (!mine && m.trace.isNotEmpty())
-                    TracePanel(m.trace, m.traceExpanded, null, onToggleTrace, onOpenUrl)
-                if (mine) Text(m.content, fontSize = 15.sp, lineHeight = 24.sp,
-                    color = if (isWebLight()) FenverTokens.LText else FenverTokens.Text)
-                else RichText(m.content, scheme.onSurface)
+            // 助手 surface、用户 surfaceVariant；两边同为 16dp 圆角 + 发丝线，不再有
+            // 不对称气泡、渐变用户气泡与彩色阴影。
+            if (mine) {
+                FenverCard(
+                    modifier = Modifier.widthIn(max = 320.dp),
+                    color = scheme.surfaceVariant,
+                ) {
+                    Text(m.content, style = MaterialTheme.typography.bodyLarge,
+                        color = scheme.onSurface)
+                }
+            } else {
+                FenverCard(modifier = Modifier.fillMaxWidth(), color = scheme.surface) {
+                    // 过程面板排在正文上方（网页 .msg-trace 同位）：历史落定态默认折叠，
+                    // 点标题行展开。只有助手消息带得到 trace。
+                    if (m.trace.isNotEmpty())
+                        TracePanel(m.trace, m.traceExpanded, null, onToggleTrace, onOpenUrl)
+                    RichText(m.content, scheme.onSurface)
+                }
             }
         }
         // .msg-atts：图片缩略（≤240×168，圆角 10 描边）或 📄 胶囊；只挂在用户侧
@@ -2258,17 +2253,12 @@ private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded:
                             approval: ApprovalState? = null,
                             onApprovalDecision: ((String) -> Unit)? = null) {
     val scheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(topStart = 6.dp, topEnd = 20.dp,
-        bottomEnd = 20.dp, bottomStart = 20.dp)
     Column(Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text("助手", fontSize = 11.sp, color = text3Color(),
             modifier = Modifier.padding(horizontal = 4.dp))
-        Column(Modifier.fillMaxWidth()
-            .background(scheme.surfaceVariant, shape)
-            .border(BorderStroke(1.dp, scheme.outline), shape)
-            .padding(horizontal = 16.dp, vertical = 12.dp)) {
+        FenverCard(modifier = Modifier.fillMaxWidth(), color = scheme.surface) {
             if (trace.isNotEmpty())
                 TracePanel(trace, traceExpanded,
                     if (text.isEmpty()) "正在思考" else "正在生成", onToggleTrace, onOpenUrl)
@@ -2735,7 +2725,7 @@ internal fun RichText(text: String, color: Color) {
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                         .horizontalScroll(rememberScrollState()))
             } else if (seg.isNotBlank()) Text(boldAnnotated(seg, color),
-                fontSize = 15.sp, lineHeight = 25.sp)
+                fontSize = 16.sp, lineHeight = 24.sp)
         }
     }
 }

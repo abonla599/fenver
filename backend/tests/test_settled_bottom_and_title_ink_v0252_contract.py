@@ -126,15 +126,19 @@ def test_native_streaming_follow_still_gated_on_already_at_bottom():
 def test_native_topbar_title_uses_theme_ink_not_default_black():
     """顶栏对话标题必须显式 color = onSurface（网页 .topbar h1 走 --text 的同义）。
 
-    Text(topTitle 从起点到闭合括号之间要找得到 color 且是 onSurface——Compose 不写
-    color 落的是默认黑，深色主题下"标题纯黑不好辨认"就是这条没写。
+    v0.36.0 起标题由 ui/FenverComponents.kt 的 FenverTopBar 统一渲染，ChatUi 只传
+    title = topTitle；判据跟着搬到组件里，钉的仍是「标题显式跟主题墨色」——Compose
+    不写 color 落的是默认黑，深色主题下"标题纯黑不好辨认"就是这条没写。
     """
     code = _kt_code()
-    m = re.search(r"Text\(\s*topTitle[\s\S]{0,400}?\)\s*\n", code)
-    assert m, "顶栏标题 Text(topTitle 不见了"
-    block = m.group(0)
-    assert re.search(r"color\s*=\s*MaterialTheme\.colorScheme\.onSurface\b", block), \
-        "顶栏标题没显式 onSurface：默认纯黑压在深色玻璃底上，用户认不出标题"
+    assert re.search(r"FenverTopBar\(\s*title\s*=\s*topTitle", code), \
+        "顶栏不再把 topTitle 交给 FenverTopBar：标题的来源断了"
+    comp = _strip_kotlin_comments(
+        (CHATUI_KT.parent / "FenverComponents.kt").read_text(encoding="utf-8"))
+    m = re.search(r"Text\(\s*title[\s\S]{0,400}?\)", comp)
+    assert m, "FenverTopBar 里找不到 Text(title …)：组件被改名或标题渲染搬走了"
+    assert re.search(r"color\s*=\s*MaterialTheme\.colorScheme\.onSurface\b", m.group(0)), \
+        "FenverTopBar 标题没显式 onSurface：默认纯黑压在深色顶栏上，用户认不出标题"
 
 
 # ---------- 网页权威出处仍在（对照失效就喊人，不许安卓自创语义） ----------

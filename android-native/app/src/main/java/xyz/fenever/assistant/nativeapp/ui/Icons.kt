@@ -1,6 +1,7 @@
 package xyz.fenever.assistant.nativeapp.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -12,18 +13,20 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
 /* 自绘线性图标族（第 5 轮真机反馈：emoji 按钮「看着太简陋」）。
- * 统一语言：24 格网、1.7 描边、圆头圆角，全部 Canvas 直绘——零新依赖，
- * 深浅主题只换一个 tint。几何按 24x24 设计稿写，绘制时乘 k=画布宽/24 缩放。 */
+ * 统一语言：24 格网、1.5 描边、圆头圆角，全部 Canvas 直绘——零新依赖，
+ * 深浅主题只换一个 tint。几何按 24x24 设计稿写，绘制时乘 k=画布宽/24 缩放。
+ * 默认 20dp：调用方只在确实需要更小/更大时才传尺寸。 */
 
 private const val GRID = 24f
 
 @Composable
-private fun LineIcon(stroke: Float = 1.7f, modifier: Modifier = Modifier,
+private fun LineIcon(stroke: Float = 1.5f, modifier: Modifier = Modifier,
                      draw: DrawScope.(k: Float, sw: Float) -> Unit) {
     Canvas(modifier) {
         val k = size.width / GRID
@@ -48,7 +51,7 @@ private fun DrawScope.seg(color: Color, sw: Float, k: Float,
 
 /** 相机：机身圆角框 + 取景凸台 + 镜头圈 + 闪光灯点。 */
 @Composable
-fun IconCamera(tint: Color, modifier: Modifier = Modifier) =
+fun IconCamera(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawRoundRect(tint, Offset(2.6f * k, 7.6f * k), Size(18.8f * k, 12.4f * k),
             CornerRadius(3.2f * k, 3.2f * k), style = Stroke(width = sw))
@@ -59,7 +62,7 @@ fun IconCamera(tint: Color, modifier: Modifier = Modifier) =
 
 /** 麦克风：胶囊 + 底部半圆抱弧 + 短杆底座。 */
 @Composable
-fun IconMic(tint: Color, modifier: Modifier = Modifier) =
+fun IconMic(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawRoundRect(tint, Offset(9f * k, 2.8f * k), Size(6f * k, 11f * k),
             CornerRadius(3f * k, 3f * k), style = Stroke(width = sw))
@@ -71,7 +74,7 @@ fun IconMic(tint: Color, modifier: Modifier = Modifier) =
 
 /** 键盘：外框 + 两排键点 + 空格条。 */
 @Composable
-fun IconKeyboard(tint: Color, modifier: Modifier = Modifier) =
+fun IconKeyboard(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawRoundRect(tint, Offset(2.6f * k, 6.4f * k), Size(18.8f * k, 11.2f * k),
             CornerRadius(2.6f * k, 2.6f * k), style = Stroke(width = sw))
@@ -83,7 +86,7 @@ fun IconKeyboard(tint: Color, modifier: Modifier = Modifier) =
 
 /** 加号（附件面板开合时整枚旋转 45° 变 ×）。 */
 @Composable
-fun IconPlus(tint: Color, modifier: Modifier = Modifier) =
+fun IconPlus(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         seg(tint, sw, k, 12f to 5.2f, 12f to 18.8f)
         seg(tint, sw, k, 5.2f to 12f, 18.8f to 12f)
@@ -91,7 +94,7 @@ fun IconPlus(tint: Color, modifier: Modifier = Modifier) =
 
 /** 发送：上箭头（杆 + 人字头）。 */
 @Composable
-fun IconArrowUp(tint: Color, modifier: Modifier = Modifier) =
+fun IconArrowUp(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         seg(tint, sw, k, 12f to 19.2f, 12f to 6.2f)
         poly(tint, sw, k, 6.6f to 11.4f, 12f to 6f, 17.4f to 11.4f)
@@ -99,7 +102,7 @@ fun IconArrowUp(tint: Color, modifier: Modifier = Modifier) =
 
 /** 回到底部：下箭头（杆 + 人字头），v0.28 悬浮「跳到底部」钮用（参考图豆包同款）。 */
 @Composable
-fun IconArrowDown(tint: Color, modifier: Modifier = Modifier) =
+fun IconArrowDown(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         seg(tint, sw, k, 12f to 4.8f, 12f to 17.8f)
         poly(tint, sw, k, 6.6f to 12.6f, 12f to 18f, 17.4f to 12.6f)
@@ -107,7 +110,7 @@ fun IconArrowDown(tint: Color, modifier: Modifier = Modifier) =
 
 /** 停止：实心圆角小方块。 */
 @Composable
-fun IconStop(tint: Color, modifier: Modifier = Modifier) =
+fun IconStop(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, _ ->
         drawRoundRect(tint, Offset(8f * k, 8f * k), Size(8f * k, 8f * k),
             CornerRadius(2f * k, 2f * k))
@@ -115,7 +118,7 @@ fun IconStop(tint: Color, modifier: Modifier = Modifier) =
 
 /** 图片：相框 + 太阳点 + 远山折线。 */
 @Composable
-fun IconImage(tint: Color, modifier: Modifier = Modifier) =
+fun IconImage(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawRoundRect(tint, Offset(3f * k, 5.2f * k), Size(18f * k, 13.6f * k),
             CornerRadius(2.6f * k, 2.6f * k), style = Stroke(width = sw))
@@ -125,7 +128,7 @@ fun IconImage(tint: Color, modifier: Modifier = Modifier) =
 
 /** 文件：折角页 + 两道文字线。 */
 @Composable
-fun IconFile(tint: Color, modifier: Modifier = Modifier) =
+fun IconFile(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         poly(tint, sw, k, 6.2f to 3.2f, 14f to 3.2f, 17.8f to 7f, 17.8f to 20.8f,
             6.2f to 20.8f, 6.2f to 3.2f)
@@ -136,14 +139,14 @@ fun IconFile(tint: Color, modifier: Modifier = Modifier) =
 
 /** 下拉人字（模型胶囊用）。 */
 @Composable
-fun IconChevronDown(tint: Color, modifier: Modifier = Modifier) =
+fun IconChevronDown(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         poly(tint, sw, k, 7.5f to 10f, 12f to 14.6f, 16.5f to 10f)
     }
 
 /** 声纹（第 12 轮豆包三态输入区）：实心点 + 两道右开弧波纹，语音/键盘切换钮用。 */
 @Composable
-fun IconVoiceWave(tint: Color, modifier: Modifier = Modifier) =
+fun IconVoiceWave(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawCircle(tint, 1.5f * k, Offset(4.2f * k, 12f * k))
         drawArc(tint, -52f, 104f, false, Offset(4.2f * k, 8f * k), Size(8f * k, 8f * k),
@@ -154,7 +157,7 @@ fun IconVoiceWave(tint: Color, modifier: Modifier = Modifier) =
 
 /** 抽屉菜单三横。 */
 @Composable
-fun IconMenu(tint: Color, modifier: Modifier = Modifier) =
+fun IconMenu(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         seg(tint, sw, k, 4.5f to 6.8f, 19.5f to 6.8f)
         seg(tint, sw, k, 4.5f to 12f, 19.5f to 12f)
@@ -168,7 +171,7 @@ fun IconMenu(tint: Color, modifier: Modifier = Modifier) =
 
 /** 过程面板标题左侧那枚"看见过程"的眼：杏仁框 + 瞳孔。 */
 @Composable
-fun IconTraceEye(tint: Color, modifier: Modifier = Modifier) =
+fun IconTraceEye(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawArc(tint, 200f, 140f, false, Offset(4.2f * k, 4.2f * k), Size(15.6f * k, 15.6f * k),
             style = Stroke(width = sw, cap = StrokeCap.Round))
@@ -179,7 +182,7 @@ fun IconTraceEye(tint: Color, modifier: Modifier = Modifier) =
 
 /** 这一步做完了：圆圈 + 对勾。 */
 @Composable
-fun IconStepDone(tint: Color, modifier: Modifier = Modifier) =
+fun IconStepDone(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawCircle(tint, 8.6f * k, Offset(12f * k, 12f * k), style = Stroke(width = sw))
         poly(tint, sw, k, 7.9f to 12.3f, 10.7f to 15.1f, 16.2f to 9.3f)
@@ -187,7 +190,7 @@ fun IconStepDone(tint: Color, modifier: Modifier = Modifier) =
 
 /** 这一步失败了：圆圈 + 叉。 */
 @Composable
-fun IconStepFailed(tint: Color, modifier: Modifier = Modifier) =
+fun IconStepFailed(tint: Color, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, sw ->
         drawCircle(tint, 8.6f * k, Offset(12f * k, 12f * k), style = Stroke(width = sw))
         seg(tint, sw, k, 9.4f to 9.4f, 14.6f to 14.6f)
@@ -196,7 +199,7 @@ fun IconStepFailed(tint: Color, modifier: Modifier = Modifier) =
 
 /** 进行中：八个小点转圈，rotation 由调用方的无限动画喂进来。 */
 @Composable
-fun IconStepBusy(tint: Color, rotation: Float, modifier: Modifier = Modifier) =
+fun IconStepBusy(tint: Color, rotation: Float, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, _ ->
         for (i in 0 until 8) {
             val ang = Math.toRadians((i * 45f + rotation).toDouble())
@@ -209,7 +212,7 @@ fun IconStepBusy(tint: Color, rotation: Float, modifier: Modifier = Modifier) =
 
 /** 三点呼吸（参考用户给的「正在思考 •••」）：phase 0→1 跑一圈，亮的那颗往前走。 */
 @Composable
-fun IconThinkingDots(tint: Color, phase: Float, modifier: Modifier = Modifier) =
+fun IconThinkingDots(tint: Color, phase: Float, modifier: Modifier = Modifier.size(20.dp)) =
     LineIcon(modifier = modifier) { k, _ ->
         listOf(6.5f, 12f, 17.5f).forEachIndexed { i, x ->
             val wave = 1f - abs(((phase + i / 3f) % 1f) * 2f - 1f)
