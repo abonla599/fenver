@@ -79,11 +79,27 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
     }
 
     val kw = search.trim().lowercase()
-    val visible = sessions.filter {
-        kw.isEmpty() || it.title.lowercase().contains(kw) || it.session_id.lowercase().contains(kw)
+    // v0.36.1：分组（每行一次 SimpleDateFormat 日期运算）从前挂在每次重组上——
+    // 抽屉里任何状态一变就整表重分一遍。现在分组只认 sessions（remember(sessions)），
+    // 搜索只在已分好的组内做过滤：每敲一个字不再重建格式化器、不再重算全表日期差。
+    val groupedListAll = remember(sessions) {
+        LinkedHashMap<String, MutableList<SessionSummary>>().apply {
+            sessions.forEach { s ->
+                getOrPut(groupOf(s.created_at)) { mutableListOf() }.add(s)
+            }
+        }
     }
-    val groupedList = LinkedHashMap<String, MutableList<SessionSummary>>()
-    visible.forEach { s -> groupedList.getOrPut(groupOf(s.created_at)) { mutableListOf() }.add(s) }
+    val matches = { s: SessionSummary ->
+        kw.isEmpty() || s.title.lowercase().contains(kw) || s.session_id.lowercase().contains(kw)
+    }
+    val groupedList = if (kw.isEmpty()) groupedListAll
+    else LinkedHashMap<String, MutableList<SessionSummary>>().apply {
+        groupedListAll.forEach { (label, list) ->
+            val f = list.filter(matches)
+            if (f.isNotEmpty()) put(label, f.toMutableList())
+        }
+    }
+    val visibleCount = groupedList.values.sumOf { it.size }
 
     val screenW = LocalConfiguration.current.screenWidthDp.dp
     val drawerW = minOf(screenW * 0.84f, 300.dp)
@@ -146,7 +162,7 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
                     Text(shownError, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
-                if (visible.isEmpty()) item {
+                if (visibleCount == 0) item {
                     // 网页 renderSessions 的空态文案；预取未回来时先说在读取。
                     Text(if (loading && kw.isEmpty()) "正在读取会话…"
                          else if (kw.isNotEmpty()) "没有匹配的会话" else "还没有会话",
@@ -273,10 +289,15 @@ private fun SessionDrawerRow(s: xyz.fenever.assistant.nativeapp.SessionSummary,
 
 /* 会话按日分组，标签与网页 groupLabel 逐字：今天/昨天/近 7 天/近 30 天/更早
  * （判据同一条：days<=0 今天，==1 昨天，<=7、<=30，其余更早）。
- * created_at 是 ISO 串，minSdk 24 用 SimpleDateFormat 算日差。 */
+ * created_at 是 ISO 串，minSdk 24 用 SimpleDateFormat 算日差。
+ * v0.36.1：格式化器从"每行现 new"收成文件级一枚复用——SimpleDateFormat 的构造
+ * 每次都要编译日期模式，逐条重进组合地 new 它纯属白烧首帧。它只在主线程的组合
+ * 阶段被 groupOf 调用（remember(sessions) 的分组路径），没有并发窗口。 */
+private val drawerDayFmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+
 private fun groupOf(iso: String): String {
     if (iso.length < 10) return "更早"
-    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+    val fmt = drawerDayFmt
     val then = try { fmt.parse(iso.take(10)) } catch (e: Exception) { null } ?: return "更早"
     val today = try { fmt.parse(fmt.format(java.util.Date())) } catch (e: Exception) { null }
         ?: return "更早"

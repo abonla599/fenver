@@ -110,6 +110,11 @@ private object SchedState {
     var viewYear by mutableStateOf(0)         // 月历看的是哪一年 / 哪一月（0 = 还没锚上）
     var viewMonth by mutableStateOf(0)        // 月从 0 起，与 Calendar.MONTH 同口径
     var askDay by mutableStateOf<String?>(null)   // 待确认的那个日子：非空即弹「换天会丢草稿」
+    // v0.36.1：谁已经播过这一次进场。重进这一页时 remember 会重置，若还按 index×40ms
+    // 逐行淡入，看惯了清单的人每次都要等一场"重新长出来"——进场动效只属于
+    // 该身份第一次拿到数据那一刻，重进直接显示。普通 var：它不参与判"渲染什么"，
+    // 只当"要不要动画"的一次性门牌，不需要为它重组。
+    var animatedOwner = ""
 
     fun reset() {
         today = ""; day = ""; items = emptyList(); pristine = ""; days = emptyList()
@@ -256,6 +261,20 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
     val today = SchedState.today
     val day = SchedState.day
 
+    // v0.36.1：逐行进场只在该身份"第一次拿到清单"那一次播。SchedState 是对象级缓存，
+    // 重进这一页时 items 当场就有——若还让 Staggered 从 remember(false) 起算，
+    // 每进一次都要重看一遍 index×40ms 的淡入，这正是"重进卡顿"的来源。
+    // 首开 28dp 留白（下面 body 的空窗分支）是有意设计，原样保留。
+    val firstReveal = SchedState.animatedOwner != SchedState.owner &&
+        SchedState.items.isNotEmpty()
+    LaunchedEffect(firstReveal) {
+        if (!firstReveal) return@LaunchedEffect
+        // 等所有行都播完（40ms 一档、封顶 200ms，再加一点余量）才摘掉进场门牌；
+        // 同一个人之后任何一次重挂都直接显示。
+        delay((SchedState.items.size * 40).coerceAtMost(200).toLong() + 120)
+        SchedState.animatedOwner = SchedState.owner
+    }
+
     // 换天会丢掉手上这份草稿 —— 与网页 confirm() 问的是同一句话，只是这里得用一颗弹窗。
     SchedState.askDay?.let { pending ->
         AlertDialog(
@@ -367,7 +386,7 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                             modifier = Modifier.alpha(0.75f))
                     }
                     SchedState.items.forEachIndexed { index, item ->
-                        Staggered(index) {
+                        Staggered(index, animate = firstReveal) {
                             ItemRow(item = item,
                                 editing = SchedState.editing == index,
                                 interactive = !busy,
@@ -726,11 +745,14 @@ private fun WheelColumn(count: Int, value: Int, onSelect: (Int) -> Unit) {
     }
 }
 
-/** 逐行进场：40ms 一档、最多 200ms，与网页 nth-child 的 delay 表同一组数值。 */
+/** 逐行进场：40ms 一档、最多 200ms，与网页 nth-child 的 delay 表同一组数值。
+ *  v0.36.1：animate=false（重进这一页、同身份已有数据）时初值直接是"已显示"——
+ *  不再从透明起算，也就不再重播入场；进场只属于该身份第一次拿到清单那一次。 */
 @Composable
-private fun Staggered(index: Int, content: @Composable () -> Unit) {
-    var shown by remember { mutableStateOf(false) }
+private fun Staggered(index: Int, animate: Boolean, content: @Composable () -> Unit) {
+    var shown by remember { mutableStateOf(!animate) }
     LaunchedEffect(Unit) {
+        if (shown) return@LaunchedEffect
         delay((index * 40).coerceAtMost(200).toLong())
         shown = true
     }
