@@ -49,7 +49,7 @@ def test_chat_boot_fans_out_and_rich_text_parses_once_per_text():
     assert "itemsIndexed(messages, key =" in src, "消息列表又丢了稳定 key"
     assert "remember(text) { parseRichTextParts(text) }" in src, \
         "RichText 又在组合体里对全文重切 ``` 了"
-    for call in ("loadModelsNow()", "refreshSessions()", "refreshTaskCard()"):
+    for call in ("loadModelsNow()", "refreshSessionsNow()", "refreshTaskCard()"):
         assert f"launch {{ {call} }}" in src, f"{call} 没进并行分支，冷启动又串行了"
 
 
