@@ -44,7 +44,7 @@ def test_the_brand_slots_all_say_the_same_one_name():
 
 
 def test_the_brand_word_shown_in_the_ui_is_fenver():
-    """页面顶栏、登录页品牌字、安卓侧两处渐变字：渲染出来的那三个字面量都是新品牌。
+    """页面顶栏、登录页品牌字、安卓侧两处品牌字：渲染出来的那三个字面量都是新品牌。
 
     这里查的是**字面量本身**，不是"文件里含 Fenver"——顶栏与品牌字是两处独立硬编码，
     漏掉哪一处都是用户天天看见的东西。
@@ -56,11 +56,12 @@ def test_the_brand_word_shown_in_the_ui_is_fenver():
 
     native = ROOT / "android-native" / "app" / "src" / "main" / "java" / "xyz" / "fenever" / \
         "assistant" / "nativeapp"
-    gradient = []
+    brands = []
     for name in ("ui/SessionListUi.kt", "ui/AuthUi.kt"):
         text = (native / name).read_text(encoding="utf-8")
-        gradient += re.findall(r'GradientText\("([^"]+)"', text)
-    assert gradient and set(gradient) == {"Fenver"}, f"壳里的渐变字品牌不唯一：{gradient}"
+        brands += re.findall(r'(?:GradientText|BrandText)\("([^"]+)"', text)
+    assert len(brands) == 2 and set(brands) == {"Fenver"}, \
+        f"壳里的品牌字必须恰好两处且同名：{brands}"
 
 
 def test_the_accessibility_label_and_the_system_hint_name_the_app():

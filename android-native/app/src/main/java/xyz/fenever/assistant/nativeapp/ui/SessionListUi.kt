@@ -1,5 +1,6 @@
 package xyz.fenever.assistant.nativeapp.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,8 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import kotlinx.coroutines.CancellationException
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -46,24 +46,15 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import xyz.fenever.assistant.nativeapp.Api
-import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.SessionSummary
 
-/* 左侧会话抽屉 = 网页 .sidebar 的原生化（旧壳拉开 ☰ 看到的那一块）。
- * 逐处对位（style.css .sidebar/.sb-* 原文数值）：
- * - 底色 --glass（移动端侧栏就是这层毛玻璃的实底近似 #10141D）+ 右描边 --line，
- *   宽 min(84vw, 300px)；
- * - 品牌行 22px 图标 + 15px 渐变字「Fenver」；
- * - nav-item 9/10 内距、12 圆角、图标走 --text-2（不是强调色）；
- * - 搜索框 10 圆角、surface 底 + line 描边（不是胶囊）；
- * - 「会话」sb-label 11px --text-3；日期组头 sb-group 同字号；
- * - 活动会话行 = 弱渐变(120°, accent-soft→accent-2-soft)底 + 左缘 3px 渐变竖条
- *   （::before，180° accent→accent-2，上下各收 9px），正文颜色不变粗不染白；
- * - 「×」只落在活动行（网页 hover 才现 ≈ 触屏"选中那行才给删"），其余行长按兜底；
- * - who-row：28px 弱渐变头像 + ACCENT 色首字、「设置」+ 齿轮，整行进设置。 */
+/* 左侧会话抽屉：surface 全高面板，品牌行 + 导航 + 搜索 + 按日分组的会话 + 账户行。
+ * tick 每次拉开 ++ 以重拉清单（不在这里做缓存）；
+ * 非活动行没有删除钮，长按兜底；活动行才露「×」。 */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SessionDrawer(tick: Int, currentId: String,
@@ -107,119 +98,112 @@ fun SessionDrawer(tick: Int, currentId: String,
     val screenW = LocalConfiguration.current.screenWidthDp.dp
     val drawerW = minOf(screenW * 0.84f, 300.dp)
 
-    Column(Modifier.width(drawerW).fillMaxSize()
-        .background(xyz.fenever.assistant.nativeapp.theme.glassColor())
-        .border(1.dp, MaterialTheme.colorScheme.outline,
-            RoundedCornerShape(0.dp))) {
+    FenverSurface(
+        modifier = Modifier.width(drawerW).fillMaxSize(),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(0.dp),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                .padding(start = 16.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                xyz.fenever.assistant.nativeapp.theme.AiBrandMark(22)
+                Spacer(Modifier.width(10.dp))
+                BrandText("Fenver", 16)
+                Spacer(Modifier.weight(1f))
+                FenverTopBarAction(onClose) {
+                    Text("×", fontSize = 20.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
 
-        // .sb-head：品牌行 + × 关闭（× 是 only-mobile 那颗）
-        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            xyz.fenever.assistant.nativeapp.theme.AiBrandMark(22)
-            xyz.fenever.assistant.nativeapp.theme.GradientText("Fenver", 15)
-            Spacer(Modifier.weight(1f))
-            Text("×", fontSize = 20.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clickable(onClick = onClose)
-                    .padding(horizontal = 10.dp, vertical = 4.dp))
-        }
+            DrawerNav("＋", "新对话", onNewChat)
+            DrawerNav("⌗", "模型服务", onModelService)
+            DrawerNav("◈", "长期记忆", onMemory)
 
-        // .sb-nav：三条导航。图标是 --text-2，不是强调色——这一排不抢会话列表的戏
-        DrawerNav("＋", "新对话", onNewChat)
-        DrawerNav("⌗", "模型服务", onModelService)
-        DrawerNav("◈", "长期记忆", onMemory)
-
-        // .search-box：10 圆角 surface 卡 + line 描边，placeholder「搜索会话」
-        Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))) {
-            BasicTextField(search, { search = it }, singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                textStyle = TextStyle(fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurface),
-                cursorBrush = xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush(),
-                decorationBox = { inner ->
-                    Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))) {
+                BasicTextField(search, { search = it }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    textStyle = TextStyle(fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    decorationBox = { inner ->
+                        Box(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
                             if (search.isEmpty()) Text("搜索会话", fontSize = 14.sp,
                                 color = xyz.fenever.assistant.nativeapp.theme.text3Color())
                             inner()
                         }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth())
-        }
-
-        // .sb-label「会话」
-        Text("会话", fontSize = 11.sp,
-            color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
-            modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 2.dp))
-
-        LazyColumn(Modifier.fillMaxWidth().weight(1f),
-            contentPadding = PaddingValues(bottom = 8.dp)) {
-            // Compose 在组合退出时用这条取消文案结束抽屉的协程；它已经在 catch 里
-            // 按 CancellationException 重新抛出。这里再挡一层：任何路径把这条无害的
-            // 取消消息写进 error 时都不该长成给用户看的红字。
-            val shownError = error?.takeUnless { it.contains("left the composition") }
-            if (shownError != null) item {
-                Text(shownError, fontSize = 12.5.sp, color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+                    },
+                    modifier = Modifier.fillMaxWidth())
             }
-            if (visible.isEmpty()) item {
-                // 网页 renderSessions 的两句空态，逐字
-                Text(if (kw.isNotEmpty()) "没有匹配的会话" else "还没有会话",
-                    fontSize = 11.sp,
-                    color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
-                    modifier = Modifier.padding(horizontal = 8.dp,
-                        vertical = 10.dp))
-            }
-            groupedList.forEach { (label, list) ->
-                item {
-                    // .sb-group：11px --text-3 的日期头，10/8/3 内距
-                    Text(label, fontSize = 11.sp,
+
+            Text("会话", fontSize = 12.sp,
+                color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
+                modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 2.dp))
+
+            LazyColumn(Modifier.fillMaxWidth().weight(1f),
+                contentPadding = PaddingValues(bottom = 8.dp)) {
+                // Compose 在组合退出时用这条取消文案结束抽屉的协程；它已经在 catch 里
+                // 按 CancellationException 重新抛出。这里再挡一层：任何路径把这条无害的
+                // 取消消息写进 error 时都不该长成给用户看的红字。
+                val shownError = error?.takeUnless { it.contains("left the composition") }
+                if (shownError != null) item {
+                    Text(shownError, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+                if (visible.isEmpty()) item {
+                    // 网页 renderSessions 的两句空态，逐字
+                    Text(if (kw.isNotEmpty()) "没有匹配的会话" else "还没有会话",
+                        fontSize = 12.sp,
                         color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
-                        modifier = Modifier.fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp))
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
                 }
-                items(list, key = { it.session_id }) { s ->
-                    SessionDrawerRow(s, active = s.session_id == currentId,
-                        onOpen = { onOpen(s.session_id); onClose() },
-                        onDelete = { pendingDelete = s })
+                groupedList.forEach { (label, list) ->
+                    item {
+                        Text(label, fontSize = 12.sp,
+                            color = xyz.fenever.assistant.nativeapp.theme.text3Color(),
+                            modifier = Modifier.fillMaxWidth()
+                                .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp))
+                    }
+                    items(list, key = { it.session_id }) { s ->
+                        SessionDrawerRow(s, active = s.session_id == currentId,
+                            onOpen = { onOpen(s.session_id); onClose() },
+                            onDelete = { pendingDelete = s })
+                    }
                 }
             }
-        }
 
-        // .sb-foot + .who-row：整行是"进设置"的入口（网页原话：这台机器上是谁在用）
-        Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
-            Spacer(Modifier.height(10.dp))
-            Box(Modifier.fillMaxWidth().height(1.dp)
-                .background(MaterialTheme.colorScheme.outline))
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(onClick = { onSettings(); onClose() })
-                .padding(horizontal = 6.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // .avatar：28px 圆、弱渐变底、accent 色首字（不是实心渐变白字）
-                Box(Modifier.size(28.dp)
-                    .background(xyz.fenever.assistant.nativeapp.theme.aiSoftBrush(), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Text(xyz.fenever.assistant.nativeapp.Prefs.username.take(1).ifBlank { "·" },
-                        fontSize = 13.sp, color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold)
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth().height(1.dp)
+                    .background(MaterialTheme.colorScheme.outline))
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = { onSettings(); onClose() }),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Box(Modifier.size(28.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                        contentAlignment = Alignment.Center) {
+                        Text(Prefs.username.take(1).ifBlank { "·" },
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold)
+                    }
+                    Text(Prefs.username.ifBlank { "未登录" }, fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f))
+                    Text("设置", fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("⚙", fontSize = 15.sp,
+                        color = xyz.fenever.assistant.nativeapp.theme.text3Color())
                 }
-                Text(Prefs.username.ifBlank { "未登录" }, fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f))
-                Text("设置", fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("⚙", fontSize = 15.sp,
-                    color = xyz.fenever.assistant.nativeapp.theme.text3Color())
+                Spacer(Modifier.height(8.dp))
             }
         }
     }
@@ -252,16 +236,16 @@ fun SessionDrawer(tick: Int, currentId: String,
 
 @Composable
 private fun DrawerNav(ico: String, label: String, onClick: () -> Unit) {
-    // .nav-item：9/10 内距、12 圆角、14.5 字号、图标 18px --text-2
-    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
-        .clip(RoundedCornerShape(12.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
         .clickable(onClick = onClick)
-        .background(Color.Transparent)
-        .padding(horizontal = 10.dp, vertical = 9.dp),
+        .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        Text(ico, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(label, fontSize = 14.5.sp, color = MaterialTheme.colorScheme.onSurface)
+        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+            Text(ico, fontSize = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(label, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -270,28 +254,28 @@ private fun DrawerNav(ico: String, label: String, onClick: () -> Unit) {
 private fun SessionDrawerRow(s: xyz.fenever.assistant.nativeapp.SessionSummary,
                              active: Boolean, onOpen: () -> Unit, onDelete: () -> Unit) {
     val title = s.title.ifBlank { "新对话" }
-    // .sb-item：12 圆角整行；活动行弱渐变底 + 左缘 3px 180° 渐变竖条（上下各收 9px）。
-    // 文字不染白不加粗——网页选中态只是"淡了一层底"，识别度全在那根小竖条上。
-    Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp)
-        .clip(RoundedCornerShape(12.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
         .then(if (active) Modifier.background(
-            xyz.fenever.assistant.nativeapp.theme.aiSoftBrush(), RoundedCornerShape(12.dp))
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 1f / 3f))
         else Modifier)
-        .combinedClickable(onClick = onOpen, onLongClick = onDelete),
+        .combinedClickable(onClick = onOpen, onLongClick = onDelete)
+        .padding(start = 16.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        if (active) Box(Modifier.width(3.dp).height(24.dp)
-            .background(xyz.fenever.assistant.nativeapp.theme.aiVerticalBrush(),
-                RoundedCornerShape(999.dp)))
-        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 9.dp))
         if (active) {
-            // 网页 .ops 只在 hover/active 露出：这里给当前行，× 同字
-            Text("×", fontSize = 15.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clickable(onClick = onDelete)
-                    .padding(horizontal = 10.dp, vertical = 6.dp))
+            Box(Modifier.width(2.dp).height(24.dp)
+                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(999.dp)))
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontSize = 15.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f).padding(vertical = 12.dp))
+        if (active) {
+            Box(Modifier.size(44.dp).clip(CircleShape)
+                .clickable(onClick = onDelete), contentAlignment = Alignment.Center) {
+                Text("×", fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

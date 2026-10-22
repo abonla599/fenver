@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -71,6 +72,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -104,8 +106,6 @@ import xyz.fenever.assistant.nativeapp.ReminderScheduler
 import xyz.fenever.assistant.nativeapp.ReminderStore
 import xyz.fenever.assistant.nativeapp.update.Updater
 import xyz.fenever.assistant.nativeapp.theme.ThemeMode
-import xyz.fenever.assistant.nativeapp.theme.aiSoftBrush
-import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
 import java.io.File
 
@@ -117,7 +117,8 @@ import java.io.File
  *   exportCurrent/loadRemindersVal/renderAboutRows/applyTheme/connInfo/logoutCurrent
  * - accounts=renderAccounts　providers=loadProviders+providerRow+provForm
  * - persona/memory=loadMemories　reminders=renderReminders+reminderStatusCard
- * 数值全部取自 style.css 移动档（行高 54=拇指热区、卡片半径 18、12.5px 组头等）。
+ * 数值走向极简原生：一级列表为 52dp 行 + 1px 发丝线，二级页用统一顶栏与表面卡；
+ * 行序、文案、值槽、›/⇅/↗ 后缀、按钮集合与 app.js 的渲染函数仍逐处对齐。
  */
 
 /** 原生有每个人的 Bearer 令牌，「切换账号」可以静默换人（网页 Cookie 装不下第二个人，
@@ -208,8 +209,11 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
                     MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
         }
+        // 一级列表整行铺满（行内自带 16dp 内距）；二级页保留页面边距。
         Column(Modifier.weight(1f, fill = false).verticalScroll(pageScroll)
-            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 22.dp)) {
+            .padding(start = if (page.isEmpty()) 0.dp else 16.dp,
+                end = if (page.isEmpty()) 0.dp else 16.dp,
+                top = 4.dp, bottom = 22.dp)) {
             when (page) {
                 "providers" -> ProvidersPage(onChanged = { reloadProviders() })
                 "accounts" -> AccountsPage(identityTick,
@@ -238,37 +242,20 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
     }
 }
 
-/* ---------------- 弹层头（.set-bar：56 高、17/600 标题、1px 下边线） ---------------- */
+/* ---------------- 弹层头：56dp 统一顶栏，二级页用返回，一级页用关闭 ---------------- */
 @Composable
 private fun SetBar(page: String, onOpenPage: (String?) -> Unit) {
-    val sub = page.isNotEmpty()
-    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-        .padding(start = 4.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        if (sub) {
-            // .set-back：‹ 回了就是一级列表（网页 closeSetPage）
-            Text("‹", fontSize = 26.sp, color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.clip(CircleShape)
-                    .clickable { onOpenPage("") }
-                    .padding(horizontal = 10.dp, vertical = 2.dp))
-        }
-        Text(if (sub) SET_PAGES[page] ?: "设置" else "设置",
-            fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = if (sub) TextAlign.Start else TextAlign.Center,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f))
-        if (!sub) {
-            // .set-x：× 只在一级页出现——二级页的退路是 ‹，不是关整层
-            Text("×", fontSize = 24.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clip(CircleShape)
-                    .clickable { onOpenPage(null) }
-                    .padding(horizontal = 10.dp, vertical = 2.dp))
-        } else Spacer(Modifier.width(12.dp))
+    if (page.isNotEmpty()) {
+        FenverTopBar(title = SET_PAGES[page] ?: "设置", onBack = { onOpenPage("") })
+    } else {
+        FenverTopBar(title = "设置", leading = { Spacer(Modifier.width(8.dp)) },
+            actions = {
+                FenverTopBarAction(onClick = { onOpenPage(null) }) {
+                    Text("×", fontSize = 20.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            })
     }
-    Box(Modifier.fillMaxWidth().height(1.dp)
-        .background(MaterialTheme.colorScheme.outline))
 }
 
 /* ---------------- 一行的积木（.set-row / .set-card / .set-group / .set-mini） ---------------- */
@@ -331,28 +318,32 @@ private fun ThemeSegment() {
 
 @Composable
 private fun SetCard(content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth()
-        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp)),
-        content = content)
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(content = content)
+    }
 }
 
 @Composable
 private fun SetGroup(title: String) {
-    Text(title, fontSize = 12.5.sp, color = text3Color(),
-        modifier = Modifier.padding(start = 2.dp, top = 22.dp, bottom = 8.dp))
+    Text(title, fontSize = 13.sp, color = text3Color(),
+        modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 6.dp))
 }
 
 /** 网页 .pane-note（13px / --text-2 / 下留白 14px）的原生化，与 SetGroup 同样的左边距。
  *  v0.24 T4.1 起「关于」用它念那句定位语——那一句在网页里就是组标题下面的一条注脚，
  *  不是卡片里的一行：它要说的是"这一组在讲什么"，而不是"这里有个能点的东西"。 */
 @Composable
-private fun SetNote(text: String) {
+private fun SetNote(text: String, inset: Dp = 16.dp) {
     Text(text, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(start = 2.dp, bottom = 14.dp))
+        modifier = Modifier.padding(start = inset, end = 16.dp, bottom = 14.dp))
 }
 
-/** 网页 .set-row：min-height 54、padding 0 14、gap 12、15px 字；last-child 无底边线。
- *  onClick 放最后一位且非空：调用方尾随 lambda 走它，valSlot 用命名参数传。 */
+/** 设置行：52dp、16dp 内距、FenverRow 承载；danger 只有退出登录一处，需红字单独排。 */
 @Composable
 private fun SetRow(ico: String, label: String,
                    divider: Boolean = true,
@@ -362,27 +353,49 @@ private fun SetRow(ico: String, label: String,
                    onClick: () -> Unit = {}) {
     val scheme = MaterialTheme.colorScheme
     val haptic = rememberSetHaptic()
-    val labelColor = if (danger) scheme.error else scheme.onSurface
-    Row(Modifier.fillMaxWidth()
-        .then(if (!plain) Modifier.clickable { haptic(); onClick() } else Modifier)
-        .heightIn(min = 54.dp).padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(ico, fontSize = 16.sp,
-            color = if (danger) scheme.error else scheme.onSurfaceVariant,
-            modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
-        Text(label, fontSize = 15.sp, color = labelColor, maxLines = 1,
-            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        valSlot?.invoke()
-        if (trailing.isNotEmpty()) {
-            Text(trailing, fontSize = 15.sp, color = text3Color(),
-                modifier = Modifier.width(14.dp), textAlign = TextAlign.Center)
+    val click: (() -> Unit)? = if (plain) null else ({ haptic(); onClick() })
+    if (danger) {
+        Row(Modifier.fillMaxWidth()
+            .then(if (plain) Modifier else Modifier.clickable { haptic(); onClick() })
+            .heightIn(min = 52.dp).padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+                Text(ico, fontSize = 16.sp, color = scheme.error,
+                    textAlign = TextAlign.Center)
+            }
+            Text(label, style = MaterialTheme.typography.bodyLarge, color = scheme.error,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
+            valSlot?.invoke()
+            if (trailing.isNotEmpty()) {
+                Text(trailing, fontSize = 15.sp, color = text3Color())
+            }
         }
+        if (divider && !plain) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(scheme.outline))
+        }
+        return
     }
-    if (divider && !plain) {
-        Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(1.dp)
-            .background(scheme.outline))
-    }
+    FenverRow(
+        title = label,
+        leading = {
+            Text(ico, fontSize = 16.sp, color = scheme.onSurfaceVariant,
+                textAlign = TextAlign.Center)
+        },
+        trailing = {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                valSlot?.invoke()
+                if (trailing.isNotEmpty()) {
+                    Text(trailing, fontSize = 15.sp, color = text3Color())
+                }
+            }
+        },
+        onClick = click,
+        divider = divider && !plain,
+        minHeight = 52.dp,
+    )
 }
 
 @Composable
@@ -411,19 +424,17 @@ private fun SetMini(text: String, del: Boolean = false, enabled: Boolean = true,
     }
 }
 
-/** .btn-primary 的小号对位：浅档实底强调色，深档深绿底浅绿字。 */
+/** .btn-primary 的小号对位：实底强调色 + onPrimary 字。 */
 @Composable
 private fun SetMiniPrimary(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val light = isWebLight()
-    val bg = if (light) scheme.primary else Color(0xFF062518)
-    val fg = if (light) Color.White else Color(0xFFBFF3D9)
     Box(Modifier.clip(CircleShape)
-        .background(bg)
+        .background(scheme.primary)
         .border(1.dp, scheme.primary, CircleShape)
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
         .padding(horizontal = 14.dp, vertical = 9.dp)) {
-        Text(text, fontSize = 12.5.sp, color = fg)
+        Text(text, fontSize = 12.5.sp,
+            color = scheme.onPrimary.copy(alpha = if (enabled) 1f else 0.6f))
     }
 }
 
@@ -521,14 +532,13 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     fun cacheBytesNow(): Long = dirBytes(appCtx.cacheDir) + dirBytes(appCtx.externalCacheDir)
     LaunchedEffect(Unit) { cacheBytes = withContext(Dispatchers.IO) { cacheBytesNow() } }
 
-    // .set-me：头像首字（弱渐变底 + accent 字）+ 名字 + 角色 chip
-    Spacer(Modifier.height(14.dp))
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
-        .background(MaterialTheme.colorScheme.surfaceVariant)
-        .padding(14.dp),
+    // .set-me：身份头行，平铺在一级列表之上
+    Spacer(Modifier.height(8.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp)
+        .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.size(40.dp).background(aiSoftBrush(), CircleShape),
+        Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
             contentAlignment = Alignment.Center) {
             Text(name.take(1).ifBlank { "·" }, fontSize = 16.sp,
                 color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
@@ -547,184 +557,166 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
 
     // —— 账户 ——
     SetGroup("账户")
-    SetCard {
-        SetRow("⇄", "切换账户", valSlot = {
-            identityTick
-            SetValText("${Prefs.readIdentities().size} 个已登录")
-        }) { onOpenPage("accounts") }
-        SetRow("∗", "改密码", divider = false) { onRequireAuth("recover") }
-    }
+    SetRow("⇄", "切换账户", valSlot = {
+        identityTick
+        SetValText("${Prefs.readIdentities().size} 个已登录")
+    }) { onOpenPage("accounts") }
+    SetRow("∗", "改密码", divider = false) { onRequireAuth("recover") }
 
-    // —— 模型 ——（当前模型 + 模型服务同吃一张卡片，网页 .set-card 就两张行）
+    // —— 模型 ——
     SetGroup("模型")
-    SetCard {
-        ModelPickRow(providers, current, identityTick, modelsLoading) { id, p ->
-            // 网页 renderModelSelect 的 select：选不可用的 → 一句红字 + 弹回原值
-            if (!p.usable) {
-                onNote(if (admin) "该模型未配置密钥，请先在「设置 → 模型服务」补全"
-                else "该模型还没配好密钥，请联系管理员处理", true)
-                return@ModelPickRow
-            }
-            onNote("", false)
-            if (id == Prefs.defaultProviderId) return@ModelPickRow
-            Prefs.defaultProviderId = id
-            scope.launch { runCatching { Api.setMyDefaultProvider(id) } }
-            onModelsChanged()
-            onTick()
+    ModelPickRow(providers, current, identityTick, modelsLoading) { id, p ->
+        // 网页 renderModelSelect 的 select：选不可用的 → 一句红字 + 弹回原值
+        if (!p.usable) {
+            onNote(if (admin) "该模型未配置密钥，请先在「设置 → 模型服务」补全"
+            else "该模型还没配好密钥，请联系管理员处理", true)
+            return@ModelPickRow
         }
-        SetRow("⚙", "模型服务", divider = false, valSlot = { SetValText(chatNote) }) {
-            onOpenPage("providers")
-        }
+        onNote("", false)
+        if (id == Prefs.defaultProviderId) return@ModelPickRow
+        Prefs.defaultProviderId = id
+        scope.launch { runCatching { Api.setMyDefaultProvider(id) } }
+        onModelsChanged()
+        onTick()
+    }
+    SetRow("⚙", "模型服务", divider = false, valSlot = { SetValText(chatNote) }) {
+        onOpenPage("providers")
     }
 
     // —— 对话 ——
     SetGroup("对话")
-    SetCard {
-        SetRow("✎", "角色设定", valSlot = {
-            identityTick
-            SetValText(if (Prefs.persona(Prefs.lastSessionId).trim().isNotEmpty()) "已填写" else "")
-        }) { onOpenPage("persona") }
-        CtxRow(cap, providersKnown = providers.isNotEmpty())
-        SetRow("↓", "导出本次对话", divider = false) {
-            // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
-            // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
-            // 说话；原生没有这层浏览器，文件名自己按同源规则算（ExportName），
-            // 字节流交给 DownloadManager 落系统 Downloads，完成通知是系统下载队列的。
-            // 曾经这里是 onOpenUrl(票据)：把一次性兑换权递给外部浏览器，既拿不到
-            // 落盘通知也多一个能看见 URL 的人，按 R2-AC-3 判负，别再改回去。
-            //
-            // v0.23 T2.5 补上三条异常路径（R2-AC-2/3）：空会话文案沿用 T2.4（与网页
-            // 逐字同值）；≤28 写公共 Downloads 先要旧存储权限，被拒改走 App 私有目录
-            // 并把完整路径念给人听；签票/取标题阶段的断网给专属文案，不是"未知错误"。
-            // 票据过期（DownloadManager 侧的秒失败/迟到失败）由 ExportTracker 轮询
-            // 识别后自动重签一次，仍失败才发通知报错。
-            if (!canExport) { onNote("当前没有可导出的对话", true); return@SetRow }
-            val sid = Prefs.lastSessionId
-            if (!ExportTracker.hasLegacyStorage(ctx)) {
-                pendingSid = sid
-                storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                return@SetRow
-            }
-            startExport(sid, viaPrivate = false)
+    SetRow("✎", "角色设定", valSlot = {
+        identityTick
+        SetValText(if (Prefs.persona(Prefs.lastSessionId).trim().isNotEmpty()) "已填写" else "")
+    }) { onOpenPage("persona") }
+    CtxRow(cap, providersKnown = providers.isNotEmpty())
+    SetRow("↓", "导出本次对话", divider = false) {
+        // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
+        // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
+        // 说话；原生没有这层浏览器，文件名自己按同源规则算（ExportName），
+        // 字节流交给 DownloadManager 落系统 Downloads，完成通知是系统下载队列的。
+        // 曾经这里是 onOpenUrl(票据)：把一次性兑换权递给外部浏览器，既拿不到
+        // 落盘通知也多一个能看见 URL 的人，按 R2-AC-3 判负，别再改回去。
+        //
+        // v0.23 T2.5 补上三条异常路径（R2-AC-2/3）：空会话文案沿用 T2.4（与网页
+        // 逐字同值）；≤28 写公共 Downloads 先要旧存储权限，被拒改走 App 私有目录
+        // 并把完整路径念给人听；签票/取标题阶段的断网给专属文案，不是"未知错误"。
+        // 票据过期（DownloadManager 侧的秒失败/迟到失败）由 ExportTracker 轮询
+        // 识别后自动重签一次，仍失败才发通知报错。
+        if (!canExport) { onNote("当前没有可导出的对话", true); return@SetRow }
+        val sid = Prefs.lastSessionId
+        if (!ExportTracker.hasLegacyStorage(ctx)) {
+            pendingSid = sid
+            storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return@SetRow
         }
+        startExport(sid, viaPrivate = false)
     }
 
     // —— 记忆 ——
     SetGroup("记忆")
-    SetCard {
-        SetRow("◈", "长期记忆", divider = false, valSlot = { SetValText(memoryCount) }) {
-            onOpenPage("memory")
-        }
+    SetRow("◈", "长期记忆", divider = false, valSlot = { SetValText(memoryCount) }) {
+        onOpenPage("memory")
     }
 
     // —— 日程 ——
     SetGroup("日程")
-    SetCard {
-        SetRow("▤", "日程", divider = false, valSlot = { SetValText(scheduleVal) }) {
-            onOpenPage("schedule")
-        }
+    SetRow("▤", "日程", divider = false, valSlot = { SetValText(scheduleVal) }) {
+        onOpenPage("schedule")
     }
 
     // —— 设备 ——
     SetGroup("设备")
-    SetCard {
-        SetRow("⚑", "提醒", divider = false, valSlot = {
-            val n = ReminderStore.list().size
-            SetValText(if (n > 0) "$n 条" else "")
-        }) { onOpenPage("reminders") }
-    }
+    SetRow("⚑", "提醒", divider = false, valSlot = {
+        val n = ReminderStore.list().size
+        SetValText(if (n > 0) "$n 条" else "")
+    }) { onOpenPage("reminders") }
 
-    // —— 通用 ——（借鉴 WorkBuddy 的「触感反馈」「消息通知设置」与 Qoder 的「清理缓存」：
+    // —— 应用 ——（借鉴 WorkBuddy 的「触感反馈」「消息通知设置」与 Qoder 的「清理缓存」：
     //    通知行值槽直读系统授权状态、点下去进系统那一页；缓存行报出大小、清完重量）
-    SetGroup("通用")
-    SetCard {
-        SetRow("✦", "触感反馈", trailing = "", valSlot = {
-            SetSwitch(hapticsOn) { v -> hapticsOn = v; Prefs.hapticsEnabled = v }
-        }) { hapticsOn = !hapticsOn; Prefs.hapticsEnabled = hapticsOn }
-        SetRow("⊙", "消息通知设置", trailing = "›", valSlot = {
-            SetValText(if (notifGranted) "已开启" else "已关闭")
-        }) {
-            if (!openSystemNotificationSettings(appCtx))
-                onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
-        }
-        SetRow("◫", "清理缓存", divider = false, trailing = "›", valSlot = {
-            SetValText(if (cacheBytes < 0) "计算中…" else fmtBytes(cacheBytes))
-        }) { confirmClearCache = true }
+    SetGroup("应用")
+    SetRow("✦", "触感反馈", trailing = "", valSlot = {
+        SetSwitch(hapticsOn) { v -> hapticsOn = v; Prefs.hapticsEnabled = v }
+    }) { hapticsOn = !hapticsOn; Prefs.hapticsEnabled = hapticsOn }
+    SetRow("⊙", "消息通知设置", trailing = "›", valSlot = {
+        SetValText(if (notifGranted) "已开启" else "已关闭")
+    }) {
+        if (!openSystemNotificationSettings(appCtx))
+            onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
     }
+    SetRow("◫", "清理缓存", divider = false, trailing = "›", valSlot = {
+        SetValText(if (cacheBytes < 0) "计算中…" else fmtBytes(cacheBytes))
+    }) { confirmClearCache = true }
 
     // —— 关于（renderAboutRows）——
     SetGroup("关于")
     SetNote(ABOUT_TAGLINE)
-    SetCard {
-        val shellVer = "v" + BuildConfig.VERSION_NAME
-        // 「版本」这一行只报一个号码：这台手机上真能跑的那一版（壳的 versionName，
-        // 唯一来源是 android-native/app/build.gradle，与「检查更新」问的是同一个号）。
-        // 以前这里是「壳 vX · 服务端 vY」两个号码相加——服务端那一截本身就是
-        // git describe 出来的 vX.Y.Z，摆在一部手机上会被读成"这一版我能装"，
-        // 而它装不到手机上。可安装的那一版由下面那一行说，这里不再掺第二个号。
-        // 判据：backend/tests/test_v0342_single_version_row_contract.py
-        SetRow("ⓘ", "版本", plain = true, trailing = "",
-            valSlot = { SetValText(shellVer) })
-        // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
-        // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
-        // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。
-        SetRow("↻", "检查更新", trailing = "", valSlot = {
-            val d = Updater.decision
-            val available = d != null && d.kind == ReleasePlan.Kind.AVAILABLE
-            Row(verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SetValText(when {
-                    Updater.checking -> "正在检查…"
-                    Updater.downloading -> "下载中 ${Updater.percent}%"
-                    available -> "发现新版本 ${d!!.version}"
-                    d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
-                        "已是最新版本 v${d.version}"
-                    d != null -> "检查更新失败：${d.reason}"
-                    else -> "$shellVer · 点按检查"
-                })
-                if (available && !Updater.checking && !Updater.downloading) {
-                    SetMiniPrimary("立即更新") {
-                        Updater.startDownload(ctx.applicationContext) { err ->
-                            err?.let { onNote("更新失败：$it", true) }
-                        }
+    val shellVer = "v" + BuildConfig.VERSION_NAME
+    // 「版本」这一行只报一个号码：这台手机上真能跑的那一版（壳的 versionName，
+    // 唯一来源是 android-native/app/build.gradle，与「检查更新」问的是同一个号）。
+    // 以前这里是「壳 vX · 服务端 vY」两个号码相加——服务端那一截本身就是
+    // git describe 出来的 vX.Y.Z，摆在一部手机上会被读成"这一版我能装"，
+    // 而它装不到手机上。可安装的那一版由下面那一行说，这里不再掺第二个号。
+    // 判据：backend/tests/test_v0342_single_version_row_contract.py
+    SetRow("ⓘ", "版本", plain = true, trailing = "",
+        valSlot = { SetValText(shellVer) })
+    // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
+    // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
+    // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。
+    SetRow("↻", "检查更新", trailing = "", valSlot = {
+        val d = Updater.decision
+        val available = d != null && d.kind == ReleasePlan.Kind.AVAILABLE
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SetValText(when {
+                Updater.checking -> "正在检查…"
+                Updater.downloading -> "下载中 ${Updater.percent}%"
+                available -> "发现新版本 ${d!!.version}"
+                d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
+                    "已是最新版本 v${d.version}"
+                d != null -> "检查更新失败：${d.reason}"
+                else -> "$shellVer · 点按检查"
+            })
+            if (available && !Updater.checking && !Updater.downloading) {
+                SetMiniPrimary("立即更新") {
+                    Updater.startDownload(ctx.applicationContext) { err ->
+                        err?.let { onNote("更新失败：$it", true) }
                     }
                 }
             }
-        }) {
-            if (Updater.checking) return@SetRow
-            Updater.startCheck()
         }
-        // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
-        // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
-        SetRow("☾", "外观", trailing = "", valSlot = { ThemeSegment() })
-        // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
-        // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
-        // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
-        // 「意见反馈」v0.27 起不再跳 GitHub：改成应用内一页（› 前缀），填完直达
-        // 管理员的「反馈」收集页，每条带回独立编号。
-        SetRow("✉", "意见反馈", trailing = "›", valSlot = { SetValText("提交问题与建议") }) {
-            onOpenPage("feedback")
-        }
-        SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
-            onOpenUrl(ABOUT_REPO_URL)
-        }
-        SetRow("©", "许可证", plain = true, trailing = "",
-            valSlot = { SetValText(ABOUT_LICENSE) })
-        SetRow("◉", "服务地址", plain = true, trailing = "", divider = false, valSlot = {
-            SetValText(hostOf(Prefs.baseUrl))
-        })
+    }) {
+        if (Updater.checking) return@SetRow
+        Updater.startCheck()
     }
+    // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
+    // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
+    SetRow("☾", "外观", trailing = "", valSlot = { ThemeSegment() })
+    // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
+    // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
+    // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
+    // 「意见反馈」v0.27 起不再跳 GitHub：改成应用内一页（› 前缀），填完直达
+    // 管理员的「反馈」收集页，每条带回独立编号。
+    SetRow("✉", "意见反馈", trailing = "›", valSlot = { SetValText("提交问题与建议") }) {
+        onOpenPage("feedback")
+    }
+    SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
+        onOpenUrl(ABOUT_REPO_URL)
+    }
+    SetRow("©", "许可证", plain = true, trailing = "",
+        valSlot = { SetValText(ABOUT_LICENSE) })
+    SetRow("◉", "服务地址", plain = true, trailing = "", divider = false, valSlot = {
+        SetValText(hostOf(Prefs.baseUrl))
+    })
 
     // —— 退出（.set-last + .set-danger）——
     Spacer(Modifier.height(18.dp))
-    SetCard {
-        SetRow("→", "退出登录", danger = true, trailing = "", divider = false) {
-            val hit = Prefs.currentEntry() ?: run { onLoggedOut(); return@SetRow }
-            scope.launch {
-                runCatching { Api.logout(hit.token) }   // 服务端不作数也得把本机忘掉
-                Prefs.forgetCurrent()
-                onLoggedOut()
-            }
+    SetRow("→", "退出登录", danger = true, trailing = "", divider = false) {
+        val hit = Prefs.currentEntry() ?: run { onLoggedOut(); return@SetRow }
+        scope.launch {
+            runCatching { Api.logout(hit.token) }   // 服务端不作数也得把本机忘掉
+            Prefs.forgetCurrent()
+            onLoggedOut()
         }
     }
 
@@ -823,12 +815,15 @@ private fun CtxRow(cap: Int, providersKnown: Boolean) {
         if (Prefs.contextTokensK != v) Prefs.contextTokensK = v
     }
     val step = if (cap <= 64) 2 else if (cap <= 256) 8 else 32
-    Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 14.dp),
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("≡", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
-        Text("上下文长度", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface,
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+            Text("≡", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center)
+        }
+        Text("上下文长度", style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1, modifier = Modifier.weight(1f))
         CtxValue(k, cap)
         Slider(modifier = Modifier.width(110.dp),
@@ -840,7 +835,7 @@ private fun CtxRow(cap: Int, providersKnown: Boolean) {
             valueRange = 2f..cap.toFloat(),
             onValueChangeFinished = { Prefs.contextTokensK = k })
     }
-    Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(1.dp)
+    Box(Modifier.fillMaxWidth().height(1.dp)
         .background(MaterialTheme.colorScheme.outline))
 }
 
@@ -897,31 +892,25 @@ private fun AccountsPage(tick: Int, onTick: () -> Unit,
     SetCard {
         list.forEachIndexed { i, x ->
             val isHere = x.userId == here
-            Row(Modifier.fillMaxWidth().heightIn(min = 54.dp)
-                .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (isHere) Box(Modifier.width(3.dp).height(22.dp)
-                    .background(MaterialTheme.colorScheme.primary, CircleShape))
-                Text(x.username.ifBlank { x.userId }, fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                if (isHere) SetValText("当前")
-                else {
-                    SetMini("切换账号") {
-                        if (Prefs.switchTo(x.userId)) onSwitched()
+            FenverRow(
+                title = x.username.ifBlank { x.userId },
+                leading = if (isHere) ({ Box(Modifier.width(2.dp).height(18.dp)
+                    .background(MaterialTheme.colorScheme.primary, CircleShape)) }) else null,
+                trailing = {
+                    if (isHere) SetValText("当前")
+                    else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SetMini("切换账号") {
+                            if (Prefs.switchTo(x.userId)) onSwitched()
+                        }
+                        SetMini("删除账号", del = true) {
+                            // 方案 C 的既成代价照抄：删别人只忘本机
+                            Prefs.dropIdentity(x.userId)
+                            onTick()
+                        }
                     }
-                    SetMini("删除账号", del = true) {
-                        // 方案 C 的既成代价照抄：删别人只忘本机
-                        Prefs.dropIdentity(x.userId)
-                        onTick()
-                    }
-                }
-            }
-            if (i != list.size - 1) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline))
-            }
+                },
+                divider = i != list.size - 1,
+            )
         }
     }
     val me = Prefs.currentEntry()
@@ -940,9 +929,9 @@ private fun AccountsPage(tick: Int, onTick: () -> Unit,
 private fun PersonaPage(onNote: (String) -> Unit, onClose: () -> Unit) {
     var text by remember { mutableStateOf(Prefs.persona(Prefs.lastSessionId)) }
     Spacer(Modifier.height(12.dp))
-    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
         .background(MaterialTheme.colorScheme.surfaceVariant)
-        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))) {
+        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))) {
         BasicTextField(text, { text = it },
             textStyle = TextStyle(fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurface),
@@ -1048,7 +1037,8 @@ private fun FeedbackPage(onNote: (String, Boolean) -> Unit, onClose: () -> Unit)
     }
 
     Spacer(Modifier.height(12.dp))
-    SetNote("把遇到的问题或对 Fenver 的建议写在这里，提交后会直达管理员的反馈收件箱。")
+    SetNote("把遇到的问题或对 Fenver 的建议写在这里，提交后会直达管理员的反馈收件箱。",
+        inset = 2.dp)
 
     // —— 正文（多行 + 右下角 0/300 计数，贴着截图里那张输入框） ——
     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -1130,22 +1120,14 @@ private fun FeedbackPage(onNote: (String, Boolean) -> Unit, onClose: () -> Unit)
 
     Spacer(Modifier.height(16.dp))
 
-    // —— 提交（整宽主按钮，对应截图那颗蓝色"提交"）——
-    val scheme = MaterialTheme.colorScheme
-    val light = isWebLight()
-    val bg = if (light) scheme.primary else Color(0xFF062518)
-    val fg = if (light) Color.White else Color(0xFFBFF3D9)
+    // —— 提交（整宽主按钮）——
     val canSubmit = !submitting && text.trim().isNotEmpty()
-    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-        .background(if (canSubmit) bg else scheme.surfaceVariant)
-        .border(1.dp, if (canSubmit) scheme.primary else scheme.outline, RoundedCornerShape(12.dp))
-        .clickable(enabled = canSubmit) { submit() }
-        .padding(vertical = 13.dp),
-        contentAlignment = Alignment.Center) {
-        Text(if (submitting) "提交中…" else "提交",
-            fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            color = if (canSubmit) fg else text3Color())
-    }
+    FenverButton(
+        text = if (submitting) "提交中…" else "提交",
+        onClick = { submit() },
+        enabled = canSubmit,
+        modifier = Modifier.fillMaxWidth(),
+    )
 
     // —— 成功回执：把这条反馈的独立编号念给用户，让他知道"发出去了、有据可查" ——
     doneId?.let { id ->
@@ -1240,9 +1222,9 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
 /** .mem-list li：weight 药丸（.w）+ 正文 + ×。 */
 @Composable
 private fun MemRow(weight: Double, content: String, onDelete: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
         .background(MaterialTheme.colorScheme.surfaceVariant)
-        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
         .padding(horizontal = 11.dp, vertical = 9.dp),
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1267,23 +1249,12 @@ private fun FormRow(placeholder: String, value: String, onValue: (String) -> Uni
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))) {
-            BasicTextField(value, onValue, singleLine = true,
-                textStyle = TextStyle(fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurface),
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                modifier = Modifier.fillMaxWidth(),
-                decorationBox = { inner ->
-                    Box(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-                        if (value.isEmpty()) Text(placeholder, fontSize = 14.sp,
-                            color = text3Color())
-                        inner()
-                    }
-                })
-        }
+        FenverTextField(
+            value = value,
+            onValueChange = onValue,
+            placeholder = placeholder,
+            modifier = Modifier.weight(1f),
+        )
         if (btn.isNotEmpty()) SetMiniPrimary(btn) { onSubmit() }
     }
 }
@@ -1588,38 +1559,42 @@ private fun ProvRowCard(p: ProvRow, scope: String, myDefault: String?,
     var suffix = ""
     if (p.isDefault && scope != "mine") suffix += "（全站默认）"
     if (myDefault == p.id) suffix += "（我的默认）"
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-        .background(scheme.surfaceVariant)
-        .border(1.dp, scheme.outline, RoundedCornerShape(12.dp))
-        .padding(horizontal = 12.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Column(Modifier.weight(1f)) {
-                Text(p.label + suffix, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold,
-                    color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${p.model} · ${p.baseUrl} · ${p.keyMasked.ifBlank { "未填密钥" }}",
-                    fontSize = 12.sp, color = text3Color(), maxLines = 1,
-                    overflow = TextOverflow.Ellipsis)
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth(),
+        color = scheme.surfaceVariant,
+        border = BorderStroke(1.dp, scheme.outline),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text(p.label + suffix, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold,
+                        color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${p.model} · ${p.baseUrl} · ${p.keyMasked.ifBlank { "未填密钥" }}",
+                        fontSize = 12.sp, color = text3Color(), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+                val tagC = if (p.hasKey) scheme.primary else scheme.error
+                Box(Modifier.border(1.dp, tagC, CircleShape)
+                    .padding(horizontal = 8.dp, vertical = 1.dp)) {
+                    Text(if (p.hasKey) { if (p.vision) "可用·视觉" else "可用" } else "缺密钥",
+                        fontSize = 11.sp, color = tagC)
+                }
             }
-            val tagC = if (p.hasKey) scheme.primary else scheme.error
-            Box(Modifier.border(1.dp, tagC, CircleShape)
-                .padding(horizontal = 8.dp, vertical = 1.dp)) {
-                Text(if (p.hasKey) { if (p.vision) "可用·视觉" else "可用" } else "缺密钥",
-                    fontSize = 11.sp, color = tagC)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (scope != "shared") {
+                    SetMini("✎ 编辑") { onEdit() }
+                    SetMini("⚡ 测试连通") { onTest(p.id) }
+                }
+                if (p.hasKey) SetMini("★ 我的默认") { onMyDefault(p.id) }
+                if (onSiteDefault != null) {
+                    SetMini("◎ 全站默认") { onSiteDefault(p.id) }
+                }
+                if (scope != "shared") SetMini("× 删除", del = true) { onDelete(p) }
             }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            if (scope != "shared") {
-                SetMini("✎ 编辑") { onEdit() }
-                SetMini("⚡ 测试连通") { onTest(p.id) }
-            }
-            if (p.hasKey) SetMini("★ 我的默认") { onMyDefault(p.id) }
-            if (onSiteDefault != null) {
-                SetMini("◎ 全站默认") { onSiteDefault(p.id) }
-            }
-            if (scope != "shared") SetMini("× 删除", del = true) { onDelete(p) }
         }
     }
 }
@@ -1632,9 +1607,9 @@ private fun Field(label: String, placeholder: String, value: String,
         Text(label, fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 6.dp))
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))) {
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))) {
             BasicTextField(value, onValue, singleLine = true,
                 visualTransformation = if (password) PasswordVisualTransformation()
                 else VisualTransformation.None,
@@ -1727,16 +1702,16 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+        Box(Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
             .clickable { showDate = true }
             .padding(horizontal = 12.dp, vertical = 10.dp)) {
             Text(dateMillis?.let { fmtMD(it) } ?: "提醒时间", fontSize = 14.sp,
                 color = if (dateMillis == null) text3Color()
                 else MaterialTheme.colorScheme.onSurface)
         }
-        Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+        Box(Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
             .clickable { showTime = true }
             .padding(horizontal = 12.dp, vertical = 10.dp)) {
             Text(timeHM?.let { "%02d:%02d".format(it.first, it.second) } ?: "时间",
@@ -1796,10 +1771,10 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
     } else {
         SetCard {
             items.forEachIndexed { i, r ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 14.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(r.title.ifBlank { "提醒" }, fontSize = 15.sp,
+                    Text(r.title.ifBlank { "提醒" }, style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurface, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     val hist = fmtFiredHistory(r.firedAt, r.missed)
@@ -1814,7 +1789,7 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
                     }
                 }
                 if (i != items.size - 1) {
-                    Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(1.dp)
+                    Box(Modifier.fillMaxWidth().height(1.dp)
                         .background(MaterialTheme.colorScheme.outline))
                 }
             }
@@ -1857,22 +1832,23 @@ private fun RemindersPage(onNote: (String, Boolean) -> Unit) {
     }
 }
 
-/* reminderStatusCard 的一行：标签 15px + 状态值 + set-mini「去设置」。
+/* reminderStatusCard 的一行：标签 + 状态值 + set-mini「去设置」。
    （不复用 SetRow——那行的图标槽在这里没有图标，且整行不可点，只有按钮可点。） */
 @Composable
 private fun ReminderStatusRow(label: String, granted: Boolean, okText: String,
                               badText: String, divider: Boolean = true,
                               onGo: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 14.dp),
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(label, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface,
+        Text(label, style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f))
         SetValText(if (granted) okText else badText)
         SetMini("去设置", onClick = onGo)
     }
     if (divider) {
-        Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(1.dp)
+        Box(Modifier.fillMaxWidth().height(1.dp)
             .background(MaterialTheme.colorScheme.outline))
     }
 }
