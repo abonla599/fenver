@@ -61,7 +61,7 @@ import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.ReminderStore
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.GradientText
-import xyz.fenever.assistant.nativeapp.theme.WebTokens
+import xyz.fenever.assistant.nativeapp.theme.FenverTokens
 import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
 import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
@@ -235,10 +235,10 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
     }
 
     val light = isWebLight()
-    val band = if (light) WebTokens.LAuthBand
-               else WebTokens.AuthBand
-    val panel = if (light) WebTokens.LAuthPanel
-                else WebTokens.AuthPanel
+    val band = if (light) FenverTokens.LAuthBand
+               else FenverTokens.AuthBand
+    val panel = if (light) FenverTokens.LAuthPanel
+                else FenverTokens.AuthPanel
 
     // 「上一个交互页」的回退链：登录页里点「忘记密码」进来的，回上一页 = 回登录表单；
     // 从设置里直接开「改密码」进来的（initialMode=recover），回上一页 = 整层退出回聊天。

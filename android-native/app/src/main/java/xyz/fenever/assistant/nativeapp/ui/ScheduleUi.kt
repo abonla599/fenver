@@ -68,7 +68,7 @@ import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.ScheduleItemDto
 import xyz.fenever.assistant.nativeapp.Prefs
-import xyz.fenever.assistant.nativeapp.theme.WebTokens
+import xyz.fenever.assistant.nativeapp.theme.FenverTokens
 import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
 
@@ -472,7 +472,7 @@ private fun SchedPanel(head: @Composable () -> Unit, calendar: @Composable () ->
 
 @Composable
 private fun glassStrong(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) WebTokens.LGlassStrong else WebTokens.GlassStrong
+    if (isWebLight()) FenverTokens.LGlassStrong else FenverTokens.GlassStrong
 
 /** .cal-nav：翻月/翻年那一排。不可用时只降透明度，位置不动 —— 钮会跳位比看不见更难用。 */
 @Composable
@@ -770,8 +770,8 @@ private fun SchedFoot(dirty: Boolean, saving: Boolean, savedTick: Int, onSave: (
 
 @Composable
 private fun accentSoft(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) WebTokens.LAccentSoft else WebTokens.AccentSoft
+    if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft
 
 @Composable
 private fun accent2(): androidx.compose.ui.graphics.Color =
-    if (isWebLight()) WebTokens.LAccent2 else WebTokens.Accent2
+    if (isWebLight()) FenverTokens.LAccent2 else FenverTokens.Accent2

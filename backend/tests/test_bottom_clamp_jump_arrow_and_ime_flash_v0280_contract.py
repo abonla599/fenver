@@ -123,7 +123,7 @@ def test_manifest_theme_pins_the_window_background():
     xml_bg = re.search(r'name="window_bg">#([0-9A-Fa-f]{8})<', colors)
     assert xml_bg, "colors.xml 里找不到 window_bg"
     kt_bg = re.search(r"val Bg = Color\((0x[0-9A-Fa-f]{8})\)", _read(THEME_KT))
-    assert kt_bg, "Theme.kt 里找不到 WebTokens.Bg——对照失效就喊人，别改这边"
+    assert kt_bg, "Theme.kt 里找不到 FenverTokens.Bg——对照失效就喊人，别改这边"
     assert xml_bg.group(1).upper() == kt_bg.group(1)[2:].upper(), \
         f"资源底色 {xml_bg.group(1)} 与 Compose 深色画布 {kt_bg.group(1)} 不是同一个颜色"
 
