@@ -37,8 +37,8 @@
   <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到浅色">
     <!-- 两个图标都在 DOM 里，靠 CSS 换：JS 改 innerHTML 会把 SVG 命名空间写坏（Blink 下
          赋 innerHTML 的 svg 有时不渲染），而这里没有谁在监听子树变化。 -->
-    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2.2V5.8M12 18.2V21.8M2.2 12H5.8M18.2 12H21.8M5.1 5.1L7.6 7.6M16.4 16.4L18.9 18.9M18.9 5.1L16.4 7.6M7.6 16.4L5.1 18.9"/></svg>
+    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 19.4A8.4 8.4 0 1 1 15 4.6M15 19.4A7.4 7.4 0 1 1 15 4.6"/></svg>
   </button>
 </nav>
 
@@ -148,7 +148,7 @@
 </footer>
 
 <button class="totop" type="button" id="topBtn" aria-label="回到顶部" hidden>
-  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19.4V5.6M7.9 12.4L6.5 11 12 5.6 17.5 11 16.1 12.4"/></svg>
 </button>
 
 <script src="/site/site.js" defer></script>
