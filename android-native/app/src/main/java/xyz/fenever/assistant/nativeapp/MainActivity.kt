@@ -20,6 +20,7 @@ import xyz.fenever.assistant.nativeapp.theme.ThemeMode
 import xyz.fenever.assistant.nativeapp.ui.AuthScreen
 import xyz.fenever.assistant.nativeapp.ui.ChatScreen
 import xyz.fenever.assistant.nativeapp.ui.reenterRequested
+import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +28,9 @@ class MainActivity : ComponentActivity() {
         Prefs.init(applicationContext)
         ReminderStore.init(applicationContext)
         ReminderChannels.ensure(applicationContext)
-        sweepStaleApks(applicationContext)
+        // 扫私有下载目录要读磁盘、逐条比版本，不该和首帧抢主线程：交给后台线程，
+        // 删包结果不影响启动路径上的任何状态。
+        thread(name = "apk-sweep") { sweepStaleApks(applicationContext) }
         // 冷启动第一帧就把已存的外观偏好灌进 Compose state，不闪一下深色
         ThemeMode.value = Prefs.themeMode
         setContent {

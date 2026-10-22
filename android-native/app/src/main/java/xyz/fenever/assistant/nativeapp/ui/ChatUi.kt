@@ -135,8 +135,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -539,7 +541,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         scope.launch { runCatching { Api.listSessions() }
             .onSuccess { sessions = it }.onFailure { logoutIf401(it) } }
     }
-    LaunchedEffect(Unit) { loadModelsNow(); refreshSessions(); refreshTaskCard() }
+    LaunchedEffect(Unit) {
+        // 三路互不依赖：各发各的，谁先回来谁先落，不让任务卡读接口把模型清单挡住。
+        // 各自的 401/错误处理仍在 loadModelsNow / refreshSessions / refreshTaskCard 里。
+        coroutineScope {
+            launch { loadModelsNow() }
+            launch { refreshSessions() }
+            launch { refreshTaskCard() }
+        }
+    }
 
     // switchSession：getSession 拉全量消息（含服务端留存的附件条目）
     fun openSession(id: String) {
@@ -2648,8 +2658,11 @@ private fun AttPreview(a: AttItem) {
     var bmp by remember(a.id) { mutableStateOf(AttCache.mem.get(a.id)) }
     LaunchedEffect(a.id) {
         if (bmp == null) runCatching { Api.uploadBytes(a.id) }.onSuccess { bytes ->
-            val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
-            val b = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            // 解码是一段不短的 CPU 工作（还有 2× 下采样），放默认调度器，别占主线程。
+            val b = withContext(Dispatchers.Default) {
+                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            }
             if (b != null) { AttCache.mem.put(a.id, b); bmp = b }
         }
     }
@@ -2704,8 +2717,10 @@ private fun boldAnnotated(src: String, color: Color): AnnotatedString {
     return b.toAnnotatedString()
 }
 
-@Composable
-internal fun RichText(text: String, color: Color) {
+/* 围栏切分从组合里抽出来：同一段文本只在它变化时解析一次（remember(text)），
+ * 流式追加才重新切，其余重组不再对全文重扫。判定规则与抽出来之前逐字一致：
+ * 围栏后第一行若在 40 字符内当语言标记吞掉，闭合围栏后同规则吞掉换行。 */
+internal fun parseRichTextParts(text: String): List<Pair<String, Boolean>> {
     val parts = ArrayList<Pair<String, Boolean>>()
     var rest = text
     while (true) {
@@ -2723,6 +2738,12 @@ internal fun RichText(text: String, color: Color) {
             if (after >= 0 && after - it < 40) after + 1 else it
         })
     }
+    return parts
+}
+
+@Composable
+internal fun RichText(text: String, color: Color) {
+    val parts = remember(text) { parseRichTextParts(text) }
     Column {
         parts.forEach { (seg, code) ->
             if (code) {
@@ -2737,8 +2758,11 @@ internal fun RichText(text: String, color: Color) {
                         .border(1.dp, FenverTokens.Line, preShape)
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                         .horizontalScroll(rememberScrollState()))
-            } else if (seg.isNotBlank()) Text(boldAnnotated(seg, color),
-                fontSize = 16.sp, lineHeight = 24.sp)
+            } else if (seg.isNotBlank()) {
+                // 同一段文本每次重组都重拼一遍 AnnotatedString 是白烧：按段 + 颜色缓存。
+                val annotated = remember(seg, color) { boldAnnotated(seg, color) }
+                Text(annotated, fontSize = 16.sp, lineHeight = 24.sp)
+            }
         }
     }
 }
