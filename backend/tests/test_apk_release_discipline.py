@@ -180,6 +180,25 @@ def test_signature_guard_compares_against_a_previous_release_that_has_an_apk():
         "上一版选择没有要求至少一个 APK 资产：找不到可比的包时仍会整个 Release 失败")
 
 
+def test_signature_guard_fails_closed_when_release_list_cannot_be_read():
+    """读不到 Release 列表时必须报错，不能把它当成“首次发布”跳过签名守卫。
+
+    2026-10-22 v0.36.0 实测：`gh api` 返回空时旧代码走
+    `if [ -z "$prev" ]; then warning + exit 0`，于是一次签名守卫被静默跳过。
+    只有“列表确实为 0 条”才是首次发布；非空列表却找不到带 APK 的正式版同样是
+    判据失效，必须 fail-closed。
+    """
+    raw = (REPO_ROOT / ".github" / "workflows" / "release-apk.yml").read_text(encoding="utf-8")
+    workflow = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+    assert "if ! releases=$(gh api" in workflow, \
+        "Release 列表读取失败没有单独分支：空输出会被当成首次发布"
+    assert "if [ \"$total\" -eq 0 ]" in workflow, \
+        "没有区分“真的没有任何 Release”和“列表读不到/没有带包的版”"
+    assert "找不到任何带 .apk 的正式版" in workflow, \
+        "非空列表但找不到带包正式版时没有 fail-closed"
+    assert "守卫 fail-closed" in workflow
+
+
 def test_the_signing_material_sits_in_signingconfigs_not_buildtypes():
     """签名四项 + storeType 必须待在 signingConfigs 里，buildTypes 只许引用它。
 
