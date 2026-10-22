@@ -53,8 +53,9 @@ def _web_about() -> str:
 
 
 def _native_about() -> str:
-    """原生侧「关于」那一组：SetGroup("关于") 起、到退出登录那一行为止。"""
-    return _slice(_native_raw(), 'SetGroup("关于")', 'SetRow("→", "退出登录"')
+    """原生侧「关于」那一组：SetGroup("关于") 起、到退出登录那一行为止。
+    v0.36.1 图标语言批：行首字形换成 FenverIcon 枚举报，切片止点跟着改读。"""
+    return _slice(_native_raw(), 'SetGroup("关于")', 'SetRow(FenverIcon.Logout, "退出登录"')
 
 
 def test_both_corpuses_are_real_ones():

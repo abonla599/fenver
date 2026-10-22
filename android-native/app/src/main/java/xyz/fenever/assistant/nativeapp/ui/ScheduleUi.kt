@@ -315,15 +315,15 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
             val at = ScheduleBoard.monthIndex(SchedState.viewYear, SchedState.viewMonth)
             Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                CalNav("«", "上一年", floor < 0 || at - 12 < floor) { moveMonth(-12) }
-                CalNav("‹", "上个月", floor < 0 || at <= floor) { moveMonth(-1) }
+                CalNav(FenverIcon.ChevronDoubleLeft, "上一年", floor < 0 || at - 12 < floor) { moveMonth(-12) }
+                CalNav(FenverIcon.ChevronLeft, "上个月", floor < 0 || at <= floor) { moveMonth(-1) }
                 Text(if (floor < 0) "" else ScheduleBoard.monthTitle(
                     SchedState.viewYear, SchedState.viewMonth),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
-                CalNav("›", "下个月", floor < 0) { moveMonth(1) }
-                CalNav("»", "下一年", floor < 0) { moveMonth(12) }
+                CalNav(FenverIcon.ChevronRight, "下个月", floor < 0) { moveMonth(1) }
+                CalNav(FenverIcon.ChevronDoubleRight, "下一年", floor < 0) { moveMonth(12) }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                 for (w in ScheduleBoard.WEEK_HEAD) {
@@ -362,8 +362,8 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                     .padding(horizontal = 16.dp, vertical = 34.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("▤", fontSize = 26.sp, color = text3Color(),
-                        modifier = Modifier.alpha(0.8f))
+                    FenverIcon(FenverIcon.Schedule, text3Color(),
+                        Modifier.size(24.dp).alpha(0.8f))
                     Text("这天还没有安排", style = MaterialTheme.typography.bodyMedium,
                         color = text3Color(), textAlign = TextAlign.Center)
                     Text("点下面「添加一项」记下第一件",
@@ -439,7 +439,7 @@ fun SchedulePage(onNote: (String, Boolean) -> Unit, onRequireAuth: (String) -> U
                 }
             }
         },
-        addLabel = "＋ 添加一项",
+        addLabel = "添加一项",
         onAdd = {
             if (!SchedState.loading) {
                 SchedState.items = SchedState.items + SchedItem("", "", false)
@@ -489,9 +489,10 @@ private fun SchedPanel(head: @Composable () -> Unit, calendar: @Composable () ->
                 .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("＋", fontSize = 17.sp, color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
-                Text(addLabel.substring(1), style = MaterialTheme.typography.bodyMedium,
+                // 「＋」字形换进图标语言：加号一枚 + 原样文案（双端同值判据不动）。
+                FenverIcon(FenverIcon.Plus, MaterialTheme.colorScheme.primary,
+                    Modifier.size(17.dp))
+                Text(addLabel, style = MaterialTheme.typography.bodyMedium,
                     color = text3Color())
             }
             SchedFoot(dirty = dirty, saving = saving, savedTick = savedTick, onSave = onSave)
@@ -499,15 +500,16 @@ private fun SchedPanel(head: @Composable () -> Unit, calendar: @Composable () ->
     }
 }
 
-/** .cal-nav：翻月/翻年那一排。不可用时只降透明度，位置不动 —— 钮会跳位比看不见更难用。 */
+/** .cal-nav：翻月/翻年那一排。不可用时只降透明度，位置不动 —— 钮会跳位比看不见更难用。
+ *  v0.36.1 图标批：«‹›» 字形换成 FenverIcon 的单/双人字（同一枚也做设置行尾）。 */
 @Composable
-private fun CalNav(glyph: String, label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun CalNav(icon: FenverIcon, label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(Modifier.size(width = 34.dp, height = 30.dp).clip(RoundedCornerShape(10.dp))
         .alpha(if (enabled) 1f else 0.3f)
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier.focusable())
         .semantics { contentDescription = label },
         contentAlignment = Alignment.Center) {
-        Text(glyph, fontSize = 16.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FenverIcon(icon, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(16.dp))
     }
 }
 
@@ -573,8 +575,8 @@ private fun ItemRow(item: SchedItem, editing: Boolean, interactive: Boolean,
                         RoundedCornerShape(6.dp))
                     .clickable(enabled = interactive, onClick = onToggle),
                     contentAlignment = Alignment.Center) {
-                    if (item.done) Text("✓", fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onPrimary)
+                    if (item.done) FenverIcon(FenverIcon.Check,
+                        MaterialTheme.colorScheme.onPrimary, Modifier.size(14.dp))
                 }
                 Text(item.text, style = MaterialTheme.typography.bodyMedium,
                     color = if (item.done) text3Color()
@@ -590,14 +592,16 @@ private fun ItemRow(item: SchedItem, editing: Boolean, interactive: Boolean,
                         .background(MaterialTheme.colorScheme.surfaceVariant,
                             RoundedCornerShape(999.dp))
                         .padding(horizontal = 10.dp, vertical = 3.dp))
-                Text("✎", fontSize = 14.sp, color = text3Color(),
-                    modifier = Modifier.clip(CircleShape).clickable(enabled = interactive,
+                Box(Modifier.clip(CircleShape).clickable(enabled = interactive,
                         onClick = onStartEdit)
-                        .padding(horizontal = 6.dp, vertical = 4.dp))
-                Text("🗑", fontSize = 14.sp, color = text3Color(),
-                    modifier = Modifier.clip(CircleShape).clickable(enabled = interactive,
+                        .padding(horizontal = 6.dp, vertical = 4.dp)) {
+                    FenverIcon(FenverIcon.Edit, text3Color(), Modifier.size(16.dp))
+                }
+                Box(Modifier.clip(CircleShape).clickable(enabled = interactive,
                         onClick = onDelete)
-                        .padding(horizontal = 6.dp, vertical = 4.dp))
+                        .padding(horizontal = 6.dp, vertical = 4.dp)) {
+                    FenverIcon(FenverIcon.Trash, text3Color(), Modifier.size(16.dp))
+                }
             }
         }
     }
@@ -779,6 +783,8 @@ private fun SchedFoot(dirty: Boolean, saving: Boolean, savedTick: Int, onSave: (
             Text("已保存", fontSize = 12.5.sp, letterSpacing = 0.4.sp,
                 color = MaterialTheme.colorScheme.primary)
         } else {
+            // 双端同文案合同（test_schedule_ui_contract SHARED_COPY）：这句连「● 」前缀
+            // 一起与网页逐字同值——它是正文状态记号，不是本轮收口的图标位。
             Text(if (dirty) "● 有未保存修改 · 保存将整日替换" else "尚无修改",
                 fontSize = 12.5.sp, letterSpacing = 0.4.sp,
                 color = if (dirty) MaterialTheme.colorScheme.primary else text3Color())

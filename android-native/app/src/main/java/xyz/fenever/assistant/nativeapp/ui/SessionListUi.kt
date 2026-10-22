@@ -120,14 +120,14 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
                 BrandText("Fenver", 16)
                 Spacer(Modifier.weight(1f))
                 FenverTopBarAction(onClose) {
-                    Text("×", fontSize = 20.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FenverIcon(FenverIcon.Close,
+                        MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(18.dp))
                 }
             }
 
-            DrawerNav("＋", "新对话", onNewChat)
-            DrawerNav("⌗", "模型服务", onModelService)
-            DrawerNav("◈", "长期记忆", onMemory)
+            DrawerNav(FenverIcon.Plus, "新对话", onNewChat)
+            DrawerNav(FenverIcon.ModelService, "模型服务", onModelService)
+            DrawerNav(FenverIcon.Memory, "长期记忆", onMemory)
 
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                 .clip(RoundedCornerShape(12.dp))
@@ -207,8 +207,8 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
                         modifier = Modifier.weight(1f))
                     Text("设置", fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("⚙", fontSize = 15.sp,
-                        color = xyz.fenever.assistant.nativeapp.theme.text3Color())
+                    FenverIcon(FenverIcon.Settings,
+                        xyz.fenever.assistant.nativeapp.theme.text3Color(), Modifier.size(18.dp))
                 }
                 Spacer(Modifier.height(8.dp))
             }
@@ -242,15 +242,14 @@ fun SessionDrawer(tick: Int, currentId: String, initialSessions: List<SessionSum
 }
 
 @Composable
-private fun DrawerNav(ico: String, label: String, onClick: () -> Unit) {
+private fun DrawerNav(ico: FenverIcon, label: String, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
         .clickable(onClick = onClick)
         .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            Text(ico, fontSize = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            FenverIcon(ico, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(20.dp))
         }
         Text(label, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
     }
@@ -280,8 +279,8 @@ private fun SessionDrawerRow(s: xyz.fenever.assistant.nativeapp.SessionSummary,
         if (active) {
             Box(Modifier.size(44.dp).clip(CircleShape)
                 .clickable(onClick = onDelete), contentAlignment = Alignment.Center) {
-                Text("×", fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FenverIcon(FenverIcon.Close,
+                    MaterialTheme.colorScheme.onSurfaceVariant, Modifier.size(14.dp))
             }
         }
     }

@@ -30,10 +30,14 @@ ICONS = _read(UI / "ui" / "Icons.kt")
 def test_composer_buttons_no_longer_use_emoji_glyphs():
     for glyph in ('"📷"', '"🎙"', '"⌨"', '"＋"', '"↑"', '"⌄"', '"☰"'):
         assert glyph not in CHAT, f"输入栏还留着 emoji 字形按钮 {glyph}——第 5 轮已换自绘图标"
+    # v0.36.1 图标语言批的读法更新（意图不变）：IconXxx 名字还在 Icons.kt，但只是
+    # 薄包装；ChatUi 的调用一律走统一入口 FenverIcon(FenverIcon.Xxx, …)。
     for icon in ("IconCamera", "IconMic", "IconKeyboard", "IconPlus", "IconArrowUp",
                  "IconStop", "IconImage", "IconFile", "IconChevronDown", "IconMenu"):
-        assert f"fun {icon}(" in ICONS, f"Icons.kt 缺自绘图标 {icon}"
-        assert f"{icon}(" in CHAT, f"ChatUi 没在用自绘图标 {icon}"
+        assert f"fun {icon}(" in ICONS, f"Icons.kt 缺自绘图标 {icon}（薄包装名字被契约钉着）"
+        kind = icon[len("Icon"):]
+        assert f"FenverIcon(FenverIcon.{kind}" in CHAT, \
+            f"ChatUi 没在用统一入口画 {icon} 对应那枚（FenverIcon(FenverIcon.{kind})）"
     assert "Canvas" in ICONS and "StrokeCap.Round" in ICONS, \
         "图标族是 Canvas 直绘的圆头描边线性图标（统一手筋），不是贴图"
 

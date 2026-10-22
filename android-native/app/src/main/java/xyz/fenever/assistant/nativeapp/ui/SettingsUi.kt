@@ -336,8 +336,8 @@ private fun SetBar(page: String, onOpenPage: (String?) -> Unit) {
         FenverTopBar(title = "设置", leading = { Spacer(Modifier.width(8.dp)) },
             actions = {
                 FenverTopBarAction(onClick = { onOpenPage(null) }) {
-                    Text("×", fontSize = 20.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FenverIcon(FenverIcon.Close, MaterialTheme.colorScheme.onSurfaceVariant,
+                        Modifier.size(20.dp))
                 }
             })
     }
@@ -428,12 +428,14 @@ private fun SetNote(text: String, inset: Dp = 16.dp) {
         modifier = Modifier.padding(start = inset, end = 16.dp, bottom = 14.dp))
 }
 
-/** 设置行：52dp、16dp 内距、FenverRow 承载；danger 只有退出登录一处，需红字单独排。 */
+/** 设置行：52dp、16dp 内距、FenverRow 承载；danger 只有退出登录一处，需红字单独排。
+ *  v0.36.1 图标批：行首/行尾从 Unicode 字形换成 FenverIcon——同一语义在所有页面用同一枚，
+ *  trailing=null 表示该行没有行尾附属（原 trailing=""）。 */
 @Composable
-private fun SetRow(ico: String, label: String,
+private fun SetRow(ico: FenverIcon, label: String,
                    divider: Boolean = true,
                    danger: Boolean = false, plain: Boolean = false,
-                   trailing: String = "›",
+                   trailing: FenverIcon? = FenverIcon.ChevronRight,
                    valSlot: (@Composable () -> Unit)? = null,
                    onClick: () -> Unit = {}) {
     val scheme = MaterialTheme.colorScheme
@@ -446,16 +448,13 @@ private fun SetRow(ico: String, label: String,
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-                Text(ico, fontSize = 16.sp, color = scheme.error,
-                    textAlign = TextAlign.Center)
+                FenverIcon(ico, scheme.error, Modifier.size(20.dp))
             }
             Text(label, style = MaterialTheme.typography.bodyLarge, color = scheme.error,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f))
             valSlot?.invoke()
-            if (trailing.isNotEmpty()) {
-                Text(trailing, fontSize = 15.sp, color = text3Color())
-            }
+            trailing?.let { FenverIcon(it, text3Color(), Modifier.size(16.dp)) }
         }
         if (divider && !plain) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(scheme.outline))
@@ -465,16 +464,13 @@ private fun SetRow(ico: String, label: String,
     FenverRow(
         title = label,
         leading = {
-            Text(ico, fontSize = 16.sp, color = scheme.onSurfaceVariant,
-                textAlign = TextAlign.Center)
+            FenverIcon(ico, scheme.onSurfaceVariant, Modifier.size(20.dp))
         },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 valSlot?.invoke()
-                if (trailing.isNotEmpty()) {
-                    Text(trailing, fontSize = 15.sp, color = text3Color())
-                }
+                trailing?.let { FenverIcon(it, text3Color(), Modifier.size(16.dp)) }
             }
         },
         onClick = click,
@@ -491,9 +487,12 @@ private fun SetValText(text: String) {
     }
 }
 
-/** .set-mini：胶囊小按钮（去设置/取消/切换账号/删除账号）。del=true 描红。 */
+/** .set-mini：胶囊小按钮（去设置/取消/切换账号/删除账号）。del=true 描红。
+ *  v0.36.1 图标批：原来写进文案前缀的字形（✎ ⚡ ★ ◎ ×）换成 icon 槽里的 FenverIcon，
+ *  胶囊文字只留语素本身。 */
 @Composable
-private fun SetMini(text: String, del: Boolean = false, enabled: Boolean = true,
+private fun SetMini(text: String, icon: FenverIcon? = null,
+                    del: Boolean = false, enabled: Boolean = true,
                     onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val c = when {
@@ -505,21 +504,30 @@ private fun SetMini(text: String, del: Boolean = false, enabled: Boolean = true,
         .border(1.dp, c, CircleShape)
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
         .padding(horizontal = 12.dp, vertical = 9.dp)) {
-        Text(text, fontSize = 12.5.sp, color = c)
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            if (icon != null) FenverIcon(icon, c, Modifier.size(14.dp))
+            Text(text, fontSize = 12.5.sp, color = c)
+        }
     }
 }
 
-/** .btn-primary 的小号对位：实底强调色 + onPrimary 字。 */
+/** .btn-primary 的小号对位：实底强调色 + onPrimary 字。icon 槽同 SetMini（字形前缀收进图标语言）。 */
 @Composable
-private fun SetMiniPrimary(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+private fun SetMiniPrimary(text: String, icon: FenverIcon? = null,
+                           enabled: Boolean = true, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Box(Modifier.clip(CircleShape)
         .background(scheme.primary)
         .border(1.dp, scheme.primary, CircleShape)
         .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
         .padding(horizontal = 14.dp, vertical = 9.dp)) {
-        Text(text, fontSize = 12.5.sp,
-            color = scheme.onPrimary.copy(alpha = if (enabled) 1f else 0.6f))
+        Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            if (icon != null) FenverIcon(icon, scheme.onPrimary, Modifier.size(14.dp))
+            Text(text, fontSize = 12.5.sp,
+                color = scheme.onPrimary.copy(alpha = if (enabled) 1f else 0.6f))
+        }
     }
 }
 
@@ -647,11 +655,11 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
 
     // —— 账户 ——
     SetGroup("账户")
-    SetRow("⇄", "切换账户", valSlot = {
+    SetRow(FenverIcon.SwapAccounts, "切换账户", valSlot = {
         identityTick
         SetValText("${Prefs.readIdentities().size} 个已登录")
     }) { onOpenPage("accounts") }
-    SetRow("∗", "改密码", divider = false) { onRequireAuth("recover") }
+    SetRow(FenverIcon.PasswordKey, "改密码", divider = false) { onRequireAuth("recover") }
 
     // —— 模型 ——
     SetGroup("模型")
@@ -669,18 +677,18 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         onModelsChanged()
         onTick()
     }
-    SetRow("⚙", "模型服务", divider = false, valSlot = { SetValText(chatNote) }) {
+    SetRow(FenverIcon.ModelService, "模型服务", divider = false, valSlot = { SetValText(chatNote) }) {
         onOpenPage("providers")
     }
 
     // —— 对话 ——
     SetGroup("对话")
-    SetRow("✎", "角色设定", valSlot = {
+    SetRow(FenverIcon.Edit, "角色设定", valSlot = {
         identityTick
         SetValText(if (Prefs.persona(Prefs.lastSessionId).trim().isNotEmpty()) "已填写" else "")
     }) { onOpenPage("persona") }
     CtxRow(cap, providersKnown = providers.isNotEmpty())
-    SetRow("↓", "导出本次对话", divider = false) {
+    SetRow(FenverIcon.Export, "导出本次对话", divider = false) {
         // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
         // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
         // 说话；原生没有这层浏览器，文件名自己按同源规则算（ExportName），
@@ -705,19 +713,19 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
 
     // —— 记忆 ——
     SetGroup("记忆")
-    SetRow("◈", "长期记忆", divider = false, valSlot = { SetValText(memoryCount) }) {
+    SetRow(FenverIcon.Memory, "长期记忆", divider = false, valSlot = { SetValText(memoryCount) }) {
         onOpenPage("memory")
     }
 
     // —— 日程 ——
     SetGroup("日程")
-    SetRow("▤", "日程", divider = false, valSlot = { SetValText(scheduleVal) }) {
+    SetRow(FenverIcon.Schedule, "日程", divider = false, valSlot = { SetValText(scheduleVal) }) {
         onOpenPage("schedule")
     }
 
     // —— 设备 ——
     SetGroup("设备")
-    SetRow("⚑", "提醒", divider = false, valSlot = {
+    SetRow(FenverIcon.Reminder, "提醒", divider = false, valSlot = {
         val n = ReminderStore.list().size
         SetValText(if (n > 0) "$n 条" else "")
     }) { onOpenPage("reminders") }
@@ -725,16 +733,16 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     // —— 应用 ——（借鉴 WorkBuddy 的「触感反馈」「消息通知设置」与 Qoder 的「清理缓存」：
     //    通知行值槽直读系统授权状态、点下去进系统那一页；缓存行报出大小、清完重量）
     SetGroup("应用")
-    SetRow("✦", "触感反馈", trailing = "", valSlot = {
+    SetRow(FenverIcon.Haptic, "触感反馈", trailing = null, valSlot = {
         SetSwitch(hapticsOn) { v -> hapticsOn = v; Prefs.hapticsEnabled = v }
     }) { hapticsOn = !hapticsOn; Prefs.hapticsEnabled = hapticsOn }
-    SetRow("⊙", "消息通知设置", trailing = "›", valSlot = {
+    SetRow(FenverIcon.Notification, "消息通知设置", valSlot = {
         SetValText(if (notifGranted) "已开启" else "已关闭")
     }) {
         if (!openSystemNotificationSettings(appCtx))
             onNote("打不开系统那一页，请到系统设置里搜「Fenver」", true)
     }
-    SetRow("◫", "清理缓存", divider = false, trailing = "›", valSlot = {
+    SetRow(FenverIcon.ClearCache, "清理缓存", divider = false, valSlot = {
         SetValText(if (cacheBytes < 0) "计算中…" else fmtBytes(cacheBytes))
     }) { confirmClearCache = true }
 
@@ -748,12 +756,12 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     // git describe 出来的 vX.Y.Z，摆在一部手机上会被读成"这一版我能装"，
     // 而它装不到手机上。可安装的那一版由下面那一行说，这里不再掺第二个号。
     // 判据：backend/tests/test_v0342_single_version_row_contract.py
-    SetRow("ⓘ", "版本", plain = true, trailing = "",
+    SetRow(FenverIcon.Info, "版本", plain = true, trailing = null,
         valSlot = { SetValText(shellVer) })
     // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
     // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
     // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。
-    SetRow("↻", "检查更新", trailing = "", valSlot = {
+    SetRow(FenverIcon.Refresh, "检查更新", trailing = null, valSlot = {
         val d = Updater.decision
         val available = d != null && d.kind == ReleasePlan.Kind.AVAILABLE
         Row(verticalAlignment = Alignment.CenterVertically,
@@ -781,27 +789,27 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     }
     // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
     // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
-    SetRow("☾", "外观", trailing = "", valSlot = { ThemeSegment() })
+    SetRow(FenverIcon.Moon, "外观", trailing = null, valSlot = { ThemeSegment() })
     // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
     // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
     // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
     // 「意见反馈」v0.27 起不再跳 GitHub：改成应用内一页（› 前缀），填完直达
     // 管理员的「反馈」收集页，每条带回独立编号。
-    SetRow("✉", "意见反馈", trailing = "›", valSlot = { SetValText("提交问题与建议") }) {
+    SetRow(FenverIcon.Mail, "意见反馈", valSlot = { SetValText("提交问题与建议") }) {
         onOpenPage("feedback")
     }
-    SetRow("↗", "开源仓库", trailing = "↗", valSlot = { SetValText(ABOUT_REPO_HOST) }) {
+    SetRow(FenverIcon.OpenExternal, "开源仓库", trailing = FenverIcon.OpenExternal, valSlot = { SetValText(ABOUT_REPO_HOST) }) {
         onOpenUrl(ABOUT_REPO_URL)
     }
-    SetRow("©", "许可证", plain = true, trailing = "",
+    SetRow(FenverIcon.License, "许可证", plain = true, trailing = null,
         valSlot = { SetValText(ABOUT_LICENSE) })
-    SetRow("◉", "服务地址", plain = true, trailing = "", divider = false, valSlot = {
+    SetRow(FenverIcon.ServiceAddress, "服务地址", plain = true, trailing = null, divider = false, valSlot = {
         SetValText(hostOf(Prefs.baseUrl))
     })
 
     // —— 退出（.set-last + .set-danger）——
     Spacer(Modifier.height(18.dp))
-    SetRow("→", "退出登录", danger = true, trailing = "", divider = false) {
+    SetRow(FenverIcon.Logout, "退出登录", danger = true, trailing = null, divider = false) {
         val hit = Prefs.currentEntry() ?: run { onLoggedOut(); return@SetRow }
         scope.launch {
             runCatching { Api.logout(hit.token) }   // 服务端不作数也得把本机忘掉
@@ -858,7 +866,7 @@ private fun ModelPickRow(providers: List<ModelInfo>, current: ModelInfo?,
                          onPick: (String, ModelInfo) -> Unit) {
     var open by remember { mutableStateOf(false) }
     tick
-    SetRow("◆", "当前模型", trailing = "⌄", valSlot = {
+    SetRow(FenverIcon.Model, "当前模型", trailing = FenverIcon.ChevronDown, valSlot = {
         SetValText(current?.name ?: if (loading) "读取中…" else "未配置模型")
     }) { open = true }
     if (open) {
@@ -910,8 +918,8 @@ private fun CtxRow(cap: Int, providersKnown: Boolean) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            Text("≡", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center)
+            FenverIcon(FenverIcon.Context, MaterialTheme.colorScheme.onSurfaceVariant,
+                Modifier.size(20.dp))
         }
         Text("上下文长度", style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
@@ -1174,15 +1182,16 @@ private fun FeedbackPage(onNote: (String, Boolean) -> Unit, onClose: () -> Unit)
                 Image(f.bmp.asImageBitmap(), contentDescription = null,
                     modifier = Modifier.matchParentSize())
                 // 右上角 × 删掉这一张（不删服务端附件，只是不带上）
-                Text("×", fontSize = 14.sp, color = Color.White,
-                    modifier = Modifier.align(Alignment.TopEnd)
-                        .padding(2.dp).size(18.dp).clip(CircleShape)
-                        .background(Color(0x99000000), CircleShape)
-                        .clickable {
-                            haptic()
-                            imgs = imgs.filterIndexed { j, _ -> j != i }
-                        },
-                    textAlign = TextAlign.Center)
+                Box(Modifier.align(Alignment.TopEnd)
+                    .padding(2.dp).size(18.dp).clip(CircleShape)
+                    .background(Color(0x99000000), CircleShape)
+                    .clickable {
+                        haptic()
+                        imgs = imgs.filterIndexed { j, _ -> j != i }
+                    },
+                    contentAlignment = Alignment.Center) {
+                    FenverIcon(FenverIcon.Close, Color.White, Modifier.size(11.dp))
+                }
             }
         }
         if (imgs.size < FB_IMAGE_MAX) {
@@ -1198,7 +1207,7 @@ private fun FeedbackPage(onNote: (String, Boolean) -> Unit, onClose: () -> Unit)
                     )
                 },
                 contentAlignment = Alignment.Center) {
-                Text("＋", fontSize = 24.sp, color = text3Color())
+                FenverIcon(FenverIcon.Plus, text3Color(), Modifier.size(24.dp))
             }
         }
     }
@@ -1348,9 +1357,11 @@ private fun MemRow(weight: Double, content: String, onDelete: () -> Unit) {
         }
         Text(content, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f))
-        Text("×", fontSize = 15.sp, color = text3Color(),
-            modifier = Modifier.clip(CircleShape).clickable(onClick = onDelete)
-                .padding(horizontal = 4.dp))
+        Box(Modifier.clip(CircleShape).clickable(onClick = onDelete)
+            .padding(horizontal = 4.dp).size(20.dp),
+            contentAlignment = Alignment.Center) {
+            FenverIcon(FenverIcon.Close, text3Color(), Modifier.size(14.dp))
+        }
     }
 }
 
@@ -1539,7 +1550,7 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
     }
     if (admin) {
         Spacer(Modifier.height(8.dp))
-        SetMiniPrimary("＋ 添加共享模型服务") { openForm(null, "admin") }
+        SetMiniPrimary("添加共享模型服务", icon = FenverIcon.Plus) { openForm(null, "admin") }
     }
     // —— 我的模型 ——
     Text("我的模型（自带 API Key）", fontSize = 12.5.sp, color = text3Color(),
@@ -1555,7 +1566,7 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
         }
     }
     Spacer(Modifier.height(8.dp))
-    SetMiniPrimary("＋ 添加我的模型") { openForm(null, "mine") }
+    SetMiniPrimary("添加我的模型", icon = FenverIcon.Plus) { openForm(null, "mine") }
 
     // —— 表单（.prov-form：虚线框，preset 胶囊行在最上）——
     if (formOpen) {
@@ -1716,14 +1727,14 @@ private fun ProvRowCard(p: ProvRow, scope: String, myDefault: String?,
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 if (scope != "shared") {
-                    SetMini("✎ 编辑") { onEdit() }
-                    SetMini("⚡ 测试连通") { onTest(p.id) }
+                    SetMini("编辑", icon = FenverIcon.Edit) { onEdit() }
+                    SetMini("测试连通", icon = FenverIcon.Bolt) { onTest(p.id) }
                 }
-                if (p.hasKey) SetMini("★ 我的默认") { onMyDefault(p.id) }
+                if (p.hasKey) SetMini("我的默认", icon = FenverIcon.Star) { onMyDefault(p.id) }
                 if (onSiteDefault != null) {
-                    SetMini("◎ 全站默认") { onSiteDefault(p.id) }
+                    SetMini("全站默认", icon = FenverIcon.SiteDefault) { onSiteDefault(p.id) }
                 }
-                if (scope != "shared") SetMini("× 删除", del = true) { onDelete(p) }
+                if (scope != "shared") SetMini("删除", icon = FenverIcon.Close, del = true) { onDelete(p) }
             }
         }
     }
