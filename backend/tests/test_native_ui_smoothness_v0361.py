@@ -82,7 +82,8 @@ def test_first_frame_values_come_from_the_cache_not_empty():
         "缓存大小又用 -1 起算：每次开设置都要看一帧「计算中…）」"
     assert "var cacheBytes by remember { mutableStateOf(-1L) }" not in s, \
         "cacheBytes 的空初值回来了"
-    assert "SettingsCache.memoryCount = c" in s, "记忆条数刷新成功没写回缓存"
+    assert "SettingsCache.setMemoryCount(" in s, \
+        "记忆条数刷新成功没经 owner 闸写回缓存（审查批：裸赋值会把旧身份的在途尾巴落给新人）"
     assert "SettingsCache.cacheBytes = b" in s, "缓存大小算完没写回进程级缓存"
 
 
@@ -98,12 +99,15 @@ def test_memory_page_has_no_blank_loading_first_frame():
     s = _settings()
     assert "var items by remember { mutableStateOf(SettingsCache.memoryItems) }" in s, \
         "记忆页又从空列表起算了"
-    assert "var loading by remember { mutableStateOf(SettingsCache.memoryItems.isEmpty()) }" in s, \
-        "记忆页 loading 没跟着缓存起算：有缓存也要白屏一帧"
+    assert "var loading by remember { mutableStateOf(!SettingsCache.memoryItemsLoaded) }" in s, \
+        "记忆页 loading 没跟着 loaded 位起算：0 条的人重进又要白屏一帧"
+    assert "var loading by remember { mutableStateOf(SettingsCache.memoryItems.isEmpty()) }" not in s, \
+        "空列表当\"没加载过\"的老判据回来了：加载过且为空与首次进入分不开"
     assert "var loading by remember { mutableStateOf(true) }" not in s, \
         "「loading=true 且空列表」的首帧形状回来了"
     assert '"正在读取记忆…"' in s, "无缓存的首次读取没有可读的话，只剩空白"
-    assert "SettingsCache.memoryItems = items" in s, "读取成功没写回记忆列表缓存"
+    assert "SettingsCache.setMemoryItems(who, items)" in s, \
+        "读取成功没经 owner 闸写回记忆列表缓存"
 
 
 def test_providers_page_renders_cache_first_and_keeps_list_on_failure():
@@ -112,8 +116,8 @@ def test_providers_page_renders_cache_first_and_keeps_list_on_failure():
         "模型服务页共享清单又从空列表起算：重进先闪空架"
     assert "var mine by remember { mutableStateOf(SettingsCache.provMine) }" in s, \
         "模型服务页我的清单同上"
-    assert "SettingsCache.provShared = shared" in s and "SettingsCache.provMine = mine" in s, \
-        "刷新成功没写回模型服务清单缓存"
+    assert "SettingsCache.setProviders(who, shared, mine, myDefault)" in s, \
+        "刷新成功没经 owner 闸写回模型服务清单缓存"
     assert '"正在读取模型服务…"' in s, "进程内首次加载没有骨架/等待态"
     err_at = s.index('模型服务没拉到')
     blk_at = s.rindex(".onFailure {", 0, err_at)
@@ -201,6 +205,27 @@ def test_settled_scroll_is_single_pass_with_one_next_frame_correction():
         "没贴实时不再补夹滚动边界"
 
 
+def test_settled_bottom_correction_is_bounded_not_an_unbounded_loop():
+    """审查批改判：单发补一次 → 有界短校正（最多 3 轮帧检），并静态证明它有界。
+
+    有界的证据链三格缺一即红：① 轮数上限写死在文件级常量 =3；
+    ② 落定效果里只有这一枚 repeat、且它吃的是那枚常量；③ 体内没有 while——
+    计数器不随布局结果续期，绝非 24 帧循环换皮。"""
+    c = _chat()
+    assert "private const val MAX_BOTTOM_CORRECTIONS = 3" in c, \
+        "贴底校正的轮数上限没了/被改大：校正必须是有界的 3 轮"
+    body = _block(c, "LaunchedEffect(messages.size, streamText, streamTrace.size, streamTraceChars) {")
+    assert "repeat(MAX_BOTTOM_CORRECTIONS)" in body, \
+        "落定分支不再走有界常量：要么退回单发、要么在别处自造循环"
+    assert body.count("repeat(") == 1, \
+        f"落定效果里出现 {body.count('repeat(')} 枚 repeat：有界判据只许一枚"
+    assert "while (" not in body and "while(" not in body, \
+        "贴底效果里冒出 while：那是无界循环的形状，本批明令禁止"
+    # 只在仍处于近底时才继续补：最后一项已不在视口（用户上翻）必须立刻收手
+    assert "if (last == null) return@LaunchedEffect" in body, \
+        "近底闸门没了：用户上翻走开后校正还在跟他抢滚动"
+
+
 def test_engine_picker_does_not_query_packagemanager_in_composition():
     c = _chat()
     body = _block(c, "if (enginePickerOpen) {")
@@ -209,3 +234,73 @@ def test_engine_picker_does_not_query_packagemanager_in_composition():
     assert "val cands = engineCands ?: emptyList()" in body, "弹窗不再只读 effect 的结果"
     assert "engineCands = withContext(Dispatchers.IO) { speechServiceCandidates(ctx) }" in c, \
         "枚举没有挪进 IO 线程的 LaunchedEffect"
+
+
+# ---------- ⑤ 审查批：pullFromHistory epoch 守卫 + SettingsCache owner 校验 + loaded 位 ----------
+
+def test_pull_from_history_is_epoch_guarded():
+    """审查批：pullFromHistory 也是「请求→落地」路径，必须照 openSession 写法守卫。
+
+    断网取回通常慢——期间切会话，旧会话答案绝不能追加到新会话屏上。
+    钉三件：① 请求前捕获 epoch 和 sessionId；② 回包落地前两者都必须仍匹配；
+    ③ 失败分支也要守卫（旧会话的报错也不该甩在新屏上）。"""
+    c = _chat()
+    body = _block(c, "suspend fun pullFromHistory() {")
+    assert "val epochAtRequest = sessionEpoch" in body, \
+        "pullFromHistory 没有在发请求前扣 epoch：回包无法知道自己是不是过期了"
+    assert "val sidAtRequest = sessionId" in body, \
+        "pullFromHistory 没有在发请求前扣 sessionId：切会话后 sid 变了守卫无从比对"
+    assert "if (epochAtRequest != sessionEpoch || sidAtRequest != sessionId) return" in body, \
+        "成功回包落地前没有双守卫（epoch+sid）：断线取回期间切会话，旧答案仍会追加到新屏"
+    assert body.count("epochAtRequest != sessionEpoch || sidAtRequest != sessionId") >= 2, \
+        "失败分支没有守卫：旧会话的取回报错也会甩到新会话屏上"
+
+
+def test_settings_cache_writes_are_owner_checked():
+    """审查批：SettingsCache 每次写入必须比对当前 owner，不一致就丢弃。
+
+    钉住四个带 who 的 setter 都在对象里，且调用方全部换成 setter 版本。"""
+    s = _settings()
+    obj = _block(s, "private object SettingsCache {")
+    assert "fun setMemoryCount(who: String" in obj, "setMemoryCount owner 校验 setter 缺失"
+    assert "fun setScheduleVal(who: String" in obj, "setScheduleVal owner 校验 setter 缺失"
+    assert "fun setMemoryItems(who: String" in obj, "setMemoryItems owner 校验 setter 缺失"
+    assert "fun setProviders(who: String" in obj, "setProviders owner 校验 setter 缺失"
+    # 四个 setter 内部都必须是 "if (owner == who)" 校验
+    assert obj.count("if (owner == who)") >= 4, \
+        "SettingsCache setter 里有不校验 owner 的写入口"
+    # 调用方：三处已知的 owner 作用域写入都换成 setter 版本
+    assert "SettingsCache.setMemoryCount(cacheOwner, c)" in s, \
+        "记忆条数并行拉取路径没走 owner 闸"
+    assert "SettingsCache.setMemoryCount(cacheOwner, it)" in s, \
+        "onCountChanged 回调没走 owner 闸"
+    assert "SettingsCache.setScheduleVal(cacheOwner, it)" in s, \
+        "日程值刷新没走 owner 闸"
+
+
+def test_settings_cache_fields_are_volatile():
+    """审查批：所有跨线程可读的字段必须 @Volatile，尤其是 cacheBytes（long，防撕裂）。"""
+    s = _settings()
+    obj = _block(s, "private object SettingsCache {")
+    assert "@Volatile var owner" in obj, "owner 字段没有 @Volatile"
+    assert "@Volatile var memoryCount" in obj
+    assert "@Volatile var memoryItems" in obj
+    assert "@Volatile var provShared" in obj
+    assert "@Volatile var provListLoaded" in obj, \
+        "provListLoaded 没有 @Volatile：loaded 位跨线程不可见"
+    assert "@Volatile var memoryItemsLoaded" in obj, \
+        "memoryItemsLoaded 没有 @Volatile"
+    assert "@Volatile var cacheBytes" in obj, \
+        "cacheBytes 没有 @Volatile：long 撕裂理论风险不许赌"
+
+
+def test_providers_page_uses_loaded_bit_not_empty_heuristic():
+    """审查批：provLoaded 初值必须吃 provListLoaded 位，不许再用"两个清单都不为空"判"加载过"。
+
+    0 供应商/0 记忆的人 loaded 位也是 true，重进直接显示空态，不再闪一帧骨架。"""
+    s = _settings()
+    assert "mutableStateOf(SettingsCache.provListLoaded)" in s, \
+        "provLoaded 初值没吃 provListLoaded 位：0 供应商的人重进要闪骨架"
+    assert "SettingsCache.provShared.isNotEmpty() || SettingsCache.provMine.isNotEmpty()) }" \
+        not in s, \
+        "provLoaded 的空列表启发式回来了：加载过且为空被当成还没加载"
