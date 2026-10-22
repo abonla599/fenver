@@ -44,6 +44,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -172,7 +174,8 @@ fun FenverButton(
     }
 }
 
-/** 输入框：surfaceVariant 底、12dp 圆角、获得焦点时 1dp primary 描边。 */
+/** 输入框：surfaceVariant 底、12dp 圆角、获得焦点时 1dp primary 描边。
+ *  密码遮蔽 / 行尾控件 / 就地报错走可选参数，登录页不必另写一套输入框。 */
 @Composable
 fun FenverTextField(
     value: String,
@@ -182,32 +185,46 @@ fun FenverTextField(
     singleLine: Boolean = true,
     enabled: Boolean = true,
     minHeight: Dp = 44.dp,
+    isError: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    imeAction: ImeAction = ImeAction.Done,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
+    val stroke = when {
+        isError -> scheme.error
+        focused -> scheme.primary
+        else -> scheme.outline
+    }
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
         enabled = enabled,
         singleLine = singleLine,
+        visualTransformation = visualTransformation,
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
         cursorBrush = SolidColor(scheme.primary),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
         modifier = modifier
             .fillMaxWidth()
             .defaultMinSize(minHeight = minHeight)
             .background(scheme.surfaceVariant, shape)
-            .border(BorderStroke(1.dp, if (focused) scheme.primary else scheme.outline), shape)
+            .border(BorderStroke(1.dp, stroke), shape)
             .padding(horizontal = 12.dp, vertical = 11.dp)
             .onFocusChanged { focused = it.isFocused },
         decorationBox = { inner ->
-            Box(contentAlignment = Alignment.CenterStart) {
-                if (value.isEmpty() && placeholder.isNotEmpty()) {
-                    Text(placeholder, style = MaterialTheme.typography.bodyLarge,
-                        color = scheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (value.isEmpty() && placeholder.isNotEmpty()) {
+                        Text(placeholder, style = MaterialTheme.typography.bodyLarge,
+                            color = scheme.onSurfaceVariant)
+                    }
+                    inner()
                 }
-                inner()
+                trailing?.invoke()
             }
         },
     )
@@ -258,30 +275,45 @@ fun FenverTopBarAction(onClick: () -> Unit, content: @Composable () -> Unit) {
     ) { content() }
 }
 
-/** 底部弹层：顶部 24dp 圆角、surface 底、一层轻阴影，不提供拖拽关闭。 */
+/** 底部弹层：顶部 24dp 圆角、surface 底、一层轻阴影，不提供拖拽关闭。
+ *  inline=true 时只画壳、不新开窗口——按住说话的手势锚点在 Activity 窗口里，
+ *  Dialog 会把按下中的触摸序列抢走，录音卡只能在原位渲染同一套壳。 */
 @Composable
 fun FenverSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    inline: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    if (inline) {
+        FenverSheetShell(modifier, content)
+        return
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-            val shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-            Column(
-                modifier
-                    .fillMaxWidth()
-                    .shadow(24.dp, shape)
-                    .clip(shape)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(horizontal = 16.dp, vertical = 16.dp),
-                content = content,
-            )
+            FenverSheetShell(modifier, content)
         }
     }
+}
+
+@Composable
+private fun FenverSheetShell(
+    modifier: Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .shadow(24.dp, shape)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        content = content,
+    )
 }
 
 /** 模型/状态胶囊：999 圆角、label 字号，视觉小、触控区仍按 48dp 兜底。 */

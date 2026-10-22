@@ -49,9 +49,9 @@ def test_voice_takeover_is_bottom_card():
     body = screen.group(0)
     assert "松手发送，上移取消" in body and "松手取消" in body, \
         "豆包两态文案原样：录音提示 / 上滑取消"
-    assert "fillMaxSize" not in body and "RoundedCornerShape" in body \
-        and "verticalGradient" in body, \
-        "第 13 轮改判：收小成圆角卡片（大小比输入框大点就行），全屏不许回魂"
+    assert "fillMaxSize" not in body and "FenverSheet(" in body, \
+        "第 13 轮改判：收小成底部卡片（大小比输入框大点就行），全屏不许回魂；" \
+        "第 36 轮起卡片壳是 FenverSheet 的中性表面，渐变底退役"
     assert "WaveBars(level" in body, "实时波纹搬进全屏场景"
     assert "pointerInput" not in body, \
         "覆盖层绝不挂 pointerInput：吃了事件录音状态机就断（锚点在输入位）"

@@ -87,8 +87,8 @@ def test_voice_screen_is_compact_bottom_card():
     assert screen, "VoiceScreen 必须在 VoiceUi 里"
     body = screen.group(0)
     assert "fillMaxSize" not in body, "全屏回魂即违例：卡片不许铺满屏幕"
-    assert "RoundedCornerShape(26.dp)" in body and "verticalGradient" in body, \
-        "圆角卡片 + 两态渐变（录音绿/取消粉）照豆包配色"
+    assert "FenverSheet(" in body and "scheme.primary" in body, \
+        "卡片壳是 FenverSheet 的中性表面，录音态只吃 primary（渐变绿/粉已退役）"
     assert "松手发送，上移取消" in body and "松手取消" in body
     assert "WaveBars(level, waveInk, bars = 24)" in body, "波纹搬进窄卡：24 根够用"
     assert "pointerInput" not in body, \

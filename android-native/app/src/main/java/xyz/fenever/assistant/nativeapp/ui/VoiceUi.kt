@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,19 +45,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -543,38 +541,39 @@ fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = 260L, cancelUp: Dp
 
 /* ---------------- 录音界面（第 13 轮：输入位上方的紧凑卡片） ----------------
  * 第 12 轮的全屏接管被真机判「占据整个屏幕很不美观，大小比输入框大点就行」——
- * 本轮收小：一枚圆角卡片贴在屏幕底部，正好盖住输入卡（输入框、模型钮、＋全部
- * 藏进卡片后面），高度只比输入卡大一圈。配色沿用豆包实录：录音=绿渐变+
- * 「松手发送，上移取消」+白波纹；上滑=粉渐变红字「松手取消」+红波纹。
+ * 本轮收小：一张底部弹层贴在屏幕底部，正好盖住输入卡（输入框、模型钮、＋全部
+ * 藏进卡片后面），高度只比输入卡大一圈。壳用 FenverSheet 的中性表面 + 顶部 24
+ * 圆角；录音态只吃 primary，上滑取消态吃 danger。
  * 手势锚点仍在输入位那个 Box 上：本卡片不挂 pointerInput、不吃事件，录音状态
- * 机照常走；卡片出现也不影响已按下手指的事件分发。 */
+ * 机照常走；卡片出现也不影响已按下手指的事件分发——所以壳必须 inline 渲染，
+ * Dialog 会另开窗口、把按下中的触摸序列从锚点上抢走。 */
 
 @Composable
 fun VoiceScreen(heard: String, level: Float, cancelling: Boolean,
                 modifier: Modifier = Modifier) {
-    val bg = if (cancelling) Brush.verticalGradient(listOf(Color(0xFFF7D4CF), Color(0xFFEFB3AC)))
-             else Brush.verticalGradient(listOf(Color(0xFF8EDFBC), Color(0xFF5FCF9E)))
-    val ink = if (cancelling) Color(0xFFD8443A) else Color(0xFF123B2E)
-    val waveInk = if (cancelling) Color(0xFFE0463C) else Color(0xFFFFFFFF)
-    Column(modifier.fillMaxWidth().padding(horizontal = 14.dp)
-        .clip(RoundedCornerShape(26.dp)).background(bg)
-        .padding(horizontal = 18.dp, vertical = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(if (cancelling) "松手取消" else "松手发送，上移取消",
-            fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = ink)
-        Spacer(Modifier.height(8.dp))
-        WaveBars(level, waveInk, bars = 24)
-        if (heard.isNotEmpty()) {
+    val scheme = MaterialTheme.colorScheme
+    val ink = if (cancelling) scheme.error else scheme.onSurface
+    val waveInk = if (cancelling) scheme.error else scheme.primary
+    FenverSheet(onDismiss = { /* 录音卡不吃点击，没有点外面关掉这一路 */ },
+        modifier = modifier, inline = true) {
+        Column(Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(if (cancelling) "松手取消" else "松手发送，上移取消",
+                style = MaterialTheme.typography.labelLarge, color = ink)
             Spacer(Modifier.height(8.dp))
-            Text(heard, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = ink,
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center)
+            WaveBars(level, waveInk, bars = 24)
+            if (heard.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(heard, style = MaterialTheme.typography.bodyLarge, color = ink,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center)
+            }
         }
     }
 }
 
 /* 波纹条：高度 = 实时音量(level) × 每根柱子的固定权重 × 一个呼吸脉冲。
- * 第 12 轮起随全屏场景搬家：颜色由外层传入（录音白、取消红），宽版 30 根。 */
+ * 颜色由外层传入（录音 primary、取消 danger），宽版 30 根。 */
 @Composable
 private fun WaveBars(level: Float, barColor: Color, bars: Int = 30) {
     val pulse by rememberInfiniteTransition(label = "voicePulse").animateFloat(
