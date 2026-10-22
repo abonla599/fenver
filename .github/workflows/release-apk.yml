@@ -232,11 +232,25 @@ jobs:
           # 只换服务端的版本（v0.35.1-v0.35.3）没有 APK，不能拿它当签名参照；
           # 跳过它们，继续往前找最近一个真正能安装的包。
           tag="${GITHUB_REF_NAME}"
-          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=50" \
-            --jq "[.[] | select(.tag_name != \"${tag}\" and .draft == false and .prerelease == false and ([.assets[]? | select(.name | endswith(\".apk\"))] | length > 0))][0].tag_name // empty")
+          # 读不到列表 ≠ 首次发布。v0.36.0 实测过 `gh api` 返回空被当成首发给放行，
+          # 那次靠人工核指纹兜住；这里必须 fail-closed。
+          if ! releases=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=50"); then
+            echo "::error::读取 Release 列表失败，无法确认上一正式版签名；守卫 fail-closed"
+            exit 1
+          fi
+          if ! total=$(printf '%s' "$releases" | jq -er 'length'); then
+            echo "::error::Release 列表为空或不是合法 JSON，无法确认上一正式版签名；守卫 fail-closed"
+            exit 1
+          fi
+          prev=$(printf '%s' "$releases" | jq -r --arg tag "$tag" \
+            "[.[] | select(.tag_name != \$tag and .draft == false and .prerelease == false and ([.assets[]? | select(.name | endswith(\".apk\"))] | length > 0))][0].tag_name // empty")
           if [ -z "$prev" ]; then
-            echo "::warning::找不到上一正式版（首次发布？），本次跳过签名守卫"
-            exit 0
+            if [ "$total" -eq 0 ]; then
+              echo "::warning::没有任何 Release（首次发布？），本次跳过签名守卫"
+              exit 0
+            fi
+            echo "::error::Release 列表共 ${total} 条，但找不到任何带 .apk 的正式版；守卫 fail-closed"
+            exit 1
           fi
           url=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${prev}" \
             --jq "[.assets[] | select(.name | endswith(\".apk\"))][0].browser_download_url // empty")
