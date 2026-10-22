@@ -874,6 +874,16 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     fun streamInto() {
         if (busy) return
         streamJob = scope.launch {
+            // v0.36.1 发版前审查批：runStream 主落点的跨会话守卫（同 openSession /
+            // pullFromHistory 的机制，扣的换成发流这一刻的请求号与会话 id）。用户从 A
+            // 切到 B 之后，A 这一枪的流式回答绝不能 append 进 B 的 messages、更不能
+            // persist 回 B——不匹配的帧与终局落地整包丢弃。
+            // 有意不硬断仍在跑的流：本地 cancel 会改服务端的轮次走向（cancel 与任其
+            // 跑完是两笔账），计费语义不动。A 的这轮由服务端照常收尾落库，用户回到 A
+            // 经 openSession 取回——这是"先不落错会话"下的可接受最小行为。
+            val epochAtSend = sessionEpoch
+            val sidAtSend = sessionId
+            fun mine() = epochAtSend == sessionEpoch && sidAtSend == sessionId
             busy = true; stopRequested = false
             currentRunId = null
             streamText = ""
@@ -901,6 +911,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             var failMsg = ""
             var stopped = false
             var needHistory = false
+            // 错帧只扫一次屏：孤儿流的临时气泡不必每帧都清一遍
+            var staleSwept = false
             // v0.35 #99：流上出现挂起前缀 = "去读一次任务"。它只是触发器，不是状态；
             // 帧上没有任务身份，真正在等哪一条由列表 + 详情两个 GET 回答。
             var sawSuspend = false
@@ -910,9 +922,25 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
             try {
                 Api.streamChat(payload,
-                    onStatus = { setStatus(it) },   // 断线重连那句人话直接落状态条
+                    // 断线重连那句人话直接落状态条——但只对号的那一拍才落，
+                    // 切了会话就不许再占用 B 屏幕上的状态行。
+                    onStatus = { if (mine()) setStatus(it) },
+                    // run_id 不设守卫是刻意的：它是「停止」要打的那一枪的靶子，不是
+                    // 画面/持久化落点。认下最新 run_id，用户切了会话按停止也够得着
+                    // 真在跑的那条服务端 run，计费语义不变。
                     onRun = { currentRunId = it }    // 记住 run_id：停止打 cancel、续播也认它
                 ).collect { ev ->
+                    // 流式期间切了会话：这一帧整包丢弃，屏上/list/状态行一概不碰；
+                    // 头一帧对不上号时顺手把这一轮挂在屏上的临时气泡与过程撤下，
+                    // 别让 A 的半截字继续画在 B 的卡上（B 的卡是 live 的，读的就是
+                    // 这些全局临时槽）。
+                    if (!mine()) {
+                        if (!staleSwept) {
+                            staleSwept = true
+                            streamText = null; streamTrace = emptyList(); streamApproval = null
+                        }
+                        return@collect
+                    }
                     if (stopRequested) throw CancellationException("stop")
                     when (ev) {
                         is ChatEvent.Start -> if (ev.runId.isNotEmpty()) currentRunId = ev.runId
@@ -989,37 +1017,43 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     }
                 }
                 NetMinder.noteSuccess()
-                if (failed) {
-                    // error 帧：模型真故障，原因已给出，绝不重发整轮去二次付费。
-                    messages = messages + UiMsg("assistant",
-                        (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + failMsg,
-                        transient = true, trace = settledTrace(),
-                        traceExpanded = settledExpanded())
-                    setStatus(failMsg, true)
-                } else when (doneStatus) {
-                    "cancelled" -> {
-                        stopped = true
-                        val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
+                // 终局落点（消息 append、状态行）整段先对号：切了会话，这一枪的
+                // 收尾对屏幕就是废纸——不写 B 的列表、不占 B 的状态行。
+                if (mine()) {
+                    if (failed) {
+                        // error 帧：模型真故障，原因已给出，绝不重发整轮去二次付费。
                         messages = messages + UiMsg("assistant",
-                            text + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
-                            trace = settledTrace(), traceExpanded = settledExpanded())
-                        setStatus("已停止生成")
-                    }
-                    "cannot_resume" -> needHistory = true
-                    else -> {
-                        val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
-                        messages = messages + UiMsg("assistant", text, doneId,
-                            doneModel?.ifBlank { null },
-                            trace = settledTrace(), traceExpanded = settledExpanded())
+                            (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + failMsg,
+                            transient = true, trace = settledTrace(),
+                            traceExpanded = settledExpanded())
+                        setStatus(failMsg, true)
+                    } else when (doneStatus) {
+                        "cancelled" -> {
+                            stopped = true
+                            val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
+                            messages = messages + UiMsg("assistant",
+                                text + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
+                                trace = settledTrace(), traceExpanded = settledExpanded())
+                            setStatus("已停止生成")
+                        }
+                        "cannot_resume" -> needHistory = true
+                        else -> {
+                            val text = if (acc.isNotEmpty()) acc.toString() else doneFullText
+                            messages = messages + UiMsg("assistant", text, doneId,
+                                doneModel?.ifBlank { null },
+                                trace = settledTrace(), traceExpanded = settledExpanded())
+                        }
                     }
                 }
             } catch (e: CancellationException) {
                 // 本地取消的兜底一支：只有服务端 cancel 打不出去时才会走到这里。
                 stopped = true
-                messages = messages + UiMsg("assistant",
-                    acc.toString() + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
-                    trace = settledTrace(), traceExpanded = settledExpanded())
-                setStatus("已停止生成")
+                if (mine()) {
+                    messages = messages + UiMsg("assistant",
+                        acc.toString() + "\n\n（已停止生成）", doneId, doneModel?.ifBlank { null },
+                        trace = settledTrace(), traceExpanded = settledExpanded())
+                    setStatus("已停止生成")
+                }
             } catch (e: StreamNeedHistoryException) {
                 // 410 / 续不上 / 试到上限：去会话里取回，不重发生成（这一枪到了服务端，不算断网）。
                 needHistory = true
@@ -1027,26 +1061,37 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 NetMinder.noteFailure(e)
                 failed = true
                 val msg = e.message ?: "请求失败"
-                messages = messages + UiMsg("assistant",
-                    (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + msg,
-                    transient = true, trace = settledTrace(),
-                    traceExpanded = settledExpanded())
-                if (!logoutIf401(e)) setStatus(msg, true)
+                if (mine()) {
+                    messages = messages + UiMsg("assistant",
+                        (if (acc.isNotEmpty()) acc.toString() + "\n\n" else "") + "⚠️ " + msg,
+                        transient = true, trace = settledTrace(),
+                        traceExpanded = settledExpanded())
+                    if (!logoutIf401(e)) setStatus(msg, true)
+                }
             } finally {
+                // finally 里这几行刻意不设守卫：streamText/busy 是全局单例流槽
+                // （busy 闸在，A 的孤儿流没收尾前 B 根本起不了第二轮），这一枪
+                // 终局时清掉它对任何会话都是事实；反过来若守卫掉不清，B 会被
+                // busy=true 永久卡死发不出消息。这里只清临时显示态，不碰 messages、
+                // 不 persist——那两样全在上面的对号分支里。
                 streamText = null; busy = false; streamJob = null
                 // 过程已经随 UiMsg 落地，流上的临时累积就地清空（面板不会双倍挂两份）
                 streamTrace = emptyList()
             }
-            if (needHistory) pullFromHistory()
+            // 取回也是落地：切了会话目标就作废——不能对着 B 去取回「这一轮」的结果。
+            if (needHistory && mine()) pullFromHistory()
             // persistCurrent + loadSessions：标题可能因首条消息被服务端改掉（顶栏要跟着新）
             withContext(NonCancellable) {
-                persist(messages)
+                // persist 落地前必须对号：此刻 messages 是屏幕上的活列表（可能已是 B 的），
+                // 不守卫就会把 A 的这一轮 PUT 进 B——更狠的变体是 B 还在加载中、列表为空，
+                // 一发空 persist 把 B 的服务端历史整平。会话清单刷新取的是
+                // 服务端真值、与这一轮内容无关，不设守卫照落。
+                if (mine()) persist(messages)
                 runCatching { sessions = Api.listSessions() }
             }
-            // 流上有人说"停在断点等输入"了：去读一次任务的真相。找不到等待中的任务
-            // 就什么都不画（多数挂起只是聊天里的一次工具断点，并没有对应的 Task）。
+            // 任务卡读的是「当前身份在等哪一条」：身份级状态、不是这一轮的消息落点，无需守卫
             if (sawSuspend) refreshTaskCard()
-            if (!failed && !stopped) setStatus("")
+            if (mine() && !failed && !stopped) setStatus("")
         }
     }
 
@@ -1259,12 +1304,21 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             setStatus("这条回复缺少 message_id，无法提交反馈", true); return
         }
         scope.launch {
+            // v0.36.1 发版前审查批：反馈是「请求→按 index 落地」路径——回包慢的
+            // 那一程里切了会话，index 指向的就是 B 的第 index 行，落不得。
+            val epochAtRequest = sessionEpoch
+            val sidAtRequest = sessionId
+            fun stillHere() = epochAtRequest == sessionEpoch && sidAtRequest == sessionId
             runCatching { Api.feedback(m.messageId, rating) }.onSuccess {
+                if (!stillHere()) return@onSuccess
                 // 网页：同值再点撤销；message_id 缺失那句错误在上方已拦
                 messages = messages.mapIndexed { i, x ->
                     if (i == index) x.copy(feedback = if (x.feedback == rating) null else rating) else x
                 }
-            }.onFailure { if (!logoutIf401(it)) setStatus("反馈失败：" + it.message, true) }
+            }.onFailure {
+                if (!stillHere()) return@onFailure
+                if (!logoutIf401(it)) setStatus("反馈失败：" + it.message, true)
+            }
         }
     }
 
@@ -1373,10 +1427,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         else {
                             // 中缀 togetherWith 必须跟在左值同一行（Kotlin 解析规则），
                             // 六段式写不清爽——先各自攒出 enter/exit 再拼。
+                            // v0.36.1 审查批对齐口径：位移按 -12%/+18% 卡宽直写
+                            // （旧的 -it/12≈-8.3%、it/5=+20% 与提案对不上）；乘积是
+                            // Float，滑入偏移要 Int，收尾取整、判据仍锁在系数上。
                             val enter = slideInHorizontally(
                                 animationSpec = tween(SESSION_SWAP_ENTER_MS,
                                     easing = SESSION_SWAP_EASING),
-                                initialOffsetX = { -it / 12 }) +
+                                initialOffsetX = { (-it * 0.12f).toInt() }) +
                                 scaleIn(
                                     animationSpec = tween(SESSION_SWAP_ENTER_MS,
                                         easing = SESSION_SWAP_EASING),
@@ -1386,7 +1443,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             val exit = slideOutHorizontally(
                                 animationSpec = tween(SESSION_SWAP_EXIT_MS,
                                     easing = SESSION_SWAP_EASING),
-                                targetOffsetX = { it / 5 }) +
+                                targetOffsetX = { (it * 0.18f).toInt() }) +
                                 scaleOut(
                                     animationSpec = tween(SESSION_SWAP_EXIT_MS,
                                         easing = SESSION_SWAP_EASING),
@@ -1439,17 +1496,29 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                             // 旧卡退场中：index 是快照的 index，拿它动全局
                                             // messages 会删错行——点不动才对。
                                             if (!live) return@launch
+                                            // v0.36.1 发版前审查批：persist 是挂起点，保存
+                                            // 在途时用户完全可能切了会话——回包之后的每一处
+                                            // 落地（编辑态回填、消息列表、起重流）都必须还是
+                                            // 出发那一号那一会话，否则整包作废。
+                                            val epochAtAction = sessionEpoch
+                                            val sidAtAction = sessionId
+                                            fun stillHere() =
+                                                epochAtAction == sessionEpoch &&
+                                                    sidAtAction == sessionId
                                             val next = messages.take(index).toMutableList()
                                             next.add(messages[index].copy(content = text))
                                             // T2.2 AC-3：先落服务端，失败就退回编辑态且草稿原样保留
                                             // （网页同判据：commit 里 await 抛错就不 renderMessages，
                                             // 编辑框和字都还在，按下一次「保存」即重试）。
                                             if (!persist(next)) {
-                                                if (index <= messages.lastIndex) {
-                                                    editingIndex = index; editingDraft = text
-                                                } else { editingIndex = null; editingDraft = null }
+                                                if (stillHere()) {
+                                                    if (index <= messages.lastIndex) {
+                                                        editingIndex = index; editingDraft = text
+                                                    } else { editingIndex = null; editingDraft = null }
+                                                }
                                                 return@launch
                                             }
+                                            if (!stillHere()) return@launch
                                             editingIndex = null; editingDraft = null
                                             messages = next
                                             // 网页：编辑用户消息后重新生成后续（重走一轮流式）
@@ -1462,16 +1531,28 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                     onDelete = {
                                         scope.launch {
                                             if (!live) return@launch
+                                            // 同 onSaveEdit：persist 挂起期间切了会话，
+                                            // 回包后不许把 A 的删行结果落成 B 的列表。
+                                            val epochAtAction = sessionEpoch
+                                            val sidAtAction = sessionId
                                             val next = messages.filterIndexed { i, _ -> i != index }
                                             persist(next)
+                                            if (epochAtAction != sessionEpoch ||
+                                                sidAtAction != sessionId) return@launch
                                             messages = next
                                         }
                                     },
                                     onRegen = {
                                         scope.launch {
                                             if (!live) return@launch
+                                            val epochAtAction = sessionEpoch
+                                            val sidAtAction = sessionId
                                             val keep = messages.take(index)
                                             persist(keep)
+                                            // 挂起在途切了会话：截断列表与起重流都作废，
+                                            // 否则 A 的截断挂到 B 上、A 的回答流进 B。
+                                            if (epochAtAction != sessionEpoch ||
+                                                sidAtAction != sessionId) return@launch
                                             messages = keep
                                             streamInto()
                                         }

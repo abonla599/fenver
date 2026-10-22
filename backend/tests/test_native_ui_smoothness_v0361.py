@@ -258,6 +258,70 @@ def test_pull_from_history_is_epoch_guarded():
         "失败分支没有守卫：旧会话的取回报错也会甩到新会话屏上"
 
 
+# ---------- ⑥ 发版前审查批：runStream 主落点 + 挂起后落地的跨会话守卫 ----------
+
+def test_run_stream_landing_sites_are_all_epoch_guarded():
+    """发版前必修：runStream（send/regenerate/stop 共用的流式内核）主落点守卫。
+
+    用户从 A 切到 B 后，A 的流式回答不许 append 进 B 的 messages、更不许被
+    persist 成 B 的内容。不能只锁一处——逐落点钉：
+    ① 发流第一步扣 epoch+sid，比对判据成形为 mine()；
+    ② 流式帧头比对，不匹配整包丢弃（return@collect），并撤下挂在屏上的临时气泡；
+    ③ 断线重连的状态行文案（onStatus）先对号再落；
+    ④ 终局三写法（error 帧 / cancelled / 正常落定）整体在对号分支里；
+    ⑤ 本地取消兜底分支；⑥ 异常分支的消息与状态行；
+    ⑦ 历史取回触发（不对着 B 取回 A 的「这一轮」）；⑧ persist 落地前比对
+    （不守卫会把 A 的一轮 PUT 进 B，或在 B 加载中空列表时把 B 的历史整平）；
+    ⑨ 终局清状态行也先对号。"""
+    c = _chat()
+    body = _block(c, "fun streamInto() {")
+    assert "val epochAtSend = sessionEpoch" in body, \
+        "发流前没扣请求号：流式落地无从判断自己是不是当前会话的那一枪"
+    assert "val sidAtSend = sessionId" in body, \
+        "发流前没扣会话 id：切会话后守卫无从比对"
+    assert "fun mine() = epochAtSend == sessionEpoch && sidAtSend == sessionId" in body, \
+        "epoch+sid 双守卫比对没有成形：锁要求的两处都齐了才算守卫"
+    assert "if (!mine()) {" in body and "return@collect" in body, \
+        "流式帧落点没有对号丢包闸门：旧会话的 token 仍在刷 streamText/trace"
+    assert "streamText = null; streamTrace = emptyList(); streamApproval = null" in body, \
+        "对不上号的孤儿流不再顺手撤下临时气泡：A 的半截字会挂着画在 B 的卡上"
+    assert "onStatus = { if (mine()) setStatus(it) }" in body, \
+        "断线重连的状态行不再对号：A 的重连文案会占掉 B 的状态行"
+    assert body.count("if (mine()) {") >= 3, \
+        "终局/本地取消/异常三支消息落点不再逐支对号（只锁一处不满足本批判据）"
+    assert "if (needHistory && mine()) pullFromHistory()" in body, \
+        "取回历史没先对号：会拿着 B 的会话 id 去「取回 A 的这一轮」"
+    assert "if (mine()) persist(messages)" in body, \
+        "persist 落点没有 epoch+sid 比对：孤儿流会把屏上活列表（可能是 B 的）PUT 错会话"
+    assert "if (mine() && !failed && !stopped) setStatus(\"\")" in body, \
+        "终局清状态行不再对号：A 的收尾会抹掉 B 自己的状态提示"
+    # 比对点总量：定义 1 + 帧闸/onStatus/终局/取消/异常/取回/persist/清状态行 8 处调用
+    assert body.count("mine()") >= 9, \
+        f"runStream 内 epoch+sid 比对只剩 {body.count('mine()')} 处：本批明令不能只锁一处"
+
+
+def test_handler_landing_after_suspend_is_epoch_guarded():
+    """同批扫描其他流式入口：编辑保存/删除/重新生成/反馈都是「入口有 live 闸、
+    但落地在挂起之后」的形状——live 只证发起那一刻，persist/回包在途切了会话，
+    落地照样串。钉每个挂起后落点前都有 epoch+sid 比对。"""
+    c = _chat()
+    body = _block(c, "val live = card.sid == sessionId")
+    assert body.count("val epochAtAction = sessionEpoch") >= 3, \
+        "保存/删除/重生成不再逐支在动作发起时扣请求号"
+    assert body.count("val sidAtAction = sessionId") >= 3, \
+        "保存/删除/重生成不再逐支在动作发起时扣会话 id"
+    # 删除与重生成的截断落地、保存的成功与失败回填——比对必须先于落地
+    assert body.count("sidAtAction != sessionId) return@launch") >= 2, \
+        "删除/重生成的 persist 挂起后没有对号就写回列表/起重流"
+    assert body.count("stillHere()") >= 3, \
+        "编辑保存的回填与落地分支不再走 epoch+sid 比对"
+    fb = _block(c, "fun sendFeedback(index: Int, rating: Int) {")
+    assert "val epochAtRequest = sessionEpoch" in fb and "val sidAtRequest = sessionId" in fb, \
+        "反馈发起时没扣双守卫：按 index 落地可能改的是切过来会话的第 index 行"
+    assert fb.count("if (!stillHere()) return@on") >= 2, \
+        "反馈的成功/失败回包落地不再逐支对号"
+
+
 def test_settings_cache_writes_are_owner_checked():
     """审查批：SettingsCache 每次写入必须比对当前 owner，不一致就丢弃。
 
