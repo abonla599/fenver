@@ -425,6 +425,35 @@ def test_theme_toggle_exists_and_dark_is_the_default():
     assert "#themeBtn .i-moon" in css, "主题图标都挂在页面上，CSS 里却没有切换规则"
 
 
+def test_the_site_chrome_icons_follow_the_fenver_icon_language():
+    """v0.36.1 图标批（官网侧）：太阳/月亮/回顶三枚 UI 图标与 PWA、原生同一套语言。
+
+    雪碧图不跨文档——官网与 PWA 是两份 HTML，跨文件 `<use>` 要引外链，而外链图标
+    正是这批改版要消灭的东西，所以官网这三枚直接按语言内联重画。这条锁钉的是
+    口径而不是复制几何：24 格画板、描边 1.8、圆头圆角、不填充。
+    品牌 logo/插画（若有）不在这条管内：目前整页只有这三枚内联 svg。
+
+    负控：旧的那枚**填充**月亮路径不许回来；画板被改成非 24 格时判据当场红。
+    """
+    page = _page()
+    grids = re.findall(r'<svg viewBox="0 0 (\d+) (\d+)"', page)
+    assert grids, "官网找不到任何内联 svg 图标：三枚 UI 图标被搬去哪了"
+    assert all(g == ("24", "24") for g in grids), f"官网图标画板不再是 24 格网：{grids}"
+    assert 'M21 12.8A9' not in page, "旧填充月亮回来了：语言里除状态点外不填充"
+    css = _css()
+    for sel in (".iconbtn svg", ".totop svg"):
+        rule = re.search(re.escape(sel) + r" \{([^}]*)\}", css)
+        assert rule, f"{sel} 的描边规则丢了：语言口径没人守了"
+        for tooth in ("stroke-width: 1.8", "stroke-linecap: round",
+                      "stroke-linejoin: round", "fill: none", "stroke: currentColor"):
+            assert tooth in rule.group(1), f"{sel} 少了语言口径的一牙：{tooth}"
+    # 回顶箭头带翎口折角（签名二）：两翼末端各有一个 2 单位钩。
+    arrows = re.findall(r'<svg viewBox="0 0 24 24"[^>]*><path d="([^"]+)"/></svg>', page)
+    up = [d for d in arrows if d.startswith("M12 19.4V5.6")]
+    assert up and "7.9 12.4" in up[0] and "16.1 12.4" in up[0], \
+        "回顶箭头丢了折角签名：它得是这套语言里的人"
+
+
 def _css() -> str:
     import os
     from app.web.web_router import SITE_DIR

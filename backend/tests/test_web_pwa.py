@@ -882,6 +882,83 @@ def test_the_settings_list_has_no_teaching_copy():
         assert glyph not in sheet and glyph not in css, f"用了 {glyph} 字形"
 
 
+def test_settings_icons_are_the_fv_sprite_not_bare_paths():
+    """v0.36.1 图标批（网页侧）：设置区图标全部走原创语言的 #fv- symbol，不再留裸 path。
+
+    和原生 Icons.kt 同一套记号：24×24 格网、描边 1.8、圆头圆角、currentColor，
+    切角/折角/3 节点 trace 三枚签名画在 symbol 里。锁四件事：
+
+    1. 设置弹层区（settings → msgTpl）里每枚 24 格 svg 实例只有一个
+       `<use href="#fv-…">`，不许再有裸形状元素（path/circle/rect/…）——
+       上一代通用线性图标就是这么一枚一枚钉在行里的；
+    2. 整页所有 24 格 UI 图标（含侧栏设置钮与登录层眼睛）都走 #fv- 引用；
+       logo/插图不吃这条：更新卡那枚 us-art 是 88×64 画板，按画板尺寸天然在白名单外；
+    3. 雪碧图本体在语言口径里：每枚 symbol 都是 24 格 viewBox、1.8 描边、
+       圆头圆角、stroke=currentColor，除状态点（小半径 fill 圆）外不填充；
+       引用出去的每一枚 id 都有定义；
+    4. 没有借来的图标库/网络字体（feather/lucide/cdnjs/unpkg/…零命中）。
+
+    负控自证：把一枚 use 换回裸 path，判据必须报红。
+    """
+    html = _html()
+
+    def bare_shape_svgs(region: str) -> list:
+        out = []
+        for m in re.finditer(r"<svg\b[^>]*>.*?</svg>", region, re.S):
+            tag = m.group(0)
+            inner = tag[tag.index(">") + 1:-len("</svg>")]
+            if '<use href="#fv-' in inner:
+                continue
+            if re.search(r"<(path|circle|rect|ellipse|line|polyline|polygon)\b", inner):
+                out.append(tag[:80])
+        return out
+
+    sheet = html[html.index('<div class="modal hidden" id="settings"'):html.index('<template id="msgTpl">')]
+    assert bare_shape_svgs(sheet) == [], f"设置区还钉着裸形状图标：{bare_shape_svgs(sheet)}"
+    # 负控：塞一枚旧画法回去，判据必须当场报红（否则这条锁是装饰）。
+    mutated = sheet.replace('<use href="#fv-key"/>',
+                            '<svg viewBox="0 0 24 24"><path d="M4 8h13"/></svg>', 1)
+    assert mutated != sheet, "负控锚点丢了：#fv-key 的 use 引用不在设置区"
+    probe = mutated.replace('<span class="set-ico"><svg viewBox="0 0 24 24" aria-hidden="true">',
+                            '<span class="set-ico"><svg viewBox="0 0 24 24" aria-hidden="true" data-x="1">', 1)
+    assert bare_shape_svgs(probe + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 1h2"/></svg>'), \
+        "负控失效：裸 path 骗过了判据"
+
+    # 设置区里的实例 svg 必须连形状都不带（use-only），而不只是"有 use"：
+    for m in re.finditer(r"<svg\b[^>]*>.*?</svg>", sheet, re.S):
+        inner = m.group(0)[m.group(0).index(">") + 1:-len("</svg>")]
+        assert '<use href="#fv-' in inner and not re.search(
+            r"<(path|circle|rect|ellipse|line|polyline|polygon)\b", inner), \
+            f"设置行图标不是纯 use 引用：{m.group(0)[:80]}"
+
+    # 整页 24 格 UI 图标全部走 sprite（侧栏那枚与登录层眼睛都在内）。
+    body = html[html.index("</defs></svg>"):]
+    inst = re.findall(r'<svg viewBox="0 0 24 24"[^>]*>(.*?)</svg>', body, re.S)
+    assert len(inst) >= 20, f"24 格图标实例少了（现 {len(inst)} 枚）：设置行被搬走了？"
+    for inner in inst:
+        assert inner.startswith('<use href="#fv-'), f"24 格实例没走 #fv- symbol：{inner[:60]}"
+
+    defined = set(re.findall(r'<symbol id="(fv-[a-z-]+)" viewBox="0 0 24 24">', html))
+    used = set(re.findall(r'<use href="#(fv-[a-z-]+)"', body))
+    assert len(defined) >= 20, f"雪碧图 symbol 只剩 {len(defined)} 枚"
+    assert used <= defined, f"引用了没定义的 symbol：{sorted(used - defined)}"
+
+    for sym in re.finditer(r'<symbol id="fv-[a-z-]+" viewBox="0 0 24 24">(.*?)</symbol>', html, re.S):
+        g = sym.group(1)
+        assert 'stroke="currentColor"' in g and 'stroke-width="1.8"' in g \
+            and 'stroke-linecap="round"' in g and 'stroke-linejoin="round"' in g, \
+            f"symbol 不在语言口径（24 格/1.8/圆头/currentColor）：{sym.group(0)[:70]}"
+        # 填充只许出现在状态点上：带 fill="currentColor" 的必须是半径 ≤2.6 的小圆。
+        for dot in re.finditer(r'<circle[^>]*fill="currentColor"[^>]*>', g):
+            r = re.search(r'r="([\d.]+)"', dot.group(0))
+            assert r and float(r.group(1)) <= 2.6, f"状态点之外的填充回来了：{dot.group(0)}"
+
+    low = html.lower()
+    for vendor in ("feather", "lucide", "ionicons", "heroicons", "material icons",
+                   "material-icons", "cdnjs", "unpkg", "jsdelivr", "font-awesome", "@tabler"):
+        assert vendor not in low, f"引了外部图标库/字体：{vendor}"
+
+
 def test_the_sidebar_foot_is_one_row_that_opens_settings():
     """侧栏底部那一行同时是"我是谁"和"进设置"，两件事不必再占两个位置。
 
