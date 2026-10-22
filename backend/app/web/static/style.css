@@ -118,6 +118,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .fv-btn:active { transform: scale(.98); }
 .fv-btn-primary { background: var(--fv-accent); border-color: var(--fv-accent); color: #062518; font-weight: 600; }
 .fv-btn-primary:hover { background: var(--fv-accent-pressed); border-color: var(--fv-accent-pressed); }
+[data-theme="light"] .fv-btn-primary { color: #ffffff; }
 .fv-input { width: 100%; min-height: 44px; padding: 0 var(--fv-space-3); color: var(--fv-text);
             background: var(--fv-surface-2); border: 1px solid var(--fv-line);
             border-radius: var(--fv-radius-md); outline: none; }
