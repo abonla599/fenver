@@ -191,8 +191,10 @@ def test_stale_messages_never_sit_under_the_new_title():
     assert "messages = emptyList()" in body, \
         "切换那一刻没清屏：旧消息仍挂在新标题下等回包"
     assert '"正在读取会话…"' in c, "加载中没有可读的轻量提示"
-    assert "if (sessionLoading) item {" in c, "加载提示没有接进消息列表"
-    assert "} else item {" in c, "空态英雄没有挂在加载态的 else 分支上（接线被改形）"
+    assert "if (card.loading) item {" in c, \
+        "加载提示没有接进转场快照卡的消息列表（动效批：消息区改画 SwapTarget 快照）"
+    assert "} else if (live) item {" in c, \
+        "空态英雄没有挂在加载态的 else 分支上（接线被改形）"
 
 
 def test_settled_scroll_is_single_pass_with_one_next_frame_correction():

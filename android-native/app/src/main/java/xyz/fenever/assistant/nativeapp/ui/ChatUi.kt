@@ -17,7 +17,11 @@ import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -28,7 +32,10 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -133,6 +140,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -328,6 +336,21 @@ private const val MAX_SCROLL_OFFSET = Int.MAX_VALUE / 2
  * 不许把它改大，更不许借它复活 24 帧循环——那正是 v0.36.1 首帧批砍掉的东西。 */
 private const val MAX_BOTTOM_CORRECTIONS = 3
 
+/* v0.36.1 动效批：会话切换的「挤入卡片」（方案 A）节拍与缓动。
+ * 只动消息区这一张卡：新卡从抽屉侧（左）轻微滑入 + 缩放淡入，旧卡向右轻微滑出，
+ * 像从牌堆里把下一张顶出来。进入 260ms、退出 220ms——先走的不许比进来的慢，
+ * 接替感来自这里；缓动 .2f,0f,0f,1f 为标准慢出。
+ * 变换全部走 AnimatedContent 自带的 graphicsLayer 通道，不在每帧重组里做重活。 */
+private const val SESSION_SWAP_ENTER_MS = 260
+private const val SESSION_SWAP_EXIT_MS = 220
+private val SESSION_SWAP_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+/** v0.36.1 动效批：切换转场的目标状态——消息区卡片画的就是这一份快照。
+ * contentKey 只取 sid：流式 token、消息增长会生成新实例但 key 不变（同一张卡就地
+ * 换内容，不触发转场）；只有换会话才换 key，旧卡带着**切换那一刻的 msgs** 退场，
+ * 退出过程中绝不读新会话的 messages。 */
+private class SwapTarget(val sid: String, val msgs: List<UiMsg>, val loading: Boolean)
+
 /* 第 7 轮真机反馈改判：第 4 轮为赶跑"点一下就浮出且关不掉的粘贴气泡"，把整屏
  * 文字工具条换成了空壳——代价是键盘开着时长按输入框也什么都出不来，想粘贴没门。
  * 用户钦定：键盘弹着的时候长按要出「粘贴/全选/选择」那套系统工具条。空壳拆掉，
@@ -355,6 +378,23 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var sessionLoading by remember { mutableStateOf(false) }
     var sessions by remember { mutableStateOf(listOf<SessionSummary>()) }
     var messages by remember { mutableStateOf(listOf<UiMsg>()) }
+    // v0.36.1 动效批：会话切换「挤入卡片」的转场快照（见 SwapTarget 注释）——
+    // 换会话/换消息/换加载态都会生成新实例，但 AnimatedContent 的 contentKey 只认
+    // sid：流式 token 与消息增长不触发转场，只有真正的切换才换卡。
+    val swapTarget = remember(sessionId, messages, sessionLoading) {
+        SwapTarget(sessionId, messages, sessionLoading)
+    }
+    // 首次组合不播：进 App 恢复上一次会话是「恢复现场」，不是「切换」。
+    // swappedOnce 由三个真实切换入口（openSession、新对话、删除当前会话）打标——
+    // 打标前 transitionSpec 恒为 None，首帧零动画；打标后每次都走完整转场。
+    var swappedOnce by remember { mutableStateOf(false) }
+    // 用户关了系统动画（Settings.Global.ANIMATOR_DURATION_SCALE == 0）就不该硬塞动效。
+    // remember 只取一次（每组合反复查系统服务是明确禁止的写法）：
+    // 组合期读一拍 Global.getFloat，此后整棵组件树复用该值，换会话时不再问系统。
+    val animScaleOff = remember {
+        Settings.Global.getFloat(ctx.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }
     // TextFieldValue 而不是 String：程序改文案（点建议标语、发送后清空）时
     // String 版 BasicTextField 会把光标弹回句首，用户接着打字很别扭。
     var input by remember { mutableStateOf(TextFieldValue("")) }
@@ -586,6 +626,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     fun openSession(id: String) {
         val epoch = sessionEpoch + 1
         sessionEpoch = epoch
+        swappedOnce = true   // v0.36.1 动效：从这一次起切换才走「挤入卡片」转场
         sessionId = id; Prefs.lastSessionId = id
         // 换会话必关编辑态：编辑框是【这一条会话里第 index 行】的承诺，换列表不兑现
         editingIndex = null; editingDraft = null
@@ -1262,6 +1303,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         sessionId = ""; Prefs.lastSessionId = ""
                         // v0.36.1：换会话根同样先作废在途的 getSession、清屏再走，
                         // 旧列表不许挂到"新对话"标题下。
+                        // 动效批：这也是一次切换，打过标后走完整转场。
+                        swappedOnce = true
                         sessionEpoch++; sessionLoading = false; messages = emptyList()
                         if (ensureSession()) closeDrawer()
                     }
@@ -1272,6 +1315,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 onModelService = { settingsPage = "providers"; closeDrawer() },
                 onDeleted = { id ->
                     if (id == sessionId) {
+                        swappedOnce = true   // 动效批：删当前会话清零也算一次切换
                         sessionEpoch++   // 在途的那一枪作废：删掉的会话不该再往屏上落字
                         sessionId = ""; Prefs.lastSessionId = ""; messages = emptyList()
                         sessionLoading = false
@@ -1308,89 +1352,153 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     },
                 )
 
-                // ---------- .messages：padding 14/12/6，条目间 gap 22 ----------
-                LazyColumn(Modifier.weight(1f).fillMaxWidth().imePadding()
-                    .padding(horizontal = 12.dp),
-                    state = listState,
-                    contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp),
-                    verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                    if (messages.isEmpty() && !busy && streamText == null) {
-                        if (sessionLoading) item {
-                            // v0.36.1 读取中：旧消息已清、空态英雄不画——一行了无负担的
-                            // 提示顶着，回包后整屏一次性替换。
-                            Text("正在读取会话…", fontSize = 13.sp, color = text3Color(),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp))
-                        } else item {
-                            EmptyHero()
+                // ---------- v0.36.1 动效批：会话切换「挤入卡片」（方案 A） ----------
+                // 只动消息区这一张卡（输入卡/顶栏/抽屉本体不在转场射程）。
+                // AnimatedContent 以 sessionId 为 contentKey：流式 token、消息增减只换
+                // 快照内容不换 key——同一张卡就地换内容，绝不触发转场；只有换会话才换
+                // key 整卡对调。新卡从抽屉侧（左）轻微滑入、放大、淡入，旧卡向右轻微
+                // 滑出、缩小、淡出；新卡 zIndex 恒高于旧卡（旧卡从底下退走）。
+                // 旧卡画 card.msgs——切换那一刻的快照——退出过程不读新会话的 messages；
+                // 交互回调全部 live 闸门把关，旧卡是一张只许看的过场海报。
+                // 时长/缓动见文件级常量；变换走 AnimatedContent 自带的 graphicsLayer
+                // 通道，本转场不在每帧重组里做任何测量级重活。
+                AnimatedContent(
+                    targetState = swapTarget,
+                    contentKey = { it.sid },
+                    transitionSpec = {
+                        // 首次组合不播（swappedOnce 由真实切换入口打标）；
+                        // 系统动画缩放为 0（用户关了动画）时旁路转场，直接换卡。
+                        if (animScaleOff || !swappedOnce)
+                            EnterTransition.None togetherWith ExitTransition.None
+                        else {
+                            // 中缀 togetherWith 必须跟在左值同一行（Kotlin 解析规则），
+                            // 六段式写不清爽——先各自攒出 enter/exit 再拼。
+                            val enter = slideInHorizontally(
+                                animationSpec = tween(SESSION_SWAP_ENTER_MS,
+                                    easing = SESSION_SWAP_EASING),
+                                initialOffsetX = { -it / 12 }) +
+                                scaleIn(
+                                    animationSpec = tween(SESSION_SWAP_ENTER_MS,
+                                        easing = SESSION_SWAP_EASING),
+                                    initialScale = 0.96f) +
+                                fadeIn(tween(SESSION_SWAP_ENTER_MS,
+                                    easing = SESSION_SWAP_EASING))
+                            val exit = slideOutHorizontally(
+                                animationSpec = tween(SESSION_SWAP_EXIT_MS,
+                                    easing = SESSION_SWAP_EASING),
+                                targetOffsetX = { it / 5 }) +
+                                scaleOut(
+                                    animationSpec = tween(SESSION_SWAP_EXIT_MS,
+                                        easing = SESSION_SWAP_EASING),
+                                    targetScale = 0.94f) +
+                                fadeOut(tween(SESSION_SWAP_EXIT_MS,
+                                    easing = SESSION_SWAP_EASING))
+                            enter togetherWith exit
                         }
-                    }
-                    itemsIndexed(messages, key = { _, m -> m.messageId ?: "local-${m.localId}" }, contentType = { _, m -> m.role }) { index, m ->
-                        MessageRow(
-                            m = m,
-                            isLastAssistant = m.role == "assistant" &&
-                                index == messages.lastIndex && streamText == null,
-                            editing = editingIndex == index,
-                            streaming = busy || streamText != null,
-                            seedDraft = editingDraft,
-                            copyTip = copyTip?.takeIf { it.first == index }?.second,
-                            onStartEdit = { editingDraft = null; editingIndex = index },
-                            onCancelEdit = { editingIndex = null; editingDraft = null },
-                            onSaveEdit = { text ->
-                                scope.launch {
-                                    val next = messages.take(index).toMutableList()
-                                    next.add(messages[index].copy(content = text))
-                                    // T2.2 AC-3：先落服务端，失败就退回编辑态且草稿原样保留
-                                    // （网页同判据：commit 里 await 抛错就不 renderMessages，
-                                    // 编辑框和字都还在，按下一次「保存」即重试）。
-                                    if (!persist(next)) {
-                                        if (index <= messages.lastIndex) {
-                                            editingIndex = index; editingDraft = text
-                                        } else { editingIndex = null; editingDraft = null }
-                                        return@launch
-                                    }
-                                    editingIndex = null; editingDraft = null
-                                    messages = next
-                                    // 网页：编辑用户消息后重新生成后续（重走一轮流式）
-                                    if (next[index].role == "user") streamInto()
+                    },
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                ) { card ->
+                    // live = sessionId 当前指着的那张卡；旧卡一进入退场就不再 live。
+                    val live = card.sid == sessionId
+                    // LazyListState 只能挂一枚 LazyColumn：转场那一帧新旧两张共用
+                    // listState 会当场炸。live 卡用外层 listState（贴底效果、近底
+                    // 判据、悬浮箭头都钉在它上面）；旧卡拿一次性 state——220ms 的
+                    // 退场不再关心滚动位置。
+                    val areaListState = if (live) listState else rememberLazyListState()
+                    Box(Modifier.fillMaxSize().zIndex(if (live) 1f else 0f)) {
+                        // ---------- .messages：padding 14/12/6，条目间 gap 22 ----------
+                        LazyColumn(Modifier.fillMaxWidth().imePadding()
+                            .padding(horizontal = 12.dp),
+                            state = areaListState,
+                            contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp),
+                            verticalArrangement = Arrangement.spacedBy(22.dp)) {
+                            if (card.msgs.isEmpty() && (!live || (!busy && streamText == null))) {
+                                if (card.loading) item {
+                                    // v0.36.1 读取中：旧消息已清、空态英雄不画——一行了无负担的
+                                    // 提示顶着；数据回来后 key 没变，在同一次转场里填上，
+                                    // 不发生第二次转场。
+                                    Text("正在读取会话…", fontSize = 13.sp, color = text3Color(),
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp))
+                                } else if (live) item {
+                                    EmptyHero()
                                 }
-                            },
-                            onCopy = { ok -> copyTip = index to (if (ok) "已复制" else "失败") },
-                            onDelete = {
-                                scope.launch {
-                                    val next = messages.filterIndexed { i, _ -> i != index }
-                                    persist(next)
-                                    messages = next
-                                }
-                            },
-                            onRegen = {
-                                scope.launch {
-                                    val keep = messages.take(index)
-                                    persist(keep)
-                                    messages = keep
-                                    streamInto()
-                                }
-                            },
-                            onFeedback = { sendFeedback(index, it) },
-                            onToggleTrace = {
-                                // 人点过就尊重人的选择（落定时的"自动折叠"只没被碰过的面板）
-                                messages = messages.mapIndexed { i, x ->
-                                    if (i == index)
-                                        x.copy(traceExpanded = !x.traceExpanded) else x
-                                }
-                            },
-                            onOpenUrl = onOpenUrl,
-                        )
-                    }
-                    streamText?.let { s ->
-                        item {
-                            StreamingBubble(s, streamTrace, streamTraceOpen,
-                                onToggleTrace = {
+                            }
+                            itemsIndexed(card.msgs, key = { _, m -> m.messageId ?: "local-${m.localId}" }, contentType = { _, m -> m.role }) { index, m ->
+                                MessageRow(
+                                    m = m,
+                                    isLastAssistant = m.role == "assistant" &&
+                                        index == card.msgs.lastIndex && (!live || streamText == null),
+                                    editing = live && editingIndex == index,
+                                    streaming = live && (busy || streamText != null),
+                                    seedDraft = if (live) editingDraft else null,
+                                    copyTip = if (live) copyTip?.takeIf { it.first == index }?.second else null,
+                                    onStartEdit = { if (live) { editingDraft = null; editingIndex = index } },
+                                    onCancelEdit = { if (live) { editingIndex = null; editingDraft = null } },
+                                    onSaveEdit = { text ->
+                                        scope.launch {
+                                            // 旧卡退场中：index 是快照的 index，拿它动全局
+                                            // messages 会删错行——点不动才对。
+                                            if (!live) return@launch
+                                            val next = messages.take(index).toMutableList()
+                                            next.add(messages[index].copy(content = text))
+                                            // T2.2 AC-3：先落服务端，失败就退回编辑态且草稿原样保留
+                                            // （网页同判据：commit 里 await 抛错就不 renderMessages，
+                                            // 编辑框和字都还在，按下一次「保存」即重试）。
+                                            if (!persist(next)) {
+                                                if (index <= messages.lastIndex) {
+                                                    editingIndex = index; editingDraft = text
+                                                } else { editingIndex = null; editingDraft = null }
+                                                return@launch
+                                            }
+                                            editingIndex = null; editingDraft = null
+                                            messages = next
+                                            // 网页：编辑用户消息后重新生成后续（重走一轮流式）
+                                            if (next[index].role == "user") streamInto()
+                                        }
+                                    },
+                                    onCopy = { ok ->
+                                        if (live) copyTip = index to (if (ok) "已复制" else "失败")
+                                    },
+                                    onDelete = {
+                                        scope.launch {
+                                            if (!live) return@launch
+                                            val next = messages.filterIndexed { i, _ -> i != index }
+                                            persist(next)
+                                            messages = next
+                                        }
+                                    },
+                                    onRegen = {
+                                        scope.launch {
+                                            if (!live) return@launch
+                                            val keep = messages.take(index)
+                                            persist(keep)
+                                            messages = keep
+                                            streamInto()
+                                        }
+                                    },
+                                    onFeedback = { if (live) sendFeedback(index, it) },
+                                    onToggleTrace = {
+                                        // 人点过就尊重人的选择（落定时的"自动折叠"只没被碰过的面板）
+                                        if (live) messages = messages.mapIndexed { i, x ->
+                                            if (i == index)
+                                                x.copy(traceExpanded = !x.traceExpanded) else x
+                                        }
+                                    },
+                                    onOpenUrl = onOpenUrl,
+                                )
+                            }
+                            if (live) streamText?.let { s ->
+                                item {
+                                    // 流式气泡属于"当下这张卡"：旧卡退场 220ms 里若新会话
+                                    // 恰好在流式，不许把这轮的字画到旧卡上。
+                                    StreamingBubble(s, streamTrace, streamTraceOpen,
+                                        onToggleTrace = {
                                     streamTraceTouched = true
                                     streamTraceOpen = !streamTraceOpen
                                 },
-                                onOpenUrl = onOpenUrl,
-                                approval = streamApproval,
-                                onApprovalDecision = { decision ->
+                                        onOpenUrl = onOpenUrl,
+                                        approval = streamApproval,
+                                        onApprovalDecision = { decision ->
                                     val cur = streamApproval ?: return@StreamingBubble
                                     if (cur.resolved) return@StreamingBubble
                                     if (decision == "__timeout__") {
@@ -1405,22 +1513,25 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                         streamApproval = cur.copy(resolved = true, decision = decision)
                                     }
                                 })
-                        }
-                    }
-                    // v0.35 #99：卡片挂在消息与流式气泡之后。它是"这一轮停下来等你"，
-                    // 不该夹在历史中间；状态住在 ChatScreen 层，滚出视口再回来还是同一份。
-                    val tc = taskUi
-                    val tv = taskView
-                    if (tc != null && tv != null && tv.visible) {
-                        item(key = "task-card") {
-                            TaskWaitingCard(
-                                view = tv,
-                                draft = tc.draft,
-                                busy = tc.busy,
-                                error = tc.error,
-                                onDraft = { t -> taskCard = taskCard?.copy(draft = t) },
-                                onSubmit = { submitTaskAnswer() },
-                            )
+                                }
+                            }
+                            // v0.35 #99：卡片挂在消息与流式气泡之后。它是"这一轮停下来等你"，
+                            // 不该夹在历史中间；状态住在 ChatScreen 层，滚出视口再回来还是同一份。
+                            // 动效批：任务卡同样只挂 live 卡——它是当前会话的状态，不是快照。
+                            val tc = taskUi
+                            val tv = taskView
+                            if (live && tc != null && tv != null && tv.visible) {
+                                item(key = "task-card") {
+                                    TaskWaitingCard(
+                                        view = tv,
+                                        draft = tc.draft,
+                                        busy = tc.busy,
+                                        error = tc.error,
+                                        onDraft = { t -> taskCard = taskCard?.copy(draft = t) },
+                                        onSubmit = { submitTaskAnswer() },
+                                    )
+                                }
+                            }
                         }
                     }
                 }

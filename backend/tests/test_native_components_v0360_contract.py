@@ -17,6 +17,6 @@ def test_component_primitives_exist():
 
 def test_chat_uses_flat_surfaces_and_stable_keys():
     src = _t("ChatUi.kt")
-    assert "itemsIndexed(messages, key =" in src
+    assert "itemsIndexed(card.msgs, key =" in src  # v0.36.1 动效批：列表画的是转场快照
     assert "userBubbleBrush(" not in src, "用户气泡还在用渐变"
     assert "FenverSurface(" in src

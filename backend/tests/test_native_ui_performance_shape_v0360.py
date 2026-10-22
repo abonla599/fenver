@@ -46,7 +46,7 @@ def test_startup_keeps_apk_sweep_off_the_main_thread():
 
 def test_chat_boot_fans_out_and_rich_text_parses_once_per_text():
     src = _t("ui/ChatUi.kt")
-    assert "itemsIndexed(messages, key =" in src, "消息列表又丢了稳定 key"
+    assert "itemsIndexed(card.msgs, key =" in src, "消息列表又丢了稳定 key"
     assert "remember(text) { parseRichTextParts(text) }" in src, \
         "RichText 又在组合体里对全文重切 ``` 了"
     for call in ("loadModelsNow()", "refreshSessionsNow()", "refreshTaskCard()"):
