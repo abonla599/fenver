@@ -339,6 +339,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
     // ---------- 状态：对照 app.js 的 state / pref ----------
     var sessionId by remember { mutableStateOf(Prefs.lastSessionId) }
+    // v0.36.1 切会话竞态守卫：每一次会话切换都推进号；getSession 回包时号已不是
+    // 自己出发那一号就整包丢弃——连点两下抽屉里两条会话，慢的那一包绝不能落在
+    // 新会话的屏幕上（旧消息挂在新标题下就是这么来的）。
+    var sessionEpoch by remember { mutableIntStateOf(0) }
+    // 会话内容在途标记：加载中屏上不给旧消息留位，画一条轻量读取提示，
+    // 数据回来后一次性替换（对齐网页 renderSessions 的"要么旧要么新，不混"）。
+    var sessionLoading by remember { mutableStateOf(false) }
     var sessions by remember { mutableStateOf(listOf<SessionSummary>()) }
     var messages by remember { mutableStateOf(listOf<UiMsg>()) }
     // TextFieldValue 而不是 String：程序改文案（点建议标语、发送后清空）时
@@ -389,6 +396,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 连续引擎死亡次数，到 2 就自动轮换下一个候选，别让用户干按。
     var enginePickerOpen by remember { mutableStateOf(false) }
     var engineDeadStreak by remember { mutableStateOf(0) }
+    // v0.36.1：引擎候选改由 effect 在 IO 线程枚举（speechServiceCandidates 走
+    // PackageManager 两次 queryIntentServices + 逐个 getApplicationInfo/Label，
+    // 是同步 binder 往返）。从前它挂在弹窗的组合体里——一开弹窗就在主线程组合
+    // 阶段查系统服务，帧直接被查询钉住。null = 这一枪还没回，弹窗先说"正在查找"。
+    var engineCands by remember { mutableStateOf<List<SpeechServiceInfo>?>(null) }
+    LaunchedEffect(enginePickerOpen) {
+        if (!enginePickerOpen) return@LaunchedEffect
+        engineCands = withContext(Dispatchers.IO) { speechServiceCandidates(ctx) }
+    }
     val listState = rememberLazyListState()
     // v0.28：composer 那一块此刻的实测高度（像素）。悬浮「跳到底部」箭头
     // 要悬在它正上方 14dp——箭头是浮层不占布局，位置只能按实测高度算。
@@ -561,11 +577,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
     // switchSession：getSession 拉全量消息（含服务端留存的附件条目）
     fun openSession(id: String) {
+        val epoch = sessionEpoch + 1
+        sessionEpoch = epoch
         sessionId = id; Prefs.lastSessionId = id
         // 换会话必关编辑态：编辑框是【这一条会话里第 index 行】的承诺，换列表不兑现
         editingIndex = null; editingDraft = null
+        // v0.36.1：旧消息不挂在新标题下——切的那一刻就清空进加载态，
+        // 回包一次性替换；再点别的会话会把这一枪的号作废，慢包整包丢弃。
+        messages = emptyList()
+        sessionLoading = true
         scope.launch {
             runCatching { Api.getSession(id) }.onSuccess { d ->
+                if (epoch != sessionEpoch) return@onSuccess   // 已不是当前会话的请求：丢
                 messages = d.messages.map { m ->
                     UiMsg(m.role, m.content, m.message_id, m.model,
                         attachments = (m.attachments ?: emptyList())
@@ -573,7 +596,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         // 落盘回放：重开一条会话也看得见过程（服务端那份 trace 就是为这一句留的）
                         trace = traceFromStored(m.trace))
                 }
-            }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
+                sessionLoading = false
+            }.onFailure {
+                if (epoch == sessionEpoch) {
+                    sessionLoading = false
+                    if (!logoutIf401(it)) setStatus(it.message ?: "", true)
+                }
+            }
         }
     }
 
@@ -591,7 +620,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 输入卡后面（真机反馈「输入框老是挡着上面的输出」，截图里操作行被切掉半截）。
     // 越界的 offset 会被 LazyList 夹到最大滚动位置——"贴到最底"从此不依赖高度测量，
     // 量多高都贴得实。落定分支的退出判据也换成结果导向：最后一项底边已经进了视口
-    // 才算贴完，随帧重贴直到那一刻（上限 24 帧防排版反复抖动）。
+    // 才算贴完（v0.28 当时是随帧重贴直到那一刻、上限 24 帧；v0.36.1 收敛成
+    // "下一帧量一次、没进视口才补一发"，切会话整屏替换不再背着循环跑）。
     // v0.29.0 过程面板与贴底的共存：面板长高搭的是 content 帧重跑的顺风车；落定那一拍
     // 的无条件顶到底会把整块过程连同答案尾行一起送回眼前；生成中分支自带「只有近底才
     // 跟」闸门，上翻阅读不被打断。
@@ -610,19 +640,21 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
         if (streamText == null && !busy) {
             // 落定：无视中途上翻，把答案的最后一行送回眼前（对齐网页 renderMessages
-            // 的无条件 scrollTop=scrollHeight）。先拉进视口，再随帧顶到底，
-            // 直到亲眼看到"最后一项的底边在视口里"。
+            // 的无条件 scrollTop=scrollHeight）。
+            // v0.36.1 改判：从前这里是一条最多 24 帧的随帧重贴循环，而切会话
+            // messages 整屏替换那一拍也会触发它——一进会话就要连贴十几帧的"回底"，
+            // 正是首帧观感卡顿的组成部分。改成两拍单发：先把最后一项拉进视口，
+            // 下一帧亲眼量一次；只有底边还没进视口（条目事后长高那一族）才补一次
+            // 夹到滚动边界。判据与收工条件沿用同一份真相（last 底边 ≤ 视口底）。
             listState.scrollToItem(total - 1, 0)
-            repeat(24) {
-                withFrameNanos { }
-                val now = listState.layoutInfo
-                val t = now.totalItemsCount
-                if (t == 0) return@LaunchedEffect
-                val last = now.visibleItemsInfo.lastOrNull { it.index == t - 1 }
-                // 1.6.8 的 ListItemInfo 没有 .end：底边就是 offset + size。
-                if (last != null && last.offset + last.size <= now.viewportEndOffset) return@LaunchedEffect
-                listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
-            }
+            withFrameNanos { }
+            val now = listState.layoutInfo
+            val t = now.totalItemsCount
+            if (t == 0) return@LaunchedEffect
+            val last = now.visibleItemsInfo.lastOrNull { it.index == t - 1 }
+            // 1.6.8 的 ListItemInfo 没有 .end：底边就是 offset + size。
+            val settledIn = last != null && last.offset + last.size <= now.viewportEndOffset
+            if (!settledIn) listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
         } else {
             val lastVisible = first.visibleItemsInfo.lastOrNull()?.index ?: -1
             if (lastVisible < total - 2) return@LaunchedEffect
@@ -700,9 +732,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 // 回空态重开，绝不让用户对着一条不存在的会话继续编辑重试。
                 e is ApiException && e.status == 404 -> {
                     setStatus("这个会话已在其他端被删除，已为你刷新", true)
+                    sessionEpoch++   // v0.36.1：这条会话已经没了，在途的读取/落地一并作废
                     sessionId = ""
                     Prefs.lastSessionId = ""
                     messages = emptyList()
+                    sessionLoading = false
                     editingIndex = null; editingDraft = null
                     runCatching { sessions = Api.listSessions() }
                     false
@@ -1202,6 +1236,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     // 网页 newChat：先清空再 ensureSession —— 新对话立刻建出来
                     scope.launch {
                         sessionId = ""; Prefs.lastSessionId = ""
+                        // v0.36.1：换会话根同样先作废在途的 getSession、清屏再走，
+                        // 旧列表不许挂到"新对话"标题下。
+                        sessionEpoch++; sessionLoading = false; messages = emptyList()
                         if (ensureSession()) closeDrawer()
                     }
                 },
@@ -1211,7 +1248,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 onModelService = { settingsPage = "providers"; closeDrawer() },
                 onDeleted = { id ->
                     if (id == sessionId) {
+                        sessionEpoch++   // 在途的那一枪作废：删掉的会话不该再往屏上落字
                         sessionId = ""; Prefs.lastSessionId = ""; messages = emptyList()
+                        sessionLoading = false
                     }
                     refreshSessions()
                 },
@@ -1251,8 +1290,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     state = listState,
                     contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                    if (messages.isEmpty() && !busy && streamText == null) item {
-                        EmptyHero()
+                    if (messages.isEmpty() && !busy && streamText == null) {
+                        if (sessionLoading) item {
+                            // v0.36.1 读取中：旧消息已清、空态英雄不画——一行了无负担的
+                            // 提示顶着，回包后整屏一次性替换。
+                            Text("正在读取会话…", fontSize = 13.sp, color = text3Color(),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp))
+                        } else item {
+                            EmptyHero()
+                        }
                     }
                     itemsIndexed(messages, key = { _, m -> m.messageId ?: "local-${m.localId}" }, contentType = { _, m -> m.role }) { index, m ->
                         MessageRow(
@@ -1418,7 +1464,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     // 引擎选择弹窗（第 6 轮）：默认引擎连不上自家服务器时，换引擎
                     // 才是正解。列全部候选 + 跟随系统默认 + 系统语音设置直达。
                     if (enginePickerOpen) {
-                        val cands = speechServiceCandidates(ctx)
+                        // v0.36.1：组合阶段不查系统服务——候选由上面的 LaunchedEffect
+                        // 在 IO 线程枚举好，这里只读结果；没回来时明说"正在查找"。
+                        val cands = engineCands ?: emptyList()
                         val manualPkg = Prefs.voiceEnginePkg
                         val manualOn = Prefs.voiceEngineCls.isNotEmpty()
                         Dialog(onDismissRequest = { enginePickerOpen = false }) {
@@ -1438,14 +1486,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                             applyEngine(null); enginePickerOpen = false
                                             setStatus("已切回系统默认引擎，按住说一句试试")
                                         }
-                                        cands.forEach { info ->
+                                        if (engineCands == null)
+                                            Text("正在查找可用引擎…",
+                                                fontSize = 12.sp, color = text3Color(),
+                                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+                                        if (cands.isNotEmpty()) cands.forEach { info ->
                                             EngineRow(info.label,
                                                 manualOn && info.pkg == manualPkg) {
                                                 applyEngine(info); enginePickerOpen = false
                                                 setStatus("已切到「${info.label}」，按住说一句试试")
                                             }
                                         }
-                                        if (cands.isEmpty())
+                                        if (engineCands != null && cands.isEmpty())
                                             Text("这台手机没枚举到第二个引擎：去「设置 → 应用管理」确认语音服务有没有被停用",
                                                 fontSize = 12.sp, color = text3Color(),
                                                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
