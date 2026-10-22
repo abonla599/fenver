@@ -1,82 +1,98 @@
-/* 配色对齐用户提供的 Qoder 截图：近黑底、低对比描边、薄荷绿强调色。
- * 亮色主题保留，通过 [data-theme="light"] 覆盖变量。
- * 本轮加了第二强调色 --accent-2（紫罗兰蓝），与 --accent 组成主渐变；
- * --accent 本身的语义（描边、链接、focus）不变，admin.css 仍依赖它。
+/* 极简原生：中性表面 + 单强调色 + 发丝线。--fv-* 是与 android-native
+ * FenverTokens 同源的唯一 token 权威，旧变量保留为映射别名，等全站迁移完再删。
+ * 亮色主题只覆盖 --fv-*，别名在 :root 里按 var() 解析，自然跟着换。
  */
 :root {
-  --accent: #2fbf8f;
-  --accent-hover: #29a97f;
-  --accent-soft: rgba(47, 191, 143, .14);
-  --accent-2: #6c7bff;
-  --accent-2-soft: rgba(108, 123, 255, .16);
-  /* 底色从纯灰黑调成深蓝黑：年轻向的氛围感来自这点色温，而不是更多装饰 */
-  --bg: #0b0e15;
-  --bg-soft: #10141d;
-  --bg-hover: #191e2a;
-  --surface: #141824;
-  --text: #e6e9ed;
-  --text-2: #98a1ad;
-  --text-3: #6a7481;
-  --line: #242a3a;
-  --user-bubble: #1d3a49;
-  --user-bubble-2: #2b2f58;
-  --user-text: #e6e9ed;
-  --danger: #f87171;
-  --code-bg: #080a11;
-  /* 登录层那两道弧色：弧要看得见，靠的是交界两侧一暗一亮，所以这两个值必须成对存在
-     （test_web_pwa 钉着"两侧不许是同一个 token"）。--auth-band 是品牌带那一侧，
-     --auth-panel 是表单面板那一侧。 */
-  --auth-band: #06080f;
-  --auth-panel: #151a2b;
-  /* 玻璃拟态表面：半透明色 + backdrop-filter blur，@supports 回退见下方 */
-  --glass: rgba(16, 20, 29, .72);
-  --glass-strong: rgba(20, 24, 36, .88);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 30px rgba(0, 0, 0, .4);
-  --radius: 18px;
+  --fv-bg: #0a0b0e;
+  --fv-surface: #121317;
+  --fv-surface-2: #181a20;
+  --fv-surface-3: #1f222a;
+  --fv-line: #262a31;
+  --fv-text: #f2f3f5;
+  --fv-text-2: #a1a6b0;
+  --fv-text-3: #6f747e;
+  --fv-accent: #3dd598;
+  --fv-accent-pressed: #35c98c;
+  --fv-accent-soft: rgba(61, 213, 152, .12);
+  --fv-ai: #7c83ff;
+  --fv-ai-soft: rgba(124, 131, 255, .16);
+  --fv-danger: #f87171;
+  --fv-code-bg: #08090c;
+  --fv-radius-sm: 8px;
+  --fv-radius-md: 12px;
+  --fv-radius-lg: 16px;
+  --fv-radius-xl: 24px;
+  --fv-space-1: 4px;
+  --fv-space-2: 8px;
+  --fv-space-3: 12px;
+  --fv-space-4: 16px;
+  --fv-space-5: 20px;
+  --fv-space-6: 24px;
+  --fv-space-8: 32px;
+  --fv-dur-quick: 120ms;
+  --fv-dur-standard: 180ms;
+  --fv-dur-emphasized: 240ms;
+  --fv-ease: cubic-bezier(.2, 0, 0, 1);
+  --fv-ease-emphasized: cubic-bezier(.16, 1, .3, 1);
+  --fv-shadow: 0 8px 24px rgba(0, 0, 0, .24);
+
+  /* 旧名过渡别名：现有规则与 admin.css 仍引用它们 */
+  --accent: var(--fv-accent);
+  --accent-hover: var(--fv-accent-pressed);
+  --accent-soft: var(--fv-accent-soft);
+  --accent-2: var(--fv-ai);
+  --accent-2-soft: var(--fv-ai-soft);
+  --bg: var(--fv-bg);
+  --bg-soft: var(--fv-surface);
+  --bg-hover: var(--fv-surface-3);
+  --surface: var(--fv-surface);
+  --text: var(--fv-text);
+  --text-2: var(--fv-text-2);
+  --text-3: var(--fv-text-3);
+  --line: var(--fv-line);
+  --user-bubble: var(--fv-surface-2);
+  --user-bubble-2: var(--fv-surface-2);
+  --user-text: var(--fv-text);
+  --danger: var(--fv-danger);
+  --code-bg: var(--fv-code-bg);
+  /* 登录层那两道弧色必须成对存在且不相等（test_web_pwa 钉着），
+     深色下带子比页面底更暗一档，面板取 surface。 */
+  --auth-band: #08090c;
+  --auth-panel: #121317;
+  --glass: var(--fv-surface);
+  --glass-strong: var(--fv-surface);
+  --shadow: var(--fv-shadow);
+  --radius: var(--fv-radius-lg);
   --sidebar-w: 268px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 [data-theme="light"] {
-  /* 主按钮白字对比度：#0f9d76 只有 3.4:1（AA 要 4.5:1），压到 #0a7d5e 约 5.1:1 */
-  --accent: #0a7d5e;
-  --accent-hover: #086a4f;
-  --accent-soft: #e6f6f0;
-  --accent-2: #5566f0;
-  --accent-2-soft: #e9ecfd;
-  --bg: #ffffff;
-  --bg-soft: #f6f7fb;
-  --bg-hover: #eceef4;
-  --surface: #ffffff;
-  --text: #17191f;
-  --text-2: #5b6472;
-  --text-3: #98a1ae;
-  --line: #e4e7ee;
-  --user-bubble: #e0f5ee;
-  --user-bubble-2: #e6e9fc;
-  --user-text: #17191f;
-  --danger: #dc2626;
-  /* 浅主题下这两档也必须分得开，否则弧边又隐形了。这里走"带子略灰、面板纯白"，
-     步长比深主题小是因为白底上再压一块深灰会把整屏拉成深色登录页；
-     边界靠面板那道上投影补足，不靠色差硬扛。 */
-  --auth-band: #dfe3f2;
+  --fv-bg: #f7f8fa;
+  --fv-surface: #ffffff;
+  --fv-surface-2: #eef0f4;
+  --fv-surface-3: #e4e7ec;
+  --fv-line: #e3e6eb;
+  --fv-text: #16181d;
+  --fv-text-2: #5f6672;
+  --fv-text-3: #8a919c;
+  --fv-accent: #0a7d5e;
+  --fv-accent-pressed: #086a4f;
+  --fv-accent-soft: #e6f6f0;
+  --fv-ai: #5566f0;
+  --fv-ai-soft: #e9ecfd;
+  --fv-danger: #dc2626;
+  --fv-code-bg: #f3f4f6;
+  --fv-shadow: 0 8px 24px rgba(16, 24, 40, .10);
+  --auth-band: #eef0f4;
   --auth-panel: #ffffff;
-  --glass: rgba(255, 255, 255, .78);
-  --glass-strong: rgba(255, 255, 255, .93);
-  --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 8px 24px rgba(16, 24, 40, .07);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {
-  background: var(--bg);
-  /* 氛围光：右上紫罗兰、左下薄荷，固定在视口不随消息滚动。很淡，只是给
-     纯色底一点温度；admin 页 body.admin 用 background 简写把它重置掉。 */
-  background-image:
-    radial-gradient(1100px 520px at 88% -12%, var(--accent-2-soft), transparent 62%),
-    radial-gradient(900px 480px at -12% 108%, var(--accent-soft), transparent 62%);
-  background-attachment: fixed;
+  background: var(--fv-bg);
   color: var(--text);
   font: 15px/1.7 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-text-size-adjust: 100%;
@@ -85,6 +101,35 @@ body {
 button, input, textarea, select { font: inherit; color: inherit; }
 .hidden { display: none !important; }
 .only-mobile { display: none; }
+
+/* ---------- 基础组件（官网 site.css 里是同名同值的另一份） ----------
+ * 现有页面仍用旧类，过渡期这两套并存；新代码只挑 .fv-* 与 --fv-*。 */
+.fv-surface { background: var(--fv-surface); border: 1px solid var(--fv-line); border-radius: var(--fv-radius-lg); }
+.fv-card { background: var(--fv-surface); border: 1px solid var(--fv-line); border-radius: var(--fv-radius-lg); padding: var(--fv-space-4); }
+.fv-row { display: flex; align-items: center; gap: var(--fv-space-3); width: 100%; min-height: 52px;
+          padding: 0 var(--fv-space-4); border: 0; border-bottom: 1px solid var(--fv-line);
+          background: transparent; color: var(--fv-text); text-align: left; }
+.fv-row:last-child { border-bottom: 0; }
+.fv-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px;
+          padding: 0 var(--fv-space-4); border: 1px solid var(--fv-line); border-radius: 999px;
+          background: transparent; color: var(--fv-text); font: inherit; cursor: pointer;
+          transition: background var(--fv-dur-standard) var(--fv-ease), border-color var(--fv-dur-standard) var(--fv-ease); }
+.fv-btn:hover { background: var(--fv-surface-2); }
+.fv-btn:active { transform: scale(.98); }
+.fv-btn-primary { background: var(--fv-accent); border-color: var(--fv-accent); color: #062518; font-weight: 600; }
+.fv-btn-primary:hover { background: var(--fv-accent-pressed); border-color: var(--fv-accent-pressed); }
+.fv-input { width: 100%; min-height: 44px; padding: 0 var(--fv-space-3); color: var(--fv-text);
+            background: var(--fv-surface-2); border: 1px solid var(--fv-line);
+            border-radius: var(--fv-radius-md); outline: none; }
+.fv-input:focus { border-color: var(--fv-accent); }
+.fv-topbar { display: flex; align-items: center; gap: var(--fv-space-2); min-height: 56px;
+             padding: var(--fv-space-2) var(--fv-space-3); background: var(--fv-bg);
+             border-bottom: 1px solid var(--fv-line); }
+.fv-sheet { background: var(--fv-surface); border: 1px solid var(--fv-line); border-bottom: 0;
+            border-radius: var(--fv-radius-xl) var(--fv-radius-xl) 0 0; box-shadow: var(--fv-shadow); }
+.fv-chip { display: inline-flex; align-items: center; gap: var(--fv-space-1); max-width: 100%;
+           padding: 4px 11px; border: 1px solid var(--fv-line); border-radius: 999px;
+           background: var(--fv-surface-2); color: var(--fv-text-2); font-size: 13px; }
 
 /* 细滚动条：粗轨道在深底上像一道疤 */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -105,30 +150,22 @@ button:focus-visible, a:focus-visible, select:focus-visible,
   width: var(--sidebar-w); flex: none;
   display: flex; flex-direction: column; gap: 6px;
   padding: calc(12px + var(--safe-top)) 10px 10px;
-  background: var(--glass);
-  backdrop-filter: blur(16px) saturate(1.5);
-  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  background: var(--fv-surface);
   border-right: 1px solid var(--line);
 }
 .sb-head { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; flex: 1; min-width: 0; }
-/* 品牌字标吃主渐变；clip 不被支持时整块跳过，字还是原色，不会消失 */
-@supports ((-webkit-background-clip: text) or (background-clip: text)) {
-  .brand > span, .auth-brand > span, .empty-state h2 {
-    background: linear-gradient(120deg, var(--accent), var(--accent-2));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-  }
-}
+/* 品牌字单色：同源 App 品牌位已去掉渐变，网页这边不另画一套 */
+.brand > span { color: var(--fv-text); }
+.auth-brand > span { color: var(--fv-accent); }
 .brand-logo { width: 22px; height: 22px; border-radius: 7px; flex: none; }
 
 .sb-nav { display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
   border: 0; background: transparent; color: var(--text);
-  text-align: left; padding: 9px 10px; border-radius: 12px; cursor: pointer; font-size: 14.5px;
-  transition: background .16s ease, color .16s ease;
+  text-align: left; padding: 9px 10px; border-radius: var(--fv-radius-md); cursor: pointer; font-size: 14.5px;
+  transition: background var(--fv-dur-standard) var(--fv-ease), color var(--fv-dur-standard) var(--fv-ease);
 }
 .nav-item:hover { background: var(--bg-hover); }
 .ni-ico { width: 18px; text-align: center; color: var(--text-2); font-size: 15px; }
@@ -138,14 +175,14 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .sb-label { font-size: 11px; color: var(--text-3); padding: 12px 10px 2px; letter-spacing: .05em; }
 .sb-list { flex: 1; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 .sb-group { font-size: 11px; color: var(--text-3); padding: 10px 8px 3px; }
-.sb-item { display: flex; align-items: center; gap: 4px; border-radius: 12px; padding: 0 4px 0 0;
-           position: relative; transition: background .16s ease; }
+.sb-item { display: flex; align-items: center; gap: 4px; border-radius: var(--fv-radius-md); padding: 0 4px 0 0;
+           position: relative; transition: background var(--fv-dur-standard) var(--fv-ease); }
 .sb-item:hover { background: var(--bg-hover); }
-.sb-item.active { background: linear-gradient(120deg, var(--accent-soft), var(--accent-2-soft)); }
-/* 当前会话左侧那道光条：渐变竖条，比一整块高亮更"这是你在的地方" */
+.sb-item.active { background: var(--accent-soft); }
+/* 当前会话左侧那道光条：实心 accent 竖条，选中态只靠这一笔与淡底 */
 .sb-item.active::before {
   content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px;
-  border-radius: 999px; background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  border-radius: 999px; background: var(--accent);
 }
 .sb-item .title {
   flex: 1; min-width: 0; border: 0; background: transparent; text-align: left;
@@ -164,7 +201,7 @@ button:focus-visible, a:focus-visible, select:focus-visible,
            transition: background .16s ease, color .16s ease; }
 .who-row:hover { background: var(--bg-hover); color: var(--text); }
 .avatar { display: grid; place-items: center; flex: none; width: 28px; height: 28px;
-          border-radius: 50%; background: linear-gradient(135deg, var(--accent-soft), var(--accent-2-soft));
+          border-radius: 50%; background: var(--accent-soft);
           color: var(--accent); font-size: 13px; font-weight: 600; text-transform: uppercase; }
 .who-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
             white-space: nowrap; color: var(--text); }
@@ -179,9 +216,7 @@ button:focus-visible, a:focus-visible, select:focus-visible,
   display: flex; align-items: center; gap: 8px;
   padding: calc(10px + var(--safe-top)) 12px 10px;
   border-bottom: 1px solid var(--line);
-  background: var(--glass);
-  backdrop-filter: blur(16px) saturate(1.5);
-  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  background: var(--fv-bg);
 }
 .top-title { font-size: 15px; font-weight: 600; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
@@ -206,17 +241,18 @@ button:focus-visible, a:focus-visible, select:focus-visible,
 .msg-role { font-size: 11px; color: var(--text-3); padding: 0 4px; }
 .msg.user .msg-role { text-align: right; }
 .msg-body { max-width: 100%; overflow-wrap: anywhere; }
-/* 消息气泡化：用户侧吃双色渐变（青调 → 紫调）、右对齐；助手侧柔和表面色、
-   左对齐。DOM 类名没动，只是给两张脸各自一张皮。 */
+/* 消息气泡：用户侧 surface2、助手侧 surface，都是 1px 发丝线 + 16 圆角；
+   不再用深青→靛紫渐变。DOM 类名与左右对齐不变。 */
 .msg.user .msg-body {
-  background: linear-gradient(135deg, var(--user-bubble), var(--user-bubble-2));
+  background: var(--fv-surface-2);
+  border: 1px solid var(--line);
   color: var(--user-text);
-  padding: 10px 15px; border-radius: 20px 20px 6px 20px;
+  padding: 10px 15px; border-radius: var(--fv-radius-lg);
   white-space: pre-wrap; max-width: 82%;
 }
 .msg.assistant .msg-body {
-  width: 100%; background: var(--bg-soft); border: 1px solid var(--line);
-  border-radius: 6px 20px 20px 20px; padding: 12px 16px;
+  width: 100%; background: var(--fv-surface); border: 1px solid var(--line);
+  border-radius: var(--fv-radius-lg); padding: 12px 16px;
 }
 
 .msg-atts { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -436,9 +472,8 @@ a.trace-result-title:hover { text-decoration: underline; }
 
 .empty-state { max-width: 640px; margin: 9vh auto 0; text-align: center; color: var(--text-2); }
 .empty-state h2 { font-size: 20px; color: var(--text); margin: 0 0 6px; font-weight: 600; }
-.empty-state img { width: 54px; height: 54px; border-radius: 16px; margin-bottom: 14px;
-  /* 图标外那圈渐变光晕：空状态是第一屏的门面，值得一点光 */
-  box-shadow: 0 0 0 1px var(--line), 0 0 44px -6px var(--accent-2-soft), 0 0 64px -10px var(--accent-soft); }
+.empty-state img { width: 54px; height: 54px; border-radius: var(--fv-radius-lg); margin-bottom: 14px;
+  box-shadow: 0 0 0 1px var(--line); }
 
 /* ---------- 输入区 ---------- */
 .composer { padding: 6px 16px calc(14px + var(--safe-bottom)); }
@@ -464,51 +499,44 @@ a.trace-result-title:hover { text-decoration: underline; }
 .suggestions button {
   border: 1px solid var(--line); background: var(--surface); color: var(--text-2);
   border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer;
-  transition: transform .18s ease, border-color .18s ease, color .18s ease, box-shadow .18s ease;
+  transition: border-color var(--fv-dur-standard) var(--fv-ease), color var(--fv-dur-standard) var(--fv-ease);
 }
-.suggestions button:hover {
-  border-color: var(--accent); color: var(--accent);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 20px -10px var(--accent-2-soft), 0 4px 12px -6px var(--accent-soft);
-}
+.suggestions button:hover { border-color: var(--accent); color: var(--accent); }
 
 .input-card {
   border: 1px solid var(--line); background: var(--surface);
-  border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px 8px 6px;
-  transition: border-color .18s ease, box-shadow .18s ease;
+  border-radius: var(--radius); box-shadow: none; padding: 8px 8px 6px;
+  transition: border-color var(--fv-dur-standard) var(--fv-ease), box-shadow var(--fv-dur-standard) var(--fv-ease);
 }
-.input-card:focus-within { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 3px var(--accent-soft); }
+.input-card:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 #input { width: 100%; border: 0; background: transparent; resize: none; outline: none; max-height: 40vh; padding: 4px 6px; line-height: 1.6; caret-color: var(--accent); }
 
 .input-foot { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
 .hint { flex: 1; font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hint.err { color: var(--danger); }
 
-/* 按钮统一胶囊形；主按钮吃主渐变。hover 用亮度/位移而不是换底色：渐变底上
-   换纯色 hover 会把渐变吃掉一帧。 */
+/* 按钮：主按钮与发送键都是实心 accent，不再吃双色渐变与光晕 */
 .btn { border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 14px;
-       transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease, filter .18s ease; }
-.btn:hover { background: var(--bg-hover); transform: translateY(-1px); }
-.btn:active { transform: translateY(1px); }
+       transition: background var(--fv-dur-standard) var(--fv-ease), border-color var(--fv-dur-standard) var(--fv-ease), color var(--fv-dur-standard) var(--fv-ease), transform var(--fv-dur-quick) var(--fv-ease); }
+.btn:hover { background: var(--bg-hover); }
+.btn:active { transform: scale(.98); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: 0; color: #062518; font-weight: 600;
-               box-shadow: 0 6px 18px -8px var(--accent-2-soft); }
-.btn-primary:hover { background: linear-gradient(135deg, var(--accent-hover), var(--accent-2)); filter: brightness(1.05); }
+.btn-primary { background: var(--accent); border: 1px solid var(--accent); color: #062518; font-weight: 600; }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
 .btn-block { width: 100%; }
 .btn-small { padding: 5px 12px; font-size: 13px; border-radius: 999px; }
-/* 浅主题下两档渐变色都偏深，白字对比才够；深主题渐变偏亮，继续用深字 */
+/* 浅主题下 accent 偏深，白字对比才够；深主题 accent 偏亮，继续用深字 */
 [data-theme="light"] .btn-primary, [data-theme="light"] .btn-send { color: #ffffff; }
 .btn-send {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: 0; color: #062518;
-  width: 36px; height: 36px; border-radius: 50%; padding: 0; font-size: 17px; font-weight: 700; flex: none;
+  background: var(--accent); border: 1px solid var(--accent); color: #062518;
+  width: 40px; height: 40px; border-radius: 50%; padding: 0; font-size: 17px; font-weight: 700; flex: none;
   display: grid; place-items: center;
-  box-shadow: 0 6px 16px -6px var(--accent-2-soft);
-  transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
+  transition: transform var(--fv-dur-quick) var(--fv-ease), background var(--fv-dur-standard) var(--fv-ease);
 }
-.btn-send:hover { filter: brightness(1.08); transform: translateY(-1px); }
-.btn-send:active { transform: scale(.92); }
+.btn-send:hover { background: var(--accent-hover); }
+.btn-send:active { transform: scale(.98); }
 
 /* 「+」按钮与附件菜单
    注意：按钮同时带 .icon-btn 与 .plus-btn，而 .icon-btn 规则在下方且特异性相同，
@@ -525,11 +553,9 @@ a.trace-result-title:hover { text-decoration: underline; }
 .attach-menu {
   display: flex; gap: 10px;
   max-width: 780px; margin: 0 auto 8px;
-  padding: 10px; border: 1px solid var(--line); border-radius: 16px;
-  background: var(--glass-strong); box-shadow: var(--shadow);
-  backdrop-filter: blur(18px) saturate(1.5);
-  -webkit-backdrop-filter: blur(18px) saturate(1.5);
-  animation: pop .14s ease-out;
+  padding: 10px; border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: pop var(--fv-dur-standard) var(--fv-ease);
 }
 @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -550,11 +576,9 @@ a.trace-result-title:hover { text-decoration: underline; }
 .model-menu {
   display: flex; flex-direction: column; gap: 2px;
   max-width: 780px; margin: 0 auto 8px;
-  padding: 6px; border: 1px solid var(--line); border-radius: 16px;
-  background: var(--glass-strong); box-shadow: var(--shadow);
-  backdrop-filter: blur(18px) saturate(1.5);
-  -webkit-backdrop-filter: blur(18px) saturate(1.5);
-  animation: pop .14s ease-out;
+  padding: 6px; border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: pop var(--fv-dur-standard) var(--fv-ease);
 }
 .model-menu button {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -587,11 +611,9 @@ a.trace-result-title:hover { text-decoration: underline; }
 /* ---------- 设置弹窗 ---------- */
 .modal { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .6); display: flex; align-items: center; justify-content: center; padding: 16px; }
 .modal-card { width: min(720px, 100%); max-height: 88vh; display: flex; flex-direction: column;
-  background: var(--glass-strong); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden;
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5); }
-/* 玻璃拟态的回退：老 WebView 没有 backdrop-filter 时给不透明纯色，半透明底
-   没有模糊托底时会糊成一滩，宁可老老实实不透明。 */
+  background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+/* 老 WebView 没有 backdrop-filter 时的实心回退。现在表面本来就是实心，
+   这段保留为「不支持模糊也不糊字」的显式表态（test_web_pwa 钉着这一档）。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .topbar, .sidebar { background: var(--bg-soft); }
   .modal-card, .attach-menu, .cam-card { background: var(--surface); }
@@ -612,9 +634,9 @@ a.trace-result-title:hover { text-decoration: underline; }
 .set-bar:has(.set-back) .set-title { text-align: left; }
 .set-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 22px; }
 .set-group { margin: 22px 2px 8px; color: var(--text-3); font-size: 12.5px; letter-spacing: .4px; }
-.set-card { background: var(--bg-soft); border-radius: var(--radius); overflow: hidden; }
+.set-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .set-last { margin-top: 18px; }
-.set-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px;
+.set-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px;
   padding: 0 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent;
   color: inherit; text-align: left; cursor: pointer; font-size: 15px;
   text-decoration: none;   /* 这一行既可能是 button 也可能是链接（旧壳的「去下载页」），
@@ -642,7 +664,7 @@ a.trace-result-title:hover { text-decoration: underline; }
 .set-mini[disabled] { opacity: .5; cursor: default; }
 .set-me { display: flex; align-items: center; gap: 12px; padding: 14px; }
 .set-av { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid;
-  place-items: center; background: linear-gradient(135deg, var(--accent-soft), var(--accent-2-soft)); color: var(--accent); font-weight: 600; }
+  place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .set-me-name { flex: 1; min-width: 0; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-tag { flex: none; font-size: 11.5px; color: var(--accent);
@@ -705,10 +727,8 @@ a.trace-result-title:hover { text-decoration: underline; }
 #cameraModal { z-index: 70; background: rgba(0, 0, 0, .86); }
 .cam-card {
   width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px;
-  background: var(--glass-strong); border: 1px solid var(--line); border-radius: 20px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
   padding: 12px; box-shadow: var(--shadow);
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
 }
 .cam-card video, .cam-card canvas {
   width: 100%; max-height: 58vh; border-radius: 12px; background: #000; object-fit: contain;
@@ -797,7 +817,7 @@ a.trace-result-title:hover { text-decoration: underline; }
               background: var(--auth-panel);
               padding: 34px 24px 28px;
               border-radius: 50% 50% 0 0 / 30px 30px 0 0;
-              box-shadow: 0 -14px 34px rgba(0, 0, 0, .28); }
+              box-shadow: 0 -8px 24px rgba(0, 0, 0, .24); }
 .auth.pending .auth-sheet { display: none; }
 .auth.intro-brand .auth-brand { animation: auth-brand-in .4s ease-out backwards; }
 .auth.intro-sheet .auth-sheet { animation: auth-sheet-rise .5s cubic-bezier(.22, .61, .36, 1) backwards; }
@@ -867,16 +887,13 @@ a.trace-result-title:hover { text-decoration: underline; }
  *    一张可以稍后再看的更新卡片不该从它们中间探出来。
  * ② max-width 520px + 居中：平板与桌面窗口下它是一条通栏横幅，难看且像系统弹窗。
  * ③ bottom 留 var(--safe-bottom)：Android 手势条与刘海会盖住卡片下沿那颗按钮。
- * 玻璃面沿用 .auth-sheet 那一路，老 WebView 没有 backdrop-filter 时由下面的
- * @supports 回退成不透明纯色——半透明底配不上模糊就是糊成一团文字。 */
+ * 表面是实心 surface + 一层轻阴影；老 WebView 的回退写法保留，语义上不依赖模糊。 */
 .update-sheet { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%);
                 z-index: 55; width: calc(100% - 24px); max-width: 520px;
                 padding: 18px 18px calc(14px + var(--safe-bottom));
                 border: 1px solid var(--line); border-bottom: 0;
-                border-radius: 18px 18px 0 0; background: var(--glass-strong);
-                backdrop-filter: blur(20px) saturate(1.5);
-                -webkit-backdrop-filter: blur(20px) saturate(1.5);
-                box-shadow: 0 -14px 34px rgba(0, 0, 0, .28); }
+                border-radius: var(--fv-radius-xl) var(--fv-radius-xl) 0 0; background: var(--surface);
+                box-shadow: var(--shadow); }
 .update-sheet.show { animation: update-sheet-rise .38s cubic-bezier(.22, .61, .36, 1) backwards; }
 @keyframes update-sheet-rise { from { opacity: 0; transform: translate(-50%, 16px); }
                                to   { opacity: 1; transform: translate(-50%, 0); } }
@@ -899,7 +916,7 @@ a.trace-result-title:hover { text-decoration: underline; }
 .us-btn:active { transform: scale(.97); }
 .us-ghost { border: 1px solid var(--line); background: transparent; color: var(--text-2); }
 .us-primary { border: 0; color: #fff; text-decoration: none;
-              background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
+              background: var(--accent); }
 .us-primary:hover { filter: brightness(1.06); }
 
 /* ---------------- 按住说话录音浮层（v0.22，与原生 VoiceOverlay 同款三件套） ----------------
@@ -938,10 +955,10 @@ a.trace-result-title:hover { text-decoration: underline; }
    两端的文案与规格由 test_schedule_ui_contract.py 钉在一起。
    ============================================================ */
 .sched-panel {
-  background: var(--glass-strong);
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);              /* 主面板圆角 18 */
-  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  box-shadow: none;
   overflow: hidden;
 }
 .sched-head { padding: 16px 16px 10px; }

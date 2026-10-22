@@ -249,7 +249,7 @@ function setStatus(text, isErr) {
 function applyTheme() {
   document.documentElement.dataset.theme = pref.theme;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = pref.theme === "light" ? "#ffffff" : "#0e1013";
+  if (meta) meta.content = pref.theme === "light" ? "#ffffff" : "#0a0b0e";
   $("themeVal").textContent = pref.theme === "light" ? "浅色" : "深色";
 }
 
