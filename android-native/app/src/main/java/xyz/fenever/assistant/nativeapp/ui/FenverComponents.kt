@@ -244,7 +244,7 @@ fun FenverTopBar(
         ) {
             when {
                 onBack != null -> FenverTopBarAction(onBack) {
-                    IconChevronDown(MaterialTheme.colorScheme.onSurface,
+                    FenverIcon(FenverIcon.ChevronDown, MaterialTheme.colorScheme.onSurface,
                         Modifier.size(20.dp).rotate(90f))
                 }
                 leading != null -> leading()

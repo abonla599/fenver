@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -66,7 +67,7 @@ fun NetMinderCard(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("⚠", fontSize = 13.sp, color = scheme.error)
+            FenverIcon(FenverIcon.Warning, scheme.error, Modifier.size(16.dp))
             Text("连不上网络了，消息暂时发不出去", fontSize = 13.sp,
                 fontWeight = FontWeight.Medium, color = scheme.onSurface)
         }

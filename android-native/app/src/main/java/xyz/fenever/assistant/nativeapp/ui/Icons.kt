@@ -32,13 +32,11 @@ import kotlin.math.sqrt
  *   · 签名三：多段结构用 3 节点 trace 母题（长期记忆、当前模型、日程行点），
  *     与品牌星芒、过程面板的三点呼吸同宗；
  *   · 除状态点（声纹起点、呼吸三点、忙碌转圈、脏标记那颗点、i 那点、闪光灯、
- *     键帽点、太阳）外一律不填充。
+ *     键帽点、太阳、警示感叹那颗点）外一律不填充。
  * 默认 20dp；16dp（行尾附属）与更大尺寸只在调用方确实需要时用。
  * 旧 IconXxx 函数名全部保留为薄包装：既有契约读的是名字，几何只有下面一份。 */
 
-internal const val GRID = 24f          // 格网边长（设计单位）
-internal const val MARGIN = 2f         // 四周留白
-internal const val CONTENT = 20f       // 内容区 = GRID - 2*MARGIN
+internal const val GRID = 24f          // 格网边长（设计单位）；内容区 20×20 由逐枚坐标自守四周 2 单位留白
 internal const val STROKE = 1.8f       // 描边宽度（设计单位）
 internal const val BEVEL = 2.6f        // 闭合外框右上角 45° 切角
 internal const val FOLD = 2f           // 开放线末端的折角长度
@@ -53,8 +51,8 @@ enum class FenverIcon {
     Close, Check, ThumbUp, ThumbDown, Trash, Edit,
     Settings, ModelService, Model, Memory, Schedule, Reminder, Haptic,
     Notification, ClearCache, Info, Refresh, Moon, Mail, OpenExternal,
-    License, ServiceAddress, Logout, SwapAccounts, PasswordKey, Export, Dot,
-    Bolt, Star, SiteDefault, Context,
+    License, ServiceAddress, Logout, SwapAccounts, PasswordKey, Export,
+    Bolt, Star, SiteDefault, Context, Warning,
 }
 
 /** 所有 UI 图标调用的统一入口。rotation/phase 只服务两枚动画母题（忙碌转圈、呼吸三点）。 */
@@ -119,11 +117,11 @@ private fun DrawScope.drawFenverIcon(kind: FenverIcon, tint: Color,
         FenverIcon.SwapAccounts -> drawSwapAccounts(tint, k, sw)
         FenverIcon.PasswordKey -> drawPasswordKey(tint, k, sw)
         FenverIcon.Export -> drawExport(tint, k, sw)
-        FenverIcon.Dot -> dot(tint, k, 12f, 12f, 2.7f)
         FenverIcon.Bolt -> drawBolt(tint, k, sw)
         FenverIcon.Star -> drawStar(tint, k, sw)
         FenverIcon.SiteDefault -> drawSiteDefault(tint, k, sw)
         FenverIcon.Context -> drawContext(tint, k, sw)
+        FenverIcon.Warning -> drawWarning(tint, k, sw)
     }
 }
 
@@ -567,6 +565,14 @@ private fun DrawScope.drawContext(tint: Color, k: Float, sw: Float) {
     seg(tint, sw, k, 4.6f to 7.8f, 19.4f to 7.8f)
     seg(tint, sw, k, 4.6f to 12f, 19.4f to 12f)
     seg(tint, sw, k, 4.6f to 16.2f, 14f to 16.2f)
+}
+
+/** 警示（断网提醒等状态位）：圆角连接三角框（polyC 的 StrokeJoin.Round 就是这枚的软角）
+ *  + 感叹竖与状态点（点走状态点豁免）。 */
+private fun DrawScope.drawWarning(tint: Color, k: Float, sw: Float) {
+    polyC(tint, sw, k, 12f to 3.4f, 21.4f to 19.8f, 2.6f to 19.8f)
+    seg(tint, sw, k, 12f to 9.2f, 12f to 13.6f)
+    dot(tint, k, 12f, 16.6f)
 }
 
 /* ---------------- 旧函数名薄包装 ----------------
