@@ -538,10 +538,14 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
     }
     suspend fun refreshSessionsNow(): String? =
-        runCatching { Api.listSessions() }.fold(
-            onSuccess = { sessions = it; null },
-            onFailure = { if (!logoutIf401(it)) it.message ?: "加载失败" else null },
-        )
+        try {
+            sessions = Api.listSessions()
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!logoutIf401(e)) e.message ?: "加载失败" else null
+        }
     fun refreshSessions() {
         scope.launch { refreshSessionsNow() }
     }
