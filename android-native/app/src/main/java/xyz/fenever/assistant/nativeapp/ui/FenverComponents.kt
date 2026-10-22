@@ -126,9 +126,9 @@ fun FenverRow(
     }
 }
 
-enum class FenverButtonKind { Primary, Secondary, Ghost, Danger }
+enum class FenverButtonKind { Primary, Secondary, Ghost }
 
-/** 实心/次级/幽灵/危险四档，统一 44dp 高，无渐变无光晕。 */
+/** 实心/次级/幽灵三档，统一 44dp 高，无渐变无光晕；禁用态整体降到中性表面。 */
 @Composable
 fun FenverButton(
     text: String,
@@ -138,17 +138,15 @@ fun FenverButton(
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val background = when (kind) {
+    val background = if (!enabled) scheme.surfaceVariant else when (kind) {
         FenverButtonKind.Primary -> scheme.primary
         FenverButtonKind.Secondary -> scheme.surfaceVariant
         FenverButtonKind.Ghost -> Color.Transparent
-        FenverButtonKind.Danger -> scheme.error
     }
-    val ink = when (kind) {
+    val ink = if (!enabled) scheme.onSurfaceVariant else when (kind) {
         FenverButtonKind.Primary -> scheme.onPrimary
         FenverButtonKind.Secondary -> scheme.onSurface
         FenverButtonKind.Ghost -> scheme.primary
-        FenverButtonKind.Danger -> scheme.onError
     }
     val border = when (kind) {
         FenverButtonKind.Secondary -> BorderStroke(1.dp, scheme.outline)

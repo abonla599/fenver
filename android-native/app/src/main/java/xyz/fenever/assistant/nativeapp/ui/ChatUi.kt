@@ -537,16 +537,20 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             if (providers.any { it.usable }) setStatus("")
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
     }
+    suspend fun refreshSessionsNow(): String? =
+        runCatching { Api.listSessions() }.fold(
+            onSuccess = { sessions = it; null },
+            onFailure = { if (!logoutIf401(it)) it.message ?: "加载失败" else null },
+        )
     fun refreshSessions() {
-        scope.launch { runCatching { Api.listSessions() }
-            .onSuccess { sessions = it }.onFailure { logoutIf401(it) } }
+        scope.launch { refreshSessionsNow() }
     }
     LaunchedEffect(Unit) {
         // 三路互不依赖：各发各的，谁先回来谁先落，不让任务卡读接口把模型清单挡住。
-        // 各自的 401/错误处理仍在 loadModelsNow / refreshSessions / refreshTaskCard 里。
+        // 各自的 401/错误处理仍在 loadModelsNow / refreshSessionsNow / refreshTaskCard 里。
         coroutineScope {
             launch { loadModelsNow() }
-            launch { refreshSessions() }
+            launch { refreshSessionsNow() }
             launch { refreshTaskCard() }
         }
     }
@@ -569,12 +573,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    // 抽屉拉开就重拉列表（网页不留快照）
+    // 抽屉拉开时先显示已预取的列表，再由抽屉自己后台刷新；这里只通知它刷新。
     LaunchedEffect(drawerState.currentValue) {
-        if (drawerState.currentValue == DrawerValue.Open) {
-            drawerTick++
-            scope.launch { runCatching { Api.listSessions() }.onSuccess { sessions = it } }
-        }
+        if (drawerState.currentValue == DrawerValue.Open) drawerTick++
     }
 
     // 贴底跟随：流式期间对齐网页 paint()（app.js:1556）——本来贴底才滚，上翻阅读不被打断。
@@ -1192,6 +1193,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             SessionDrawer(
                 tick = drawerTick,
                 currentId = sessionId,
+                initialSessions = sessions,
                 onNewChat = {
                     // 网页 newChat：先清空再 ensureSession —— 新对话立刻建出来
                     scope.launch {
@@ -1207,8 +1209,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     if (id == sessionId) {
                         sessionId = ""; Prefs.lastSessionId = ""; messages = emptyList()
                     }
+                    refreshSessions()
                 },
-                onLoggedOut = onLoggedOut,
+                onRefreshSessions = { refreshSessionsNow() },
                 onClose = { closeDrawer() },
             )
         },

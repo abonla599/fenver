@@ -176,24 +176,6 @@ object ThemeMode {
 fun isWebLight(): Boolean = MaterialTheme.colorScheme.background == FenverTokens.LBg
 
 @Composable
-fun fenverAccent(): Color = MaterialTheme.colorScheme.primary
-
-@Composable
-fun fenverSurface(): Color = MaterialTheme.colorScheme.surface
-
-@Composable
-fun fenverSurface2(): Color = MaterialTheme.colorScheme.surfaceVariant
-
-@Composable
-fun fenverLine(): Color = MaterialTheme.colorScheme.outline
-
-@Composable
-fun fenverText(): Color = MaterialTheme.colorScheme.onSurface
-
-@Composable
-fun fenverText2(): Color = MaterialTheme.colorScheme.onSurfaceVariant
-
-@Composable
 fun AiTheme(content: @Composable () -> Unit) {
     val dark = when (ThemeMode.value) {
         "light" -> false
@@ -221,63 +203,10 @@ fun AiTheme(content: @Composable () -> Unit) {
     )
 }
 
-/* Task 2/3 会替换全部调用点；本任务先保留函数名，内部收成单色 accent，
- * 避免旧调用点继续画渐变与光晕。 */
-@Composable
-fun aiPrimaryBrush(): Brush =
-    SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent)
-
-@Composable
-fun aiSoftBrush(): Brush =
-    SolidColor(if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft)
-
-@Composable
-fun aiVerticalBrush(): Brush =
-    SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent)
-
-@Composable
-fun userBubbleBrush(): Brush =
-    SolidColor(if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft)
-
-@Composable
-fun glassColor(): Color = if (isWebLight()) FenverTokens.LGlass else FenverTokens.Glass
-
-@Composable
-fun glassStrongColor(): Color =
-    if (isWebLight()) FenverTokens.LGlassStrong else FenverTokens.GlassStrong
-
 @Composable
 fun text3Color(): Color = if (isWebLight()) FenverTokens.LText3 else FenverTokens.Text3
 
-/* 氛围光与网页 body 一致：右上紫罗兰、左下薄荷，很淡，不随内容滚动。
- * Task 2/3 移除整层光晕前，这里仍按 token 取色。 */
-@Composable
-fun AiGlowBackground(content: @Composable BoxScope.() -> Unit) {
-    val light = isWebLight()
-    val glow2 = if (light) FenverTokens.LAccent2Soft else FenverTokens.Accent2Soft
-    val glowA = if (light) FenverTokens.LAccentSoft else FenverTokens.AccentSoft
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Canvas(Modifier.fillMaxSize()) {
-            drawCircle(
-                Brush.radialGradient(listOf(glow2, Color.Transparent),
-                    center = Offset(size.width * 0.88f, -size.height * 0.12f),
-                    radius = size.width * 0.72f),
-                radius = size.width * 0.72f,
-                center = Offset(size.width * 0.88f, -size.height * 0.12f))
-            drawCircle(
-                Brush.radialGradient(listOf(glowA, Color.Transparent),
-                    center = Offset(-size.width * 0.12f, size.height * 1.08f),
-                    radius = size.width * 0.66f),
-                radius = size.width * 0.66f,
-                center = Offset(-size.width * 0.12f, size.height * 1.08f))
-        }
-        content()
-    }
-}
-
-/* 品牌记号：直接 use 网页同一枚 icon.png（渐变圆角方块 + 白气泡三点），
- * 不再靠 Canvas 画近似形——用户原话「里面的这个图标也一点都不好看」。
- * 资源在 res/drawable-nodpi/app_icon.png（由 launcher 同一张源图裁出）。 */
+/* 品牌记号：直接使用与桌面图标同源的 app_icon.png。 */
 @Composable
 fun AiBrandMark(sizeDp: Int = 44) {
     Image(
@@ -286,19 +215,6 @@ fun AiBrandMark(sizeDp: Int = 44) {
         modifier = Modifier.size(sizeDp.dp)
             .clip(RoundedCornerShape((sizeDp / 3.14f).dp)),
     )
-}
-
-/* 品牌字：调用点保留到 Task 2；内部先收成单色 accent，不再画渐变。 */
-@Composable
-fun GradientText(text: String, fontSize: Int, modifier: Modifier = Modifier,
-                 weight: FontWeight = FontWeight.SemiBold) {
-    androidx.compose.material3.Text(
-        text, modifier,
-        style = TextStyle(
-            brush = SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent),
-            fontWeight = weight,
-            fontSize = fontSize.sp,
-            lineHeight = (fontSize * 1.4).sp))
 }
 
 /* 等宽段（代码块）统一从这取。 */
