@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -38,115 +39,130 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/* 视觉不另起炉灶：逐 token 照抄旧壳加载的网页 style.css——
- * 深蓝黑底、薄荷绿(--accent) × 紫罗兰蓝(--accent-2) 双强调色、
- * 用户气泡深青→靛紫 135° 渐变、助手气泡是弱表面 + 细描边。
- * 数值全部取自 :root 与 [data-theme="light"] 原文，不猜。 */
-object WebTokens {
-    // ---- dark（网页 :root）----
-    val Bg = Color(0xFF0B0E15)
-    val BgSoft = Color(0xFF10141D)
-    val BgHover = Color(0xFF191E2A)
-    val Surface = Color(0xFF141824)
-    val Text = Color(0xFFE6E9ED)
-    val Text2 = Color(0xFF98A1AD)
-    val Text3 = Color(0xFF6A7481)
-    val Line = Color(0xFF242A3A)
-    val Accent = Color(0xFF2FBF8F)
-    val AccentSoft = Color(0x242FBF8F)      // rgba(47,191,143,.14)
-    val Accent2 = Color(0xFF6C7BFF)
-    val Accent2Soft = Color(0x296C7BFF)     // rgba(108,123,255,.16)
-    val UserBubble = Color(0xFF1D3A49)
-    val UserBubble2 = Color(0xFF2B2F58)
+/* v0.36.0 极简原生：中性表面 + 单强调色 + 发丝线，数值以 spec 4.1 为准。
+ * 深/浅两套共用一组名字；旧调用点用到的过渡 token 保留为同族映射，Task 2/3 再收口。 */
+object FenverTokens {
+    // ---- dark ----
+    val Bg = Color(0xFF0A0B0E)
+    val BgSoft = Color(0xFF181A20)
+    val BgHover = Color(0xFF1F222A)
+    val Surface = Color(0xFF121317)
+    val Surface2 = Color(0xFF181A20)
+    val Surface3 = Color(0xFF1F222A)
+    val Line = Color(0xFF262A31)
+    val Text = Color(0xFFF2F3F5)
+    val Text2 = Color(0xFFA1A6B0)
+    val Text3 = Color(0xFF6F747E)
+    val Accent = Color(0xFF3DD598)
+    val AccentPressed = Color(0xFF35C98C)
+    val AccentSoft = Color(0x1F3DD598)      // rgba(61,213,152,.12)
+    val Ai = Color(0xFF7C83FF)
     val Danger = Color(0xFFF87171)
-    val CodeBg = Color(0xFF080A11)
-    val AuthBand = Color(0xFF06080F)
-    val AuthPanel = Color(0xFF151A2B)
-    val BtnPrimaryInk = Color(0xFF062518)   // 渐变主按钮上的深字
-    val Glass = Color(0xB810141D)           // rgba(16,20,29,.72)
-    val GlassStrong = Color(0xE1141824)     // rgba(20,24,36,.88)
+    val CodeBg = Color(0xFF08090C)
 
-    // ---- light（网页 [data-theme="light"]）----
-    val LAccent = Color(0xFF0A7D5E)
-    val LAccentSoft = Color(0xFFE6F6F0)
-    val LAccent2 = Color(0xFF5566F0)
-    val LAccent2Soft = Color(0xFFE9ECFD)
-    val LBg = Color(0xFFFFFFFF)
-    val LBgSoft = Color(0xFFF6F7FB)
-    val LBgHover = Color(0xFFECEEF4)
+    // ---- light ----
+    val LBg = Color(0xFFF7F8FA)
+    val LBgSoft = Color(0xFFEEF0F4)
+    val LBgHover = Color(0xFFE4E7EC)
     val LSurface = Color(0xFFFFFFFF)
-    val LText = Color(0xFF17191F)
-    val LText2 = Color(0xFF5B6472)
-    val LText3 = Color(0xFF98A1AE)
-    val LLine = Color(0xFFE4E7EE)
-    val LUserBubble = Color(0xFFE0F5EE)
-    val LUserBubble2 = Color(0xFFE6E9FC)
+    val LSurface2 = Color(0xFFEEF0F4)
+    val LSurface3 = Color(0xFFE4E7EC)
+    val LLine = Color(0xFFE3E6EB)
+    val LText = Color(0xFF16181D)
+    val LText2 = Color(0xFF5F6672)
+    val LText3 = Color(0xFF8A919C)
+    val LAccent = Color(0xFF0A7D5E)
+    val LAccentPressed = Color(0xFF086A4F)
+    val LAccentSoft = Color(0xFFE6F6F0)
+    val LAi = Color(0xFF5566F0)
     val LDanger = Color(0xFFDC2626)
-    val LAuthBand = Color(0xFFDFE3F2)
-    val LAuthPanel = Color(0xFFFFFFFF)
-    val LGlass = Color(0xC7FFFFFF)          // rgba(255,255,255,.78)
-    val LGlassStrong = Color(0xEDFFFFFF)    // rgba(255,255,255,.93)
+    val LCodeBg = Color(0xFFF3F4F6)
+
+    // 旧调用点的过渡别名：Accent2 即 AI 身份色，Auth*/Glass* 收编为表面色阶。
+    val Accent2 = Ai
+    val LAccent2 = LAi
+    val Accent2Soft = Color(0x297C83FF)
+    val LAccent2Soft = Color(0x1F5566F0)
+    val BtnPrimaryInk = Bg
+    val AuthBand = Bg
+    val LAuthBand = LBg
+    val AuthPanel = Surface
+    val LAuthPanel = LSurface
+    val Glass = Bg
+    val LGlass = LBg
+    val GlassStrong = Surface
+    val LGlassStrong = LSurface
 }
 
 private val DarkScheme = darkColorScheme(
-    primary = WebTokens.Accent,
-    onPrimary = WebTokens.BtnPrimaryInk,
-    primaryContainer = Color(0xFF173B31),
-    onPrimaryContainer = WebTokens.Accent,
-    secondary = WebTokens.Accent2,
+    primary = FenverTokens.Accent,
+    onPrimary = FenverTokens.BtnPrimaryInk,
+    primaryContainer = FenverTokens.AccentSoft,
+    onPrimaryContainer = FenverTokens.Accent,
+    secondary = FenverTokens.Ai,
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFF232A4D),
-    background = WebTokens.Bg,
-    onBackground = WebTokens.Text,
-    surface = WebTokens.Surface,
-    onSurface = WebTokens.Text,
-    surfaceVariant = WebTokens.BgSoft,
-    onSurfaceVariant = WebTokens.Text2,
-    error = WebTokens.Danger,
-    onError = Color(0xFF2B0F0F),
-    errorContainer = Color(0xFF3A1D20),
-    onErrorContainer = WebTokens.Text,
-    outline = WebTokens.Line,
-    outlineVariant = Color(0xFF1C2230),
+    secondaryContainer = FenverTokens.Surface3,
+    onSecondaryContainer = FenverTokens.Text,
+    tertiary = FenverTokens.Ai,
+    onTertiary = Color.White,
+    background = FenverTokens.Bg,
+    onBackground = FenverTokens.Text,
+    surface = FenverTokens.Surface,
+    onSurface = FenverTokens.Text,
+    surfaceVariant = FenverTokens.Surface2,
+    onSurfaceVariant = FenverTokens.Text2,
+    error = FenverTokens.Danger,
+    onError = FenverTokens.Bg,
+    errorContainer = FenverTokens.Surface3,
+    onErrorContainer = FenverTokens.Danger,
+    outline = FenverTokens.Line,
+    outlineVariant = FenverTokens.Line,
 )
 
 private val LightScheme = lightColorScheme(
-    primary = WebTokens.LAccent,
-    onPrimary = Color.White,        // 浅主题主按钮是白字（网页同款规则）
-    primaryContainer = WebTokens.LAccentSoft,
-    onPrimaryContainer = WebTokens.LAccent,
-    secondary = WebTokens.LAccent2,
-    background = WebTokens.LBg,
-    onBackground = WebTokens.LText,
-    surface = WebTokens.LSurface,
-    onSurface = WebTokens.LText,
-    surfaceVariant = WebTokens.LBgSoft,
-    onSurfaceVariant = WebTokens.LText2,
-    error = WebTokens.LDanger,
-    outline = WebTokens.LLine,
-    outlineVariant = WebTokens.LLine,
+    primary = FenverTokens.LAccent,
+    onPrimary = Color.White,
+    primaryContainer = FenverTokens.LAccentSoft,
+    onPrimaryContainer = FenverTokens.LAccent,
+    secondary = FenverTokens.LAi,
+    onSecondary = Color.White,
+    secondaryContainer = FenverTokens.LSurface2,
+    onSecondaryContainer = FenverTokens.LText,
+    tertiary = FenverTokens.LAi,
+    onTertiary = Color.White,
+    background = FenverTokens.LBg,
+    onBackground = FenverTokens.LText,
+    surface = FenverTokens.LSurface,
+    onSurface = FenverTokens.LText,
+    surfaceVariant = FenverTokens.LSurface2,
+    onSurfaceVariant = FenverTokens.LText2,
+    error = FenverTokens.LDanger,
+    onError = Color.White,
+    errorContainer = FenverTokens.LSurface2,
+    onErrorContainer = FenverTokens.LDanger,
+    outline = FenverTokens.LLine,
+    outlineVariant = FenverTokens.LLine,
 )
 
-// 网页 --radius: 18px 是主刻度；卡片 18、输入 12~14、气泡见各屏
-private val WebShapes = Shapes(
-    extraSmall = RoundedCornerShape(8.dp),
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(18.dp),
+private val FenverShapes = Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
     extraLarge = RoundedCornerShape(24.dp),
 )
 
-// 网页正文 15px/1.7；标题 600 字重——克制本身就是这套设计的识别度
-private val WebTypography = Typography(
-    headlineSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 20.sp),
-    titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp),
-    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 15.sp),
-    bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 26.sp),
-    bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 15.sp, lineHeight = 25.sp),
-    bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.5.sp),
-    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp),
-    labelMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 13.sp),
-    labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 11.sp),
+// spec 4.2：系统字体，字重/行高按档位收口，局部尺寸才允许在调用点写死。
+private val FenverTypography = Typography(
+    headlineSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 28.sp, lineHeight = 36.sp),
+    titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 22.sp, lineHeight = 30.sp),
+    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp, lineHeight = 24.sp),
+    bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 24.sp),
+    bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp),
+    labelLarge = TextStyle(fontWeight = FontWeight.Medium, fontSize = 13.sp, lineHeight = 18.sp),
+    labelMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 13.sp, lineHeight = 18.sp),
+    labelSmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp),
 )
 
 /* 外观三态（system/dark/light）：设置页「外观」行换成分段控件后，
@@ -157,7 +173,25 @@ object ThemeMode {
 }
 
 @Composable
-fun isWebLight(): Boolean = MaterialTheme.colorScheme.background == WebTokens.LBg
+fun isWebLight(): Boolean = MaterialTheme.colorScheme.background == FenverTokens.LBg
+
+@Composable
+fun fenverAccent(): Color = MaterialTheme.colorScheme.primary
+
+@Composable
+fun fenverSurface(): Color = MaterialTheme.colorScheme.surface
+
+@Composable
+fun fenverSurface2(): Color = MaterialTheme.colorScheme.surfaceVariant
+
+@Composable
+fun fenverLine(): Color = MaterialTheme.colorScheme.outline
+
+@Composable
+fun fenverText(): Color = MaterialTheme.colorScheme.onSurface
+
+@Composable
+fun fenverText2(): Color = MaterialTheme.colorScheme.onSurfaceVariant
 
 @Composable
 fun AiTheme(content: @Composable () -> Unit) {
@@ -171,7 +205,7 @@ fun AiTheme(content: @Composable () -> Unit) {
     // themes.xml 把冷启动首帧钉成深色画布（App 默认外观），但外观是运行时可换的
     // 三态——浅色/跟随系统落浅色时，底色必须跟着换回白，否则闪屏只是换了个颜色。
     // 换肤的每一拍在这里重设底色：资源管首帧，这里管之后的一切帧。
-    val bg = if (dark) WebTokens.Bg else WebTokens.LBg
+    val bg = if (dark) FenverTokens.Bg else FenverTokens.LBg
     val view = LocalView.current
     DisposableEffect(bg) {
         var c: Context = view.context
@@ -181,59 +215,47 @@ fun AiTheme(content: @Composable () -> Unit) {
     }
     MaterialTheme(
         colorScheme = if (dark) DarkScheme else LightScheme,
-        shapes = WebShapes,
-        typography = WebTypography,
+        shapes = FenverShapes,
+        typography = FenverTypography,
         content = content,
     )
 }
 
-/* 主渐变 accent→accent-2（CSS 120°/135° 都是左上→右下方向，Compose 默认
- * linearGradient 即此方向）：主按钮、发送键、品牌字标共用。 */
+/* Task 2/3 会替换全部调用点；本任务先保留函数名，内部收成单色 accent，
+ * 避免旧调用点继续画渐变与光晕。 */
 @Composable
 fun aiPrimaryBrush(): Brush =
-    Brush.linearGradient(if (isWebLight())
-        listOf(WebTokens.LAccent, WebTokens.LAccent2)
-    else listOf(WebTokens.Accent, WebTokens.Accent2))
+    SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent)
 
-/* 弱渐变 accent-soft→accent-2-soft（120°）：侧栏活动行底、头像底。
- * 网页 .sb-item.active / .avatar 用的都是这层"淡到几乎看不出方向"的双色渐变，
- * 不是实心强调色——实心会把整行烧成一块亮斑，这里要的只是"哪一行被选中"。 */
 @Composable
 fun aiSoftBrush(): Brush =
-    Brush.linearGradient(if (isWebLight())
-        listOf(WebTokens.LAccentSoft, WebTokens.LAccent2Soft)
-    else listOf(WebTokens.AccentSoft, WebTokens.Accent2Soft))
+    SolidColor(if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft)
 
-/* 180°（自上而下）渐变：活动会话左侧那根 3px 小竖条。 */
 @Composable
 fun aiVerticalBrush(): Brush =
-    Brush.verticalGradient(if (isWebLight())
-        listOf(WebTokens.LAccent, WebTokens.LAccent2)
-    else listOf(WebTokens.Accent, WebTokens.Accent2))
+    SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent)
 
-/* 用户气泡渐变：深青→靛紫（网页 .msg.user .msg-body 135°）。 */
 @Composable
 fun userBubbleBrush(): Brush =
-    Brush.linearGradient(if (isWebLight())
-        listOf(WebTokens.LUserBubble, WebTokens.LUserBubble2)
-    else listOf(WebTokens.UserBubble, WebTokens.UserBubble2))
+    SolidColor(if (isWebLight()) FenverTokens.LAccentSoft else FenverTokens.AccentSoft)
 
 @Composable
-fun glassColor(): Color = if (isWebLight()) WebTokens.LGlass else WebTokens.Glass
+fun glassColor(): Color = if (isWebLight()) FenverTokens.LGlass else FenverTokens.Glass
 
 @Composable
 fun glassStrongColor(): Color =
-    if (isWebLight()) WebTokens.LGlassStrong else WebTokens.GlassStrong
+    if (isWebLight()) FenverTokens.LGlassStrong else FenverTokens.GlassStrong
 
 @Composable
-fun text3Color(): Color = if (isWebLight()) WebTokens.LText3 else WebTokens.Text3
+fun text3Color(): Color = if (isWebLight()) FenverTokens.LText3 else FenverTokens.Text3
 
-/* 氛围光与网页 body 一致：右上紫罗兰、左下薄荷，很淡，不随内容滚动。 */
+/* 氛围光与网页 body 一致：右上紫罗兰、左下薄荷，很淡，不随内容滚动。
+ * Task 2/3 移除整层光晕前，这里仍按 token 取色。 */
 @Composable
 fun AiGlowBackground(content: @Composable BoxScope.() -> Unit) {
     val light = isWebLight()
-    val glow2 = if (light) WebTokens.LAccent2Soft else WebTokens.Accent2Soft
-    val glowA = if (light) WebTokens.LAccentSoft else WebTokens.AccentSoft
+    val glow2 = if (light) FenverTokens.LAccent2Soft else FenverTokens.Accent2Soft
+    val glowA = if (light) FenverTokens.LAccentSoft else FenverTokens.AccentSoft
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Canvas(Modifier.fillMaxSize()) {
             drawCircle(
@@ -266,16 +288,14 @@ fun AiBrandMark(sizeDp: Int = 44) {
     )
 }
 
-/* 渐变裁切文字（网页 .brand span / .auth-brand span / .empty-state h2 的
- * background: linear-gradient(...) + -webkit-background-clip: text）。 */
+/* 品牌字：调用点保留到 Task 2；内部先收成单色 accent，不再画渐变。 */
 @Composable
 fun GradientText(text: String, fontSize: Int, modifier: Modifier = Modifier,
                  weight: FontWeight = FontWeight.SemiBold) {
-    val brush = aiPrimaryBrush()
     androidx.compose.material3.Text(
         text, modifier,
         style = TextStyle(
-            brush = brush,
+            brush = SolidColor(if (isWebLight()) FenverTokens.LAccent else FenverTokens.Accent),
             fontWeight = weight,
             fontSize = fontSize.sp,
             lineHeight = (fontSize * 1.4).sp))

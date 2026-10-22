@@ -160,7 +160,7 @@ import xyz.fenever.assistant.nativeapp.StreamNeedHistoryException
 import xyz.fenever.assistant.core.TaskCard
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.AiGlowBackground
-import xyz.fenever.assistant.nativeapp.theme.WebTokens
+import xyz.fenever.assistant.nativeapp.theme.FenverTokens
 import xyz.fenever.assistant.nativeapp.theme.aiPrimaryBrush
 import xyz.fenever.assistant.nativeapp.theme.glassColor
 import xyz.fenever.assistant.nativeapp.theme.glassStrongColor
@@ -1611,7 +1611,7 @@ private fun fmtSize(bytes: Long): String = when {
 /* .bg-hover 不在 MaterialTheme 色板上（网页它是独立一档），按主题直取。 */
 @Composable
 internal fun hoverBg(): Color =
-    if (isWebLight()) WebTokens.LBgHover else WebTokens.BgHover
+    if (isWebLight()) FenverTokens.LBgHover else FenverTokens.BgHover
 
 /* ---------------- 输入卡（第 12 轮真机反馈：豆包三态输入区） ----------------
  * 收起态一行：[声纹] [发消息或按住说话…] [＋]；
@@ -1841,7 +1841,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                                 glow = if (isWebLight()) Color(0x592451D6) else Color(0x595C8CFF),
                                 stroke = Color.Transparent) {
                                 IconArrowUp(if (isWebLight()) Color.White
-                                            else WebTokens.BtnPrimaryInk, Modifier.size(20.dp))
+                                            else FenverTokens.BtnPrimaryInk, Modifier.size(20.dp))
                             }
                         }
                     }
@@ -2188,7 +2188,7 @@ private fun MessageRow(m: UiMsg, isLastAssistant: Boolean, editing: Boolean,
                 if (!mine && m.trace.isNotEmpty())
                     TracePanel(m.trace, m.traceExpanded, null, onToggleTrace, onOpenUrl)
                 if (mine) Text(m.content, fontSize = 15.sp, lineHeight = 24.sp,
-                    color = if (isWebLight()) WebTokens.LText else WebTokens.Text)
+                    color = if (isWebLight()) FenverTokens.LText else FenverTokens.Text)
                 else RichText(m.content, scheme.onSurface)
             }
         }
@@ -2727,11 +2727,11 @@ internal fun RichText(text: String, color: Color) {
                 Text(seg.trimEnd('\n'),
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     fontSize = 13.sp, lineHeight = 21.sp,
-                    color = WebTokens.Text,
+                    color = FenverTokens.Text,
                     modifier = Modifier.fillMaxWidth()
                         .padding(vertical = 4.dp)
-                        .background(WebTokens.CodeBg, preShape)
-                        .border(1.dp, WebTokens.Line, preShape)
+                        .background(FenverTokens.CodeBg, preShape)
+                        .border(1.dp, FenverTokens.Line, preShape)
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                         .horizontalScroll(rememberScrollState()))
             } else if (seg.isNotBlank()) Text(boldAnnotated(seg, color),

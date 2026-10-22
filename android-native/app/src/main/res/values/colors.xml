@@ -4,9 +4,11 @@
          ic_launcher_background），改成 teal→indigo 渐变，源在
          res/drawable/ic_launcher_background.xml，画的那一份出自
          tools/render-app-icon.ps1。这一格删掉，不留一份对不上的旧色值。 -->
-    <!-- v0.28 白闪屏修复：窗口底色钉成 App 默认深色主题的画布（theme/WebTokens.Bg）。
+    <!-- v0.28 白闪屏修复：窗口底色钉成 App 默认深色主题的画布（theme/FenverTokens.Bg）。
          旧值走 Material.Light 的白底——键盘 adjustResize 把窗口顶起时，输入卡下面
          露出的那一条正是这个底色，深色界面配一条大白板（真机反馈「键盘出现之前
-         会出现白色闪屏」）。浅色外观下由 theme/Theme.kt 在换肤时实时改回白底。 -->
-    <color name="window_bg">#FF0B0E15</color>
+         会出现白色闪屏」）。浅色外观下由 theme/Theme.kt 在换肤时实时改回白底。
+         v0.36.0：值改成极简 token 的 #0A0B0E；八位写法带 FF 不透明前缀，与
+         Kotlin 的 Color(0xFF0A0B0E) 逐字节对照（test_bottom_clamp... 锁着）。 -->
+    <color name="window_bg">#FF0A0B0E</color>
 </resources>
