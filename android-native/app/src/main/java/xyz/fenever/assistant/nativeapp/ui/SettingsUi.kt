@@ -75,6 +75,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -149,6 +150,15 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
                   onModelsChanged: () -> Unit, onLoggedOut: () -> Unit,
                   canExport: Boolean) {
     val scope = rememberCoroutineScope()
+
+    /* 弹层内容自带走/留的动画，窗口层再叠一套系统默认动画就成了两段；
+     * 只关窗口动画，返回键、遮罩与内容行为一概不动。 */
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.parent as? DialogWindowProvider)?.window
+        window?.setWindowAnimations(0)
+        onDispose { }
+    }
 
     // ---------- 跨页共享的状态（对照 app.js 的 state / 各 sync* 函数） ----------
     var identityTick by remember { mutableIntStateOf(0) }          // 名单/身份变了就 ++

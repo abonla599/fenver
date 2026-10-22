@@ -154,14 +154,19 @@ def test_code_fence_content_is_still_verbatim():
     """``` 围栏里不许做加粗：代码中的 `**`（指针、幂运算、Glob）原样保留。
 
     这一条防的是"顺手把 boldSegments 提到 split 之前"：那样 `int **p` 会变成 int p，
-    用户复制到 IDE 里才发现少了两个星号。判据钉在分支位置上——加粗只许出现在
-    围栏判定的 else 那一侧，代码那一侧仍然把 seg 直接交给等宽 Text()。
+    用户复制到 IDE 里才发现少了两个星号。围栏切分自 v0.36.0 起住进纯函数
+    `parseRichTextParts`（RichText 只 remember 一次解析结果），锚点跟着搬家，但判据
+    不放宽——加粗只许出现在围栏判定的 else 那一侧，代码那一侧仍然把 seg 直接交给
+    等宽 Text()，且 RichText 必须真的接上这个解析函数。
     """
     src = _text(CHAT_UI)
     body = _kotlin_body(src, "internal fun RichText", "RichText")
-    assert '"```"' in body, "RichText 不再区分代码围栏：围栏里的星号会被当成加粗吃掉"
-    hit = [l.strip() for l in body.splitlines() if "boldAnnotated(" in l]
-    assert hit and all("else" in l for l in hit), \
-        f"加粗渲染不在 else（非代码）分支里：{hit}"
+    parser = _kotlin_body(src, "internal fun parseRichTextParts", "parseRichTextParts")
+    assert '"```"' in parser, "围栏切分不再识别 ```：围栏里的星号会被当成加粗吃掉"
+    assert "parseRichTextParts(" in body, "RichText 没接上围栏解析：屏上会是一整段裸文本"
+    at_else = body.find("else if (seg.isNotBlank())")
+    at_bold = body.find("boldAnnotated(")
+    assert at_else >= 0 and at_bold > at_else, "加粗渲染不在 else（非代码）分支里"
+    assert body.count("boldAnnotated(") == 1, "正文渲染出现了第二处加粗调用，分支位置不再可判"
     assert "Text(seg.trimEnd" in body, \
         "代码分支不再原样上屏：围栏内的 ** 会被吃掉，复制出来的代码是坏的"
