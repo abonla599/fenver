@@ -63,15 +63,20 @@ def test_swap_transition_is_keyed_by_session_id_only():
 def test_enter_exit_transform_offsets_and_scales_are_exact():
     c = _chat()
     spec = _block(c, "transitionSpec = {")
-    # 新卡从抽屉侧（左）挤进来：初偏移 -1/12 宽 + 0.96 起放 + 淡入
-    assert "initialOffsetX = { -it / 12 }" in spec, "入场不再是抽屉侧轻微滑入"
+    # 新卡从抽屉侧（左）挤进来：初偏移 -12% 卡宽 + 0.96 起放 + 淡入
+    # （发版前审查批对齐口径：旧形状 -it/12≈-8.3% 与提案的 -12% 不符，改直写系数；
+    # 乘积是 Float、偏移要 Int，.toInt() 收口也是形状的一部分，一并钉死）
+    assert "initialOffsetX = { (-it * 0.12f).toInt() }" in spec, "入场偏移不再是 -12% 卡宽"
     assert "initialScale = 0.96f" in spec, "入场不再从 .96 放大"
     assert "fadeIn(" in spec, "入场丢了淡入"
-    # 旧卡向右退出：+1/5 宽滑出 + 缩到 .94 + 淡出
-    assert "targetOffsetX = { it / 5 }" in spec, "退场不再向右滑出"
+    # 旧卡向右退出：+18% 卡宽滑出 + 缩到 .94 + 淡出（旧 it/5=+20% 与提案 +18% 不符）
+    assert "targetOffsetX = { (it * 0.18f).toInt() }" in spec, "退场偏移不再是 +18% 卡宽"
     assert "targetScale = 0.94f" in spec, "退场不再缩小到 .94"
     assert "fadeOut(" in spec, "退场丢了淡出"
     assert "togetherWith" in spec, "enter/exit 没有拼成 ContentTransform"
+    # 反向钉：旧的分数写法不许以任何形式回到转场里
+    assert "-it / 12" not in spec and "it / 5" not in spec, \
+        "转场里又出现旧的 -1/12、+1/5 分数偏移：口径必须是小数系数直写"
 
 
 def test_swap_durations_and_easing_are_the_pinned_constants():
