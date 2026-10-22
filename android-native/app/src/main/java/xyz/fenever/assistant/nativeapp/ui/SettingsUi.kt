@@ -80,6 +80,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -127,6 +128,29 @@ import java.io.File
  *  MainActivity 看到这一枚旗标就把 ChatScreen 整个重挂（等价网页 location.reload）。 */
 internal var reenterRequested = false
 
+/* v0.36.1 进程级设置缓存：设置弹层每次打开都重新进组合，remember 的初值从空起算，
+ * 首帧必然先画一帧等待态（"正在读取…/计算中…"）再跳成真值——这就是"打开设置卡一下"
+ * 的观感来源。这里把上一次成功读到的值按 owner 存一份，重进直接用它起算，后台照常
+ * 刷新；换身份（owner 变了）整份失效，绝不把上一个人的条数/清单画给下一个人。
+ * 缓存只当首帧初值用，不是第二真相：刷新成功即覆盖，失败留着旧值但错误照说。 */
+private object SettingsCache {
+    var owner = ""                              // 这份缓存属于谁；"" = 还没人写过
+    var memoryCount = ""                        // 「N 条」/「50+ 条」/""
+    var scheduleVal = ""                        // 「N 天有安排」/""
+    var memoryItems: List<JsonObject> = emptyList()   // 记忆页首帧（仅未搜索那一份）
+    var provShared: List<ProvRow> = emptyList()       // 模型服务页首帧（共享）
+    var provMine: List<ProvRow> = emptyList()         // 模型服务页首帧（我的）
+    var provMyDefault: String? = null
+    var cacheBytes = -1L                        // 设备级事实，不随身份失效；-1 = 从没算过
+
+    fun adopt(who: String) {
+        if (owner == who) return
+        owner = who
+        memoryCount = ""; scheduleVal = ""; memoryItems = emptyList()
+        provShared = emptyList(); provMine = emptyList(); provMyDefault = null
+    }
+}
+
 private val SET_PAGES = mapOf(
     "providers" to "模型服务", "accounts" to "账户", "persona" to "角色设定",
     "memory" to "长期记忆", "reminders" to "提醒", "schedule" to "日程",
@@ -169,8 +193,11 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
     // 这里直接用它当首帧，后台刷新照旧。
     var providers by remember { mutableStateOf(cachedProviders) }
     var serverDefault by remember { mutableStateOf<String?>(null) }
-    var memoryCount by remember { mutableStateOf("") }
-    var scheduleVal by remember { mutableStateOf("") }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
+    // v0.36.1：先把缓存认领到当前身份（换人整份作废），再用它当首帧初值——
+    // 命中缓存时这一帧直接是旧真值，后台刷新只负责把它变得更准，不再有空窗。
+    SettingsCache.adopt(Prefs.currentEntry()?.userId ?: "")
+    var memoryCount by remember { mutableStateOf(SettingsCache.memoryCount) }
+    var scheduleVal by remember { mutableStateOf(SettingsCache.scheduleVal) }        // 「N 天有安排」              // 「N 条」/「50+ 条」/""
 
     /* 每页各存一份滚动位置：主列表滑到靠下 → 点进任意子页 → 返回，不再弹回顶部
        （真机反馈：以前返回后得从头重新滑到靠下才能继续操作）。弹层切页时整体不离开
@@ -192,13 +219,24 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
     }
 
     LaunchedEffect(Unit) {
-        runCatching { val r = Api.models(); providers = r.models; serverDefault = r.default }
-        modelsLoaded = true
-        runCatching {
-            val el = Api.listMemory(50)
-            val arr = (el as? JsonObject)?.get("memories") as? JsonArray
-            memoryCount = if (arr == null) "" else
-                if (arr.size >= 50) "50+ 条" else "${arr.size} 条"
+        // v0.36.1：模型清单和记忆条数互不依赖——旧版串着拉，内存条那一格要等两次
+        // 往返才动。现在两路各发各的，谁先回来谁先落。失败仍被 runCatching 收住：
+        // 有缓存时旧值继续显示（后台刷新失败不该把已经看见的数字抹掉），
+        // 错误不吞——模型那一格的"正在读取"判据（modelsLoaded）照旧会说话。
+        coroutineScope {
+            launch {
+                runCatching { val r = Api.models(); providers = r.models; serverDefault = r.default }
+                modelsLoaded = true
+            }
+            launch {
+                runCatching {
+                    val el = Api.listMemory(50)
+                    val arr = (el as? JsonObject)?.get("memories") as? JsonArray
+                    val c = if (arr == null) "" else
+                        if (arr.size >= 50) "50+ 条" else "${arr.size} 条"
+                    if (c.isNotEmpty()) { memoryCount = c; SettingsCache.memoryCount = c }
+                }
+            }
         }
         /* v0.34.2：这里不再拉 /health 的 build 往「版本」那一行拼。以前这一行是
          * 「壳 v0.34.0 · 服务端 v0.34.1」两个号码并排，而 build 那截本身就是
@@ -232,11 +270,13 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
                     onSwitched = { reenterRequested = true; onLoggedOut() })
                 "persona" -> PersonaPage(onNote = { setStatus(it) },
                     onClose = { onOpenPage(null) })
-                "memory" -> MemoryPage(onCountChanged = { memoryCount = it },
+                "memory" -> MemoryPage(onCountChanged = { memoryCount = it;
+                        SettingsCache.memoryCount = it },
                     onNote = { setStatus(it, true) })
                 "schedule" -> SchedulePage(onNote = { t, err -> setStatus(t, err) },
                     onRequireAuth = onRequireAuth,
-                    onValChanged = { scheduleVal = it })
+                    onValChanged = { scheduleVal = it
+                        if (it.isNotEmpty()) SettingsCache.scheduleVal = it })
                 "feedback" -> FeedbackPage(onNote = { t, err -> setStatus(t, err) },
                     onClose = { onOpenPage("") })
                 "reminders" -> RemindersPage(onNote = { t, err -> setStatus(t, err) })
@@ -532,7 +572,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     permTick
     val notifGranted = ReminderChannels.notificationsGranted(ctx)
     var hapticsOn by remember { mutableStateOf(Prefs.hapticsEnabled) }
-    var cacheBytes by remember { mutableStateOf(-1L) }
+    // v0.36.1：缓存大小是磁盘扫描的结果，同一进程里没必要每次开设置都重算一遍再让人
+    // 等"计算中…"——初值吃上一次算好的，后台重量一次覆盖它；只有进程内头一次才算没数。
+    var cacheBytes by remember { mutableStateOf(SettingsCache.cacheBytes) }
     var confirmClearCache by remember { mutableStateOf(false) }
     val appCtx = ctx.applicationContext
     fun dirBytes(f: File?): Long = f?.let {
@@ -540,7 +582,10 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             .getOrDefault(0L)
     } ?: 0L
     fun cacheBytesNow(): Long = dirBytes(appCtx.cacheDir) + dirBytes(appCtx.externalCacheDir)
-    LaunchedEffect(Unit) { cacheBytes = withContext(Dispatchers.IO) { cacheBytesNow() } }
+    LaunchedEffect(Unit) {
+        val b = withContext(Dispatchers.IO) { cacheBytesNow() }
+        cacheBytes = b; SettingsCache.cacheBytes = b
+    }
 
     // .set-me：身份头行，平铺在一级列表之上
     Spacer(Modifier.height(8.dp))
@@ -740,13 +785,14 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                 TextButton(onClick = {
                     confirmClearCache = false
                     scope.launch {
-                        cacheBytes = withContext(Dispatchers.IO) {
+                        val b = withContext(Dispatchers.IO) {
                             runCatching {
                                 listOfNotNull(appCtx.cacheDir, appCtx.externalCacheDir)
                                     .forEach { d -> d.listFiles()?.forEach { it.deleteRecursively() } }
                             }
                             cacheBytesNow()
                         }
+                        cacheBytes = b; SettingsCache.cacheBytes = b
                     }
                 }) { Text("清理") }
             },
@@ -1162,8 +1208,11 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
     var query by remember { mutableStateOf("") }      // state.memoryQuery（已提交）
     var qInput by remember { mutableStateOf("") }
     var addInput by remember { mutableStateOf("") }
-    var items by remember { mutableStateOf(listOf<JsonObject>()) }
-    var loading by remember { mutableStateOf(true) }
+    var items by remember { mutableStateOf(SettingsCache.memoryItems) }
+    // v0.36.1：首帧不许落在「loading=true 且空列表」的白屏上。有缓存先画缓存
+    // （loading 直接false起算，后台刷新回来整体替换）；只有进程内头一次进来
+    // 才走"正在读取…"。刷新失败时列表不清空，错误单独用 err 说。
+    var loading by remember { mutableStateOf(SettingsCache.memoryItems.isEmpty()) }
     var err by remember { mutableStateOf("") }
 
     fun reload() {
@@ -1177,6 +1226,9 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
                 } ?: JsonArray(emptyList())
                 items = arr.mapNotNull { it as? JsonObject }
                 if (query.isBlank()) {
+                    // 只有"未搜索"那一份进缓存：搜索结果不进首帧，别把一次过滤
+                    // 当成这个人的全部记忆留给下一次。
+                    SettingsCache.memoryItems = items
                     onCountChanged(if (items.size >= 50) "50+ 条" else "${items.size} 条")
                 }
             } catch (e: Exception) {
@@ -1204,6 +1256,12 @@ private fun MemoryPage(onCountChanged: (String) -> Unit, onNote: (String) -> Uni
     if (err.isNotEmpty()) {
         Text(err, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
             modifier = Modifier.padding(vertical = 6.dp))
+    }
+    // v0.36.1：真正的第一次（没缓存可画）说"正在读取…"，而不是整屏空白等人；
+    // 判空只发生在加载完成之后（下面那条空态照旧被 !loading 挡着）。
+    if (loading && items.isEmpty() && err.isEmpty()) {
+        Text("正在读取记忆…", fontSize = 14.sp, color = text3Color(),
+            modifier = Modifier.padding(vertical = 8.dp))
     }
     if (!loading && items.isEmpty() && err.isEmpty()) {
         Text(if (query.isNotBlank()) "没有匹配的记忆" else "还没有记忆",
@@ -1302,9 +1360,14 @@ private data class Preset(val label: String, val baseUrl: String, val model: Str
 private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChanged) {
     val scope = rememberCoroutineScope()
     val admin = Prefs.role == "admin"
-    var shared by remember { mutableStateOf(listOf<ProvRow>()) }
-    var mine by remember { mutableStateOf(listOf<ProvRow>()) }
-    var myDefault by remember { mutableStateOf<String?>(null) }
+    // v0.36.1：旧版每次进这一页 remember 都从空列表起算，等于"清空再 reload"——
+    // 重进先闪一帧空架。现在初值吃按 owner 存的上一份清单，后台刷新整体替换；
+    // provLoaded 只有真拿到过回包才置真，骨架只在进程内首次（无缓存）出现。
+    var shared by remember { mutableStateOf(SettingsCache.provShared) }
+    var mine by remember { mutableStateOf(SettingsCache.provMine) }
+    var myDefault by remember { mutableStateOf<String?>(SettingsCache.provMyDefault) }
+    var provLoaded by remember { mutableStateOf(
+        SettingsCache.provShared.isNotEmpty() || SettingsCache.provMine.isNotEmpty()) }
     var presets by remember { mutableStateOf(listOf<Preset>()) }
     var err by remember { mutableStateOf("") }
     // 表单：editingId 空串 → 新建；formScope="admin"/"mine" 决定走哪面
@@ -1346,7 +1409,13 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
                                 ?: false))
                     }
                 }
+                provLoaded = true
+                SettingsCache.provShared = shared
+                SettingsCache.provMine = mine
+                SettingsCache.provMyDefault = myDefault
             }.onFailure {
+                // 后台刷新失败：已显示的清单原样留着（缓存不许被一次失败抹掉），
+                // 但错误必须照说——吞错误才是这里真正要防的事故。
                 err = "模型服务没拉到：" + (it.message ?: "")
             }
         }
@@ -1396,6 +1465,11 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
     Spacer(Modifier.height(12.dp))
     if (err.isNotEmpty()) {
         Text(err, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(bottom = 12.dp))
+    }
+    // 骨架只属于"进程内第一次"：有缓存时上面两栏画的是旧真值，不该再垫一层等待态。
+    if (!provLoaded && shared.isEmpty() && mine.isEmpty()) {
+        Text("正在读取模型服务…", fontSize = 13.sp, color = text3Color(),
             modifier = Modifier.padding(bottom = 12.dp))
     }
     // —— 共享模型（管理员维护）——
