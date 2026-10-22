@@ -9,7 +9,9 @@
 ③ 四个 UI 文件（ChatUi/SettingsUi/SessionListUi/ScheduleUi）不再拿 Unicode 字形当图标：
    被钉死的字形名单只收"图标位"用过的那些；正文语义符号（· … ⚠ ⚠️ ✅ ❌ 以及
    「设置 → 模型服务」箭头路径文案、· 分隔符）明确豁免，不许误伤；
-④ 没引入 Material Icons 或任何外部图标库（零依赖是这族的来由：Canvas 直绘）。
+④ 没引入 Material Icons 或任何外部图标库（零依赖是这族的来由：Canvas 直绘）；
+⑤ 收尾批（本文件最后一次改动）：两份"批外"文件 NetMinder.kt / FenverComponents.kt
+   也收进同一入口——⚠ 字形与 IconXxx 旧名直调在这两处出现即红。
 读法沿用本仓库判例：把 Kotlin 源码当文本读（剥注释，注释不上屏），负控自证在先。
 """
 import re
@@ -142,3 +144,39 @@ def test_no_material_icons_or_external_icon_library():
     gradle = _text(GRADLE)
     for dep in ("material-icons", "iconloader", "coil-svg"):
         assert dep not in gradle, f"build.gradle 混进外部图标依赖 {dep}"
+
+
+# 收尾批收进同规的两份"批外"文件：四页之外的图标调用点。
+LOOSE = [UI / "NetMinder.kt", UI / "FenverComponents.kt"]
+
+
+def test_the_detector_catches_the_loose_ends():
+    """负控自证⑤：新尺子抓得到收尾前的两种旧写法，不是又一条检不到东西的绿线。"""
+    legacy_wrapper = re.compile(r"(?<![A-Za-z0-9_])Icon[A-Z][A-Za-z0-9_]*\(")
+    assert legacy_wrapper.search('IconChevronDown(onSurface, mod)'), "尺子抓不到 IconXxx 直调"
+    assert legacy_wrapper.search("val icon = IconMenu(tint)"), \
+        "赋值右侧的 IconXxx 直调也必须抓到：名字前有空格不是豁免"
+    assert legacy_wrapper.search("leadingIcon(painter)") is None, \
+        "leadingIcon 这类非包装名不许误伤"
+    assert _icon_glyph_literals('Text("⚠", fontSize = 13.sp)', banned=["⚠"]) == ["⚠"], \
+        "尺子抓不到 NetMinder 收尾前的 ⚠ 字形图标"
+
+
+def test_loose_ends_routed_through_the_same_entry():
+    """收尾批：NetMinder 的警示位与 FenverComponents 的回退箭头都改走统一入口，
+    从此这两份文件与四页同规——字形图标、旧名直调、丢分发臂，任一出现即红。"""
+    icons = _strip_kotlin_comments(_text(ICONS))
+    assert re.search(r"FenverIcon\.Warning -> drawWarning\(", icons), \
+        "警示枚没有分发臂：NetMinder 的告警图标无处可画"
+    assert "private fun DrawScope.drawWarning(" in icons, "drawWarning 几何本体没了"
+    legacy_wrapper = re.compile(r"(?<![A-Za-z0-9_])Icon[A-Z][A-Za-z0-9_]*\(")
+    for f in LOOSE:
+        src = _strip_kotlin_comments(_text(f))
+        assert not _icon_glyph_literals(src, banned=["⚠"]), \
+            f"{f.name} 又拿 ⚠ 字形当状态图标了：用 FenverIcon.Warning"
+        assert not legacy_wrapper.search(src), \
+            f"{f.name} 还有绕过统一入口的 IconXxx(...) 直调：调用必须走 FenverIcon(…)"
+        assert "FenverIcon(FenverIcon." in src, f"{f.name} 一枚图标都不走统一入口了？"
+    nm = _strip_kotlin_comments(_text(UI / "NetMinder.kt"))
+    assert "FenverIcon(FenverIcon.Warning" in nm, \
+        "NetMinder 断网卡片的警示位没接 FenverIcon.Warning：⚠ 又回去了"
