@@ -240,8 +240,9 @@ def test_page_only_calls_routes_that_exist():
     的另一面：编一个不存在的地址挂到按钮上，点了才 404，比不接更糟。带 id 的那一段
     是 encodeURIComponent 现拼的，所以以 `/` 结尾的字面量按前缀判，其余整段判。
 
-    两个 security 端点是 v0.36.3 工单第三节的契约，第一批只写前端；第二批实现后
-    它们会自己落进路由表，这条锁不需要再改。
+    两个 security 端点是 v0.36.3 工单第三节的契约，第一批只写前端。名单不是永久的
+    放行条：`test_pending_contract_routes_must_stay_absent_until_batch_two` 会在它们
+    真进路由表的那一刻变红，逼合并者清空名单并恢复"路由必须 hit"。
     """
     routes = _route_pairs()
     # 查询串不是路径的一部分：`/v1/memory/decay?decay_factor=` 认的是 /v1/memory/decay
@@ -254,6 +255,31 @@ def test_page_only_calls_routes_that_exist():
             hit = [tpl for _, tpl in routes if _matches(tpl, path)]
         assert hit or path in PENDING_CONTRACT_ROUTES, \
             f"admin.js 里的 {path} 在后端路由表上找不到"
+
+
+def test_pending_contract_routes_must_stay_absent_until_batch_two():
+    """自过期闸：名单里的端点一旦真进路由表，这条当场变红。
+
+    第一批需要放行"还没实现"；第二批落地后继续放行，等于让 `test_page_only_calls_
+    routes_that_exist` 也放行"端点被删掉"——端点存在与否都不再影响任何断言。
+
+    红了以后按三步收口（v0.36.3 最终合并）：
+    1. 清空 `PENDING_CONTRACT_ROUTES`（或删掉这套机制）；
+    2. 删掉/改写 `test_pending_route_allowlist_is_exactly_the_security_contract`
+       （它现在钉的是"名单恰好两条"，收口后它的前提已经不存在）；
+    3. 让它上面那条测试重新要求两个 security 路径命中真实路由表，并按 HTTP 方法
+       校验（当前只比路径；`export.csv` 被 `{fb_id}` 模板误判成 405 可用的教训）。
+    """
+    routes = _route_pairs()
+    live = sorted(
+        path for path in PENDING_CONTRACT_ROUTES
+        if any(_matches(tpl, path) for _, tpl in routes)
+    )
+    assert not live, (
+        f"{live} 已经在后端路由表上了：PENDING 名单到期。合并第二批时必须清空名单、"
+        "删掉 test_pending_route_allowlist_is_exactly_the_security_contract，"
+        "并恢复 security 两个路径必须 hit（且方法匹配）的断言"
+    )
 
 
 def test_endpoints_that_had_no_button_are_now_wired():

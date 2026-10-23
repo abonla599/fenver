@@ -136,18 +136,18 @@
     <section class="sec hidden" id="secSecurity" role="tabpanel" aria-labelledby="tab-security">
       <div class="sec-head">
         <h2>安全</h2>
-        <p class="pane-note">窗口内的事件计数、来源与账号排行、审计文件状态。事件与审计都只读。页面可见且停在本分区时每 20 秒自动刷新。</p>
+        <p class="pane-note">统计窗口内的事件计数、来源与账号排行、审计文件状态；事件列表不随这个窗口筛选。事件与审计都只读。页面可见且停在本分区时每 20 秒自动刷新，自动刷新会回到第一页。</p>
       </div>
       <div class="toolbar">
         <label class="field inline" for="secWindow">
-          <span>窗口</span>
+          <span>统计窗口</span>
           <select id="secWindow">
             <option value="1h">1 小时</option>
             <option value="24h" selected>24 小时</option>
             <option value="7d">7 天</option>
           </select>
         </label>
-        <span class="dim" id="secAutoNote">自动刷新仅在本分区可见时运行</span>
+        <span class="dim" id="secAutoNote">自动刷新仅在本分区可见时运行，刷新会回到第一页</span>
         <button id="btnSecReload" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读取"></button>
       </div>
       <div class="empty hidden" id="secState" aria-live="polite"></div>
