@@ -816,7 +816,9 @@ def test_user_list_never_leaks_credentials():
     row = [u for u in res.json()["users"] if u["user_id"] == created["user_id"]][0]
     assert set(row) == {"user_id", "username", "role", "disabled",
                         "must_change_password",
-                        "created_at", "last_seen", "sessions"}
+                        "created_at", "last_seen", "sessions",
+                        # v0.36.3：最早会话到期时刻（ISO 或 null）
+                        "next_session_expiry_at"}
 
 
 def test_the_session_count_is_reported_without_the_tokens():

@@ -11,8 +11,11 @@
 3. 凭据明文只在"必须被看见"的那一次出现：令牌见于注册与登录的响应，以及管理员
    轮换的响应。任何端点都不许复述调用方刚提交的密码或令牌。
 """
+import datetime
+import math
 import os
 import re
+import time
 from collections import defaultdict
 from typing import List, Optional
 
@@ -31,9 +34,15 @@ from app.core import config_store
 from app.core import providers
 # v0.24 T3.4：管理端每一次账号改动都往 audit.jsonl 追加一条（只增、脱敏在这一层里）。
 from app.core import audit
+# v0.36.3：安全监控（有界、脱敏的 auth.* 事件账）。record() 只做内存操作，
+# 这里绝不能直接写文件——这些调用点全在请求热路径上。
+from app.core import security_log
+# 来源 IP 的唯一口径搬到了 client_ip（authz 也要用，且不能反向 import 本模块）。
+from app.core.client_ip import LOOPBACK, client_ip
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
-from app.core.auth import AuthError, DEVICE_SECRET_INACTIVE_SECONDS, hash_secret
+from app.core.auth import (AuthError, DEVICE_SECRET_INACTIVE_SECONDS,
+                           SESSION_TOKEN_TTL_SECONDS, hash_secret)
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -331,22 +340,13 @@ def _note_reset(ip: str) -> None:
     _note(_RESETS, ip)
 
 
-LOOPBACK = ("127.0.0.1", "::1")
-
-
 def _client_ip(request: Request) -> str:
-    # 只信 Cloudflare 那一个头。X-Forwarded-For 是一条可被追加的链，取首项等于
-    # 取攻击者写的第一句假话；cf-connecting-ip 由边缘改写，才是可信来源。
-    #
-    # 但"边缘改写过"这件事得有个判据，否则它只是一句信仰：现网的形状是后端只绑
-    # 回环、公网流量必须经 cloudflared 从 127.0.0.1 转进来，所以**对端不是回环**
-    # 就意味着这个请求没走隧道——那它带来的 cf-connecting-ip 是客户端自己写的。
-    # 少这一道，哪天有人把 PORT/HOST 改成对外监听，五本限流账就同时变成可绕过的。
-    peer = request.client.host if request.client else ""
-    real = request.headers.get("cf-connecting-ip", "").strip()
-    if real and peer in LOOPBACK:
-        return real
-    return peer or "unknown"
+    """薄包装：口径本体在 app/core/client_ip.py，全仓只有那一份 CF 头逻辑。
+
+    这个名字必须留着——app/web/web_router.py 从这里 import 它（APK 代取限频与
+    本模块共用同一个来源口径），直接删掉会让那条路由在导入期就崩。
+    """
+    return client_ip(request)
 
 
 
@@ -392,6 +392,12 @@ def _too_many(retry_after: int) -> HTTPException:
                          headers={"Retry-After": str(retry_after)})
 
 
+def _note_rate_limited(request: Request, ip: str, account, detail: str) -> None:
+    """429 的埋点：记"被哪本账挡下"，不记请求体、不记 query。"""
+    security_log.record("auth.rate_limited", request=request, ip=ip,
+                        account=account, status=429, detail=detail)
+
+
 def throttle_paid_upstream(request: Request, principal) -> None:
     """凡是会真金白银叫一次上游模型的入口，都走这一本账：60 秒 20 次，键 IP + 登录身份。
 
@@ -414,6 +420,7 @@ def throttle_paid_upstream(request: Request, principal) -> None:
     """
     ip = _client_ip(request)
     if not chat_allowed(ip, principal.user_id):
+        _note_rate_limited(request, ip, principal.user_id, "limit.chat")
         raise _too_many(chat_retry_after(ip, principal.user_id))
     note_chat(ip, principal.user_id)
 
@@ -440,6 +447,7 @@ def throttle_orchestrate_attempt(request: Request, principal) -> None:
     if not _sliding_peek(_ORCHESTRATE_ATTEMPTS, key,
                          ORCHESTRATE_ATTEMPT_WINDOW_SECONDS,
                          MAX_ORCHESTRATE_ATTEMPTS_PER_WINDOW):
+        _note_rate_limited(request, ip, principal.user_id, "limit.orchestrate")
         raise _too_many(_sliding_retry_after(_ORCHESTRATE_ATTEMPTS, key,
                                              ORCHESTRATE_ATTEMPT_WINDOW_SECONDS))
     _sliding_note(_ORCHESTRATE_ATTEMPTS, key)
@@ -564,15 +572,17 @@ def register(req: RegisterRequest, request: Request, response: Response):
     if _throttled(ip):
         # 与登录共用同一份失败预算。少了这一句，"撞名要计费"就是空话：格子照扣、
         # 谁也不收，枚举用户名依然是免费的。
+        _note_rate_limited(request, ip, req.username, "limit.register")
         raise _too_many(FAILURE_WINDOW_SECONDS)
     if _registrations_full(ip):
+        _note_rate_limited(request, ip, req.username, "limit.register")
         raise _too_many(REGISTER_WINDOW_SECONDS)
     try:
         principal, token, device_secret = _store().register_for_new_session(
             username=req.username, password=req.password,
             security_answers=req.security_answers)
     except AuthError as e:
-        raise _register_error(e, ip)
+        raise _register_error(e, ip, req.username)
     _note_registration(ip)
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
     _store_device_secret(response, device_secret)
@@ -584,7 +594,7 @@ def register(req: RegisterRequest, request: Request, response: Response):
             "device_secret": device_secret}
 
 
-def _register_error(e: AuthError, ip: str) -> HTTPException:
+def _register_error(e: AuthError, ip: str, username: str = "") -> HTTPException:
     """把存储层的失败原因翻译成状态码，并给唯一那条可被滥用的信道计费。"""
     if e.taken:
         # 实话保留，但它现在是免凭据的用户名枚举信道：每问一次扣一格登录预算。
@@ -593,8 +603,14 @@ def _register_error(e: AuthError, ip: str) -> HTTPException:
         # 成功一次"来洗账。换 IP 意味着它背后真有一张分布式网络，那时限流本来也挡不住，
         # 只是把成本抬上去。
         _note_failure(ip)
+        security_log.record("auth.fail", ip=ip, account=username,
+                            route="/v1/auth/register", status=409,
+                            detail="register.rejected")
         return HTTPException(status_code=409, detail=e.reason)
     # 用户名、密码、三条找回答案本身不合格：都是当事人自己能改好的，不计费也不该挡别人的路。
+    security_log.record("auth.fail", ip=ip, account=username,
+                        route="/v1/auth/register", status=422,
+                        detail="register.rejected")
     return HTTPException(status_code=422, detail=e.reason)
 
 
@@ -607,12 +623,16 @@ def login(req: LoginRequest, request: Request, response: Response):
     """
     ip = _client_ip(request)
     if _throttled(ip):
+        _note_rate_limited(request, ip, req.username, "limit.login")
         raise _too_many(FAILURE_WINDOW_SECONDS)
     try:
         principal, token, device_secret = _store().login_for_new_session(
             username=req.username, password=req.password)
     except AuthError as e:
         _note_failure(ip)
+        security_log.record("auth.fail", ip=ip, account=req.username,
+                            route="/v1/auth/login", status=401,
+                            detail="login.failed")
         # 401 而不是 403：这里没有"身份是真的但角色不够"这一说，只有"没认出来"。
         raise HTTPException(status_code=401, detail=e.reason)
     # 成功**不**清失败账（终审 F3）：理由见 _FAILS 上面那段。
@@ -688,11 +708,17 @@ def reauth(request: Request, response: Response,
     ip = _client_ip(request)
     digest = hash_secret(secret)
     if _reauth_throttled(ip, digest):
+        _note_rate_limited(request, ip, "", "limit.reauth")
         raise _too_many(FAILURE_WINDOW_SECONDS)
     try:
         principal, token, new_secret, payload = _store().reauth(secret)
     except AuthError as e:
         _note_reauth_failure(ip, digest)
+        # 失败时没有 principal 可填：account 留空（日志层会记成 anonymous）。
+        # 这里也绝不记那把 secret——摘要只进限流账的内存键，安全日志不碰。
+        security_log.record("auth.fail", request=request, ip=ip, account="",
+                            status=410 if getattr(e, "gone", False) else 401,
+                            detail="reauth.denied")
         # 审计只记"有人拿续命凭据试过并被拒"，不记那把值：audit.jsonl 是明文日志。
         audit.log(None, "auth.reauth.denied", target=_reauth_secret_key(digest))
         if getattr(e, "gone", False):
@@ -730,8 +756,10 @@ def reset(req: ResetRequest, request: Request, response: Response):
     """
     ip = _client_ip(request)
     if _reset_throttled(ip) or _reset_account_throttled(req.username):
+        _note_rate_limited(request, ip, req.username, "limit.reset")
         raise _too_many(FAILURE_WINDOW_SECONDS)
     if _resets_full(ip):
+        _note_rate_limited(request, ip, req.username, "limit.reset")
         raise _too_many(RESET_WINDOW_SECONDS)
     try:
         _store().reset_password(req.username, req.answers, req.new_password,
@@ -746,9 +774,15 @@ def reset(req: ResetRequest, request: Request, response: Response):
             # 锁不锁对任何用户名一律，429 就不泄露"这号存在吗"）。
             _note_reset_failure(ip)
             _note_reset_failure_account(req.username)
+            security_log.record("auth.fail", ip=ip, account=req.username,
+                                route="/v1/auth/reset", status=401,
+                                detail="reset.rejected")
             raise HTTPException(status_code=401, detail=e.reason)
         # 新密码或轮换答案列表本身不合格（太短、太长、条数不对）：那是当事人自己能
         # 改好的，不计费
+        security_log.record("auth.fail", ip=ip, account=req.username,
+                            route="/v1/auth/reset", status=422,
+                            detail="reset.rejected")
         raise HTTPException(status_code=422, detail=e.reason)
     _note_reset(ip)
     # 改密会清掉这个人全部 device_secrets（auth.reset_password）；这台浏览器里的
@@ -816,6 +850,57 @@ def adopt(request: Request, response: Response,
 # role 不在任何请求体里：管理员只来自 ACCESS_TOKEN bootstrap，或来自运维手改
 # users.json。给 API 开一个写 role 的口子，等于把整套身份体系作废。
 
+def _next_session_expiry(record: dict):
+    """这个账号名下所有有效会话里**最早**的那个到期时刻（ISO 或 None）。
+
+    只从 tokens 与三张平行时间表派生，绝不回显摘要本身：
+    - 每枚未吊销令牌取 min(签发时刻 + 滑动 TTL, 会话绝对上限)；
+    - 没有签发时刻的存量令牌跳过（算不出到期，不编一个）；
+    - 已过期（<= now）、非有限值、坏时间戳一律跳过；
+    - 一枚都不剩时返回 None。
+
+    单独成函数而不是写进 _public_user：那条函数不许出现 "issued_at" 字样
+    （判据见 test_v033_session_token_ttl.py），而这种时间戳运算只能写在别处。
+    """
+    tokens = record.get("tokens") or []
+    issued_table = record.get("token_issued_at") or {}
+    absolute_table = record.get("token_absolute_deadline") or {}
+    revoked_table = record.get("token_revoked_at") or {}
+    if not isinstance(tokens, list) or not isinstance(issued_table, dict):
+        return None
+    if not isinstance(revoked_table, dict):
+        revoked_table = {}
+    if not isinstance(absolute_table, dict):
+        absolute_table = {}
+    now = time.time()
+    best = None
+    for digest in tokens:
+        if not isinstance(digest, str) or digest in revoked_table:
+            continue
+        try:
+            issued = float(issued_table[digest])
+        except (KeyError, TypeError, ValueError):
+            continue                      # 存量令牌：没有签发时刻可算
+        if not math.isfinite(issued):
+            continue
+        expiry = issued + SESSION_TOKEN_TTL_SECONDS
+        if isinstance(absolute_table, dict) and digest in absolute_table:
+            try:
+                cap = float(absolute_table[digest])
+            except (TypeError, ValueError):
+                continue                  # 上限读不懂：这枚令牌的时间不可信，跳过
+            if not math.isfinite(cap):
+                continue
+            expiry = min(expiry, cap)
+        if not math.isfinite(expiry) or expiry <= now:
+            continue
+        best = expiry if best is None else min(best, expiry)
+    if best is None:
+        return None
+    return datetime.datetime.fromtimestamp(
+        best, tz=datetime.timezone.utc).isoformat()
+
+
 def _public_user(record: dict) -> dict:
     """用户记录的对外视图。逐字段列出，是为了让 pw_hash 与 tokens 无处可藏。"""
     return {
@@ -832,6 +917,9 @@ def _public_user(record: dict) -> dict:
         "last_seen": record.get("last_used_at"),
         # 有几台设备在线是运维要知道的，但只报数量：令牌摘要本身是凭据。
         "sessions": len(record.get("tokens") or []),
+        # v0.36.3：这人的会话最早什么时候到期（让管理员看出"谁快被登出了"）。
+        # 只由时间戳派生，摘要与令牌原文一个字节都不出这道门。
+        "next_session_expiry_at": _next_session_expiry(record),
     }
 
 
@@ -1123,3 +1211,67 @@ def read_audit(limit: int = 200, _: Principal = RequireAdmin):
     """只读地看这份只增账：最新在下（read() 已按正序返回）。没有删除路由——
     能从界面删掉的证据就不是证据。"""
     return {"entries": audit.read(limit=min(max(1, limit), 1000))}
+
+
+# ---------- v0.36.3：安全监控（admin-only，响应一律 no-store） ----------
+# 这两个端点只读内存里的有界事件环；文件读写由 security_log 的后台线程负责。
+# 不进任何公开名单：authz.PUBLIC_PATHS 没有它们，路由契约也会按 RequireAdmin 钉住。
+
+_SECURITY_WINDOWS = {"1h": 3600, "24h": 24 * 3600, "7d": 7 * 24 * 3600}
+
+
+@router.get("/v1/admin/security/summary")
+def admin_security_summary(response: Response, window: str = "1h",
+                           _: Principal = RequireAdmin):
+    """窗口聚合：总量、按类型/来源/账号前 10、审计账规模与告警。
+
+    `window` 只认三档。未知值给 400 而不是悄悄回落——"我要 30 天"拿到一份 1h
+    的图，比报错更难发现。
+    """
+    seconds = _SECURITY_WINDOWS.get((window or "").strip())
+    if seconds is None:
+        raise HTTPException(status_code=400, detail="window 只能是 1h / 24h / 7d")
+    data = security_log.summary(seconds)
+    data["window"] = window
+    response.headers["Cache-Control"] = "no-store"
+    return data
+
+
+@router.get("/v1/admin/security/events")
+def admin_security_events(response: Response, type: Optional[str] = None,
+                          source: Optional[str] = None,
+                          account: Optional[str] = None,
+                          before: Optional[str] = None,
+                          limit: Optional[str] = None,
+                          _: Principal = RequireAdmin):
+    """倒序分页读事件。`next_before` 是下一页游标（本页最后一条的 id，没有更旧时为 null）。
+
+    limit/before 声明成字符串再手工解析：FastAPI 的 int 参数在非整数时回 422，
+    而这里的契约是 400（一句话说清哪个参数不对）。limit 只收 1–200。
+    """
+    if type is not None and type not in security_log.TYPES:
+        raise HTTPException(status_code=400, detail="type 不是受支持的安全事件类型")
+    if limit is None or limit == "":
+        count = 50
+    else:
+        try:
+            count = int(str(limit).strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="limit 必须是 1–200 的整数")
+        if not 1 <= count <= 200:
+            raise HTTPException(status_code=400, detail="limit 必须是 1–200 的整数")
+    cursor = None
+    if before is not None and before != "":
+        try:
+            cursor = int(str(before).strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="before 必须是正整数")
+        if cursor <= 0:
+            raise HTTPException(status_code=400, detail="before 必须是正整数")
+    source_filter = (source or "").strip()[:80] or None
+    account_filter = (account or "").strip()[:64] or None
+    items, next_before = security_log.events(
+        before=cursor, limit=count, type=type,
+        source=source_filter, account=account_filter)
+    response.headers["Cache-Control"] = "no-store"
+    return {"events": items, "next_before": next_before}
