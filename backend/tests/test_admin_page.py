@@ -214,6 +214,14 @@ def test_token_reveal_copy_stops_at_plaintext_being_one_shot():
 
 # ---------- 接后端点：页面上不许有编出来的路径 ----------
 
+# v0.36.3 第一批按契约先写前端、第二批才落地的端点。名单是闭集：新增一条必须同时
+# 改 test_v0363_admin_console.py 里的契约锁，否则这里就变成“随便写什么都放行”。
+PENDING_CONTRACT_ROUTES = {
+    "/v1/admin/security/summary",
+    "/v1/admin/security/events",
+}
+
+
 def _route_pairs() -> list:
     return [(m, r.path) for r in app.routes
             if isinstance(r, APIRoute) for m in r.methods]
@@ -226,11 +234,14 @@ def _matches(template: str, path: str) -> bool:
 
 
 def test_page_only_calls_routes_that_exist():
-    """admin.js 里每个 "/v1/…" 字面量都必须落在真路由表上。
+    """admin.js 里每个 "/v1/…" 字面量都必须落在真路由表上，或属于待上线的契约端点。
 
     这轮的目标是"接上后端已有但页面没用上的端点"，而"不新增后端端点"是同一个约束
     的另一面：编一个不存在的地址挂到按钮上，点了才 404，比不接更糟。带 id 的那一段
     是 encodeURIComponent 现拼的，所以以 `/` 结尾的字面量按前缀判，其余整段判。
+
+    两个 security 端点是 v0.36.3 工单第三节的契约，第一批只写前端；第二批实现后
+    它们会自己落进路由表，这条锁不需要再改。
     """
     routes = _route_pairs()
     # 查询串不是路径的一部分：`/v1/memory/decay?decay_factor=` 认的是 /v1/memory/decay
@@ -241,7 +252,8 @@ def test_page_only_calls_routes_that_exist():
             hit = [tpl for _, tpl in routes if tpl.startswith(path)]
         else:
             hit = [tpl for _, tpl in routes if _matches(tpl, path)]
-        assert hit, f"admin.js 里的 {path} 在后端路由表上找不到"
+        assert hit or path in PENDING_CONTRACT_ROUTES, \
+            f"admin.js 里的 {path} 在后端路由表上找不到"
 
 
 def test_endpoints_that_had_no_button_are_now_wired():
@@ -299,7 +311,7 @@ def test_tabs_and_sections_match_each_other_exactly():
     secs = re.findall(r'<section class="sec[^"]*" id="([^"]+)"', html)
     assert goto and secs, "这条锁在空转：一个 tab 或一个分区都没扫到"
     assert sorted(goto) == sorted(secs), f"tab 与分区对不上：{sorted(set(goto) ^ set(secs))}"
-    assert "secUsage" in secs, "用量那一节不见了"
+    assert "secRuntime" in secs, "运行那一节不见了"
 
 
 def test_every_data_icon_names_an_icon_that_exists():
@@ -398,22 +410,25 @@ def test_paid_by_labels_are_pinned_to_the_backend_whitelist():
 
 
 def test_usage_reads_the_name_table_after_users_load():
-    """「谁」这一栏读的是 loadUsers 填的 user_id→用户名表，所以它必须晚于那一步。
+    """「谁」这一栏读的是 fetchUsers 填的 user_id→用户名表，所以它必须先于渲染。
 
-    并到同一批 Promise.all 里不会报错，只会让第一次渲染时满屏都是裸 id——
-    而这恰好是"数据在但读不出人"的那种坏法。第二句钉的是别处不再 fetch 一次同一张表。
+    v0.36.3 起用量是运行子页的懒加载项，不再挂在 boot 的 refresh 上：名字表由
+    ensureUsers 按需拉一次，loadUsage 在渲染行之前先等它。风险与旧版相同——
+    先渲染会让第一次进去满屏裸 id；而两处各自 fetch 同一张表就是第二个真相。
     """
     js = _js()
-    body = re.search(r"async function refresh\(\)\s*\{([\s\S]*?)\n  \}", js)
-    assert body, "refresh 不像原来的形状了，这条锁要跟着改而不是删"
-    inner = body.group(1)
-    assert "loadUsers" in inner and "loadUsage" in inner
-    assert not re.search(r"Promise\.all\(\[[^\]]*loadUsers[^\]]*loadUsage", inner), \
-        "用量又被并回同一批并发了：两个函数同时起跑，名字表多半还是空的"
-    assert inner.index("loadUsers") < inner.index("loadUsage"), \
-        "名字表还没填就去渲染「谁」那一栏，第一次进去会满屏裸 id"
+    fetch_body = re.search(r"async function fetchUsers\(\)\s*\{([\s\S]*?)\n  \}", js)
+    assert fetch_body, "fetchUsers 不像原来的形状了，这条锁要跟着改而不是删"
+    assert 'req("/v1/admin/users")' in fetch_body.group(1), \
+        "名字表的唯一读法不再住在 fetchUsers 里"
     assert js.count('req("/v1/admin/users")') == 1, \
-        "user_id→用户名 有了第二个读法：两处各自刷新就是第二个真相（建号那条 POST 不算）"
+        "user_id→用户名 有了第二个读法（建号那条 POST 不算）"
+    usage_body = re.search(r"async function loadUsage\(\)\s*\{([\s\S]*?)\n  \}", js)
+    assert usage_body, "loadUsage 不像原来的形状了，这条锁要跟着改而不是删"
+    inner = usage_body.group(1)
+    assert "ensureUsers" in inner, "用量渲染前不再确保名字表已加载"
+    assert inner.index("ensureUsers") < inner.index("usageRow"), \
+        "名字表还没填就去渲染「谁」那一栏，第一次进去会满屏裸 id"
 
 
 # ---------- v0.24 阶段3 T3.2：账号那一节接上 T3.1 的四个动作 ----------
