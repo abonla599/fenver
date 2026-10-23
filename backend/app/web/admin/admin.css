@@ -12,6 +12,8 @@
 :root {
   /* 可点目标的统一热区。44px 是这一页的硬下限：删号、换发、停用点错都要重来。 */
   --fv-tap: 44px;
+  /* 共享令牌里没有 danger 的淡底；本页只此一处定义，标签与高危徽章共用。 */
+  --fv-danger-soft: rgba(248, 113, 113, .14);
 }
 
 body.admin {
@@ -119,6 +121,15 @@ summary {
   min-width: 0;
 }
 #panel input:focus, #panel select:focus, #panel textarea:focus { border-color: var(--accent); }
+/* 上面那组带 [type] 的规则为了去掉鼠标点击时的默认描边写了 outline:none，特异性
+   比裸的 input:focus-visible 高，键盘用户就只剩边框变色。这里用同样的 ID 前缀补回来，
+   顺序压在 outline:none 之后。 */
+#panel input:focus-visible,
+#panel select:focus-visible,
+#panel textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 input.num { width: 86px; flex: none; }
 textarea.req {
   width: 100%;
@@ -155,6 +166,13 @@ textarea.req {
   background: var(--surface);
   min-width: 0;
 }
+/* /app/style.css 里 .sidebar 是 268px、.brand 是 flex:1（PWA 侧栏要撑满剩余高度）。
+   两条都会级联到这一页：侧栏比 232px 网格列宽出 36px 盖住正文，品牌块则被拉到
+   半屏高、把导航推到页面下半部。用 body.admin 提一级，把这两条显式收回。 */
+body.admin .sidebar { width: 232px; }
+body.admin .brand { flex: none; }
+body.admin .nav { flex: none; }
+body.admin .sidebar-foot { flex: none; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px; }
 .brand-name { font-weight: 600; font-size: 15px; }
 .nav { display: flex; flex-direction: column; gap: 4px; }
@@ -351,7 +369,8 @@ table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13p
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 th { color: var(--text-3); font-weight: 500; font-size: 12px; white-space: nowrap; }
 td.name { font-weight: 500; }
-td.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
+/* 反馈卡片的编号是 span.code，不只是表格里的 td.code：两处统一等宽。 */
+td.code, span.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
 td.acts, th.acts { white-space: nowrap; }
 td.acts button { margin: 0 2px 2px 0; }
 .tag {
@@ -362,13 +381,17 @@ td.acts button { margin: 0 2px 2px 0; }
   color: var(--accent);
   white-space: nowrap;
 }
-.tag.off, .tag.warn { background: rgba(248, 113, 113, .14); color: var(--danger); }
+.tag.off, .tag.warn { background: var(--fv-danger-soft); color: var(--danger); }
 
 /* ---------- 列表卡片（账号 / 反馈 / 安全事件） ---------- */
 
 .desktop-only { display: block; }
 .mobile-only { display: none; }
 .card-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; min-width: 0; }
+/* .card-list 的 display:flex 写在 .mobile-only 后面，同特异性会把桌面端的“手机专属”
+   卡片列表重新显示出来：账号与安全事件各多一整份重复内容。补一条更具体的收起；
+   手机媒体查询里的 `.card-list.mobile-only { display:flex }` 在文件末尾，仍会覆盖它。 */
+.card-list.mobile-only { display: none; }
 
 .user-card, .fb-item, .event-card {
   border: 1px solid var(--line);
@@ -426,7 +449,7 @@ td.acts button { margin: 0 2px 2px 0; }
 }
 .sev-tag.info { background: var(--fv-surface-3); color: var(--text-2); }
 .sev-tag.warn { background: var(--fv-ai-soft); color: var(--fv-ai); }
-.sev-tag.alert { background: rgba(248, 113, 113, .14); color: var(--danger); }
+.sev-tag.alert { background: var(--fv-danger-soft); color: var(--danger); }
 
 /* ---------- 排行条 ---------- */
 

@@ -11,6 +11,10 @@
 (() => {
   "use strict";
 
+  // 旧版把令牌明文写在 localStorage 的 accessToken 里；现在的凭据只住 httpOnly
+  // Cookie，页面不读也不写本机存储。这里清掉旧版遗留，是唯一一处存储调用。
+  try { localStorage.removeItem("accessToken"); } catch (e) { /* 存储被禁用时无事可做 */ }
+
   const $ = (id) => document.getElementById(id);
 
   /* ---------- 建树 ---------- */
@@ -855,6 +859,25 @@
     fbBadge.title = count ? "未读反馈 " + count + " 条" : "无未读反馈";
   }
 
+  // 只更新导航角标：不碰当前分区的列表，也不碰用户表。boot 与顶栏刷新都走这一条，
+  // 停在 #/accounts、#/security 或 #/runtime/* 时角标才是对的。
+  async function refreshFeedbackBadge() {
+    try {
+      const data = await req("/v1/admin/user-feedback");
+      setFeedbackBadge(Number(data.unread) || 0);
+    } catch (e) {
+      // 角标是附属信息：失败就保持原状，不能把当前分区一起拖红。
+    }
+  }
+
+  // 缺 id 的条目不能共用 String(undefined) 这个键，否则同批只留得下第一条。
+  function feedbackKey(f) {
+    if (f.id !== undefined && f.id !== null && f.id !== "") return "id:" + String(f.id);
+    return ["created_at", "user_id", "email", "text"]
+      .map((k) => String(f[k] === undefined || f[k] === null ? "" : f[k]))
+      .join("|");
+  }
+
   async function loadFeedback(reset) {
     if (reset) {
       feedbackItems = [];
@@ -870,10 +893,11 @@
     const data = await req("/v1/admin/user-feedback?" + parts.join("&"));
     const items = Array.isArray(data.items) ? data.items : [];
     const seen = {};
-    feedbackItems.forEach((f) => { seen[f.id] = true; });
+    feedbackItems.forEach((f) => { seen[feedbackKey(f)] = true; });
     items.forEach((f) => {
-      if (!seen[f.id]) {
-        seen[f.id] = true;
+      const key = feedbackKey(f);
+      if (!seen[key]) {
+        seen[key] = true;
         feedbackItems.push(f);
       }
     });
@@ -979,13 +1003,37 @@
     await loadFeedback(false);
   }
 
-  function setFeedbackFilter(unreadOnly) {
-    feedbackUnreadOnly = !!unreadOnly;
+  function syncFeedbackFilterButtons() {
     $("fbAll").classList.toggle("active", !feedbackUnreadOnly);
     $("fbUnread").classList.toggle("active", feedbackUnreadOnly);
     $("fbAll").setAttribute("aria-pressed", feedbackUnreadOnly ? "false" : "true");
     $("fbUnread").setAttribute("aria-pressed", feedbackUnreadOnly ? "true" : "false");
-    busy(null, () => loadFeedback(true));
+  }
+
+  function setFeedbackFilter(unreadOnly) {
+    const prev = {
+      unreadOnly: feedbackUnreadOnly,
+      items: feedbackItems.slice(),
+      unread: feedbackUnread,
+      nextBefore: feedbackNextBefore,
+    };
+    feedbackUnreadOnly = !!unreadOnly;
+    syncFeedbackFilterButtons();
+    busy(null, async () => {
+      try {
+        await loadFeedback(true);
+      } catch (e) {
+        // loadFeedback 失败前已经清空列表：不把旧筛选的投影也还回去，视觉上就成了
+        // 「未读」下面摆着「全部」的卡片。按钮态、旧列表、游标一起恢复后再重绘。
+        feedbackUnreadOnly = prev.unreadOnly;
+        feedbackItems = prev.items;
+        feedbackUnread = prev.unread;
+        feedbackNextBefore = prev.nextBefore;
+        syncFeedbackFilterButtons();
+        renderFeedback();
+        throw e;
+      }
+    });
   }
 
   async function exportFeedback() {
@@ -1026,6 +1074,9 @@
   let secEventIds = {};
   let secNextBefore = null;
   let secTimer = null;
+  // summary/events 还没上线时置真：20 秒定时器不再每轮打一次 404，手动重新读取
+  // 成功后会自己恢复。
+  let secEndpointsMissing = false;
 
   const SEC_TYPES = {
     "auth.fail": "登录失败",
@@ -1135,6 +1186,12 @@
     ]);
     handleSummary(results[0]);
     handleEvents(results[1], false);
+    // 端点还没上线时暂停 20 秒定时器：否则每轮都会稳定打两次 404，日志全是噪声。
+    const missing = results.some((r) => r.status === "rejected"
+      && r.reason && r.reason.status === 404);
+    if (missing) secEndpointsMissing = true;
+    else if (results.every((r) => r.status === "fulfilled")) secEndpointsMissing = false;
+    syncSecurityTimer();
   }
 
   function renderSecuritySummary(data) {
@@ -1147,7 +1204,7 @@
 
     const stats = $("secStats");
     stats.textContent = "";
-    stats.appendChild(cell("p", "窗口内共 " + (Number(totals.events) || 0) + " 条事件",
+    stats.appendChild(cell("p", "统计窗口内共 " + (Number(totals.events) || 0) + " 条事件",
       "pane-note note-tight wide"));
     const cards = [
       ["失败登录", countType("auth.fail")],
@@ -1173,7 +1230,7 @@
   function renderRank(container, items, nameKey, total) {
     container.textContent = "";
     if (!items.length) {
-      container.appendChild(cell("p", "这个窗口没有记录。", "pane-note note-tight"));
+      container.appendChild(cell("p", "统计窗口内没有记录。", "pane-note note-tight"));
       return;
     }
     const sorted = items.slice().sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0));
@@ -1211,13 +1268,24 @@
     });
   }
 
+  function securityEventKey(event) {
+    if (event.id !== undefined && event.id !== null && event.id !== "") {
+      return "id:" + String(event.id);
+    }
+    // 契约要求 events[].id，但第二批真漏了字段时不能把整批都当成同一条丢掉：
+    // 用界面上看得见的字段拼一个稳定键。
+    return ["ts", "type", "source", "status", "route"]
+      .map((k) => String(event[k] === undefined || event[k] === null ? "" : event[k]))
+      .join("|");
+  }
+
   function renderSecurityEvents(events, append) {
     if (!append) {
       secEvents = [];
       secEventIds = {};
     }
     events.forEach((event) => {
-      const key = String(event.id);
+      const key = securityEventKey(event);
       if (secEventIds[key]) return;
       secEventIds[key] = true;
       secEvents.push(event);
@@ -1233,8 +1301,8 @@
     $("btnSecMore").classList.toggle("hidden",
       secNextBefore === null || secNextBefore === undefined);
     if (!secEvents.length) {
-      tbody.appendChild(emptyRow("这个窗口没有事件。可以换 1h / 7d，或清除筛选。", 8));
-      cards.appendChild(emptyBox("这个窗口没有事件。可以换 1h / 7d，或清除筛选。"));
+      tbody.appendChild(emptyRow("当前筛选没有事件。可以换类型 / 来源，或清除筛选。", 8));
+      cards.appendChild(emptyBox("当前筛选没有事件。可以换类型 / 来源，或清除筛选。"));
       return;
     }
     secEvents.forEach((event) => {
@@ -1303,7 +1371,8 @@
   }
 
   function syncSecurityTimer() {
-    const active = authed && route === "security" && document.visibilityState === "visible";
+    const active = authed && route === "security" && document.visibilityState === "visible"
+      && !secEndpointsMissing;
     if (active && !secTimer) {
       secTimer = setInterval(() => {
         if (authed && route === "security" && document.visibilityState === "visible") {
@@ -1901,6 +1970,8 @@
 
   async function refreshCurrent() {
     if (!authed) return;
+    // 顶栏刷新也要把未读角标带上：否则停在账号/安全/运行页时角标永远是打开页面那一刻的值。
+    refreshFeedbackBadge();
     if (route === "overview") { await loadOverview(); return; }
     if (route === "accounts") { await loadUsers(); return; }
     if (route === "security") { await loadSecurity(); return; }
@@ -1920,6 +1991,7 @@
     secEvents = [];
     secEventIds = {};
     secNextBefore = null;
+    secEndpointsMissing = false;
     regOpen = null;
     Object.keys(runtimeLoaded).forEach((key) => { delete runtimeLoaded[key]; });
     Object.keys(runtimeLoading).forEach((key) => { delete runtimeLoading[key]; });
@@ -1941,6 +2013,8 @@
     $("panel").classList.remove("hidden");
     $("who").textContent = "当前身份：" + me.username + "（" + me.user_id + "）";
     applyRoute();
+    // 无论落在哪个 hash，都先无条件取一次未读数；停在 #/accounts 之类的入口也要有角标。
+    refreshFeedbackBadge();
   }
 
   /* ---------- 事件 ---------- */
