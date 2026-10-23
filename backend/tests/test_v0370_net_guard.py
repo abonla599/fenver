@@ -1,0 +1,349 @@
+"""v0.37.0 第一批：net_guard 抽取 + IP 字面量缺口加固。
+
+背景：providers 的 base_url 闸门里，IP 字面量走的是快路，域名那一支才有的
+`is_link_local` / `is_multicast` 属性补丁对快路不可见，于是
+`http://[fe80::10]/`、`http://224.0.0.1/`、`http://[ff02::1]/` 这三类**写法**
+能直接过关；`100.64.0.0/10`（CGNAT）、三个文档段、`198.18.0.0/15`（基准段）
+连清单里都没有，两支写法一起漏。判据抽到 `app.core.net_guard` 之后，清单补齐，
+字面量与域名共用同一个 `_address_reject_reason`。
+
+本文件钉四件事：
+1. 每一类新补的地址段，字面量写法必须真的被拒（缺任何一条 CIDR/属性判据红）；
+2. 公网地址不许误伤——每个新段都配了边界外一例（负控的另一半：判据过宽也红）；
+3. 抽取本身不换口径：既有的 reason 句式逐字保持（"指向" vs "的主机名…解析到"，
+   链路本地/组播/内网的分类词），providers 侧仍**调用时**取注入点；
+4. 负控变异：把清单里某一段在**内存里**摘掉，对应字面量必须转绿为放行——
+   证明那条 CIDR 是真的判据来源，不是一句注释。等价性自陈：monkeypatch 换的是
+   `net_guard` 模块属性本身，`reject_reason` 在调用时才读它，走的正是生产同一条
+   代码路径；不落盘、teardown 自动还原，提交的清单文件从未被改过。
+
+用法（本目录惯例）：../venv/Scripts/python.exe -m pytest tests/test_v0370_net_guard.py -q
+"""
+import ipaddress
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+
+from app.core import net_guard, providers
+
+
+def _forbidden_resolver(host):
+    """字面量/localhost 快路必须**不调用**解析器：调用了就是这里红。"""
+    raise AssertionError(f"不该触发 DNS 解析，却调用了：{host}")
+
+
+def _reject(literal, *, allow_loopback=False):
+    return net_guard.reject_reason(literal, resolve=_forbidden_resolver,
+                                   allow_loopback=allow_loopback, where="base_url")
+
+
+# ---------- 缺口加固：任务点名的三个 URL 现在必须被拒 ----------
+
+@pytest.mark.parametrize("url", [
+    "http://[fe80::10]/",
+    "http://224.0.0.1/",
+    "http://[ff02::1]/",
+])
+def test_v0370_named_gap_urls_are_now_rejected(url):
+    """修复前这三个在真码里一路放行（规划员复现、事实核查确认）。走整条 URL 路径。
+
+    负向锁：把 net_guard 里 fe80::/10、ff00::/12、224.0.0.0/4 三段与对应的属性
+    判断一起删掉，本条红。
+    """
+    why = providers._base_url_reject_reason(url)
+    assert why, f"v0.37.0 要补的缺口居然还放行：{url}"
+    assert any(k in why for k in ("链路本地", "组播", "内网")), f"理由要说清类别：{why!r}"
+
+
+# ---------- 全类别字面量清单：私网/链路本地/组播/CGNAT/文档/基准/保留 ----------
+
+BLOCKED_LITERALS = {
+    "回环 v4": ("127.0.0.1", "本机"),
+    "回环 v4 边缘": ("127.255.255.255", "本机"),
+    "回环 v6": ("::1", "本机"),
+    "全零 v4": ("0.0.0.0", "本机"),
+    "零段非全零": ("0.1.2.3", "内网"),
+    "IPv6 未指定": ("::", "本机"),
+    "私网 A": ("10.9.8.7", "内网"),
+    "私网 B": ("172.20.0.1", "内网"),
+    "私网 C": ("192.168.30.40", "内网"),
+    "链路本地 v4（云元数据）": ("169.254.169.254", "内网"),
+    "唯一本地 v6": ("fd12::34", "内网"),
+    "fc00 v6": ("fc01::2", "内网"),
+    "链路本地 v6": ("fe80::10", "链路本地"),
+    "链路本地 v6 边缘": ("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "链路本地"),
+    "组播 v4": ("224.0.0.1", "组播"),
+    "组播 v4 边缘": ("239.255.255.255", "组播"),
+    "组播 v6": ("ff02::1", "组播"),
+    "组播 v6 上沿": ("ff0f::8", "组播"),
+    "CGNAT 下沿": ("100.64.0.0", "内网"),
+    "CGNAT 上沿": ("100.127.255.255", "内网"),
+    "文档段 1": ("192.0.2.5", "内网"),
+    "文档段 2": ("198.51.100.7", "内网"),
+    "文档段 3": ("203.0.113.200", "内网"),
+    "基准段": ("198.18.9.9", "内网"),
+    "基准段上沿": ("198.19.255.255", "内网"),
+    "v6 文档段": ("2001:db8::1", "内网"),
+    "保留段 class E": ("240.0.0.1", "内网"),
+    "受限广播": ("255.255.255.255", "内网"),
+    "v4 映射私网": ("::ffff:10.0.0.1", "内网"),
+    "v4 映射元数据": ("::ffff:169.254.169.254", "内网"),
+    "v4 映射回环": ("::ffff:127.0.0.1", "本机"),
+}
+
+
+@pytest.mark.parametrize("literal,keyword",
+                         list(BLOCKED_LITERALS.values()),
+                         ids=list(BLOCKED_LITERALS))
+def test_every_blocked_category_rejects_the_ip_literal(literal, keyword):
+    """IPv4/IPv6 全部私网/链路本地/组播/CGNAT/文档/基准/保留段——**字面量写法**。
+
+    这是本轮的主修复：v0.33/v0.34.2 的旧闸门里，链路本地 v6、组播（两支）、
+    CGNAT、文档段、基准段、保留段、v4 映射写法都能以字面量过关。
+
+    负向锁：删掉 net_guard 清单里对应那一段（属性类还得连属性判断一起删），
+    本条红；把 `_address_reject_reason` 里的映射折叠删掉，三条 v4 映射参数红。
+    """
+    why = _reject(literal)
+    assert why, f"字面量 {literal} 居然放行"
+    assert keyword in why, f"{literal} 的理由应含「{keyword}」：{why!r}"
+
+
+def test_bracketed_and_uppercase_v6_literals_are_rejected():
+    """`[FE80::10]` 这种带括号大写写法与裸串同判——strip("[]")/lower 的口径没丢。"""
+    assert _reject("[FE80::10]")
+    assert _reject("[FF02::1]")
+
+
+# ---------- 公网不误伤：每个新段的边界外一例 ----------
+
+ALLOWED_LITERALS = [
+    "8.8.8.8", "1.1.1.1", "93.184.216.34", "104.16.0.1",
+    "11.0.0.1",              # 10/8 边界外
+    "172.15.255.255", "172.32.0.1",   # 172.16/12 边界外
+    "192.167.255.255", "192.169.0.1",  # 192.168/16 边界外
+    "169.253.0.1", "169.255.0.1",      # 169.254/16 边界外
+    "100.63.255.255", "100.128.0.0",   # CGNAT 边界外
+    "192.0.1.255", "192.0.3.0",        # TEST-NET-1 边界外
+    "198.17.255.255", "198.20.0.0",    # 基准段边界外
+    "198.51.99.255", "198.51.101.0",   # TEST-NET-2 边界外
+    "203.0.112.255", "203.0.114.0",    # TEST-NET-3 边界外
+    "223.255.255.255",                 # 组播段下边界外
+    "2606:2800:220:1:248:1893:25c8:1946",
+    "2001:4860:4860::8888",            # 2001:db8::/32 同 prefix 长邻居，不是文档段
+    "fe00::",                          # fe80::/10 边界外
+    "::ffff:93.184.216.34",            # v4 映射到公网仍算公网
+]
+
+
+@pytest.mark.parametrize("literal", ALLOWED_LITERALS)
+def test_public_and_boundary_outside_literals_stay_allowed(literal):
+    """闸门拦的是特殊用途段，不是"所有地址"——边界外一例都不许误伤。
+
+    负向锁：把清单里任何一段写宽（如 100.64.0.0/10 写成 /9），对应边界参数红。
+    """
+    assert _reject(literal) == "", f"公网/边界外地址被误拒：{literal}"
+
+
+# ---------- 抽取不换口径：既有句式逐字钉住 ----------
+
+def test_existing_reason_sentences_are_unchanged():
+    """文案一位都不动（v0.33 立的原话），管理员与既有断言看到的句子不变。
+
+    负向锁：改动 net_guard 里任何一条 f-string 模板，本条红。
+    """
+    assert (providers._base_url_reject_reason("http://10.1.2.3/v1")
+            == "base_url 指向内网地址 10.1.2.3（10.0.0.0/8），服务端不做内网请求")
+    assert (providers._base_url_reject_reason("http://127.0.0.1:8000/v1")
+            == "base_url 指向本机地址 127.0.0.1，服务端不做本机请求；"
+               "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+    assert providers._base_url_reject_reason("http:///v1") == "base_url 里没有主机名"
+
+
+def test_domain_branch_wordings_survive_the_move(monkeypatch):
+    """域名支的"链路本地/组播/内网"三种分类词不因补 CIDR 而改写：
+    fe80/组播走属性判断（排在清单前），169.254 仍走 CIDR 文案。
+
+    负向锁：把属性判断挪到 CIDR 循环之后，前两条参数会变成"内网地址"文案而红。
+    """
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["fe80::1"])
+    why = providers._base_url_reject_reason("https://mine.example/v1")
+    assert "解析到链路本地地址 fe80::1" in why, why
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["224.0.0.1"])
+    why = providers._base_url_reject_reason("https://mine.example/v1")
+    assert "解析到组播地址 224.0.0.1" in why, why
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["169.254.1.1"])
+    why = providers._base_url_reject_reason("https://mine.example/v1")
+    assert "解析到内网地址 169.254.1.1（169.254.0.0/16）" in why, why
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["100.64.1.2"])
+    why = providers._base_url_reject_reason("https://mine.example/v1")
+    assert "解析到内网地址 100.64.1.2（100.64.0.0/10）" in why, why
+
+
+def test_providers_still_owns_the_injection_points():
+    """薄包装的三件事：别名同源、URL 层留在 providers、开关节关仍在 providers。
+
+    负向锁：`_PRIVATE_NETWORKS` 若被复制成另一份 tuple（两处清单迟早对不上），
+    第一条红；开关被搬去 net_guard（providers 读不到），第二条红。
+    """
+    assert providers._PRIVATE_NETWORKS is net_guard.PRIVATE_NETWORKS
+    assert hasattr(providers, "ALLOW_LOCALHOST_BASE_URL")
+    assert hasattr(providers, "_resolve_addresses")
+    import inspect
+    sig = inspect.signature(providers._base_url_reject_reason)
+    assert list(sig.parameters) == ["base_url"], \
+        f"包装函数只许吃 base_url，注入点必须留在函数体里取：{sig}"
+    src = inspect.getsource(providers._base_url_reject_reason)
+    assert "resolve=_resolve_addresses," in src
+    assert "allow_loopback=ALLOW_LOCALHOST_BASE_URL," in src
+
+
+# ---------- 多答案 / 解析失败 / 空 / 垃圾 ----------
+
+def test_multi_answer_rejects_when_any_one_crosses(monkeypatch):
+    """全称判据：公网排前也不许只看第一条；理由点名踩线的那条新段地址。"""
+    monkeypatch.setattr(providers, "_resolve_addresses",
+                        lambda h: ["93.184.216.34", "100.64.5.6"])
+    why = providers._base_url_reject_reason("https://mixed.example/v1")
+    assert why and "100.64.5.6" in why, why
+
+
+def test_multi_answer_all_public_is_allowed(monkeypatch):
+    monkeypatch.setattr(providers, "_resolve_addresses",
+                        lambda h: ["93.184.216.34", "2001:4860:4860::8888"])
+    assert providers._base_url_reject_reason("https://dual.example/v1") == ""
+
+
+@pytest.mark.parametrize("answers,keyword", [
+    (None, "解析失败"),
+    ([], "解析结果为空"),
+    (["not-an-ip"], "无法识别"),
+])
+def test_resolution_failure_modes_reject_fail_closed(monkeypatch, answers, keyword):
+    """解析炸/空/垃圾三类都拒（fail closed），理由句式与 v0.34.2 一致。"""
+    def fake(host):
+        if answers is None:
+            raise OSError(-2, "Name or service not known")
+        return list(answers)
+
+    monkeypatch.setattr(providers, "_resolve_addresses", fake)
+    why = providers._base_url_reject_reason("https://bad.example/v1")
+    assert why and keyword in why, f"{keyword}: {why!r}"
+
+
+# ---------- allow_loopback 只放回环类 ----------
+
+@pytest.mark.parametrize("target", [
+    "127.0.0.1", "::1", "0.0.0.0", "::", "localhost", "api.localhost",
+])
+def test_allow_loopback_releases_only_the_local_machine_class(target):
+    """开关打开：回环/全零/localhost 名字放行。
+
+    负向锁：把 `_address_reject_reason` 开关分支写死 return，本条红。
+    """
+    assert _reject(target, allow_loopback=True) == ""
+
+
+@pytest.mark.parametrize("target", [
+    "10.0.0.5", "169.254.169.254", "fe80::10", "224.0.0.1", "ff02::1",
+    "100.64.0.1", "fd12::34",
+])
+def test_allow_loopback_never_releases_private_link_local_or_multicast(target):
+    """开关的理由是"允许自建模型"，不是"允许扫内网"——其余类别打开也照拒。"""
+    why = _reject(target, allow_loopback=True)
+    assert why, f"开关打开居然放行了 {target}"
+
+
+def test_allow_loopback_continues_past_loopback_to_the_next_answer(monkeypatch):
+    """域名多答案：开关打开跳过回环那条，继续查出后面踩线的地址并点名它。
+
+    负向锁：把开关分支的 return "" 写成"整个函数放行"，本条红。
+    """
+    monkeypatch.setattr(providers, "_resolve_addresses",
+                        lambda h: ["127.0.0.1", "203.0.113.9"])
+    monkeypatch.setattr(providers, "ALLOW_LOCALHOST_BASE_URL", True)
+    why = providers._base_url_reject_reason("https://mine.example/v1")
+    assert why and "203.0.113.9" in why, why
+
+
+def test_literals_and_localhost_never_reach_the_resolver():
+    """快路不碰 DNS：字面量（含新补的类别）与 localhost 名直接判定。
+
+    `_reject` 携带的解析器一旦被调用就抛——放行/拒绝之外，"没被调用"也是断言。
+    """
+    for target in ("224.0.0.1", "fe80::1", "100.64.0.1", "localhost", "x.localhost"):
+        assert _reject(target), target
+
+
+# ---------- 负控：缺一类地址，判据必须报红（内存变异） ----------
+
+CIDR_ONLY_RANGES = [
+    ("100.64.0.0/10", "100.64.5.6"),
+    ("192.0.2.0/24", "192.0.2.5"),
+    ("198.51.100.0/24", "198.51.100.1"),
+    ("203.0.113.0/24", "203.0.113.42"),
+    ("198.18.0.0/15", "198.18.9.9"),
+    ("2001:db8::/32", "2001:db8::5"),
+    ("240.0.0.0/4", "240.0.0.1"),
+    ("0.0.0.0/8", "0.1.2.3"),
+    ("fc00::/7", "fd12::34"),
+    ("10.0.0.0/8", "10.1.2.3"),
+    ("169.254.0.0/16", "169.254.169.254"),
+]
+
+
+@pytest.mark.parametrize("cidr,literal", CIDR_ONLY_RANGES)
+def test_gate_goes_red_only_because_of_the_declared_range(monkeypatch, cidr, literal):
+    """每条 CIDR-only 判据的负控：原清单下拒；在内存里摘掉**这一段**后放行。
+
+    绿灯必须能归因到清单里那一行——摘掉还拒，说明判据在别处（本参数就是错的
+    "CIDR-only"断言）；摘掉变放行，说明这一段真的在把关。
+
+    等价性自陈：变异是把 `net_guard.PRIVATE_NETWORKS` 换成过滤后的**新 tuple**
+    （模块属性、调用时读取，与生产写入路径同一入口），不改任何落盘文件；
+    monkeypatch 在 teardown 还原原对象，本文件之后的用例拿到的仍是原清单。
+    """
+    pristine = net_guard.PRIVATE_NETWORKS
+    assert _reject(literal), f"原清单下 {literal} 就该被拒（前置态不对，变异无从谈起）"
+    mutated = tuple(n for n in pristine if str(n) != cidr)
+    assert len(mutated) == len(pristine) - 1, f"清单里找不到 {cidr}，这一参数本身是假的"
+    monkeypatch.setattr(net_guard, "PRIVATE_NETWORKS", mutated)
+    assert _reject(literal) == "", f"摘掉 {cidr} 仍拒 {literal}：判据另有出处，此负控无效"
+
+
+@pytest.mark.parametrize("cidr,literal", [
+    ("fe80::/10", "fe80::10"),
+    ("224.0.0.0/4", "224.0.0.1"),
+    ("ff00::/12", "ff02::1"),
+])
+def test_link_local_and_multicast_are_double_covered(monkeypatch, cidr, literal):
+    """链路本地/组播是"清单 + 属性判断"双保险：摘掉 CIDR 仍被属性拦住。
+
+    钉的是加固的冗余度（文案靠属性、完备性靠清单）；负向锁：连同
+    `_address_reject_reason` 里的属性分支一起删才可能放行。
+    """
+    pristine = net_guard.PRIVATE_NETWORKS
+    mutated = tuple(n for n in pristine if str(n) != cidr)
+    monkeypatch.setattr(net_guard, "PRIVATE_NETWORKS", mutated)
+    why = _reject(literal)
+    assert why, f"{literal} 摘掉 {cidr} 后放行——属性判断不成立，双保险是假的"
+    assert any(k in why for k in ("链路本地", "组播")), why
+
+
+def test_mutations_do_not_leak():
+    """负控之后清单必须原样：条数与成员逐一等于首拍快照（证明 monkeypatch 还原了）。
+
+    若变异泄漏进后续用例，本文件乃至全套的绿灯都不再可信。
+    """
+    expected = tuple(ipaddress.ip_network(c) for c in (
+        "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "169.254.0.0/16", "0.0.0.0/8", "fc00::/7", "100.64.0.0/10", "192.0.2.0/24",
+        "198.51.100.0/24", "203.0.113.0/24", "198.18.0.0/15", "224.0.0.0/4",
+        "ff00::/12", "fe80::/10", "2001:db8::/32", "240.0.0.0/4"))
+    assert net_guard.PRIVATE_NETWORKS == expected
