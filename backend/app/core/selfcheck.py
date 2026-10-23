@@ -45,13 +45,40 @@ BROKEN = "broken"
 # 非 broken 的非 ok 状态一律记 WARN、不动重启预算。它仍低于 broken，真故障不会被盖住。
 _SEVERITY = {OK: 0, DEGRADED: 1, NOT_CONFIGURED: 1, BROKEN: 2}
 
-# 云端嵌入的启用判据（与 memory_manager 同一句）：三样齐备才算配了。
-_EMBED_ENV_KEYS = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL")
+# 云端嵌入的启用判据（与 memory_manager 同一句）：密钥、地址、模型名**三者齐全**
+# 才算已配置。v0.36.2 起密钥有两个来源——`EMBEDDINGS_PROVIDER_ID` 指向的 provider
+# 里那条非占位密钥（单源正道），或旧部署留在 .env 的 `api_key`（过渡回退）；
+# 两者都拿不到才算缺密钥这一件。
+# 旧写法是 `not any(...)`：三键全缺才为真，于是"只有 api_key、没有地址和模型名"
+# 这种半配状态会被说成"已配置"——memory_manager 明明走了本地/伪嵌入分支，自检却
+# 不豁免它的维度冲突，口径与实现漂移。现在与实现共用同一条"齐全"判据。
+_EMBED_ENV_KEYS = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL",
+                   "EMBEDDINGS_PROVIDER_ID")
+
+
+def _embeddings_key_present() -> bool:
+    """嵌入密钥到底有没有：provider 单源优先，回落 .env api_key（过渡期兼容）。"""
+    pid = (os.getenv("EMBEDDINGS_PROVIDER_ID") or "").strip()
+    if pid:
+        try:
+            from app.core.providers import looks_placeholder
+            from app.core.providers import store as provider_store
+            record = provider_store.get(pid)
+            key = str((record or {}).get("api_key") or "").strip()
+            if key and not looks_placeholder(key):
+                return True
+        except Exception:
+            # 判据读不动时不许把自检本身弄崩：落到 env 那一档再看。
+            pass
+    return bool((os.getenv("api_key") or "").strip())
 
 
 def _embeddings_unconfigured() -> bool:
-    """三件嵌入配置缺任意一项——memory_manager 会落到本地/伪嵌入的那条路。"""
-    return not any((os.getenv(key) or "").strip() for key in _EMBED_ENV_KEYS)
+    """三件（密钥来源 / EMBEDDINGS_BASE_URL / EMBEDDINGS_MODEL）缺任意一项——
+    memory_manager 会落到本地/伪嵌入的那条路。"""
+    return not (_embeddings_key_present()
+                and (os.getenv("EMBEDDINGS_BASE_URL") or "").strip()
+                and (os.getenv("EMBEDDINGS_MODEL") or "").strip())
 
 
 def _is_unconfigured_dim_conflict(error) -> bool:
@@ -59,8 +86,9 @@ def _is_unconfigured_dim_conflict(error) -> bool:
 
     `dim_conflict` 由 memory_manager 的专用异常挂着：字符串匹配在这里不算数——
     异常原文是第三方写的、措辞会变，而"这次失败是不是配置缺失"本来就不在文案里。
-    三件配置全缺才可能是"这台机子本来就没打算用云端嵌入"：伪嵌入固定 384 维，
-    撞上 1536 维旧库是预期形状。反过来，磁盘 OSError 哪怕三键全缺也仍是 broken
+    嵌入判「未配置」（密钥/地址/模型名三者不齐，见 `_embeddings_unconfigured`）
+    才可能是"这台机子本来就没打算用云端嵌入"：伪嵌入固定 384 维，撞上 1536 维
+    旧库是预期形状。反过来，磁盘 OSError 哪怕嵌入配置一个都没配也仍是 broken
     ——缺配置不是它发生的原因，不能把一次真故障洗成一条配置提示。
     """
     return bool(getattr(error, "dim_conflict", False)) and _embeddings_unconfigured()
@@ -142,15 +170,17 @@ def _check_memory_backend() -> tuple:
     只是检索结果完全不可信——它不影响"能不能聊"，影响的是"记不记得住"，
     所以报 degrade、不报断。
 
-    后端根本没起来时再分两路：维度冲突 + 三件嵌入配置全缺 = not_configured
-    （机器本来就没打算用云端嵌入，伪嵌入撞上旧库是预期形状），其余一律 broken。
+    后端根本没起来时再分两路：维度冲突 + 嵌入判为未配置（密钥/地址/模型名三者
+    不齐）= not_configured（机器本来就没打算用云端嵌入，伪嵌入撞上旧库是预期
+    形状），其余一律 broken。
     """
     from app.memory.memory_router import memory_init_error, memory_manager
 
     if memory_manager is None:
         if _is_unconfigured_dim_conflict(memory_init_error):
             # 只报"没配"，不回显异常里的维度/库信息：那是一条配置提示，不是故障现场。
-            return NOT_CONFIGURED, "未配置嵌入后端（嵌入三项配置缺任意一项），记忆检索不可用"
+            return NOT_CONFIGURED, ("未配置嵌入后端（嵌入密钥 / 嵌入地址 / 嵌入模型名 "
+                                    "缺任意一项），记忆检索不可用")
         return BROKEN, f"记忆后端没起来：{memory_init_error or '未知原因'}"
     if hasattr(memory_manager, "memories"):
         # 测试/CI 的内存替身：本来就不做嵌入，这不是降级，是这套后端的设计。

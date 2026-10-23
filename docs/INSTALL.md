@@ -28,7 +28,7 @@ notepad .env
 | 变量 | 填什么 |
 |------|--------|
 | `DEEPSEEK_API_KEY`（或 `OPENAI_API_KEY`） | 你自己买的模型 Key，至少一家 |
-| `api_key` + `EMBEDDINGS_BASE_URL` + `EMBEDDINGS_MODEL` | 向量嵌入服务三项，记忆模块用语义检索；不填会降级为本地模型，能跑但检索质量差一档 |
+| `api_key` + `EMBEDDINGS_BASE_URL` + `EMBEDDINGS_MODEL` | 向量嵌入服务，记忆模块用语义检索；不填会降级为本地模型，能跑但检索质量差一档。v0.36.2 起密钥推荐**单源**配进「设置 → 模型服务」，`.env` 只留非密指针 `EMBEDDINGS_PROVIDER_ID=<provider id>`（改 provider 后重启生效）；这里的 `api_key` 降为旧回退/可选，过渡期后可删 |
 | `ACCESS_TOKEN` | 管理员口令，自己定一个长随机串。只有拿这把 token 的请求是管理员；普通用户走「注册/登录」，令牌与密码都是摘要存储 |
 
 三条安全底线（代码里都有测试钉着，别绕）：

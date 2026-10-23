@@ -7,7 +7,8 @@ from openai import OpenAI
 
 from app.core.paths import data_root, load_project_env
 from app.core import logsanitizer
-from app.core.providers import build_client, store as provider_store
+from app.core.providers import (build_client, looks_placeholder,
+                                store as provider_store)
 from app.core.tls import system_ssl_context
 from app.memory.ranking import weighted_rank
 
@@ -67,12 +68,41 @@ class MemoryManager:
                 # 嵌入口的三样（密钥、地址、模型名）一律从配置读，源码里一个都不写死。
                 # 地址原先硬编码在下一行现在的位置上——这个仓库是公开的，"哪家在替我们
                 # 做嵌入"本身就是不想公开的信息，写在源码里等于写在官网上。
+                # v0.36.2 起嵌入密钥单源在 provider 配置（密钥本体躺在
+                # provider_keys.json），.env 只留一枚非密的 `EMBEDDINGS_PROVIDER_ID`
+                # 指名用哪条。地址与模型名仍走 .env 两项（EMBEDDINGS_BASE_URL /
+                # EMBEDDINGS_MODEL）。**没有运行期热加载**：改了/删了那条 provider
+                # 配置要重启才生效（与身份库同一口径，见 docs/安装部署指南.md）。
+                embed_provider_id = (os.getenv("EMBEDDINGS_PROVIDER_ID") or "").strip()
                 api_key = (os.getenv("api_key") or "").strip()
                 base_url = (os.getenv("EMBEDDINGS_BASE_URL") or "").strip()
                 embed_model = (os.getenv("EMBEDDINGS_MODEL") or "").strip()
 
+                if embed_provider_id:
+                    provider_key = ""
+                    try:
+                        provider_record = provider_store.get(embed_provider_id)
+                        provider_key = str((provider_record or {}).get("api_key") or "").strip()
+                    except Exception as e:
+                        # 读不动就当这条密钥没配：初始化不许因为 provider 侧的
+                        # 任何故障把整个后端拖崩（下面还有 env 回落与本地/伪嵌入）。
+                        print(f"⚠️ 读取 provider 配置失败（{type(e).__name__}），"
+                              "本轮按该 provider 无密钥处理")
+                    if provider_key and not looks_placeholder(provider_key):
+                        api_key = provider_key
+                        # 只说来源，不写 key/label/model——这句与文件里其余日志一样
+                        # 可能落进 server.log，"哪家在替我们做嵌入"是不想公开的信息。
+                        print("✅ 嵌入密钥来自 provider 配置")
+                    elif api_key:
+                        print("⚠️ EMBEDDINGS_PROVIDER_ID 指向的 provider 没有可用密钥"
+                              "（记录不存在、密钥为空或仍是占位符），过渡期内回落到"
+                              " .env 的 api_key。这是单源化要消灭的双源形状：请把嵌入"
+                              "密钥配进该 provider、重启验证后删除 .env 的 api_key。")
+                    # id 已设、provider 无可用密钥、env 也没有 → api_key 保持空串，
+                    # 走下面"未配置云端嵌入"的本地/伪嵌入分支，不抛异常。
+
                 if api_key and not base_url:
-                    print("⚠️ 配了 api_key 但没配 EMBEDDINGS_BASE_URL：嵌入接口不知道该往哪儿打，"
+                    print("⚠️ 配了嵌入密钥但没配 EMBEDDINGS_BASE_URL：嵌入接口不知道该往哪儿打，"
                           "按未配置云端嵌入处理。")
 
                 if api_key and base_url and embed_model:
@@ -112,13 +142,15 @@ class MemoryManager:
                         print(f"⚠️ 云端嵌入不可用: {logsanitizer.redact(str(e))}，尝试本地模型")
                         self._init_local_embed()
                 else:
-                    print("⚠️ 未配置云端嵌入（api_key / EMBEDDINGS_BASE_URL / EMBEDDINGS_MODEL "
-                          "缺任意一项），尝试本地模型")
+                    print("⚠️ 未配置云端嵌入（嵌入密钥——EMBEDDINGS_PROVIDER_ID 指向的"
+                          "可用 provider、或 .env 的 api_key——与 EMBEDDINGS_BASE_URL / "
+                          "EMBEDDINGS_MODEL 缺任意一项），尝试本地模型")
                     self._init_local_embed()
 
                 if self._dummy_embed:
                     print("⚠️ 记忆检索已降级为伪嵌入（全零向量），语义检索结果不可信。"
-                          "请补齐 .env 里的三个嵌入配置项，或安装 sentence-transformers。")
+                          "请配好嵌入密钥与地址、模型名三项（provider 或 .env 皆可），"
+                          "或安装 sentence-transformers。")
 
             self.chroma_client = chromadb.PersistentClient(path=self.persist_dir)
             self.collection = self._open_collection(collection_name)

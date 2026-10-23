@@ -119,6 +119,12 @@ with open(os.environ["PROVIDERS_DB_PATH"], "w", encoding="utf-8") as _f:
 os.environ["DEEPSEEK_API_KEY"] = ""
 os.environ["DEEPSEEK_BASE_URL"] = ""
 
+# v0.36.2 嵌入密钥单源：`EMBEDDINGS_PROVIDER_ID` 是 provider 单源的指针。发布后现网
+# .env 会写上它，测试若不摘走，导入期构造的 MemoryManager 会去查那份 provider 库，
+# "未设 id 走旧 api_key 路径"与"设了 id"两条分支就分不清是谁在跑。置空 = 指针未设，
+# 测试从"旧部署形状"出发；要演单源分支的用例自己 setenv（见 test_embed_key_source.py）。
+os.environ["EMBEDDINGS_PROVIDER_ID"] = ""
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
