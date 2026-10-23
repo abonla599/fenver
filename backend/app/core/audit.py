@@ -9,7 +9,10 @@
    也没有 DELETE 路由。文件损坏的那一行读到时标成 _corrupt_line，不假装解析成功。
 2. **落的是摘要，不是秘密**：before/after 里凡是键名撞上口令/令牌/密钥的，一律换成
    "***"——审计要证明"动过密码"，绝不需要把那枚密码记下来。这条是防手滑：调用方
-   就算把整个用户记录原样递进来，也不会把 pw_hash / initial_password 写进盘。
+   就算把整个用户记录原样递进来，也不会把 pw_hash / initial_password /
+   device_secrets 写进盘。键名之外还有一处手滑：detail 与字符串值里**高置信度**的
+   凭据形状（Bearer、sk-…、api_key=）同样隐去；但 40 位 SHA、auth_login_failed
+   这类事件名一个字不动——证据的可用性和不泄密一样重要。
 3. **审计写失败绝不连累被审计的那次操作**：真存储已经落盘成功、事务意义上的动作
    已经完成，这时因为磁盘满/权限炸而不许改配置，是把可审计性做成了新的单点故障。
    所以 log() 吞掉写异常、往 stderr 打一行"审计在漏"，让运维看得见，而不是让管理员
@@ -20,6 +23,7 @@
 import datetime
 import json
 import os
+import re
 import sys
 import threading
 
@@ -33,7 +37,40 @@ _SECRET_KEYS = {
     "password", "old_password", "new_password", "initial_password",
     "token", "tokens", "api_key", "apikey", "pw_hash", "secret",
     "authorization", "access_token", "refresh_token", "cookie",
+    # 调用方把完整用户记录原样递进来时会撞上的那几格：设备共享密钥、密保答案、
+    # 恢复码/备用码、私钥、会话令牌。键名进名单就等于值永不落盘，不必指望调用方
+    # 每次记得先摘干净。
+    "device_secret", "device_secrets", "security_answer", "security_answers",
+    "recovery_code", "backup_code", "private_key", "session_token",
 }
+
+# 自由文本里的高置信度凭据形状。刻意比 providers.scrub_secrets 窄：那一套的第一条
+# 正则会把 auth_login_failed 这类下划线事件名整段吃掉，而审计的 action/detail 大量
+# 就是这种名字——把事件名毁掉和把证据毁掉没有区别。三条都要求值至少 8 字符。
+# 裸十六进制（40 位 commit SHA、sha256 摘要）故意不认：它们会进审计，是证据。
+_BEARER_RE = re.compile(r"(\bbearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.I)
+_PREFIXED_KEY_RE = re.compile(r"\b(?:sk|pk)-[A-Za-z0-9._\-]{8,}", re.I)
+# 两条分组：标签与分隔符原样保留（group 1 + group 2），只把值换成 ***。
+_LABELED_SECRET_RE = re.compile(
+    r"\b(api[_-]?key|authorization|access[_-]?token|secret)"
+    r"([\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{8,})",
+    re.I,
+)
+
+
+def _scrub_text(text: str) -> str:
+    """隐掉自由文本里的凭据形状，其余一个字不动（保留标签，只隐值）。"""
+    if not text:
+        return ""
+    out = str(text)
+    out = _LABELED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "***", out)
+    out = _BEARER_RE.sub(lambda m: m.group(1) + "***", out)
+    return _PREFIXED_KEY_RE.sub("***", out)
+
+
+def _truncate(text: str, limit: int) -> str:
+    """超长截断，口径与旧行为一致（保留前 limit 字，尾巴补一个省略号）。"""
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _default_path() -> str:
@@ -44,17 +81,18 @@ path = _default_path
 
 
 def _redact(obj):
-    """递归擦掉敏感键与超长串。字典的键按小写比对命中即置 ***。"""
+    """递归擦掉敏感键与超长串。字典的键按小写比对命中即置 ***，字符串先过值级
+    脱敏再截断。"""
     if isinstance(obj, dict):
         return {k: ("***" if str(k).lower() in _SECRET_KEYS else _redact(v))
                 for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_redact(x) for x in obj]
     if isinstance(obj, str):
-        return obj if len(obj) <= 400 else obj[:400] + "…"
+        return _truncate(_scrub_text(obj), 400)
     if obj is None or isinstance(obj, (bool, int, float)):
         return obj
-    return str(obj)[:400]
+    return _truncate(_scrub_text(str(obj)), 400)
 
 
 def _actor_bits(actor):
@@ -79,7 +117,7 @@ def log(actor, action, target=None, before=None, after=None, detail=""):
         "target": _redact(target),
         "before": _redact(before),
         "after": _redact(after),
-        "detail": (detail or "")[:500],
+        "detail": _truncate(_scrub_text(detail or ""), 500),
     }
     p = _default_path()
     try:
