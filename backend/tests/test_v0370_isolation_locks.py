@@ -10,9 +10,9 @@ sandbox 就等于给"沙箱容器无网络"这条隔离补一个带 URL 的旁�
 1. `http_fetch.py` 的 import 面（AST 遍历 Import/ImportFrom，正面写明认得的形状：
    绝对导入、`from app.x import y` 都算）里不许出现 `app.sandbox*` 或
    `app.core.providers`；源码文本不许出现 ALLOW_LOCALHOST；
-2. `sandbox_manager.py:77` 的 `network_disabled=True`——AST 找 docker 容器
-   create 调用上的关键字参数，同时钉当前行号 77：行号漂了本条红并教人重新锚定，
-   参数被摘掉更是直接把"代码执行不出网"这条隔离拆掉；
+2. `sandbox_manager.py` 里 `*.containers.create` 调用上的 `network_disabled=True`——
+   AST 找调用、只在该调用自己的 keywords 里断言；行号不参与判据（v0.37.0 审查
+   N12：硬编码行号是会腐烂的散文坐标，上方插一行注释不该让锁红）；
 3. execute_code 的 schema 参数恰为 {code, language}、http_fetch 恰为 {url}——
    参数表是模型唯一能碰的契约，多一颗口子（比如 user_id 或 base_url）就是新通道；
 4. http_fetch 注册旗标：needs_user=True（审计归因走服务端身份）、
@@ -37,23 +37,43 @@ SANDBOX_SRC = (BACKEND / "app" / "sandbox" / "sandbox_manager.py").read_text(enc
 _FORBIDDEN_ROOTS = ("app.sandbox", "app.core.providers")
 
 
-def _imported_modules(source: str) -> set:
-    """AST 认得的形状：`import a.b[ as c]`、`import a.b, d.e`、`from a.b import x`。
+def _imported_modules(source: str, module: str = "app.tools.http_fetch") -> set:
+    """AST 认得的形状：`import a.b[ as c]`、`import a.b, d.e`、
+    `from a.b import x, y`（每个 alias 与 module 拼接），相对导入按 `level`
+    折算回 `app.*` 前缀。
 
-    绝对与相对导入都收（相对导入把 `from .. import sandbox` 这类绕法也算进来：
-    按层数折算回 app.* 前缀比对）。条件导入（函数体里的 import）同样在射程内——
-    遍历的是整棵语法树，不限模块顶层。
+    为什么不能只收 `ImportFrom.module`：`from app.core import providers` 的
+    `module` 是 `app.core`，真正被引用的名字在 alias 里；`from .. import sandbox`
+    连 module 都是空的。v0.37.0 审查实测这四种形状全部漏网：
+    `from app.core import providers`、`from app import sandbox`、
+    `from ..core import providers`、`from .. import sandbox`。
+    条件导入（函数体里的 import）同样在射程内——遍历整棵语法树，不限顶层。
     """
+    package = module.split(".")[:-1]          # app.tools.http_fetch -> ["app","tools"]
     tree = ast.parse(source)
     found = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level:                        # 相对导入：够不着的层数按 0 收进 "app."
-                found.add("." * node.level)
-            if node.module:
-                found.add(node.module)
+            if node.level:
+                # `from . import x`（level=1）落在当前包；`from .. import x`
+                # （level=2）上一级。够不着的层数按 app 收，宁可多看一层。
+                drop = node.level - 1
+                base = package[:max(1, len(package) - drop)] if package else ["app"]
+                if node.module:
+                    base = base + node.module.split(".")
+            else:
+                base = node.module.split(".") if node.module else []
+            if base:
+                found.add(".".join(base))
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if base:
+                    found.add(".".join([*base, alias.name]))
+                else:
+                    found.add(alias.name)
     return found
 
 
@@ -75,28 +95,97 @@ def test_http_fetch_source_has_no_localhost_switch():
     assert "allow_loopback=False" in HTTP_FETCH_SRC
 
 
-def test_sandbox_container_create_keeps_network_disabled():
-    """AST 找 docker 容器 create 调用上的 `network_disabled=True`，并钉当前行号 77。
+def _dotted_call_name(node) -> str:
+    """`self.client.containers.create` -> "self.client.containers.create"。"""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
 
-    行号是**观测值**不是判据本体：判据是"这个 kwargs 必须还在且值为 True"。
-    哪天上面插了代码让行号漂了，第二句会红并给出真实行号——那是要重新锚定，
-    不是要删掉这条锁。
-    """
-    tree = ast.parse(SANDBOX_SRC)
-    found = None
-    for node in ast.walk(tree):
+
+def _container_create_calls(source: str) -> list:
+    """AST 找 `*.containers.create(...)` 调用（不再锚行号）。"""
+    calls = []
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call):
-            for kw in node.keywords:
-                if kw.arg == "network_disabled" and isinstance(kw.value, ast.Constant) \
-                        and kw.value.value is True:
-                    found = kw
-    assert found is not None, "sandbox_manager 里找不到 network_disabled=True——沙箱隔离被拆了"
-    lines = SANDBOX_SRC.splitlines()
-    actual = found.lineno
-    assert "network_disabled=True" in lines[actual - 1]
-    if actual != 77:
-        pytest.fail(f"network_disabled=True 从第 77 行漂到了第 {actual} 行："
-                    "确认没有别的改动后把锚更新成这个数，锁本身不许删")
+            name = _dotted_call_name(node.func)
+            if name == "containers.create" or name.endswith(".containers.create"):
+                calls.append(node)
+    return calls
+
+
+def _network_disabled_true(call) -> list:
+    """只在该 `containers.create` 调用自己的 keywords 里找 `network_disabled=True`。"""
+    return [kw for kw in call.keywords
+            if kw.arg == "network_disabled"
+            and isinstance(kw.value, ast.Constant) and kw.value.value is True]
+
+
+def _sandbox_lock_holds(source: str) -> bool:
+    """判据本体：至少一个 containers.create 调用带着 network_disabled=True。"""
+    return any(_network_disabled_true(call) for call in _container_create_calls(source))
+
+
+def test_sandbox_container_create_keeps_network_disabled():
+    """AST 找 docker 容器 create 调用上的 `network_disabled=True`。
+
+    判据是"这个 kwargs 必须挂在那次 create 调用上且值为 True"；行号只是观测值，
+    只在失败信息里出现——上方插一行注释不该让这条锁红（v0.37.0 审查 N12）。
+    """
+    calls = _container_create_calls(SANDBOX_SRC)
+    assert calls, "sandbox_manager 里找不到 *.containers.create 调用——沙箱隔离被拆了"
+    hits = [(call, kw) for call in calls for kw in _network_disabled_true(call)]
+    assert hits, ("sandbox_manager 的 containers.create 上找不到 network_disabled=True——"
+                  f"沙箱隔离被拆了（create 调用在第 "
+                  f"{', '.join(str(c.lineno) for c in calls)} 行）")
+
+
+def test_sandbox_lock_survives_a_line_inserted_above():
+    """行号不是判据：上方插一行（注释/空行）后同一条锁照样成立。"""
+    mutated = "# 上方随手插一行注释\n" + SANDBOX_SRC
+    assert _sandbox_lock_holds(mutated), "插一行就让锁红了：判据还在锚行号"
+
+
+def test_sandbox_lock_ignores_network_disabled_on_other_calls():
+    """`network_disabled=True` 挂在别的调用（run/其它对象）上不算数。
+
+    负向锁：把 `_container_create_calls` 放宽成"任意带该关键字的 Call"，本条红。
+    """
+    source = (
+        "def f(self):\n"
+        "    self.client.containers.create(image='x')\n"
+        "    self.client.containers.run(image='x', network_disabled=True)\n"
+        "    other.run(network_disabled=True)\n"
+    )
+    assert not _sandbox_lock_holds(source)
+
+
+def test_import_scanner_catches_from_import_shapes():
+    """`from app.x import y` 与相对导入的四种绕法必须落进扫描结果。
+
+    负向锁：把 `_imported_modules` 退回"只收 ImportFrom.module"，这四条全红
+    （v0.37.0 审查实测的四个漏网形状）。
+    """
+    cases = {
+        "from app.core import providers": "app.core.providers",
+        "from app import sandbox": "app.sandbox",
+        "from ..core import providers": "app.core.providers",
+        "from .. import sandbox": "app.sandbox",
+    }
+    for source, needle in cases.items():
+        mods = _imported_modules(source)
+        assert needle in mods, f"{source!r} 没扫出 {needle}，扫到的是 {sorted(mods)}"
+
+
+def test_import_scanner_does_not_invent_hits():
+    """正常相邻导入不许被误报成隔离面焊穿。"""
+    mods = _imported_modules("from app.core import audit, config_store\n"
+                             "from app.tools import extract\nimport httpx\n")
+    assert not any(m == root or m.startswith(root + ".") for m in mods
+                   for root in _FORBIDDEN_ROOTS), sorted(mods)
 
 
 def test_tool_schemas_are_exactly_the_declared_parameters():

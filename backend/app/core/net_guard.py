@@ -65,7 +65,25 @@ PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
                        # IPv4 的另一种写法。`::` 与 `::1` 先被 is_unspecified/
                        # is_loopback 属性判走（文案保持"本机"不变），`::ffff:x` 系
                        # 先折回 v4 再判——这一条只兜其余 compat 写法，如 ::127.0.0.1
+    # ---- v0.37.0 第二批修复：审查点名的四个特殊用途段 ----
+    # 与上面五段同一性质：能写成合法字面量、属性判断全失明、且不是"服务端该去
+    # 连接的公网端点"。
+    "100::/64",        # discard-only（RFC6666）：只为丢弃流量而分配，没有服务
+    "2001:2::/48",     # 基准测试段（RFC5180）：给网络设备压测用，不是业务端点
+    "2001:10::/28",    # ORCHID（RFC4843，已废弃）：曾用于叠加标识，现网不路由
+    "3fff::/20",       # IPv6 文档段（RFC9637）：与 2001:db8::/32 同类
 ))
+
+# 可内嵌 IPv4 的 IPv6 段：**不整段拒**，而是把低 32 位提出来按 v4 清单判。
+# `::ffff:0:0:0/96` 是 IPv4-translated（SIIT/RFC2765）写法，Python 的
+# `ipv4_mapped` 只折叠 `::ffff:a.b.c.d`（/96 的另一种布局），不认它；
+# `64:ff9b::/96` 是 NAT64 知名前缀（RFC6052）。两者都能在 SIIT/NAT64 网络里
+# 指向 169.254.169.254 或私网；但内嵌公网地址（如 64:ff9b::8.8.8.8）本身没有
+# 危害，所以按 v4 清单判，而不是把整段打成内网。
+_V4_EMBEDDED_NETWORKS = (
+    ipaddress.ip_network("::ffff:0:0:0/96"),
+    ipaddress.ip_network("64:ff9b::/96"),
+)
 
 # 回环/localhost 理由句的既有尾巴（v0.33 原文）。providers 走默认值一字不动；
 # 不吃这枚开关的调用方（http_fetch 永远 allow_loopback=False）传 "" 去掉它，
@@ -160,6 +178,12 @@ def _address_reject_reason(addr, *, host, resolved_via, allow_loopback, where,
     # 但它仍是"链路寻址"的写法，一样不许过关。
     scope_id = getattr(addr, "scope_id", None)
     mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is None and addr.version == 6:
+        # IPv4-translated 与 NAT64：低 32 位就是内嵌的 v4，按 v4 清单判。
+        for network in _V4_EMBEDDED_NETWORKS:
+            if addr in network:
+                mapped = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+                break
     if mapped is not None:
         addr = mapped
 

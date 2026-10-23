@@ -288,9 +288,16 @@ def _write() -> None:
 
 
 def read() -> dict:
-    """当前生效的配置（env 已合并）。每次现读 env，改了不用重启——与 AUTH_MODE 同口径。"""
+    """当前生效的配置（env 已合并）。每次现读 env，改了不用重启——与 AUTH_MODE 同口径。
+
+    `fetch_allowed_hosts` 必须**返回副本**：`_config` 初始化时是 `dict(DEFAULTS)`
+    的浅拷贝，`DEFAULTS` 里那个 list 会被 `read()` 的调用方直接拿到；一次
+    `read()["fetch_allowed_hosts"].append(...)` 就会改掉全局默认值（v0.37.0
+    审查 N5 的实测路径）。其余键是标量/不可变子树，浅拷贝即可。
+    """
     with _lock:
         out = dict(_config)
+        out["fetch_allowed_hosts"] = list(out.get("fetch_allowed_hosts") or [])
     env_open = _env_registration_open()
     if env_open is not None:
         out["registration_open"] = env_open

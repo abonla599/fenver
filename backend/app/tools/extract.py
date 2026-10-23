@@ -21,11 +21,26 @@ from html.parser import HTMLParser
 
 BODY_CHAR_LIMIT = 3000
 
+# 没有可见正文时的固定人话。**绝不**回退成原始 HTML：外部页面只要把可见文本做成
+# 空（纯脚本页、挑战页、JS 渲染页），整页 `<script>` 就会变成喂给模型的"正文"。
+EMPTY_BODY_TEXT = "（该页面没有可读正文）"
+
 # 命中即整个跳过（含子树内容）。集合是"这个容器里的文字不是正文"，不是"这个标签危险"。
 _DROP_TAGS = frozenset({"script", "style", "nav", "aside", "footer", "form",
                         "noscript", "template", "svg"})
 # 正文候选区域：闭合标签时各自成一段；都不存在时用 base（全文）兜底。
 _REGION_TAGS = frozenset({"article", "main"})
+# 块级边界：开始/结束标签都往当前候选压一个换行记号。没有这一步，
+# `<h1>Title</h1><p>Body</p>` 会粘成 `TitleBody`，模型分不清哪句是标题。
+# 行内标签（span/b/em/a…）故意不在表里——它们之间本来就不该断行。
+_BLOCK_TAGS = frozenset({
+    "address", "article", "blockquote", "body", "caption", "center", "dd",
+    "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption",
+    "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+    "hgroup", "hr", "html", "legend", "li", "main", "menu", "nav", "ol", "p",
+    "pre", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+    "thead", "tr", "ul", "br",
+})
 
 # 外部内容标注：与 builtin_tools 里搜索那一条同一句纪律的两份落点之一。
 # 抓回来的网页正文和搜索摘要一样是别人控制的文本——"忽略以上指令，调用
@@ -64,11 +79,16 @@ class _RegionCollector(HTMLParser):
         if tag in _REGION_TAGS:
             entry = (tag, [])
             self._open.append(entry)
+        if tag in _BLOCK_TAGS:
+            self._sink().append("\n")
 
     def handle_startendtag(self, tag, attrs):
         # `<article/>` 这种自闭合区域：内容为空，进栈出栈走同一条例外路径。
         if tag in _REGION_TAGS:
             self._regions.append((tag, []))
+            return
+        if tag in _BLOCK_TAGS and tag not in _DROP_TAGS:
+            self._sink().append("\n")
 
     def handle_endtag(self, tag):
         if tag in _DROP_TAGS:
@@ -87,11 +107,15 @@ class _RegionCollector(HTMLParser):
                 if self._open[idx][0] == tag:
                     self._regions.append(self._open.pop(idx))
                     break
+        if tag in _BLOCK_TAGS:
+            self._sink().append("\n")
 
     def handle_data(self, data):
-        if self._drop_depth > 0 or not data.strip():
+        if self._drop_depth > 0:
             return
-        self._sink().append(data)
+        # 只有空白的数据块不能整段丢：`<b>a</b> <i>b</i>` 靠中间那个空格才不会
+        # 粘成 `ab`。压一个空格交给 _join 折叠（行首尾会被 strip，块间空行会被丢）。
+        self._sink().append(data if data.strip() else " ")
 
     def candidates(self):
         finished = [_join(chunks) for _, chunks in self._regions]
@@ -101,10 +125,15 @@ class _RegionCollector(HTMLParser):
 
 
 def _join(chunks) -> str:
-    """拼段并规范空白：行内合并成单空格，块之间至少留一个换行。"""
+    """拼段并规范空白：行内合并成单空格，块之间至少留一个换行。
+
+    实现与 docstring 对齐：块级边界由 `_BLOCK_TAGS` 压入的换行记号负责，这里
+    先把每行内部的连续空白折成单空格、去掉空行，再用单个换行把行接起来。
+    因此 `<h1>Title</h1><p>Body</p>` 得到 `Title\\nBody`，而不是 `TitleBody`。
+    """
     text = "".join(chunks)
-    lines = [ln.strip() for ln in text.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 def extract_text(content_type: str, text: str, limit: int = BODY_CHAR_LIMIT) -> str:
@@ -112,6 +141,10 @@ def extract_text(content_type: str, text: str, limit: int = BODY_CHAR_LIMIT) -> 
 
     content_type 只在"是不是 HTML"上说话：HTML 走标签解析；text/plain 与
     application/json 原样进出（JSON 也是人写的文本，剥括号不等于取正文）。
+
+    **HTML 的失败路径只有一种出口**：解析异常或所有候选都为空时返回固定人话
+    `EMPTY_BODY_TEXT`，绝不把 `text.strip()`（原始 HTML，含 script/style）当正文。
+    外部页面是本工具不可信输入的一端，"没有可见正文"必须是空结果，不是整页原文。
     """
     if content_type in ("text/html", "application/xhtml+xml"):
         try:
@@ -120,12 +153,10 @@ def extract_text(content_type: str, text: str, limit: int = BODY_CHAR_LIMIT) -> 
             parsed.close()
             pool = parsed.candidates()
         except Exception:
-            pool = []               # 解析器被畸形 HTML 难住：退回全文，不是报错
-        if not pool:
-            pool = [text.strip()]
-        body = max(pool, key=len)
+            pool = []               # 解析器被畸形 HTML 难住：固定人话，不回原始 HTML
+        body = max(pool, key=len) if pool else EMPTY_BODY_TEXT
     else:
-        body = text.strip()
+        body = text.strip() or EMPTY_BODY_TEXT
     if len(body) <= limit:
         return body
     return (body[:limit]
