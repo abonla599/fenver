@@ -376,6 +376,95 @@ def test_the_two_self_hosted_domains_still_get_their_origin_specific_url(client,
                 f"{host} 的来源没被换成同源地址：{asset['browser_download_url']}"
 
 
+# ---------- 7b. v0.36.2：`_self_origin` 自己的 Host 白名单 + XFP 信任闸 ----------
+# 下游 `self_hosted_apk_url` 的域收口照旧不动，这一节钉的是上游那道纵深防御：
+# 拼来源这一步就不再吐"任谁来客写的 Host + 任谁来客写的协议"。
+
+from starlette.requests import Request as _StarletteRequest
+
+
+def _origin_request(host=None, xfp=None, peer=("127.0.0.1", 54321)):
+    """不经 HTTP 层、直接构造 ASGI scope 的 Request：要演的正是 **对端地址** 这一维，
+    它由 scope["client"] 决定——TestClient 的 peer 若不是回环，用 scope 注入，
+    绝不把 "testclient" 之类夹具写进生产信任名单。"""
+    headers = []
+    if host is not None:
+        headers.append((b"host", host.encode("utf-8")))
+    if xfp is not None:
+        headers.append((b"x-forwarded-proto", xfp.encode("utf-8")))
+    scope = {"type": "http", "http_version": "1.1", "method": "GET",
+             "path": "/v1/update/info", "raw_path": b"/v1/update/info",
+             "query_string": b"", "root_path": "", "scheme": "http",
+             "client": peer, "server": ("testserver", 80), "headers": headers}
+    return _StarletteRequest(scope)
+
+
+def _origin(host=None, xfp=None, peer=("127.0.0.1", 54321)):
+    from app.main import _self_origin
+    return _self_origin(_origin_request(host=host, xfp=xfp, peer=peer))
+
+
+@pytest.mark.parametrize("host,xfp,peer,expect", [
+    # 现网形状：cloudflared 从回环转进来，Host 是自家域。
+    ("ai.fenever.xyz", "https", ("127.0.0.1", 5), "https://ai.fenever.xyz"),
+    ("www.fenever.xyz", "https", ("127.0.0.1", 5), "https://www.fenever.xyz"),
+    ("ai.fenever.xyz", None, ("::1", 5), "https://ai.fenever.xyz"),
+    # 可信对端 + 没带 X-Forwarded-Proto：缺省仍保持 https。
+    ("ai.fenever.xyz", None, ("127.0.0.1", 5), "https://ai.fenever.xyz"),
+    # 回环 + XFP=http：空。隧道本机段是 http 不假，但对外的这一问是 https。
+    ("ai.fenever.xyz", "http", ("127.0.0.1", 5), ""),
+    # 非回环来客说了不算：哪怕 Host 是自家域、XFP 写着 https，也是空串。
+    ("ai.fenever.xyz", "https", ("8.8.8.8", 5), ""),
+    ("ai.fenever.xyz", None, ("8.8.8.8", 5), ""),
+    # 形状闸门：端口、userinfo、路径段一律拒。
+    ("ai.fenever.xyz:8443", None, ("127.0.0.1", 5), ""),
+    ("user@ai.fenever.xyz", None, ("127.0.0.1", 5), ""),
+    ("ai.fenever.xyz/extra", None, ("127.0.0.1", 5), ""),
+    # 伪域：形状合格但不是我们的域。
+    ("evil.example", None, ("127.0.0.1", 5), ""),
+    ("ai.fenever.xyz.eil.com", None, ("127.0.0.1", 5), ""),
+    ("fenever.xyz", None, ("127.0.0.1", 5), ""),
+    # 本机开发形状：localhost:8000 从来走"不换"。
+    ("localhost:8000", None, ("127.0.0.1", 5), ""),
+    ("", None, ("127.0.0.1", 5), ""),
+    (None, None, ("127.0.0.1", 5), ""),
+])
+def test_self_origin_accepts_only_a_self_hosted_domain_from_a_trusted_peer(host, xfp, peer, expect):
+    """Host 白名单（小写后必须 ∈ SELF_HOST_DOMAINS）+ 可信对端才继续谈协议。
+
+    大小写写法照常认（DNS 不区分大小写），但吐出去的是小写规范形。
+    """
+    assert _origin(host, xfp, peer) == expect
+
+
+def test_self_origin_writes_back_the_canonical_lowercase_origin():
+    """`WWW.FENEVER.XYZ` 这类写法认下来后统一还原成小写规范形——白名单比对与出口
+    地址因此共用同一个形状，不再有"按来客的大小写原样还"的第二档。"""
+    assert _origin("WWW.FENEVER.XYZ") == "https://www.fenever.xyz"
+
+
+def test_self_origin_trusts_only_explicit_proxies_and_ignores_malformed_entries(monkeypatch):
+    """`SELF_TRUSTED_PROXIES`：显式 IP/CIDR 清单是回环之外唯一的信任来源。
+
+    写错的格子只被跳过，不扩大也不收窄其它格的信任；清单没配的网段照样不认。
+    """
+    monkeypatch.setenv("SELF_TRUSTED_PROXIES", "10.0.0.0/24, 203.0.113.9, not-an-ip")
+    assert _origin("ai.fenever.xyz", None, ("10.0.0.7", 5)) == "https://ai.fenever.xyz"
+    assert _origin("ai.fenever.xyz", "https", ("203.0.113.9", 5)) == "https://ai.fenever.xyz"
+    assert _origin("ai.fenever.xyz", None, ("10.1.0.7", 5)) == ""
+    # XFP 说 http：信任给了对端，但协议判据不放过。
+    assert _origin("ai.fenever.xyz", "http", ("10.0.0.7", 5)) == ""
+
+
+def test_self_origin_does_not_trust_the_bare_testclient_peer(monkeypatch):
+    """裸 TestClient 的默认对端 "testclient" 不是 IP——解析不出＝不信任，绝不进名单。
+
+    这条同时是负控：如果哪天有人把 "testclient" 写进生产信任判据，这里当场红。
+    """
+    monkeypatch.delenv("SELF_TRUSTED_PROXIES", raising=False)
+    assert _origin("ai.fenever.xyz", None, ("testclient", 50000)) == ""
+
+
 def test_the_self_hosted_apk_path_is_the_same_string_in_the_server_the_route_and_the_client():
     """三处同名锁：换出去的地址必须是客户端写死的那条路径、也必须是真注册了的那条路由。
 

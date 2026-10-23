@@ -177,12 +177,14 @@ def test_summarize_failure_degrades_to_truncation_not_500(mem_real, monkeypatch)
 
 # ---------- G5：启动期嵌入口的三态 ----------
 
-_CLOUD_ENV = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL")
+_CLOUD_ENV = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL",
+              "EMBEDDINGS_PROVIDER_ID")
 
 
 @pytest.fixture
 def _no_cloud_env(monkeypatch):
-    """把三个嵌入配置摘干净：开发机 .env 里可能真有值，摘不走三态就测不成三态。"""
+    """把嵌入配置摘干净（含 v0.36.2 的 provider 单源指针）：开发机 .env 里可能真有值，
+    摘不走三态就测不成三态。"""
     for key in _CLOUD_ENV:
         monkeypatch.delenv(key, raising=False)
 

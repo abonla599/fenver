@@ -467,18 +467,68 @@ def update_info(request: Request):
     return manifest
 
 
+def _origin_peer_is_trusted(peer: str) -> bool:
+    """这一次请求的**对端**能不能替它声明协议。
+
+    现网形状是后端只绑 127.0.0.1、公网流量一律由 cloudflared 从回环转进来
+    （与 `auth_router._client_ip` 认 CF-Connecting-IP 用的是同一条判据）。所以
+    回环对端（127.0.0.0/8、::1）算可信；此外只认显式配进 `SELF_TRUSTED_PROXIES`
+    的 IP/CIDR 逗号清单。非 IP 形状的对端名（测试夹具的默认对端就是这种）解析不出
+    ＝不可信，绝不把测试夹具写进生产信任名单。
+    """
+    import ipaddress
+
+    if not peer:
+        return False
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    for entry in (os.getenv("SELF_TRUSTED_PROXIES") or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            # 清单里写错的一格只跳过它：信任名单坏掉的正确行为是"不额外信任何人"，
+            # 不是把整条端点拖崩。
+            continue
+    return False
+
+
 def _self_origin(request: Request) -> str:
     """这台服务器在这一次请求里的"https://主机"来源；不合格就是空串（＝什么都不换）。
 
-    只认 Host 头不认 `request.url`：生产是 TLS 在前面的反代终结的，容器里看到的是
-    http，而壳那条同源判据比的是它自己配置的 `https://` 主机。带端口或 userinfo 的
-    主机在这里会被 `self_hosted_apk_url` 判死，所以本机开发（localhost:8000）走的是
-    "不换"这一档——老壳从来不信 http，把一个它不信的地址换上去只是把一条能用的地址
-    换成一条不能用的。
+    v0.36.2 起这里自己就把门收死，不再把判据全押给下游（纵深防御，`self_hosted_apk_url`
+    那道域白名单照旧不动）：
+
+    * **Host**：去空白后不许含 `:`（带端口）、`@`（userinfo）、`/`（路径），
+      小写后必须落在 `releases.SELF_HOST_DOMAINS` 里，否则空串。`localhost:8000`
+      这类本机开发形状从来走"不换"这一档——老壳不信 http，把一个它不信的地址
+      换上去只是把一条能用的地址换成一条不能用的。
+    * **协议**：X-Forwarded-Proto 只有**可信对端**（回环，或显式配进
+      `SELF_TRUSTED_PROXIES`）说的话才采信；对端不可信一律空串——Host 与 XFP
+      都是客户端随手能写的头，而返回给手机的下载地址必须是我们自己的 https 源。
+      可信对端 + 没带 XFP 时缺省仍是 https（现网 cloudflared 从回环转进来正是
+      这一档）。
     """
+    from app.core import releases
+
     host = (request.headers.get("host") or "").strip()
+    if not host or any(ch in host for ch in (":", "@", "/")):
+        return ""
+    host = host.lower()
+    if host not in releases.SELF_HOST_DOMAINS:
+        return ""
+    peer = request.client.host if request.client else ""
+    if not _origin_peer_is_trusted(peer):
+        return ""
     proto = (request.headers.get("x-forwarded-proto") or "https").split(",")[0].strip().lower()
-    return f"{proto}://{host}" if proto == "https" and host else ""
+    return f"https://{host}" if proto == "https" else ""
 
 # ---------- 聊天接口 ----------
 from app.core import stream_events

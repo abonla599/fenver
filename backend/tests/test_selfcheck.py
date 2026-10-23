@@ -358,7 +358,8 @@ def _a_real_dimension_conflict(tmp_path):
     return str(caught.value), str(root)
 
 
-_EMBED_ENV = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL")
+_EMBED_ENV = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL",
+              "EMBEDDINGS_PROVIDER_ID")
 
 
 def _production_dummy_conflict(tmp_path, monkeypatch):
@@ -449,10 +450,16 @@ def test_a_real_failure_stays_broken_even_when_embedding_config_is_missing(monke
 
 
 def test_dim_conflict_is_not_excused_when_embedding_config_is_present(monkeypatch):
-    """同一枚维度冲突，只要三件配置里有一件在，就不是"没配"。
+    """同一枚维度冲突，只要嵌入判为**已配置**（三者齐全），就不是"没配"。
 
     已经在配嵌入的机器上出现维度冲突，说明后端或库被换了，属于真故障。这条挡住
     "看到 dim_conflict 就一律降级"的写法——那会让线上真故障静音。
+
+    v0.36.2 改锚点：判据从旧 `not any(...)`（三键全缺才算没配，任一单项在场即
+    "已配置"）改成"密钥来源 + 地址 + 模型名三者齐全才算已配置"——与
+    memory_manager 的实际分支同口径。于是"只配了一件"落回 not_configured
+    （内存里那台机器确实跑不了云端嵌入），BROKEN 一档改由**三件齐备**来触发；
+    半配状态不再被谎称成已配置。
     """
     from app.memory import memory_router
     from app.memory.memory_manager import EmbeddingDimConflict
@@ -465,11 +472,21 @@ def test_dim_conflict_is_not_excused_when_embedding_config_is_present(monkeypatc
         monkeypatch.delenv(key, raising=False)
     assert selfcheck._check_memory_backend()[0] == NOT_CONFIGURED
 
-    for key in _EMBED_ENV:
+    # 半配（缺任意一件）仍是"没配"：三件各配其一都可能被旧口径误判成已配置。
+    for missing in ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL"):
+        for key in _EMBED_ENV:
+            if key != missing:
+                monkeypatch.setenv(key, "configured")
+        assert selfcheck._check_memory_backend()[0] == NOT_CONFIGURED, \
+            f"缺 {missing} 的半配状态被判成了已配置"
+        for key in _EMBED_ENV:
+            monkeypatch.delenv(key, raising=False)
+
+    # 三件齐备：维度冲突就是真故障。
+    for key in ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL"):
         monkeypatch.setenv(key, "configured")
-        assert selfcheck._check_memory_backend()[0] == BROKEN, \
-            f"{key} 已配置，维度冲突还报 not_configured"
-        monkeypatch.delenv(key)
+    assert selfcheck._check_memory_backend()[0] == BROKEN, \
+        "三件齐备的机器上维度冲突还报 not_configured"
 
 
 # 子进程的标记行：chromadb 自己也会往 stdout 打东西，只认这一行。
