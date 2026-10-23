@@ -383,6 +383,22 @@ def test_feedback_delete_is_still_hidden_for_unread_items():
     assert "if (!f.read)" in js, "未读条目不再分支：删除按钮会出现在不该出现的地方"
 
 
+def test_feedback_images_are_thumbnails_with_an_in_page_viewer():
+    """截图不能只是一个新标签链接：先缩略图，点开在当前页放大。
+
+    图片端点仍是管理员专属的同源 GET，`<img>` 自动带 httpOnly Cookie；缩略图与
+    查看器都不许拼 HTML（加载失败时用 textContent 写回退文案）。
+    """
+    js, html, css = _js(), _html(), _css()
+    assert "fb-thumb" in js and "openImageViewer" in js
+    assert '"/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/"' in js
+    assert 'id="imageViewerImg"' in html
+    assert 'id="imageViewerClose"' in html
+    assert ".fb-thumb img" in css and "object-fit: cover" in css
+    assert ".image-viewer-body img" in css and "object-fit: contain" in css
+    assert "innerHTML" not in js
+
+
 def test_feedback_badge_refreshes_on_boot_and_manual_refresh():
     """未读角标必须在任何入口都出现：停在 #/accounts 刷新后也要更新。
 
@@ -413,7 +429,7 @@ def test_dialogs_are_modal_and_manage_focus():
     """按 id 逐个判，而不是数 `aria-modal` 的个数：第二批合法加弹层不该误红。"""
     html, js = _html(), _js()
     assert html.count('aria-modal="true"') >= 3, "三个基础弹层少了至少一个"
-    for sheet_id in ("reveal", "ask", "detail"):
+    for sheet_id in ("reveal", "ask", "detail", "imageViewer"):
         tag = re.search(r'<div[^>]*\bid="' + sheet_id + r'"[^>]*>', html)
         assert tag, f"弹层 #{sheet_id} 不见了"
         opening = tag.group(0)

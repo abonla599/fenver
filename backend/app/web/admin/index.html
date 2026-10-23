@@ -369,6 +369,19 @@
   </div>
 </div>
 
+<!-- 反馈截图查看器：缩略图点击后在当前页放大，不跳新标签。 -->
+<div id="imageViewer" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="imageViewerTitle">
+  <div class="card image-viewer-card">
+    <h2 id="imageViewerTitle">反馈截图</h2>
+    <div class="image-viewer-body">
+      <img id="imageViewerImg" alt="">
+    </div>
+    <div class="foot">
+      <button id="imageViewerClose" class="btn btn-ghost btn-small" type="button" data-icon="close" data-label="关闭"></button>
+    </div>
+  </div>
+</div>
+
 <script src="admin.js"></script>
 </body>
 </html>
