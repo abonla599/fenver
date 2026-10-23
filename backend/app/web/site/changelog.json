@@ -2,6 +2,57 @@
   "generated_from": "docs/releases/*.md",
   "releases": [
     {
+      "version": "0.36.3",
+      "server_only": true,
+      "title": "v0.36.3 更新说明",
+      "intro": "本版只换服务端，**没有新的安卓包**：最新可安装版本仍是 0.36.1（versionName 保持 0.36.1）。这一版是管理台改版与安全监控。",
+      "sections": [
+        {
+          "heading": "管理台",
+          "items": [
+            "五个分区：概览 / 账号 / 安全 / 反馈 / 运行；桌面左栏、手机底部导航；44px 热区与键盘焦点。",
+            "账号：搜索、状态筛选、建号（浏览器现生成随机口令、一次性展示）、停用/恢复、重置口令、换发令牌、删号；显示最早会话到期。",
+            "反馈：全部/未读、分页加载、已加载条目搜索、CSV 导出（公式注入转义）、截图；未读不可删。",
+            "运行：用量 / 搜索 / 记忆 / 任务 / 智能体 / 配置六个懒加载子页，原有功能全部保留。"
+          ]
+        },
+        {
+          "heading": "安全监控",
+          "items": [
+            "新增有界安全事件日志 `data/security_log.jsonl`（默认 2000 条 / 2 MiB / 30 天，自动压缩；只存脱敏网络前缀 /24、/48 与 8 位指纹，不存原始 IP、令牌、口令或请求体）。",
+            "管理员端点 `/v1/admin/security/summary|events`：1h/24h/7d 窗口、事件筛选与 `before` 游标；管理员专属、`no-store`。",
+            "覆盖：登录 / 注册 / 重置 / reauth 失败、限流 429、401 拦截、CSRF 403；工具 / 审批 / 供应商事件为后续版本预留。",
+            "审计文件体量与最近写入展示；超过 5 MiB 提示轮转。",
+            "审计脱敏补齐 `device_secret(s)` / `security_answers` 与 `Bearer` / `sk-` / `api_key=` 值级擦除。"
+          ]
+        },
+        {
+          "heading": "运维",
+          "items": [
+            "新增数据落点 `SECURITY_LOG_PATH`（默认 `data/security_log.jsonl`），`/health` 的「数据落点」由 18 变为 19。",
+            "无新依赖；登录方式不变（`.env ACCESS_TOKEN` 换 httpOnly Cookie，无独立管理员账号）。",
+            "管理员页面本身仍可匿名打开，但所有数据端点仍要求管理员身份。"
+          ]
+        },
+        {
+          "heading": "已知限制",
+          "items": [
+            "本版安全事件只覆盖鉴权 / 中间件；工具、审批、供应商异常等结构化事件在后续版本接入。",
+            "管理台真实登录、写操作与真实数据量的浏览器验收仍需在换包后补做。",
+            "管理台桌面端 `.card-list.mobile-only` 泄漏已在本次合并修复；移动端真机复测仍待做。",
+            "本版不包含 v0.37 的 http_fetch / MCP；DNS rebinding 等出站残余风险不在本版范围。"
+          ]
+        },
+        {
+          "heading": "回滚",
+          "items": [
+            "服务端回滚到 v0.36.2：`deploy/swap-package.ps1 -ExpectedVersion v0.36.2 -StageDir dist/run_backend_old-<时间戳> -Marker release-marker-v0.36.2 -Rollback -RollbackEvidence \"回滚 v0.36.3（写明原因）\"`。",
+            "无数据迁移；`security_log.jsonl` 为新增 append-only 文件，回滚后可保留。"
+          ]
+        }
+      ]
+    },
+    {
       "version": "0.36.2",
       "server_only": true,
       "title": "v0.36.2 更新说明",
