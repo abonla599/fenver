@@ -258,20 +258,6 @@ def test_security_empty_state_degrades_instead_of_blanking():
     assert "e.status === 404" in js
 
 
-def test_pending_route_allowlist_is_exactly_the_security_contract():
-    """test_admin_page 的放行名单只许住着两个 security 端点。
-
-    它是一张“暂时还没落地”的名单，不是“随便写什么都放行”的口子。第二批实现后
-    这两个端点会自己进路由表，但名单不该因此长出第三条。
-    """
-    from tests.test_admin_page import PENDING_CONTRACT_ROUTES
-
-    assert PENDING_CONTRACT_ROUTES == {
-        "/v1/admin/security/summary",
-        "/v1/admin/security/events",
-    }
-
-
 # ---------- 6/9. 样式硬约束 ----------
 
 def test_css_has_tap_targets_motion_fallback_and_prewrap():

@@ -214,14 +214,6 @@ def test_token_reveal_copy_stops_at_plaintext_being_one_shot():
 
 # ---------- 接后端点：页面上不许有编出来的路径 ----------
 
-# v0.36.3 第一批按契约先写前端、第二批才落地的端点。名单是闭集：新增一条必须同时
-# 改 test_v0363_admin_console.py 里的契约锁，否则这里就变成“随便写什么都放行”。
-PENDING_CONTRACT_ROUTES = {
-    "/v1/admin/security/summary",
-    "/v1/admin/security/events",
-}
-
-
 def _route_pairs() -> list:
     return [(m, r.path) for r in app.routes
             if isinstance(r, APIRoute) for m in r.methods]
@@ -234,15 +226,11 @@ def _matches(template: str, path: str) -> bool:
 
 
 def test_page_only_calls_routes_that_exist():
-    """admin.js 里每个 "/v1/…" 字面量都必须落在真路由表上，或属于待上线的契约端点。
+    """admin.js 里每个 "/v1/…" 字面量都必须落在真路由表上。
 
     这轮的目标是"接上后端已有但页面没用上的端点"，而"不新增后端端点"是同一个约束
     的另一面：编一个不存在的地址挂到按钮上，点了才 404，比不接更糟。带 id 的那一段
     是 encodeURIComponent 现拼的，所以以 `/` 结尾的字面量按前缀判，其余整段判。
-
-    两个 security 端点是 v0.36.3 工单第三节的契约，第一批只写前端。名单不是永久的
-    放行条：`test_pending_contract_routes_must_stay_absent_until_batch_two` 会在它们
-    真进路由表的那一刻变红，逼合并者清空名单并恢复"路由必须 hit"。
     """
     routes = _route_pairs()
     # 查询串不是路径的一部分：`/v1/memory/decay?decay_factor=` 认的是 /v1/memory/decay
@@ -253,33 +241,20 @@ def test_page_only_calls_routes_that_exist():
             hit = [tpl for _, tpl in routes if tpl.startswith(path)]
         else:
             hit = [tpl for _, tpl in routes if _matches(tpl, path)]
-        assert hit or path in PENDING_CONTRACT_ROUTES, \
-            f"admin.js 里的 {path} 在后端路由表上找不到"
+        assert hit, f"admin.js 里的 {path} 在后端路由表上找不到"
 
 
-def test_pending_contract_routes_must_stay_absent_until_batch_two():
-    """自过期闸：名单里的端点一旦真进路由表，这条当场变红。
+def test_security_and_export_routes_exist_with_get():
+    """v0.36.3 第二批上线后，放行名单必须消失；三条新调用按方法复核。
 
-    第一批需要放行"还没实现"；第二批落地后继续放行，等于让 `test_page_only_calls_
-    routes_that_exist` 也放行"端点被删掉"——端点存在与否都不再影响任何断言。
-
-    红了以后按三步收口（v0.36.3 最终合并）：
-    1. 清空 `PENDING_CONTRACT_ROUTES`（或删掉这套机制）；
-    2. 删掉/改写 `test_pending_route_allowlist_is_exactly_the_security_contract`
-       （它现在钉的是"名单恰好两条"，收口后它的前提已经不存在）；
-    3. 让它上面那条测试重新要求两个 security 路径命中真实路由表，并按 HTTP 方法
-       校验（当前只比路径；`export.csv` 被 `{fb_id}` 模板误判成 405 可用的教训）。
+    `export.csv` 以前会被 `/v1/admin/user-feedback/{fb_id}` 的 DELETE 模板按路径命中，
+    所以这里同时比方法，避免“路径像存在、方法不对”的假绿。
     """
-    routes = _route_pairs()
-    live = sorted(
-        path for path in PENDING_CONTRACT_ROUTES
-        if any(_matches(tpl, path) for _, tpl in routes)
-    )
-    assert not live, (
-        f"{live} 已经在后端路由表上了：PENDING 名单到期。合并第二批时必须清空名单、"
-        "删掉 test_pending_route_allowlist_is_exactly_the_security_contract，"
-        "并恢复 security 两个路径必须 hit（且方法匹配）的断言"
-    )
+    routes = set(_route_pairs())
+    for path in ("/v1/admin/security/summary",
+                 "/v1/admin/security/events",
+                 "/v1/admin/user-feedback/export.csv"):
+        assert ("GET", path) in routes, f"{path} 没有 GET 路由"
 
 
 def test_endpoints_that_had_no_button_are_now_wired():
