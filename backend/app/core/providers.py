@@ -6,7 +6,6 @@
 "选了没反应的模型"这类问题无法根治。
 """
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -18,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 from openai import OpenAI
 
-from app.core import credits
+from app.core import credits, net_guard
 from app.core.atomic_write import write_json_atomic
 from app.core.paths import data_root, load_project_env
 from app.core.tls import system_ssl_context
@@ -123,20 +122,16 @@ def looks_placeholder(key: str) -> bool:
 #      攻击者的地址后，此后每一个走默认 provider 的用户每轮聊天，都会把管理员的
 #      api_key 作为 `Authorization: Bearer` 发给攻击者。改一次配置，赔上全站的钱。
 #
-# 为什么是白名单式的"这段网段不许"而不是 `ip.is_global`：后者会连同
-# 100.64.0.0/10、192.0.2.0/24 这些各版本 Python 语义还在漂的保留段一起拒，
-# 部署者被拒时看不出自己撞了哪一条。这里的判据是显式、可念出来的。
-_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
-    "127.0.0.0/8",     # 回环：宿主机自己，以及本机所有 127.x 别名
-    "::1/128",         # IPv6 回环。**不在**下面 fc00::/7 里——那是唯一本地地址，
-                       # 与回环是两段，写漏这一条就是 `http://[::1]/` 一路放行
-    "10.0.0.0/8",      # RFC1918
-    "172.16.0.0/12",   # RFC1918
-    "192.168.0.0/16",  # RFC1918
-    "169.254.0.0/16",  # 链路本地：云厂商的元数据地址就在这里（169.254.169.254）
-    "0.0.0.0/8",       # 全零：0.0.0.0 与任何 0.x
-    "fc00::/7",        # IPv6 唯一本地地址
-))
+# 为什么是白名单式的"这段网段不许"而不是 `ip.is_global`、CIDR 清单里都有什么、
+# IP 字面量快路与域名解析两支各自的历史缺口——都写在 app.core.net_guard 顶部。
+# v0.37.0 起判据整体住进 net_guard（供多条出站路径共用，下一批的 http_fetch 也
+# 长在同一个口径上）；这里只剩 URL 层：拆主机名、空壳检查，以及**调用时**从模块
+# 属性取 `_resolve_addresses` 和 `ALLOW_LOCALHOST_BASE_URL` 递给 net_guard——
+# 写成默认参数会在 def 时冻结引用，conftest 的 autouse DNS 桩和逐用例的
+# monkeypatch 会一起失效，v033/v0342 两个文件大面积红。
+# 端口限制、https、userinfo、尾点/IDN、重定向不在 net_guard：provider base_url
+# 允许自定义端口，那是访问策略与配置校验的边界，net_guard 只管地址形状。
+_PRIVATE_NETWORKS = net_guard.PRIVATE_NETWORKS  # 历史别名：既有引用与测试文案认这个名字
 
 # 「localhost 放行」做成开关而不是写死：确实存在把模型自建在本机/内网直连的部署
 # （http://localhost:11434/v1 那种 Ollama），一刀切拒掉会把它们连配置都保存不了。
@@ -153,7 +148,7 @@ def _resolve_addresses(host: str) -> list:
     固定答案，于是整套测试一次都不真的走 DNS（这台机器同时是生产机，真解析既慢、
     又随网络与 hosts 文件变，红起来查不出是产品坏了还是机器没网）；生产走真
     `socket.getaddrinfo`。判据本身不在这个函数里——它只负责"问到什么"，
-    对不对由 `_base_url_reject_reason` 判，这样两侧各自也只有一处口径。
+    对不对由 `net_guard.reject_reason` 判，这样两侧各自也只有一处口径。
     """
     infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
     return sorted({info[4][0] for info in infos})
@@ -162,11 +157,12 @@ def _resolve_addresses(host: str) -> list:
 def _base_url_reject_reason(base_url: str) -> str:
     """这个 base_url 能不能让服务端替它出网。返回 "" = 放行，否则返回拒的理由。
 
-    拒的判据（说清是哪一条，管理员才改得动）：
+    拒的判据（说清是哪一条，管理员才改得动；清单与句式在 net_guard）：
     * 解析不出主机名——`http:///v1`、`http://:80/v1` 这类空壳；
     * 主机名是本机——回环（127.0.0.0/8、::1）、全零（0.0.0.0、::）或 localhost
       这个名字：受 ALLOW_LOCALHOST_BASE_URL 管，默认拒；
-    * 主机名是 IP 且落在下面任何一段私有/链路本地网段里：无论如何都拒；
+    * 主机名是 IP 字面量且落在 net_guard 清单的任一段里（私有/链路本地/组播/
+      CGNAT/文档与基准/保留段，或 IPv4 映射的 IPv6 写法）：无论如何都拒；
     * 主机名是域名：**解析之后**任一地址落在上述任一类里也拒。这一条是 v0.34.2
       补的——此前域名只看名字本身，于是一条指着 127.0.0.1 或 169.254.169.254 的
       A 记录能直接过关；解析失败同样拒（fail closed），因为一个连服务端都解析
@@ -185,78 +181,15 @@ def _base_url_reject_reason(base_url: str) -> str:
         return "base_url 解析失败"
     if not host:
         return "base_url 里没有主机名"
-
-    lowered = host.strip().lower().strip("[]")
-    try:
-        addr = ipaddress.ip_address(lowered)
-    except ValueError:
-        addr = None
-
-    if addr is not None:
-        # 回环与"全零"是同一个开关管的（都是"本机"，只是写法不同：
-        # localhost / 127.0.0.1 / ::1 / 0.0.0.0 全都指着这台服务器），
-        # 私有网段与链路本地则无论如何都拒——那个开关是"允许自建模型"，
-        # 不是"允许扫内网"。
-        if addr.is_loopback or addr.is_unspecified:
-            if ALLOW_LOCALHOST_BASE_URL:
-                return ""
-            return (f"base_url 指向本机地址 {host}，服务端不做本机请求；"
-                    "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
-        for network in _PRIVATE_NETWORKS:
-            if addr in network:
-                return f"base_url 指向内网地址 {host}（{network}），服务端不做内网请求"
-        return ""
-
-    # 主机名而不是 IP：只对"人人都知道指向本机"的那个名字（及其子域）留口子，
-    # 与上面回环/全零那几条受同一个开关控制。
-    if lowered == "localhost" or lowered.endswith(".localhost"):
-        if ALLOW_LOCALHOST_BASE_URL:
-            return ""
-        return ("base_url 指向 localhost，服务端不做本机请求；"
-                "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
-
-    # ---------- 其余域名：解析之后再判一次形状 ----------
-    # 上面 return "" 就是这道闸门的缺口：一个公网样子的好名字，A 记录改成
-    # 127.0.0.1 或 169.254.169.254 照样过关，随后服务端替它出网。
-    # 解析失败一律拒（fail closed）；多个地址里只要有一个踩线就拒——闸门要的是
-    # "这一个名字可能被指到哪儿"的全称判据，不是"第一个答案看起来对不对"。
-    try:
-        addresses = _resolve_addresses(lowered)
-    except Exception as e:
-        return (f"base_url 的主机名 {host} 解析失败（{type(e).__name__}: {str(e)[:80]}），"
-                "服务端不放行解析不出来的地址")
-    if not addresses:
-        return f"base_url 的主机名 {host} 解析结果为空，服务端不放行"
-
-    for literal in addresses:
-        try:
-            addr = ipaddress.ip_address(literal)
-        except ValueError:
-            return (f"base_url 的主机名 {host} 解析出无法识别的地址 {literal}，"
-                    "服务端不放行")
-        # 口径与上面 IP 字面量那几条逐字对齐：回环与"全零"是同一个开关管的
-        # （都是"本机"，只是写法不同——名字 vs 数字），私有/链路本地则无论
-        # 开关如何都拒。开关存在的理由是"允许自建模型"，不是"允许扫内网"。
-        if addr.is_loopback or addr.is_unspecified:
-            if ALLOW_LOCALHOST_BASE_URL:
-                continue
-            return (f"base_url 的主机名 {host} 解析到本机地址 {literal}，服务端不做本机请求；"
-                    "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
-        for network in _PRIVATE_NETWORKS:
-            if addr in network:
-                return (f"base_url 的主机名 {host} 解析到内网地址 {literal}"
-                        f"（{network}），服务端不做内网请求")
-        # 这两段刻意不写进 _PRIVATE_NETWORKS，是因为那里头只有 IPv4 的
-        # 169.254/16：IPv6 链路本地 fe80::/10 与组播是各自独立、跨版本语义稳定的
-        # 属性（不像 is_global 那样随 Python 版本改口径，见上面网段清单的注释），
-        # 而 169.254.169.254 那类元数据服务在 v6 双栈上就写在这两段里。
-        if addr.is_link_local:
-            return (f"base_url 的主机名 {host} 解析到链路本地地址 {literal}，"
-                    "服务端不做内网请求")
-        if addr.is_multicast:
-            return (f"base_url 的主机名 {host} 解析到组播地址 {literal}，"
-                    "服务端不向组播目标发请求")
-    return ""
+    # resolve / allow_loopback 必须在**调用时**从模块属性取（裸名字即可：函数体
+    # 里的全局名每次执行都重新解析）——这正是 conftest autouse 桩与逐用例
+    # monkeypatch 能生效的原因；net_guard 拿到的只是这一次调用的引用。
+    return net_guard.reject_reason(
+        host,
+        resolve=_resolve_addresses,
+        allow_loopback=ALLOW_LOCALHOST_BASE_URL,
+        where="base_url",
+    )
 
 
 # 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。
