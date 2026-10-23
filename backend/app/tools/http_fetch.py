@@ -234,7 +234,12 @@ def fetch(url: str, *, user_id: str = ""):
                         chunks.append(chunk)
                     body = b"".join(chunks)
                     charset = resp.charset_encoding or "utf-8"
-                    text = body.decode(charset, errors="replace")
+                    try:
+                        text = body.decode(charset, errors="replace")
+                    except LookupError:
+                        # 站点声明了 Python 没有的 codec（`x-gbk` 这类历史别名）：
+                        # 坏声明不配把一次能读的页面变成失败，按 utf-8 + replace 读。
+                        text = body.decode("utf-8", errors="replace")
             if redirect:
                 if hops >= MAX_REDIRECTS:
                     return fail(f"重定向已超过 {MAX_REDIRECTS} 跳上限，停止跟随",

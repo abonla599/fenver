@@ -466,12 +466,21 @@ def test_getter_normalizes_dedupes_and_caps():
 
 @pytest.fixture
 def config_restored():
-    """端点会真写 _config 与临时 config.json：用例进出各还原一次。"""
+    """端点会真写 _config 与临时 config.json：用例进出各还原一次。
+
+    两份都要还原：只回内存副本的话，盘上那份留着"这条用例配过的名单"，任何
+    后续用例调 `config_store.restore()` 就会把它读回全站——http_fetch 会突然
+    在别人的工具清单断言里显形。串味的红永远红在离真凶最远的用例上。
+    """
+    path = os.environ.get("CONFIG_DB_PATH")
+    prev_disk = Path(path).read_bytes() if path and os.path.exists(path) else None
     prev = dict(config_store._config)
     yield
     with config_store._lock:
         config_store._config.clear()
         config_store._config.update(prev)
+    if path and prev_disk is not None:
+        Path(path).write_bytes(prev_disk)
 
 
 def test_admin_post_accepts_and_rejects(client, config_restored):
