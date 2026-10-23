@@ -30,6 +30,9 @@ import threading
 from app.core.paths import data_file, ensure_parent
 
 _LOCK = threading.Lock()
+# 安全页每 20 秒读一次摘要；审计文件不变时不要重复扫全文件。
+_STATS_LOCK = threading.Lock()
+_STATS_CACHE = {"key": None, "value": None}
 
 # 出现在 before/after 摘要里就一律不落明文的键名（小写比对）。这些不是"我们判断
 # 它们敏感"，而是它们本就不该被记下来：审计要的是"这一格被改过"，不是那格的内容。
@@ -136,19 +139,50 @@ def log(actor, action, target=None, before=None, after=None, detail=""):
 
 
 def stats() -> dict:
-    """这份账的现场规模：字节数与行数（管理台安全概览用）。
+    """这份账的现场规模：字节数、行数、有效记录数与最后写入时间（管理台安全概览用）。
 
-    只读、不建文件：账还不存在时是 0/0，不是错误。行数按物理行数（含坏行）——
-    这个数字的用途是"文件是不是大得该轮转了"，不是"有多少条有效证据"。
+    只读、不建文件：账还不存在时是 0/0/0/None，不是错误。行数按物理行数（含坏行）；
+    entries 与 lines 同口径，供管理台直接显示「条记录」。last_ts 取最后一条可解析
+    记录的 ts，坏行不假装成最后写入。按 (size, mtime) 缓存，文件不变时不重复扫。
     """
     p = _default_path()
     try:
-        size_bytes = os.path.getsize(p)
-        with open(p, "rb") as f:
-            lines = sum(1 for _ in f)
+        st = os.stat(p)
+        key = (p, st.st_size, st.st_mtime_ns)
     except OSError:
-        return {"size_bytes": 0, "lines": 0}
-    return {"size_bytes": size_bytes, "lines": lines}
+        return {"size_bytes": 0, "lines": 0, "entries": 0, "last_ts": None}
+    with _STATS_LOCK:
+        cached = _STATS_CACHE
+        if cached["key"] == key:
+            return dict(cached["value"])
+    lines = 0
+    last_ts = None
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                lines += 1
+                text = raw.strip()
+                if not text:
+                    continue
+                try:
+                    rec = json.loads(text)
+                except Exception:               # noqa: BLE001 - 坏行不假装成证据
+                    continue
+                ts = rec.get("ts") if isinstance(rec, dict) else None
+                if isinstance(ts, str) and ts:
+                    last_ts = ts
+    except OSError:
+        return {"size_bytes": 0, "lines": 0, "entries": 0, "last_ts": None}
+    value = {
+        "size_bytes": st.st_size,
+        "lines": lines,
+        "entries": lines,
+        "last_ts": last_ts,
+    }
+    with _STATS_LOCK:
+        _STATS_CACHE["key"] = key
+        _STATS_CACHE["value"] = dict(value)
+    return value
 
 
 def read(limit: int = 200) -> list:

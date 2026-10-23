@@ -214,7 +214,8 @@ def test_security_endpoints_and_enums_match_the_contract():
     assert severity, "SEC_SEVERITY 不见了"
     assert set(re.findall(r"(\w+):", severity.group(1))) == {"info", "warn", "alert"}
     for field in ("data.by_type", "data.by_source", "data.by_account",
-                  "data.audit", "data.warnings", "next_before", "audit.size_bytes"):
+                  "data.audit", "data.warnings", "next_before", "audit.size_bytes",
+                  "audit.entries", "audit.last_ts"):
         assert field in js, f"契约字段 {field} 没有被消费"
     assert "Promise.allSettled" in js, "概览四张卡没有做到一张失败不影响其他"
     assert '"auth.fail"' in js and "countType" in js
