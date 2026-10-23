@@ -111,6 +111,9 @@ DATA_PATH_ENV_VARS = {
     "偏好摘要": "PREFERENCE_FILE",
     "运行时配置": "CONFIG_DB_PATH",
     "审计流水": "AUDIT_LOG_PATH",
+    # v0.36.3 安全监控：有界安全事件日志（脱敏、自动压缩）。与审计流水一样只增，
+    # 但它是"攻击面"视角的账，不是管理动作账，所以单独一份、可单独指走。
+    "安全日志": "SECURITY_LOG_PATH",
     "搜索源密钥": "SEARCH_KEYS_DB_PATH",
     "搜索用量账本": "SEARCH_USAGE_DB_PATH",
     # v0.34.3 补墙（#114）：发版物料的两只口子此前不在任何隔离清单里。它们与上面
@@ -145,6 +148,8 @@ def resolve_all_data_paths() -> list:
     from app.agents.task_store import _default_path as tasks_path
     from app.core.approval import _default_path as approvals_path
     from app.core.audit import _default_path as audit_path
+    # 安全日志在函数内懒导入：security_log 自己 import 了 paths，放模块顶部会成环。
+    from app.core import security_log
     from app.core.schedule import _default_path as schedule_path
     from app.core.usage import _default_path as usage_path
     from app.core.search_keys import path as search_keys_path
@@ -167,6 +172,7 @@ def resolve_all_data_paths() -> list:
         "偏好摘要": PREFERENCE_FILE,
         "运行时配置": config_path(),
         "审计流水": audit_path(),
+        "安全日志": security_log.default_path(),
         "搜索源密钥": search_keys_path(),
         "搜索用量账本": search_usage_path(),
         "发布清单": releases.runtime_manifest_path(),

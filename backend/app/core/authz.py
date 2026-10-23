@@ -11,6 +11,11 @@ from fastapi.responses import JSONResponse
 
 from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
                            auth_store)
+# v0.36.3 安全监控：401/403 只往内存里记一条（record 不做盘上 I/O），
+# 绝不在这里 open/fsync——这条中间件是 async 热路径。
+from app.core import security_log
+# 来源地址只认 client_ip 这一份口径；不从 auth_router 导入（那会成环）。
+from app.core.client_ip import client_ip
 # 导出票据的路径形状只有存储层知道（长度跟着生成器走），这里引用而不是抄第二份。
 from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_PATH_RE
 
@@ -260,6 +265,9 @@ def install_auth(app) -> None:
                 and not _header_credential(request)
                 and _cookie_credential(request)
                 and not request.headers.get(CSRF_HEADER, "").strip()):
+            security_log.record("auth.blocked", request=request,
+                                ip=client_ip(request), status=403,
+                                detail="csrf.missing")
             return JSONResponse(status_code=403, content={"detail": CSRF_DETAIL})
 
         if not _has_any_identity():
@@ -268,6 +276,9 @@ def install_auth(app) -> None:
 
         principal = resolve_principal(request)
         if principal is None:
+            security_log.record("auth.blocked", request=request,
+                                ip=client_ip(request), status=401,
+                                detail="token.unknown")
             return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
         request.state.principal = principal
         response = await call_next(request)
