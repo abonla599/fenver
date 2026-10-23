@@ -97,6 +97,22 @@ def log(actor, action, target=None, before=None, after=None, detail=""):
     return rec
 
 
+def stats() -> dict:
+    """这份账的现场规模：字节数与行数（管理台安全概览用）。
+
+    只读、不建文件：账还不存在时是 0/0，不是错误。行数按物理行数（含坏行）——
+    这个数字的用途是"文件是不是大得该轮转了"，不是"有多少条有效证据"。
+    """
+    p = _default_path()
+    try:
+        size_bytes = os.path.getsize(p)
+        with open(p, "rb") as f:
+            lines = sum(1 for _ in f)
+    except OSError:
+        return {"size_bytes": 0, "lines": 0}
+    return {"size_bytes": size_bytes, "lines": lines}
+
+
 def read(limit: int = 200) -> list:
     """倒序读最近 limit 条再翻回正序（最旧在前）。admin-only 的路由去套这个。
 

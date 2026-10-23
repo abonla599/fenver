@@ -79,6 +79,10 @@ os.environ["USER_FEEDBACK_FILE"] = os.path.join(_TEST_DATA_DIR, "user_feedback.j
 # data/audit.jsonl。隔离判据在 test_test_isolation.py，新增可重定向的存储时那里会红。
 os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_DATA_DIR, "audit.jsonl")
 
+# v0.36.3 安全日志：与审计流水同一段。不指走时任何一次 401/429/登录失败都会写进
+# 线上 data/security_log.jsonl——那正是"测试写现网"的形状（判据同 test_test_isolation）。
+os.environ["SECURITY_LOG_PATH"] = os.path.join(_TEST_DATA_DIR, "security_log.jsonl")
+
 # 搜索源密钥（博查/Tavily）同样是可指走的进程级存储。指到临时目录**且不写文件**：
 # 缺文件 = 所有 API 源判「未启用」，降级链在测试里恒等于纯 Bing——这既是产品无 key
 # 形态的镜像（v0.32 W1 的硬验收），也让既有那些改 `web_search.search` 的桩继续有效
