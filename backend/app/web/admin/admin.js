@@ -301,12 +301,32 @@
 
   function closeDetail() { closeSheet($("detail")); }
 
+  function closeImageViewer() {
+    closeSheet($("imageViewer"));
+    const img = $("imageViewerImg");
+    img.removeAttribute("src");
+    img.alt = "";
+  }
+
+  function openImageViewer(src, alt) {
+    const img = $("imageViewerImg");
+    img.src = src;
+    img.alt = alt || "反馈截图";
+    $("imageViewerTitle").textContent = alt || "反馈截图";
+    openSheet($("imageViewer"), $("imageViewerClose"));
+  }
+
   function closeAllSheets() {
     document.querySelectorAll(".sheet").forEach((s) => s.classList.add("hidden"));
     const r = askResolve;
     askResolve = null;
     if (r) r(false);
     $("revealText").textContent = "";
+    const viewer = $("imageViewerImg");
+    if (viewer) {
+      viewer.removeAttribute("src");
+      viewer.alt = "";
+    }
   }
 
   function trapFocus(e, box) {
@@ -962,11 +982,24 @@
     if (f.image_count) {
       const imgs = cell("div", undefined, "fb-images");
       for (let i = 0; i < f.image_count; i += 1) {
-        const a = cell("a", "截图 " + (i + 1));
-        a.href = "/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/" + i;
-        a.target = "_blank";
-        a.rel = "noopener";
-        imgs.appendChild(a);
+        const src = "/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/" + i;
+        const alt = "反馈 " + f.id + " 的截图 " + (i + 1);
+        const thumb = document.createElement("button");
+        thumb.type = "button";
+        thumb.className = "fb-thumb";
+        thumb.setAttribute("aria-label", "查看" + alt);
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = alt;
+        img.loading = "lazy";
+        img.addEventListener("error", () => {
+          thumb.classList.add("broken");
+          thumb.disabled = true;
+          thumb.textContent = "图" + (i + 1) + " 读取失败";
+        });
+        thumb.appendChild(img);
+        thumb.addEventListener("click", () => openImageViewer(src, alt));
+        imgs.appendChild(thumb);
       }
       card.appendChild(imgs);
     }
@@ -2056,6 +2089,7 @@
   $("reveal").addEventListener("click", (e) => { if (e.target === $("reveal")) closeReveal(); });
   $("detail").addEventListener("click", (e) => { if (e.target === $("detail")) closeDetail(); });
   $("btnCloseDetail").addEventListener("click", closeDetail);
+  $("imageViewerClose").addEventListener("click", closeImageViewer);
 
   $("btnCloseReveal").addEventListener("click", closeReveal);
   $("btnCopy").addEventListener("click", async () => {
@@ -2136,6 +2170,7 @@
       if (open.id === "ask") closeAsk(false);
       else if (open.id === "reveal") closeReveal();
       else if (open.id === "detail") closeDetail();
+      else if (open.id === "imageViewer") closeImageViewer();
       return;
     }
     if (e.key === "Tab") trapFocus(e, open);

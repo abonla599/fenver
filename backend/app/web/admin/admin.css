@@ -433,12 +433,47 @@ td.acts button { margin: 0 2px 2px 0; }
   margin: 8px 0 0;
   color: var(--text);
 }
-.fb-images { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: 12.5px; }
+.fb-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12.5px; }
 .fb-images a { color: var(--accent); }
 .fb-images a, .notice a {
   display: inline-flex;
   align-items: center;
   min-height: var(--fv-tap);
+}
+.fb-thumb {
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--fv-surface-3);
+  cursor: zoom-in;
+}
+.fb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fb-thumb.broken {
+  cursor: default;
+  border-style: dashed;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+  padding: 4px;
+}
+.image-viewer-card { width: min(94vw, 1100px); max-height: 90vh; }
+.image-viewer-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 8px 0;
+}
+.image-viewer-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--fv-surface-3);
 }
 
 .sev-tag {
