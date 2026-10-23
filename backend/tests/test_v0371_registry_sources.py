@@ -11,17 +11,25 @@
    required⊆properties、只允许字面本地 $ref（$dynamicRef/$recursiveRef 拒绝）、
    非有限数值拒绝、parameters 内字符串字符闸、Draft202012 元校验；坏条目整条拒；
    通过校验后 JSON 往返回炉成深拷贝，注册后改调用方原 dict 影响不到注册表；
-5. 整源刷新：本批校验被拒的同源旧条目保留，全坏批次不清空该 source；
-6. unregister_source 拒绝 builtin；register_tool 不许反向覆盖外部条目。
+5. 整源刷新：本批**提到名字**的被拒同源旧条目保留旧版本；本批没提到的旧名字仍随
+   整源刷新消失（"全坏批次不动该 source"只在坏批次点到那些名字时成立）；
+6. unregister_source 拒绝 builtin；register_tool 不许反向覆盖外部条目；
+7. 拒绝/可用性日志对不可编码文本（孤立代理）安全化，strict UTF-8 stdout 下不抛
+   （复审 R1）；Zp（U+2029）在 description 被剥离、在 parameters 被拒；异步
+   available 与异步 function 同口径拒绝。
 
 负控（见文件末尾）：拆掉 source 字段 / schema 闸 / 撞名闸，各自都有对照。
 
 测试确定性纪律（N11）：
 - 快照语义不靠概率性竞态，直接证明"取快照后改注册表，快照内容不变"；
 - 坏 schema 用逐闸 reason 断言，而不是只断言 rejected 名字集合；
-- 布尔标记用 `is True/False` 精确断言，不用恒真的 `in (True, False)`。
+- 布尔标记用 `is True/False` 精确断言，不用恒真的 `in (True, False)`；
+- 日志编码类用例必须显式把 stdout 换成 errors="strict"：pytest 默认 capture 会
+  把不可编码字符替换掉，含孤立代理的 print 在默认 capture 下是假绿（复审 R1）。
 """
 import inspect
+import io
+import sys
 import threading
 import time
 
@@ -77,6 +85,35 @@ def _entry(name="xv_demo", **kw):
 
 def _names(schema):
     return {t["function"]["name"] for t in schema}
+
+
+class _StrictStdout:
+    """临时把 sys.stdout 换成 errors="strict" 的 UTF-8 通道，退出时还原。
+
+    pytest 默认 capture 会把不可编码字符替换成安全字符，含孤立代理的 print 在
+    默认 capture 下"1 passed"假绿（复审 R1 实测）。只有 strict 通道能让
+    UnicodeEncodeError 真的抛出来。退出后 `text` 是写到该通道的全部内容。
+    """
+
+    def __init__(self):
+        self.buffer = io.BytesIO()
+        self.wrapper = io.TextIOWrapper(self.buffer, encoding="utf-8",
+                                        errors="strict")
+        self.text = ""
+
+    def __enter__(self):
+        self._saved = sys.stdout
+        sys.stdout = self.wrapper
+        return self
+
+    def __exit__(self, *exc_info):
+        sys.stdout = self._saved
+        try:
+            self.wrapper.flush()
+        finally:
+            self.text = self.buffer.getvalue().decode("utf-8")
+            self.wrapper.detach()
+        return False
 
 
 # ---------- 1. source 键：只加字段，旧键与输出一字不动 ----------
@@ -413,6 +450,47 @@ def test_top_level_description_strips_format_and_rejects_surrogate(clean_sources
     assert "xv_desc_surrogate" not in tools_registry
 
 
+def test_zp_paragraph_separator_stripped_from_description(clean_sources):
+    """B2 缺牙（复审 M11）：description 的 Zp（U+2029）必须被剥离。
+
+    把 `_STRIP_CATEGORIES` 里的 "Zp" 删掉，入库值会带回 U+2029 → 这条红。
+    """
+    src = clean_sources("mcp:xv_zp_desc")
+    out = register_external_tools(src, [
+        _entry(name="xv_zp_desc", description="前\u2029后"),
+        _entry(name="xv_zp_only", description="\u2029"),
+    ])
+    assert out["accepted"] == 1
+    assert tools_registry["xv_zp_desc"]["description"] == "前后", \
+        "Zp 没被剥离（或剥离后又被换回）"
+    reasons = {r["name"]: r["reason"] for r in out["rejected"]}
+    assert "xv_zp_only" in reasons, "只剩 Zp 的描述去控制字符后是空串，必须拒"
+
+
+def test_zp_paragraph_separator_in_parameters_rejected(clean_sources):
+    """B2 缺牙（复审 M11）：parameters 内任何字符串含 Zp（U+2029）→ 整条拒。
+
+    把 `_REJECT_TEXT_CATEGORIES` 里的 "Zp" 删掉，这两条都会被收录 → 这条红。
+    """
+    src = clean_sources("mcp:xv_zp_param")
+    bad = [
+        # 嵌套 description 含段分隔符
+        _entry(name="xv_zp_nested_desc", parameters={
+            "type": "object", "properties": {
+                "a": {"type": "string", "description": "前\u2029后"}}}),
+        # 字符串值本身就是段分隔符
+        _entry(name="xv_zp_const", parameters={
+            "type": "object", "properties": {"a": {"type": "string",
+                                                   "const": "\u2029"}}}),
+    ]
+    out = register_external_tools(src, bad)
+    assert out["accepted"] == 0
+    reasons = {r["name"]: r["reason"] for r in out["rejected"]}
+    assert set(reasons) == {e["name"] for e in bad}, out
+    for reason in reasons.values():
+        assert "控制/格式" in reason, reason
+
+
 def test_parameter_strings_with_format_or_surrogate_rejected(clean_sources):
     """B2：parameters 内任何字符串键/值含 Cc/Cf/Cs/Zl/Zp 或不可 UTF-8 编码 → 整条拒。"""
     src = clean_sources("mcp:xv_param_chars")
@@ -505,6 +583,29 @@ def test_async_callable_object_rejected(clean_sources):
     assert "xv_async_obj" not in tools_registry
 
 
+def test_async_available_rejected(clean_sources):
+    """N4 同口径：异步 `available` 会返回没人 await 的 coroutine，bool() 恒真 ⇒
+    "永远可用"的静默坏法。`async def` 函数与 `__call__` 为 async def 的实例都拒。"""
+    class AsyncAvailable:
+        async def __call__(self):
+            return True
+
+    async def async_probe():
+        return True
+
+    src = clean_sources("mcp:xv_async_avail")
+    out = register_external_tools(src, [
+        _entry(name="xv_async_avail_fn", available=async_probe),
+        _entry(name="xv_async_avail_obj", available=AsyncAvailable()),
+    ])
+    assert out["accepted"] == 0
+    reasons = {r["name"]: r["reason"] for r in out["rejected"]}
+    assert set(reasons) == {"xv_async_avail_fn", "xv_async_avail_obj"}, out
+    for reason in reasons.values():
+        assert "异步" in reason, reason
+    assert "xv_async_avail_fn" not in tools_registry
+
+
 def test_duplicate_in_batch_rejected(clean_sources):
     src = clean_sources("mcp:xv_dup")
     out = register_external_tools(src, [_entry(name="xv_twice"), _entry(name="xv_twice")])
@@ -556,6 +657,59 @@ def test_entry_validation_exception_becomes_rejected(clean_sources, monkeypatch)
     assert out["accepted"] == 0
     assert out["rejected"] == [
         {"name": "xv_entry_boom", "reason": "条目校验异常: RecursionError"}]
+
+
+# ---------- 3b. R1：拒绝/可用性日志在 strict UTF-8 stdout 下永不抛 ----------
+
+def test_surrogate_name_rejection_log_survives_strict_stdout(clean_sources):
+    """R1（阻塞）：被拒条目的名字含孤立代理时，整批注册不许中断。
+
+    `"\\ud800"` 是 JSON 里合法的转义，外部客户端可以送进来；名字正则会正确拒绝
+    它，但旧实现的拒绝日志先把整串 name print 出去，在 strict UTF-8 stdout 上抛
+    UnicodeEncodeError，一条坏条目拖垮整批。日志必须转义成 `\\ud800` 字面量。
+    """
+    src = clean_sources("mcp:xv_strict_log")
+    with _StrictStdout() as cap:
+        out = register_external_tools(src, [_entry(name="xv_\ud800")])
+    assert out["accepted"] == 0
+    assert [r["name"] for r in out["rejected"]] == ["xv_\ud800"]
+    assert "name 不符合" in out["rejected"][0]["reason"]
+    assert "⚠️ 外部工具已拒绝" in cap.text, "拒绝日志整行丢了"
+    assert "xv_\\ud800" in cap.text, "日志里没有安全化后的名字"
+    assert "xv_\ud800" not in tools_registry
+
+
+def test_surrogate_name_in_validation_exception_log_survives_strict_stdout(
+        clean_sources, monkeypatch):
+    """R1 第二路径：条目校验异常 handler 的日志同样不许因名字编码炸掉整批。"""
+    src = clean_sources("mcp:xv_strict_boom")
+
+    def exploding(entry):
+        raise RecursionError("模拟条目级爆炸")
+
+    monkeypatch.setattr(registry, "_validate_external_entry", exploding)
+    with _StrictStdout() as cap:
+        out = register_external_tools(src, [_entry(name="xv_\ud800")])
+    assert out["accepted"] == 0
+    assert out["rejected"] == [
+        {"name": "xv_\ud800", "reason": "条目校验异常: RecursionError"}]
+    assert "xv_\\ud800" in cap.text, "handler 的日志没做安全化"
+
+
+def test_availability_probe_exception_log_survives_strict_stdout(clean_sources):
+    """R1 同根因：available 抛出的异常文本含孤立代理时，工具清单构建不许炸。
+
+    这条在每次模型请求的清单构建路径上。业务语义不变：检查失败仍按"可用"处理。
+    """
+    src = clean_sources("mcp:xv_strict_probe")
+    register_external_tools(src, [_entry(
+        name="xv_strict_probe",
+        available=lambda: (_ for _ in ()).throw(RuntimeError("probe \ud800")))])
+    with _StrictStdout() as cap:
+        schema = get_available_tools_schema()
+    assert "xv_strict_probe" in _names(schema), "可用性检查失败仍应按可用处理"
+    assert "probe \\ud800" in cap.text, "可用性异常日志没做安全化"
+    assert is_available(tools_registry["xv_strict_probe"]) is True
 
 
 # ---------- 4. 注册后别名修改：入库与出口都是深拷贝 ----------

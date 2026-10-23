@@ -110,11 +110,42 @@ def register_tool(name: str, description: str, parameters: dict, available=None,
         return func
     return decorator
 
+def _safe_log_text(value, limit: int = 200) -> str:
+    """把任意值变成 strict UTF-8 输出通道也吞得下的单行文本，自身绝不抛。
+
+    外部来源的名字与异常文本都可能含孤立代理（JSON `"\\ud800"` 能被合法解析成
+    Python 字符串），直接 print 会在 `errors="strict"` 的 stdout 上抛
+    UnicodeEncodeError，把整批注册/整份工具清单构建打断。用 backslashreplace
+    编码再解码，孤立代理变成 `\\ud800` 这样的字面转义，可读且可打印。
+    """
+    try:
+        text = str(value)
+    except Exception:
+        return "<不可显示>"
+    try:
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    except Exception:
+        return "<不可显示>"
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+def _safe_print(message: str) -> None:
+    """日志失败只吞掉：输出通道炸了（编码、管道关闭）也不许影响业务结果。"""
+    try:
+        print(message)
+    except Exception:
+        pass
+
+
 def is_available(info: dict) -> bool:
     """这个工具现在能不能用。检查本身出错时按"能用"处理。
 
     方向要选对：误开只是多一次失败调用，误关是把一个能用的功能悄悄藏起来——
     前者用户会抱怨，后者没人会去查，所以宁可误开。
+
+    异常文本来自外部可调用对象，可能不可编码：日志走 _safe_log_text / _safe_print。
     """
     check = info.get("available")
     if check is None:
@@ -122,7 +153,7 @@ def is_available(info: dict) -> bool:
     try:
         return bool(check())
     except Exception as e:
-        print(f"⚠️ 工具可用性检查失败，按可用处理：{e}")
+        _safe_print(f"⚠️ 工具可用性检查失败，按可用处理：{_safe_log_text(e)}")
         return True
 
 def _schema_of(name: str, info: dict) -> dict:
@@ -338,7 +369,7 @@ def _validate_external_entry(entry):
     协程函数直接拒：执行器按同步 `func(**kwargs)` 调用外部工具，协程函数会返回
     一个没人 await 的 coroutine 对象——调用"成功"、结果永远是垃圾，这种静默坏法
     必须拒在注册时，而不是留在运行时。异步可调用对象（`__call__` 是 async def）
-    同样拒。
+    同样拒；`available` 按同一口径拒异步可调用对象（否则可用性恒为真）。
 
     通过校验的 parameters 会再做一次 `json.loads(json.dumps(...))` 深拷贝后入库：
     调用方在注册后修改自己那份 dict，影响不到注册表（B3）。
@@ -369,6 +400,12 @@ def _validate_external_entry(entry):
     available = entry.get("available")
     if available is not None and not callable(available):
         return name, None, "available 必须是可调用对象或省略"
+    if available is not None and (
+            inspect.iscoroutinefunction(available)
+            or inspect.iscoroutinefunction(getattr(available, "__call__", None))):
+        # 与 function 的 N4 同口径：async 可调用对象会返回没人 await 的 coroutine，
+        # bool(coroutine) 恒为真 ⇒ 工具永远"可用"，静默坏法。
+        return name, None, "拒绝异步 available：可用性检查按同步调用，await 无人负责"
     flags = {}
     for key, default in (("needs_user", False), ("requires_approval", True),
                          ("suspends", False)):
@@ -417,11 +454,13 @@ def register_external_tools(source: str, entries) -> dict:
     语义（v0.37.1 拍板，v0.37.1 审查后补 N1）：
     - 锁外逐条清洗校验：坏条目**整条**拒，不拖垮整批，也不让坏 schema 进模型视野；
       条目级异常（含 RecursionError）一律折成 rejected，绝不抛出整批；
-      日志只记 source/name/reason，不回显 schema 或函数内容；
+      日志只记 source/name/reason，不回显 schema 或函数内容；名字先经
+      `_safe_log_text` 转义（孤立代理变 `\\ud800` 字面量），日志本身绝不抛；
     - 锁内先做撞名终判（校验与插队之间可能有人刚注册进来），再处理 stale：
       **stale 删除集合 = 该 source 旧名字 − 本批 accepted − 本批 rejected 且当前
-      仍归该 source 的名字**。也就是说，本批校验被拒的同源旧条目会保留；全坏批次
-      不会清空该 source；只有"本批没提到"的旧名字才随整源刷新消失；
+      仍归该 source 的名字**。也就是说，本批**提到名字**的坏条目保留旧版本（不会
+      被这次刷新删掉）；本批没提到的旧名字仍随整源刷新消失——所以"全坏批次不动该
+      source"只在坏批次点到了那些名字时成立；
     - 任何已存在名字（builtin 或别的 source）一律拒绝：内置永不被覆盖，来源之间
       不许互相影子；
     - source 只作账本标记，不进 _schema_of，模型看不到；
@@ -446,17 +485,21 @@ def register_external_tools(source: str, entries) -> dict:
                 name = ""
             reason = f"条目校验异常: {type(e).__name__}"
             rejected.append({"name": name, "reason": reason})
-            print(f"⚠️ 外部工具已拒绝：source={source} "
-                  f"name={name or '<缺失>'} reason={reason}")
+            # 名字是外部输入：可能含孤立代理 → 必须走 _safe_log_text，否则 strict
+            # stdout 下这条日志自己抛 UnicodeEncodeError，整批注册就此中断。
+            _safe_print(f"⚠️ 外部工具已拒绝：source={source} "
+                        f"name={_safe_log_text(name or '<缺失>')} reason={reason}")
             continue
         if reason:
             rejected.append({"name": name, "reason": reason})
-            print(f"⚠️ 外部工具已拒绝：source={source} name={name or '<缺失>'} reason={reason}")
+            _safe_print(f"⚠️ 外部工具已拒绝：source={source} "
+                        f"name={_safe_log_text(name or '<缺失>')} reason={reason}")
             continue
         if name in seen:
             reason = "批内重名"
             rejected.append({"name": name, "reason": reason})
-            print(f"⚠️ 外部工具已拒绝：source={source} name={name} reason={reason}")
+            _safe_print(f"⚠️ 外部工具已拒绝：source={source} "
+                        f"name={_safe_log_text(name)} reason={reason}")
             continue
         seen.add(name)
         accepted.append((name, cleaned))
@@ -469,7 +512,8 @@ def register_external_tools(source: str, entries) -> dict:
             if owner is not None:
                 reason = f"名字已被来源 {owner} 占用（内置/其他来源永不被覆盖）"
                 rejected.append({"name": name, "reason": reason})
-                print(f"⚠️ 外部工具已拒绝：source={source} name={name} reason={reason}")
+                _safe_print(f"⚠️ 外部工具已拒绝：source={source} "
+                            f"name={_safe_log_text(name)} reason={reason}")
                 continue
             final.append((name, cleaned))
         accepted_names = {name for name, _ in final}
