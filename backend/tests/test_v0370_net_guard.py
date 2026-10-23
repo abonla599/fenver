@@ -17,6 +17,11 @@
    `net_guard` 模块属性本身，`reject_reason` 在调用时才读它，走的正是生产同一条
    代码路径；不落盘、teardown 自动还原，提交的清单文件从未被改过。
 
+第二批（审查放行前置）在同一张钉板上追加：6to4 `2002::/16`、Teredo `2001::/32`、
+`192.0.0.0/24`、`192.88.99.0/24`、IPv4-compatible `::/96` 五段各有字面量正控、
+边界外负控与"摘掉这一段必须转绿"的变异；zone-id 写法（`fe80::1%eth0` 这类）
+fail-closed 且理由点名 zone-id，而 `::1%lo`/`::%lo` 的既有"本机"语义不被挪走。
+
 用法（本目录惯例）：../venv/Scripts/python.exe -m pytest tests/test_v0370_net_guard.py -q
 """
 import ipaddress
@@ -92,6 +97,18 @@ BLOCKED_LITERALS = {
     "v4 映射私网": ("::ffff:10.0.0.1", "内网"),
     "v4 映射元数据": ("::ffff:169.254.169.254", "内网"),
     "v4 映射回环": ("::ffff:127.0.0.1", "本机"),
+    # ---- v0.37.0 第二批：审查点名的五个特殊用途段 ----
+    "6to4 内嵌回环": ("2002:7f00:1::1", "内网"),
+    "6to4 内嵌私网": ("2002:0a01:203::", "内网"),
+    "6to4 内嵌公网": ("2002:0808:808::", "内网"),
+    "Teredo 前缀": ("2001::1234", "内网"),
+    "Teredo 满址": ("2001:0:ffff:ffff::", "内网"),
+    "IETF 协议分配段": ("192.0.0.1", "内网"),
+    "IETF 段尾": ("192.0.0.255", "内网"),
+    "6to4 中继 anycast": ("192.88.99.1", "内网"),
+    "compat 内嵌回环": ("::127.0.0.1", "内网"),
+    "compat 内嵌私网": ("::10.0.0.1", "内网"),
+    "compat 内嵌公网": ("::8.8.8.8", "内网"),
 }
 
 
@@ -118,6 +135,57 @@ def test_bracketed_and_uppercase_v6_literals_are_rejected():
     assert _reject("[FF02::1]")
 
 
+# ---------- zone-id（审查前置第 5 条）：fail-closed 且理由可读 ----------
+
+@pytest.mark.parametrize("literal", [
+    "fe80::1%eth0",              # 链路本地 + zone：属性/zone 两条都拒得住，这里钉 zone 文案
+    "2001:4860:4860::8888%eth0", # 公网地址 + zone 一样拒：zone 只对"本机某条链路"有意义
+    "::ffff:8.8.8.8%eth0",       # v4 映射写法 + zone：折叠前捕获 scope，公网兜底也算链路寻址
+])
+def test_zone_id_literals_fail_closed_with_readable_reason(literal):
+    """带 `%接口` 的地址一律 fail closed，理由点名 zone-id，读的人知道该改什么。"""
+    why = _reject(literal)
+    assert why, f"zone-id 写法居然放行：{literal}"
+    assert "zone-id" in why, f"理由应点名 zone-id：{why!r}"
+
+
+@pytest.mark.parametrize("literal,keyword", [
+    ("::1%lo", "本机"),          # 既有语义保住：::1 带 lo 仍按回环类走"本机"文案与开关
+    ("::%lo", "本机"),           # :: 带 lo 仍按全零类
+    ("fe80::10", "链路本地"),    # 不带 zone 的链路本地文案不变（scope 分支排在属性前只影响带 % 的）
+])
+def test_zone_id_does_not_disturb_existing_categories(literal, keyword):
+    """`::1%lo`/`::%lo` 的回环语义与不带 zone 的既有分类词都不许被 zone 分支挪走。
+
+    负向锁：把 zone-id 分支挪到回环分支之前，前两条参数会变成 zone-id 文案而红——
+    开关打开时 `::1%lo` 甚至会从"可放行"变成"恒拒"。
+    """
+    why = _reject(literal)
+    assert keyword in why, f"{literal} 的理由应含「{keyword}」：{why!r}"
+    assert "zone-id" not in why, why
+
+
+def test_loopback_hint_switch_for_non_providers_callers():
+    """loopback_hint 只影响尾巴句：providers 默认逐字不动，别的调用方可去掉那句指向。
+
+    负向锁：把 _LOOPBACK_HINT 的文本改掉或让默认值变成 ""，第一条红（管理员文案漂移）；
+    把 "" 分支写死回默认尾巴，第二条红（http_fetch 拿到对它无效的开关指引）。
+    """
+    assert net_guard.reject_reason(
+        "127.0.0.1", resolve=_forbidden_resolver, allow_loopback=False,
+        where="base_url") == (
+        "base_url 指向本机地址 127.0.0.1，服务端不做本机请求；"
+        "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+    why = net_guard.reject_reason(
+        "127.0.0.1", resolve=_forbidden_resolver, allow_loopback=False,
+        where="url", loopback_hint="")
+    assert why == "url 指向本机地址 127.0.0.1，服务端不做本机请求", why
+
+    assert net_guard.reject_reason(
+        "localhost", resolve=_forbidden_resolver, allow_loopback=False,
+        where="url", loopback_hint="") == "url 指向 localhost，服务端不做本机请求"
+
+
 # ---------- 公网不误伤：每个新段的边界外一例 ----------
 
 ALLOWED_LITERALS = [
@@ -132,6 +200,10 @@ ALLOWED_LITERALS = [
     "198.51.99.255", "198.51.101.0",   # TEST-NET-2 边界外
     "203.0.112.255", "203.0.114.0",    # TEST-NET-3 边界外
     "223.255.255.255",                 # 组播段下边界外
+    "2003::",                          # 2002::/16（6to4）上边界外
+    "2001:1::",                        # 2001::/32（Teredo）上边界外（下一整个 /32）
+    "192.0.1.0",                       # 192.0.0.0/24（IETF 协议分配）上边界外
+    "192.88.98.255", "192.88.100.0",   # 192.88.99.0/24（6to4 中继）两侧边界外
     "2606:2800:220:1:248:1893:25c8:1946",
     "2001:4860:4860::8888",            # 2001:db8::/32 同 prefix 长邻居，不是文档段
     "fe00::",                          # fe80::/10 边界外
@@ -295,6 +367,14 @@ CIDR_ONLY_RANGES = [
     ("fc00::/7", "fd12::34"),
     ("10.0.0.0/8", "10.1.2.3"),
     ("169.254.0.0/16", "169.254.169.254"),
+    # ---- v0.37.0 第二批：五个特殊用途段各自独立把关 ----
+    ("2002::/16", "2002:7f00:1::1"),
+    ("2001::/32", "2001::1234"),
+    ("192.0.0.0/24", "192.0.0.1"),
+    ("192.88.99.0/24", "192.88.99.1"),
+    # compat 的负控判据尤其要紧：摘掉 ::/96 后 `::127.0.0.1` 必须转绿（放行），
+    # 若仍被拒说明别的分支在替它把关，这条 CIDR 就是死配置。
+    ("::/96", "::127.0.0.1"),
 ]
 
 
@@ -345,5 +425,6 @@ def test_mutations_do_not_leak():
         "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         "169.254.0.0/16", "0.0.0.0/8", "fc00::/7", "100.64.0.0/10", "192.0.2.0/24",
         "198.51.100.0/24", "203.0.113.0/24", "198.18.0.0/15", "224.0.0.0/4",
-        "ff00::/12", "fe80::/10", "2001:db8::/32", "240.0.0.0/4"))
+        "ff00::/12", "fe80::/10", "2001:db8::/32", "240.0.0.0/4",
+        "2002::/16", "2001::/32", "192.0.0.0/24", "192.88.99.0/24", "::/96"))
     assert net_guard.PRIVATE_NETWORKS == expected
