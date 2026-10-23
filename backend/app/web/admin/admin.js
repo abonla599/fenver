@@ -213,8 +213,8 @@
   let allUsers = [];                 // 列表原样留着：筛选在前端做，不为一个搜索框再开一条后端信道
 
   function renderUsers() {
-    const q = $("userSearch").value.trim().casefold();
-    const shown = q ? allUsers.filter((u) => (u.username || "").casefold().includes(q))
+    const q = $("userSearch").value.trim().toLowerCase();
+    const shown = q ? allUsers.filter((u) => (u.username || "").toLowerCase().includes(q))
                     : allUsers;
     $("userSearchNote").textContent = q
       ? "共 " + allUsers.length + " 人，匹配 " + shown.length + " 人"
