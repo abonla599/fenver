@@ -290,13 +290,13 @@ def test_only_a_search_that_actually_returned_something_ages_the_probe(monkeypat
     notes = []
     monkeypatch.setattr(availability, "note_search_ok", lambda: notes.append(1))
     monkeypatch.setattr(ws, "search", lambda query, max_results=3: [])
-    execute_tool("web_search", {"query": "x"})
+    execute_tool("web_search", {"query": "x"}, user_id="u")
     assert notes == [], "空结果也刷新了可用性：坏源会被自己的工具判成好用"
 
     monkeypatch.setattr(ws, "search",
                         lambda query, max_results=3: [{"title": "标题",
                                                         "url": "https://e/1", "snippet": "摘要"}])
-    out = execute_tool("web_search", {"query": "x"})
+    out = execute_tool("web_search", {"query": "x"}, user_id="u")
     assert notes == [1], f"搜成功却没告诉探测，探测会照旧每 15 分钟空敲：{out[:60]}"
 
 
@@ -311,7 +311,7 @@ def test_the_search_result_carries_the_source_url_to_the_model(monkeypatch):
                         lambda query, max_results=3: [{"title": "某校招生简章",
                                                         "url": "https://example.edu/zsjz",
                                                         "snippet": "2026 年计划……"}])
-    out = execute_tool("web_search", {"query": "某校 招生"})
+    out = execute_tool("web_search", {"query": "某校 招生"}, user_id="u")
     assert "https://example.edu/zsjz" in out, out
     assert "某校招生简章" in out and "2026 年计划" in out, out
 
@@ -466,7 +466,7 @@ def test_results_sharing_nothing_with_the_query_get_one_warning_line(monkeypatch
     ②那句提示含糊到模型照样照抄噪声标题，所以断言同时要求"换个关键词再搜"这个出口。
     """
     _serve_page(monkeypatch, ["西安市天气查询", "今日油价上涨了吗"])
-    out = execute_tool("web_search", {"query": "西北地区研究生招生简章"})
+    out = execute_tool("web_search", {"query": "西北地区研究生招生简章"}, user_id="u")
     assert _IRRELEVANT_MARK in out, f"完全无关的结果没有触发提示：{out!r}"
     assert "换个关键词" in out, f"提示里没给出下一步：{out!r}"
     assert "西安市天气查询" in out and "今日油价上涨了吗" in out, \
@@ -482,7 +482,8 @@ def test_relevant_results_get_no_warning_even_for_a_spaceless_chinese_question(m
     必须落到字符/子串上。这里连标题都是真相关的一条，仍然挂提示就是错的。
     """
     _serve_page(monkeypatch, ["2026年西北地区研究生招生简章-中国研究生招生信息网"])
-    out = execute_tool("web_search", {"query": "西北地区研究生招生简章什么时候发布"})
+    out = execute_tool("web_search", {"query": "西北地区研究生招生简章什么时候发布"},
+                       user_id="u")
     assert _IRRELEVANT_MARK not in out, f"中文问句被误判为无关：{out!r}"
     assert "研究生招生信息网" in out, out
 
@@ -494,7 +495,7 @@ def test_any_partial_overlap_switches_the_warning_off(monkeypatch):
     而一句天天出现的提示等于没有提示。
     """
     _serve_page(monkeypatch, ["完全不搭边的另一件事", "简章里的三条注意事项"])
-    out = execute_tool("web_search", {"query": "西北 研究生 招生简章"})
+    out = execute_tool("web_search", {"query": "西北 研究生 招生简章"}, user_id="u")
     assert _IRRELEVANT_MARK not in out, f"只有一个词重叠就挂了提示：{out!r}"
 
 
@@ -507,7 +508,7 @@ def test_the_guard_does_not_fire_on_the_empty_result_answer(monkeypatch):
     from app.tools import web_search as ws
 
     monkeypatch.setattr(ws, "search", lambda query, max_results=3: [])
-    out = execute_tool("web_search", {"query": "西北地区研究生招生简章"})
+    out = execute_tool("web_search", {"query": "西北地区研究生招生简章"}, user_id="u")
     assert _IRRELEVANT_MARK not in out, f"空结果被套上了有结果的提示：{out!r}"
     assert "没有返回结果" in out and "不要据此断定" in out, out
 
@@ -521,7 +522,8 @@ def test_a_page_that_only_shares_the_year_is_still_irrelevant(monkeypatch):
     """
     _serve_page(monkeypatch, ["2027年_百度百科", "2027日历表：农历、节气与周末",
                               "2027年中国放假安排（暂定）"])
-    out = execute_tool("web_search", {"query": "2027年西北地区研究生招生简章什么时候发布"})
+    out = execute_tool("web_search", {"query": "2027年西北地区研究生招生简章什么时候发布"},
+                       user_id="u")
     assert _IRRELEVANT_MARK in out, f"只共享年份的噪声页被判成相关：{out!r}"
 
 
@@ -596,3 +598,118 @@ def test_a_query_of_only_particles_gets_no_verdict(monkeypatch):
     rows = [{"title": "某件毫不相干的事", "url": "https://e/1", "snippet": "随便一句"}]
     assert builtin_tools._rows_share_a_word("他的了是在，。！、吗", rows) is True, \
         "没有实词可比，却被判成无关"
+
+
+# ---------- ④ v0.37.4 T2：结果行句柄 ----------
+#
+# 搜索结果里的 URL 是别人写的网页字段，不交给模型当参数；模型只拿得到服务端签发的
+# [r_...]。所以这一节钉三件事：旗标与 schema（owner 绑定、user_id 不进 schema）、
+# 每条 https 结果行首有且只有一枚唯一 ID、极端字段下输出仍在 2097 字以内。
+
+def test_web_search_declares_needs_user_but_keeps_user_id_out_of_the_schema(monkeypatch):
+    from app.tools import availability, builtin_tools  # noqa: F401  确保注册表已填充
+    from app.tools.registry import get_available_tools_schema, tools_registry
+
+    info = tools_registry["web_search"]
+    assert info["needs_user"] is True, "结果句柄不绑定 owner，跨用户猜中的 ID 就能重放"
+    props = info["parameters"]["properties"]
+    assert set(props) == {"query"}, f"schema 多出了参数：{sorted(props)}"
+    assert "user_id" not in props, "归属人只能由执行器注入，schema 里绝不许出现"
+    assert "[r_...]" in info["description"], "模型不知道行首那个标识是什么"
+    assert "web_read" not in info["description"], \
+        "本批没有注册 web_read，描述里提它就是指向不存在的能力"
+
+    # 给模型的那份（availability 筛过）也必须是同一条 query-only schema
+    monkeypatch.setattr(availability, "search_reachable", lambda: True)
+    for tool in get_available_tools_schema():
+        if tool["function"]["name"] == "web_search":
+            assert set(tool["function"]["parameters"]["properties"]) == {"query"}
+            break
+    else:
+        raise AssertionError("web_search 不在给模型的清单里")
+
+
+def test_every_https_result_line_carries_a_unique_result_id_but_artifacts_do_not(monkeypatch):
+    from app.tools import builtin_tools, web_search as ws
+
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
+        {"title": "标题一", "url": "https://e.example/1", "snippet": "摘要一"},
+        {"title": "标题二", "url": "https://e.example/2", "snippet": "摘要二"},
+        {"title": "标题三", "url": "https://e.example/3", "snippet": "摘要三"},
+    ])
+    resp = builtin_tools.web_search_tool("标题", user_id="u")
+    lines = [ln for ln in resp.data.splitlines() if ln.startswith("- ")]
+    assert len(lines) == 3, resp.data
+    assert all(re.match(r"^- \[r_[A-Za-z0-9_-]{16}\] ", ln) for ln in lines), lines
+    assert len({ln[3:21] for ln in lines}) == 3, f"三条结果拿了同一枚句柄：{lines}"
+    # artifacts 是留痕通道，一个字节都不许变：绝不加 ID
+    for row in resp.artifacts["results"]:
+        assert set(row) == {"title", "url", "snippet"}, row
+        assert "result_id" not in row
+    assert "中段已省略" not in resp.to_string()
+
+
+def test_an_http_result_still_shows_its_url_but_gets_no_result_id(monkeypatch):
+    """http 行照旧显示 URL，但不签 ID：读取侧只允许 https/443，死 ID 不如不给。"""
+    from app.tools import web_search as ws
+
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
+        {"title": "安全页", "url": "https://e.example/1", "snippet": "一"},
+        {"title": "明文页", "url": "http://e.example/2", "snippet": "二"},
+    ])
+    out = execute_tool("web_search", {"query": "页面"}, user_id="u")
+    lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
+    assert len(lines) == 2, out
+    assert lines[0].startswith("- [r_") and "https://e.example/1" in lines[0]
+    assert lines[1].startswith("- 明文页") and "http://e.example/2" in lines[1]
+    assert "r_" not in lines[1], f"http 行拿到了读不了的句柄：{lines[1]!r}"
+
+
+def test_three_extreme_fields_stay_under_the_result_budget(monkeypatch):
+    """3×10k 字段：字段封顶后整段输出必须 ≤2097 字，且不触发执行器的中段省略。"""
+    from app.tools import builtin_tools, web_search as ws
+
+    huge = "长" * 10000
+    # URL 用可签发的最长形状（正好 2048 字）：这样三条结果都带 [r_...]，
+    # 测到的是"ID + 三项封顶"的完整最坏行，而不是恰好绕开句柄的那种。
+    longest_url = ("https://e.example/" + "a" * 3000)[:2048]
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
+        {"title": huge, "url": longest_url, "snippet": huge} for _ in range(3)
+    ])
+    resp = builtin_tools.web_search_tool("长", user_id="u")
+    text = resp.to_string()
+    assert text.count("[r_") == 3, "构造里的 URL 是可签发的，三条都该带 ID"
+    assert len(text) <= 2097, f"3×10k 字段把结果顶到 {len(text)} 字（上限 2097）"
+    assert "中段已省略" not in text
+
+    # 走执行器出口也不许被 clip_for_model 切（成功前缀 ✓ 计入 3998 的预算）
+    out = execute_tool("web_search", {"query": "长"}, user_id="u")
+    assert len(out) <= 3998, f"执行器出口被顶到 {len(out)} 字"
+    assert "中段已省略" not in out
+
+
+def test_web_search_tool_still_runs_when_called_directly_without_an_owner(monkeypatch):
+    """直调（测试/脚本）路径保留默认空归属；生产路径由执行器注入 user_id。"""
+    from app.tools import builtin_tools, result_store, web_search as ws
+
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
+        {"title": "标题", "url": "https://e.example/1", "snippet": "摘要"}])
+    resp = builtin_tools.web_search_tool("标题")
+    assert resp.success and "- [r_" in resp.data
+    rid = re.search(r"\[(r_[A-Za-z0-9_-]{16})\]", resp.data).group(1)
+    record, reason = result_store.lookup(rid, owner="")
+    assert reason == "ok" and record["owner"] == ""
+
+
+def test_external_fields_cannot_break_the_result_line_structure(monkeypatch):
+    """标题/摘要里的换行与格式字符不许把一条结果拆成两行或改写显示。"""
+    from app.tools import web_search as ws
+
+    monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
+        {"title": "第一行\n第二行\u200b标题", "url": "https://e.example/1\nx",
+         "snippet": "摘要\r\n尾巴\u202e反向"}])
+    out = execute_tool("web_search", {"query": "第一行"}, user_id="u")
+    result_lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
+    assert len(result_lines) == 1, f"外部文本把一条结果拆成了多行：{out!r}"
+    assert "\u200b" not in out and "\u202e" not in out, "格式字符漏进了工具输出"
+    assert "https://e.example/1x" in out, "URL 里的控制字符应该只被去掉、不被改写"
