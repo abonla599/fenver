@@ -225,6 +225,8 @@ def test_resolve_all_data_paths_covers_every_store(monkeypatch, tmp_path):
                  "长期记忆向量库": "chroma_db", "任务清单": "tasks.json",
                  "用量账本": "usage.json", "日程": "schedule.json",
                  "运行时配置": "config.json", "审计流水": "audit.jsonl",
+                 # v0.36.3 安全监控：有界安全事件日志（脱敏、自动压缩）
+                 "安全日志": "security_log.jsonl",
                  "搜索源密钥": "search_keys.json", "搜索用量账本": "search_usage.json",
                  # v0.35 A2：审批票据表落盘，这份清单跟着长——这条锁的意义就是
                  # "加一份存储而忘了补这里，红的是这一条"（判据原文见上面那段注释）。

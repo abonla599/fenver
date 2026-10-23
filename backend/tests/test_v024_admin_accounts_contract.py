@@ -246,4 +246,6 @@ def test_users_list_row_gains_must_change_password_and_nothing_else(client):
     rows = client.get("/v1/admin/users").json()["users"]
     row = [u for u in rows if u["username"] == "看列表的"][0]
     assert set(row) == {"user_id", "username", "role", "disabled", "must_change_password",
-                        "created_at", "last_seen", "sessions"}
+                        "created_at", "last_seen", "sessions",
+                        # v0.36.3：最早会话到期时刻（ISO 或 null），只由时间戳派生
+                        "next_session_expiry_at"}

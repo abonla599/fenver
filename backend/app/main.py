@@ -1709,11 +1709,114 @@ def _user_feedback_public(record: dict) -> dict:
 
 
 @app.get("/v1/admin/user-feedback")
-def admin_list_user_feedback(_: Principal = RequireAdmin):
-    """反馈收集列表：新的在前 + 未读计数，管理员页角标读的就是这两个数。"""
-    items = [_user_feedback_public(r) for r in user_feedback_storage.list_all()]
+def admin_list_user_feedback(response: Response, limit: Optional[str] = None,
+                             before: Optional[str] = None,
+                             unread: Optional[str] = None,
+                             _: Principal = RequireAdmin):
+    """反馈收集列表：新的在前 + 未读计数，管理员页角标读的就是这两个数。
+
+    v0.36.3 起支持分页，但**一个参数都不带时仍是旧形状**（items 全量 + unread）：
+    旧调用方不许坏。带了任一参数才多出 `next_before` 游标。`before` 是本页最后
+    一条的 FB 编号；limit 只收 1–200；unread=1 只看未读。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    rows = user_feedback_storage.list_all()
+    items = [_user_feedback_public(r) for r in rows]
     items.reverse()
-    return {"items": items, "unread": sum(1 for r in items if not r["read"])}
+    unread_count = sum(1 for item in items if not item["read"])
+    if limit is None and before is None and unread is None:
+        return {"items": items, "unread": unread_count}
+
+    page_size = _feedback_limit(limit)
+    if _feedback_unread_only(unread):
+        items = [item for item in items if not item["read"]]
+    cursor = _feedback_cursor(before)
+    if cursor is not None:
+        ids = [item["id"] for item in items]
+        if cursor not in ids:
+            items = []
+        else:
+            items = items[ids.index(cursor) + 1:]
+    page = items[:page_size]
+    next_before = page[-1]["id"] if len(items) > page_size else None
+    return {"items": page, "unread": unread_count, "next_before": next_before}
+
+
+def _feedback_limit(raw) -> int:
+    """分页大小：缺省 50，只收 1–200（越界与非整数都是 400，不静默改写）。"""
+    if raw is None or raw == "":
+        return 50
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit 必须是 1–200 的整数")
+    if not 1 <= value <= 200:
+        raise HTTPException(status_code=400, detail="limit 必须是 1–200 的整数")
+    return value
+
+
+def _feedback_cursor(raw):
+    """before 游标：一个存在的 FB 编号形状；空 = 从头。"""
+    if raw is None or raw == "":
+        return None
+    if not user_feedback_storage.ID_RE.match(str(raw).strip()):
+        raise HTTPException(status_code=400, detail="before 必须是反馈编号（FB-000123）")
+    return str(raw).strip()
+
+
+def _feedback_unread_only(raw) -> bool:
+    if raw is None or raw == "":
+        return False
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes"):
+        return True
+    if text in ("0", "false", "no"):
+        return False
+    raise HTTPException(status_code=400, detail="unread 只接受 1 或 0")
+
+
+def _csv_safe_cell(value) -> str:
+    """防公式注入：以 = + - @ 制表符或回车开头的单元格前置单引号。
+
+    这是导出给管理员用 Excel 打开的文本，不是"数据本身被改过"——本地值仍按原样
+    存在 user_feedback.json 里，前缀只活在这一次导出的字节里。
+    """
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
+@app.get("/v1/admin/user-feedback/export.csv")
+def admin_export_user_feedback(_: Principal = RequireAdmin):
+    """把全部反馈导成 CSV（UTF-8 BOM + CRLF，Excel 双击可开）。
+
+    列固定为 id,user_id,created_at,read,email,text；每格都过公式注入前缀。
+    这条路由必须定义在 /{fb_id} 那族之前，否则 "export.csv" 会被当成编号。
+    """
+    import csv
+    import io
+
+    rows = user_feedback_storage.list_all()
+    rows.reverse()
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)                # 默认行尾就是 \r\n
+    writer.writerow(["id", "user_id", "created_at", "read", "email", "text"])
+    for record in rows:
+        writer.writerow([
+            _csv_safe_cell(record.get("id")),
+            _csv_safe_cell(record.get("user_id")),
+            _csv_safe_cell(record.get("created_at")),
+            "true" if record.get("read") else "false",
+            _csv_safe_cell(record.get("email", "")),
+            _csv_safe_cell(record.get("text", "")),
+        ])
+    body = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+    filename = "fenver-feedback-%s.csv" % datetime.now().strftime("%Y%m%d")
+    return Response(
+        content=body, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                 "Cache-Control": "no-store"})
 
 
 @app.post("/v1/admin/user-feedback/{fb_id}/read")
