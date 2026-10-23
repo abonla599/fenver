@@ -35,7 +35,10 @@ EMBED_ENV = ("api_key", "EMBEDDINGS_BASE_URL", "EMBEDDINGS_MODEL",
 
 PROVIDER_KEY = "prov-key-1234567890abcdef"
 ENV_KEY = "env-key-0000111122223333"
-PLACEHOLDER_KEY = "sk-your-xxxx-placeholder"
+# 不带 sk- 前缀：`sk-` + 20 位以上字符会命中 tools/secret_scan.py 的
+# openai-style-key 形状规则（test_secret_scan 的真仓闸门因此红）。
+# looks_placeholder 只看 PLACEHOLDER_HINTS（your- / xxx / placeholder），照判占位。
+PLACEHOLDER_KEY = "your-xxxx-placeholder"
 CANARY_MODEL = "canary-embed-model-9k"
 
 
