@@ -25,7 +25,11 @@ from app.tools.response import ToolResponse, ToolSuspended
 # suspends 的工具都必须有一档**。一次挂起至少占两次派发（首跑 + 把答案递回去的续跑，
 # 闸门在两者之前都会计数），而挂起这一族天生招重试——没有档的话，它就是白名单制闸门
 # 下那个"一次都不被挡"的口子，比 execute_code 更省注入驱动者的力气。
-_FREQ_LIMITS = {"execute_code": (600.0, 10), "plan_add": (900.0, 6)}
+_FREQ_LIMITS = {"execute_code": (600.0, 10), "plan_add": (900.0, 6),
+                # v0.37.0 http_fetch：与 execute_code 同档。这条工具的产出会被
+                # 喂回模型，"外部正文 → 模型 → 连敲白名单站点"与注入驱动拉容器
+                # 是同一条链，档口必须一样密。
+                "http_fetch": (600.0, 10)}
 _FREQ_LEDGER = defaultdict(list)
 _FREQ_LEDGER_MAX_KEYS = 4096          # 键数上限：超了顺手清过期键，防无界增长
 _FREQ_LOCK = threading.Lock()         # 计数与追加必须同锁：否则并发两条各见 9 次、各放行

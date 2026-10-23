@@ -71,6 +71,11 @@ DEFAULTS = {
     # 「算得出、看得见、拦得住（默认关）」，开不开是部署者的决定。填正数后，
     # 某用户当日影子合计到线就停在「等待你确认是否继续」，且不再向模型出网。
     "credit_shadow_daily_limit": 0.0,
+    # v0.37.0 http_fetch 的主机白名单：工具只允许抓这些域名（精确匹配主机名，
+    # 不含子域）。默认空名单 = 工具对模型不可见——"没人配过"与"配了但都拒了"
+    # 必须是同一个可见状态，而不是一个每次调用都失败的摆设。条目形状见
+    # _FETCH_HOST_RE：小写 ASCII LDH、≥2 标签、无通配/端口/@/尾点、整表 ≤50 条。
+    "fetch_allowed_hosts": [],
 }
 
 # 一个窗口数值能取到的**最大秒数**。下游 `task_store.waiting_deadline()` 会做
@@ -121,11 +126,61 @@ MUTABLE_KEYS = frozenset(DEFAULTS)
 # 端口与 userinfo（`@`）这些形状，而它们各自都能拼出别的目标主机。
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# v0.37.0 http_fetch 白名单的条目形状。一个正则收齐全部要求：
+# * 只允许小写字母/数字/连字符，且标签首尾不许是连字符（LDH，RFC3696 口径）——
+#   大写、下划线、`*`（通配）、`:`（端口）、`@`（userinfo）、非 ASCII 全部落不进；
+# * 至少两段（`[label](.label)+`）——裸单标签名不许上表，与 URL 契约同一口径，
+#   否则"配了个 `localhost`"会以"看着像域名"的形状混进来；
+# * 尾点被空标签天然拒死（`example.com.` 会要求最后一段匹配 LDH，空串不匹配）；
+# * 单标签 ≤63、总长 ≤253（正则里 1+62 与 4+63*4 的组合在 253 内再叠一条硬检查）。
+# 为什么这么严：这份名单是 http_fetch 唯一的"允许出网到哪"的事实来源，条目形状
+# 一松（通配、前缀、URL），匹配语义就会在不同代码路径里各长成不同样子。
+_FETCH_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                            r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9]))+$")
+_FETCH_HOST_MAX = 50
+
+
+def _fetch_host_ok(entry) -> bool:
+    return (isinstance(entry, str) and len(entry) <= 253
+            and bool(_FETCH_HOST_RE.match(entry)))
+
+
+def _normalize_fetch_hosts(value) -> list:
+    """把任意 JSON 形状收成"合法条目、去重、保序、≤50 条"的名单。
+
+    与 `_finite_or_close` 同一族纪律：零 raise、坏条目 print 一句就丢——这一支
+    跑在 `restore()`（导入期）里，抛出去就是现网起不来。管理端 POST 的"整单拒收"
+    由 `_VALUE_CHECKS` 在写入口判，两关的分工与其余格子的"形状关+消毒关"一致。
+    """
+    if not isinstance(value, list):
+        return []
+    out, seen = [], set()
+    for item in value:
+        entry = item.strip().lower() if isinstance(item, str) else item
+        if not _fetch_host_ok(entry):
+            print(f"⚠️ 配置项 fetch_allowed_hosts 的条目 {item!r} 不是"
+                  "「小写、≥2 段、无通配/端口/@/尾点」的 ASCII 主机名，丢弃这一条")
+            continue
+        if entry in seen:
+            continue
+        if len(out) >= _FETCH_HOST_MAX:
+            print(f"⚠️ 配置项 fetch_allowed_hosts 超过 {_FETCH_HOST_MAX} 条上限，"
+                  f"其余条目丢弃：名单是访问策略不是爬虫清单")
+            break
+        seen.add(entry)
+        out.append(entry)
+    return out
+
+
 # 逐键的值域校验。与 _type_ok（形状）并列的另一道闸门，两者都过才写入。
 # 拒的键与类型不对、未知键走同一条路：进 rejected，不抛异常也不静默吞——
 # 界面上"保存"的人有权知道这一格没被接受。
 _VALUE_CHECKS = {
     "update_repo": lambda v: bool(_REPO_RE.match(str(v).strip())),
+    # 管理端写入整表判：任何一条形状不对或超 50 条就整个键拒收（进 rejected），
+    # 而不是悄悄收一半——管理员要的是"这份名单没被接受"，不是"哪一条没进"。
+    "fetch_allowed_hosts": lambda v: (isinstance(v, list) and len(v) <= _FETCH_HOST_MAX
+                                      and all(_fetch_host_ok(e) for e in v)),
 }
 
 
@@ -401,6 +456,8 @@ def _sanitize_loaded(key: str, value):
     """
     if key == "credit_benchmark":
         return _sanitize_credit_benchmark(value)
+    if key == "fetch_allowed_hosts":
+        return _normalize_fetch_hosts(value)
     default = DEFAULTS[key]
     if isinstance(default, (int, float)) and not isinstance(default, bool):
         if isinstance(value, int) and not isinstance(value, bool):
@@ -568,6 +625,18 @@ def credit_shadow_daily_limit() -> float:
     return _finite_or_close(value, float(DEFAULTS["credit_shadow_daily_limit"]),
                             "影子护栏（data/config.json）",
                             key="credit_shadow_daily_limit")
+
+
+def fetch_allowed_hosts() -> list:
+    """http_fetch 的主机白名单（全场唯一读数口径）——归一化、去重、保序。
+
+    缓存里的值在写入口已经过 `_normalize_fetch_hosts`，这里再走同一支是防御
+    手改盘上文件绕过校验的那条路（restore 的消毒与 getter 的消毒是同一函数、
+    同一判据，不可能漂）。返回副本：调用方不许拿到 `_config` 里的活列表。
+    """
+    with _lock:
+        value = _config.get("fetch_allowed_hosts", DEFAULTS["fetch_allowed_hosts"])
+    return _normalize_fetch_hosts(value)
 
 
 def apply_update(partial: dict) -> Tuple[dict, list]:

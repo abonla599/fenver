@@ -1085,23 +1085,35 @@ def remove_user(user_id: str, actor: Principal = RequireAdmin):
 # ---------- v0.24 T1.4：运行时配置 ----------
 
 class ConfigUpdateRequest(BaseModel):
-    """管理端只收这两个键，形状与 config_store.MUTABLE_KEYS 对齐。
+    """管理端只收这三个键，形状与 config_store.MUTABLE_KEYS 对齐。
 
     字段写成 Optional：PATCH 语义，"没带的那个键不动"。全接收一个 dict 当然更省
     一行代码，但那等于让 pydantic 之外的世界替我们决定什么能写——白名单就白名单。
     """
     registration_open: Optional[bool] = None
     update_repo: Optional[str] = None
+    # v0.37.0 http_fetch 主机白名单：只有这一个写入口（RequireAdmin），普通用户
+    # 既读不到（GET /v1/config 剔除）也写不了（POST 在依赖处就 403）。空列表是
+    # 合法值（= 工具下线）；条目形状由 config_store 整表判，坏的进 rejected。
+    fetch_allowed_hosts: Optional[List[str]] = None
 
 
 @router.get("/v1/config")
-def get_config(_: Principal = CurrentPrincipal):
+def get_config(principal: Principal = CurrentPrincipal):
     """登录用户可见的配置面：注册开没开、更新从哪个仓库找。
 
     不给匿名：这两个值本身不算秘密，但"管理面长什么样"是侦察材料，与 /health
     不同，配置没有替匿名访客答一句的必要。
+
+    v0.37.0：`fetch_allowed_hosts` 只给管理员——它是"服务端被允许出网到哪"的
+    策略原样，普通用户多知道一个白名单域名，就多一枚社工话术素材（"去抓这个
+    站点吧"，而那站点真的会被服务端替他去抓）。普通用户拿到的响应里这个键
+    整个不出现，而不是给个空表——空表会引导用户去配一个他写不动的格子。
     """
-    return config_store.read()
+    cfg = config_store.read()
+    if principal.role != "admin":
+        cfg.pop("fetch_allowed_hosts", None)
+    return cfg
 
 
 @router.post("/v1/admin/config")
