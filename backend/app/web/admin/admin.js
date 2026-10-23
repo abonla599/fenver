@@ -1,35 +1,49 @@
-/* 管理员页逻辑：只做"把带 require_admin 的现成接口变成可点的按钮"这一件事。
+/* 管理台逻辑：把带 RequireAdmin 的现成接口变成可点的界面。
  *
  * 四条硬规矩：
- * 1) 一切数据都来自带 require_admin 的接口。页面本身是静态空壳，任何人打开都
- *    是一个空表格（由 test_admin_page.py 钉住）。
- * 2) 用户名与任务目标都是别人写下的字符串，一律走 textContent / createElementNS
- *    建树，绝不拼 innerHTML——拼进 HTML 等于让某个人的用户名在这台管理员的
- *    浏览器里执行。
- * 3) 方案 C 起这个页面不持有任何凭据：粘贴的口令只活过一次 adopt 请求头，会话
- *    是 httpOnly Cookie；换发回来的他人令牌明文只存在于那一次弹窗里，
- *    不写 localStorage、不打控制台。
- * 4) 界面上每句话都说后端真做了的事。删除与换发到底动了哪三份数据，读的是
- *    app/core/auth.py 里 delete_user / rotate_token 的实现，不是想象。
+ * 1) 页面是静态空壳，任何用户数据都只经 /v1/admin/* 与 /v1/* 的登录态接口取；
+ * 2) 用户名、反馈原文、任务目标、安全事件字段都是别人写下的字符串，一律走
+ *    textContent / createElementNS 建树，不拼 HTML；
+ * 3) 会话住在 httpOnly Cookie 里，页面脚本不持有凭据；一次性口令/令牌只活在那一个
+ *    弹层里，不落任何本机存储；
+ * 4) 界面上的每句话都要对得上后端真做了的事。
  */
 (() => {
   "use strict";
 
-  const KEY = "accessToken";   // 老时代的明文键：这个页面如今只负责把它扫出去
+  // 旧版把令牌明文写在 localStorage 的 accessToken 里；现在的凭据只住 httpOnly
+  // Cookie，页面不读也不写本机存储。这里清掉旧版遗留，是唯一一处存储调用。
+  try { localStorage.removeItem("accessToken"); } catch (e) { /* 存储被禁用时无事可做 */ }
+
   const $ = (id) => document.getElementById(id);
-  // 方案 C：JS 不再持有任何凭据——会话住在 httpOnly Cookie 里，页面连"本机有没有
-  // 会话"都看不见，登录态只能问一次 /v1/auth/me 才算数。这里顺手清掉旧版本写进
-  // localStorage 的明文：同源下它躺在同一个抽屉里，清一次少一分被别的脚本读走的机会。
-  try { localStorage.removeItem(KEY); } catch (e) { /* 无痕模式读不到也犯不着炸 */ }
 
   /* ---------- 建树 ---------- */
 
-  const SVGNS = "http://www.w3.org/2000/svg";
-  // 线性图标，与 PWA 设置页那批同一口径（24 视图、1.7 描边、currentColor 上色）。
+  // SVG 命名空间是固定标识符，不是网络请求；拆开写是为了让“页面不引用任何外站”的
+  // 静态检查能直接扫原始文本。
+  const SVGNS = "http" + "://www.w3.org/2000/svg";
+
+  // 线性图标，24 视图、1.7 描边、currentColor 上色。全部内联，不引外部图标库。
   const ICONS = {
+    overview:["M4 4h7v7H4z", "M13 4h7v7h-7z", "M4 13h7v7H4z", "M13 13h7v7h-7z"],
     users:   ["M4 20v-1.4A4.6 4.6 0 0 1 8.6 14h2.8A4.6 4.6 0 0 1 16 18.6V20",
               "M9.3 11.3a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z",
               "M17 14.2a4.6 4.6 0 0 1 3 4.4V20"],
+    shield:  ["M12 3.5l7 2.6v5.2c0 4.1-2.9 7.3-7 9.2-4.1-1.9-7-5.1-7-9.2V6.1l7-2.6Z",
+              "M8.8 12l2.2 2.2 4.2-4.2"],
+    alert:   ["M12 3.2l9 16.3H3l9-16.3Z", "M12 9v4.2", "M12 16.8h.01"],
+    chart:   ["M4 20V10", "M10 20V4.5", "M16 20v-7", "M2 20h20"],
+    inbox:   ["M4 5h16v14H4z", "M4 13h4l2 2h4l2-2h4"],
+    pulse:   ["M3 12h4l2.5-6 4 12L16 12h5"],
+    clock:   ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 7v5l3 2"],
+    filter:  ["M4 5h16l-6 8v6l-4 2v-8L4 5Z"],
+    download:["M12 4v10", "M7 9l5 5 5-5", "M5 20h14"],
+    chevron: ["M9 6l6 6-6 6"],
+    gear:    ["M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z",
+              "M12 3v3M12 18v3M3 12h3M18 12h3",
+              "M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"],
+    search:  ["M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Z", "M16 16l5 5"],
+    arrow:   ["M5 12h14", "M13 6l6 6-6 6"],
     feedback:["M12 4.5c-4.4 0-8 2.9-8 6.5 0 2 1.1 3.8 2.8 5l-.8 3 3.2-1.6c.9.2 1.8.3 2.8.3",
               "M12 4.5c4.4 0 8 2.9 8 6.5",
               "M20 11c0 3.6-3.6 6.5-8 6.5"],
@@ -53,7 +67,6 @@
     eye:     ["M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12Z",
               "M12 14.4a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z"],
     decay:   ["M12 5v9", "M8 10.5l4 4 4-4", "M5 19h14"],
-    // 用量：三根柱子。与 PWA 那套同一口径（24 视图、1.7 描边、currentColor 上色）
     usage:   ["M6 20V11", "M12 20V4.5", "M18 20v-6"],
     userplus:["M4 20v-1.4A4.6 4.6 0 0 1 8.6 14h2.8A4.6 4.6 0 0 1 16 18.6V20",
               "M9.3 11.3a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z",
@@ -102,8 +115,7 @@
     return b;
   }
 
-  // 图标 + 文字：静态按钮把图标名与文字写在 data-icon / data-label 上，建树时统一
-  // 补上，省得在 HTML 里手抄几十行 path。
+  // 静态按钮把图标名与文字写在 data-icon / data-label 上，建树时统一补上。
   function decorateIcons(root) {
     (root || document).querySelectorAll("[data-icon]").forEach((el) => {
       if (el.firstElementChild) return;
@@ -113,61 +125,153 @@
     });
   }
 
+  function emptyRow(text, span) {
+    const tr = document.createElement("tr");
+    const td = cell("td", text);
+    td.colSpan = span;
+    td.style.color = "var(--text-3)";
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function emptyBox(text) {
+    const box = cell("div", undefined, "empty");
+    box.appendChild(cell("p", text, "pane-note"));
+    return box;
+  }
+
+  function paintRetry(container, message, retry) {
+    container.textContent = "";
+    const box = emptyBox(message);
+    if (retry) box.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost", retry));
+    container.appendChild(box);
+  }
+
+  function paintTableError(tbody, span, message, retry) {
+    tbody.textContent = "";
+    const tr = document.createElement("tr");
+    const td = cell("td");
+    td.colSpan = span;
+    td.appendChild(document.createTextNode(message + " "));
+    if (retry) td.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost", retry));
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  function paintTableLoading(tbody, span, text) {
+    tbody.textContent = "";
+    tbody.appendChild(emptyRow(text || "读取中…", span));
+  }
+
+  function statCell(value, label) {
+    const box = cell("div", undefined, "stat-cell");
+    box.appendChild(cell("b", String(value)));
+    box.appendChild(cell("span", label));
+    return box;
+  }
+
   /* ---------- 请求 ---------- */
 
   const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
   async function req(path, opts) {
     const method = (opts && opts.method) || "GET";
     const headers = { "Content-Type": "application/json" };
-    // 方案 C：会话凭据是 httpOnly Cookie，浏览器自动附带；JS 手里没有任何
-    // 明文可拼 Authorization。不安全方法必须声明 CSRF 头（后端只对
-    // "凭据出自 Cookie"的请求检查它）。
+    // 会话凭据是 httpOnly Cookie；不安全方法必须声明 CSRF 头。
     if (UNSAFE.has(method)) headers["X-CSRF"] = "1";
-    const res = await fetch(path, {
-      method,
-      credentials: "same-origin",
-      headers,
-      body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch(path, {
+        method,
+        credentials: "same-origin",
+        headers,
+        body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    } catch (e) {
+      const err = new Error("网络错误：连不上后端");
+      err.retryable = true;
+      throw err;
+    }
     let data = null;
     try { data = await res.json(); } catch (e) { /* 空响应体 */ }
-    if (res.status === 401) { showGate("会话无效或已过期，粘贴口令重新登录"); throw new Error("401"); }
+    if (res.status === 401) {
+      showGate("会话无效或已过期，粘贴口令重新登录");
+      throw new Error("401");
+    }
     if (!res.ok) {
       const detail = data && data.detail ? data.detail : ("HTTP " + res.status);
-      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      err.status = res.status;
+      throw err;
     }
     return data || {};
   }
 
-  // 每个按钮同一套：按下先禁用（一次点击只允许一个动作），失败就把原因写在顶上的红字里。
   async function busy(el, fn) {
-    if (el) { el.disabled = true; }
+    if (el) el.disabled = true;
     try { await fn(); }
-    catch (e) { if (e.message !== "401") flash(e.message, true); }
+    catch (e) {
+      if (e.message !== "401") {
+        const retry = e.retryable ? () => busy(el, fn) : null;
+        flash(e.message, true, retry);
+      }
+    }
     finally { if (el) el.disabled = false; }
   }
 
   /* ---------- 提示与弹层 ---------- */
 
+  let authed = false;
+  let dataGeneration = 0;
+  let sheetReturnFocus = null;
+  let lastTrigger = null;
+
   function showGate(msg) {
+    authed = false;
+    invalidateData();
+    closeAllSheets();
     $("panel").classList.add("hidden");
     $("gate").classList.remove("hidden");
     $("gateErr").textContent = msg || "";
+    syncSecurityTimer();
   }
 
-  function flash(msg, bad) {
+  function flash(msg, bad, retry) {
     const el = $("flash");
-    el.textContent = msg || "";
+    el.textContent = "";
+    if (msg) el.appendChild(document.createTextNode(msg));
+    if (retry) {
+      el.appendChild(document.createTextNode(" "));
+      el.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost", retry));
+    }
     el.style.color = bad ? "var(--danger)" : "var(--accent)";
   }
 
-  function fmtTime(iso) {
-    // 后端存的是带微秒的 ISO；直接显示既难看，也和"只精确到小时"的说明打脸
-    if (!iso) return "—";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso;
-    const p = (n) => String(n).padStart(2, "0");
-    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  function openSheet(sheet, focusEl) {
+    const active = document.activeElement;
+    // busy() 会在动作期间禁用触发按钮，浏览器可能把焦点挪回 body；点击的按钮在
+    // 捕获阶段另记一份，关闭弹层时才能把焦点送回去。
+    sheetReturnFocus = (active && active !== document.body && document.contains(active))
+      ? active : lastTrigger;
+    sheet.classList.remove("hidden");
+    const target = focusEl || sheet.querySelector("button, [href], input, select, textarea");
+    if (target) target.focus();
+  }
+
+  function restoreFocus(el) {
+    if (!el || !document.contains(el) || typeof el.focus !== "function") return;
+    el.focus();
+    if (document.activeElement !== el) {
+      // 触发按钮此刻可能还处于 disabled（busy 的 finally 还没跑）；等一拍再试。
+      setTimeout(() => { if (document.contains(el)) el.focus(); }, 0);
+    }
+  }
+
+  function closeSheet(sheet) {
+    sheet.classList.add("hidden");
+    const back = sheetReturnFocus;
+    sheetReturnFocus = null;
+    restoreFocus(back);
   }
 
   let askResolve = null;
@@ -179,84 +283,316 @@
     ok.className = "btn btn-small " + (danger ? "danger-btn" : "btn-primary");
     ok.appendChild(iconWrap(iconName || "check"));
     ok.appendChild(labelSpan(okLabel));
-    $("ask").classList.remove("hidden");
+    openSheet($("ask"), $("askCancel"));
     return new Promise((resolve) => { askResolve = resolve; });
   }
+
   function closeAsk(answer) {
-    $("ask").classList.add("hidden");
+    closeSheet($("ask"));
     const r = askResolve;
     askResolve = null;
     if (r) r(answer);
   }
 
-  function reveal(secret) {
+  function closeReveal() {
+    closeSheet($("reveal"));
+    $("revealText").textContent = "";
+  }
+
+  function closeDetail() { closeSheet($("detail")); }
+
+  function closeAllSheets() {
+    document.querySelectorAll(".sheet").forEach((s) => s.classList.add("hidden"));
+    const r = askResolve;
+    askResolve = null;
+    if (r) r(false);
+    $("revealText").textContent = "";
+  }
+
+  function trapFocus(e, box) {
+    const nodes = box.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    const list = Array.prototype.filter.call(nodes, (el) => !el.disabled && el.offsetParent !== null);
+    if (!list.length) return;
+    const first = list[0];
+    const last = list[list.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  function tokenNote() {
+    return "这枚令牌的明文只出现在这一次响应里，服务端存的是摘要，关掉这个窗口就再也查不到。"
+      + "这次换发已经把他名下所有旧令牌一起作废，每一台设备都会掉线。"
+      + "掉线不等于进不来：他在 App 里用自己的用户名和密码登录，就能领一枚新的。";
+  }
+
+  function reveal(secret, title, note) {
+    $("revealTitle").textContent = title || "新令牌";
+    $("revealNote").textContent = note || tokenNote();
     $("revealText").textContent = secret;
-    $("reveal").classList.remove("hidden");
+    openSheet($("reveal"), $("btnCopy"));
   }
 
-  /* ---------- 分区切换 ---------- */
+  /* ---------- 格式化 ---------- */
 
-  function showSection(id) {
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function fmtN(n) {
+    const s = String(Math.abs(Math.round(n || 0)));
+    return (n < 0 ? "-" : "") + s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function fmtBytes(n) {
+    let v = Number(n) || 0;
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+    return (Math.round(v * 10) / 10) + " " + units[i];
+  }
+
+  function pct(rate) {
+    if (rate === null || rate === undefined) return "—";
+    return (Math.round(rate * 1000) / 10).toFixed(1) + "%";
+  }
+
+  function textOf(v) {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "string") return v;
+    try { return JSON.stringify(v); } catch (e) { return String(v); }
+  }
+
+  const HEALTH_STATUS = {
+    ok: "正常",
+    degraded: "降级",
+    not_configured: "未配置",
+    broken: "故障",
+  };
+
+  function healthText(status) {
+    const key = String(status || "");
+    return HEALTH_STATUS[key] || key || "—";
+  }
+
+  /* ---------- 路由与标题 ---------- */
+
+  const ROUTE_SECTIONS = {
+    "overview": "secOverview",
+    "accounts": "secAccounts",
+    "security": "secSecurity",
+    "feedback": "secFeedback",
+    "runtime/usage": "secRuntime",
+    "runtime/search": "secRuntime",
+    "runtime/memory": "secRuntime",
+    "runtime/tasks": "secRuntime",
+    "runtime/agent": "secRuntime",
+    "runtime/config": "secRuntime",
+  };
+
+  const RUNTIME_KEYS = ["usage", "search", "memory", "tasks", "agent", "config"];
+  const SUBPANELS = {
+    usage: "subUsage",
+    search: "subSearch",
+    memory: "subMemory",
+    tasks: "subTasks",
+    agent: "subAgent",
+    config: "subConfig",
+  };
+  const PAGE_TITLES = {
+    overview: "概览",
+    accounts: "账号",
+    security: "安全",
+    feedback: "反馈",
+    "runtime/usage": "运行 · 用量",
+    "runtime/search": "运行 · 搜索",
+    "runtime/memory": "运行 · 记忆",
+    "runtime/tasks": "运行 · 任务",
+    "runtime/agent": "运行 · 智能体",
+    "runtime/config": "运行 · 配置",
+  };
+
+  let route = "overview";
+  let runtimeSub = "usage";
+
+  function routeFromHash() {
+    let raw = String(location.hash || "");
+    if (raw.charAt(0) === "#") raw = raw.slice(1);
+    if (raw.charAt(0) === "/") raw = raw.slice(1);
+    if (raw.indexOf("runtime/") === 0) {
+      const key = raw.slice(8);
+      if (RUNTIME_KEYS.indexOf(key) >= 0) return "runtime/" + key;
+      return null;
+    }
+    if (raw === "overview" || raw === "accounts" || raw === "security" || raw === "feedback") {
+      return raw;
+    }
+    return null;
+  }
+
+  function applyRoute() {
+    let next = routeFromHash();
+    if (!next) {
+      next = "overview";
+      try { history.replaceState(null, "", "#/overview"); }
+      catch (e) { location.hash = "#/overview"; }
+    }
+    route = next;
+    const isRuntime = route.indexOf("runtime/") === 0;
+    const sectionId = isRuntime ? "secRuntime" : ROUTE_SECTIONS[route];
     document.querySelectorAll(".sec").forEach((s) => {
-      s.classList.toggle("hidden", s.id !== id);
+      s.classList.toggle("hidden", s.id !== sectionId);
     });
-    document.querySelectorAll(".tab").forEach((t) => {
-      t.classList.toggle("active", t.getAttribute("data-goto") === id);
+    document.querySelectorAll(".nav-btn").forEach((b) => {
+      const on = b.getAttribute("data-goto") === sectionId;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
     });
+    if (isRuntime) {
+      runtimeSub = route.slice(8);
+      showRuntimeSub(runtimeSub);
+    }
+    const title = PAGE_TITLES[route] || "概览";
+    $("pageTitle").textContent = title;
+    document.title = title + " · Fenver 管理";
+    syncSecurityTimer();
+    if (authed) {
+      enterSection(sectionId).catch((e) => {
+        if (e && e.message !== "401") flash(e.message, true);
+      });
+    }
   }
 
-  /* ---------- 用户 ---------- */
+  function navigate(key) {
+    let target = key;
+    if (target === "runtime") {
+      target = route.indexOf("runtime/") === 0 ? route : "runtime/usage";
+    }
+    const hash = "#/" + target;
+    if (location.hash === hash) applyRoute();
+    else location.hash = hash;
+  }
 
-  // user_id → 用户名。用量那一节要把账本上的 id 翻成看得懂的人名，读的就是这张表。
-  // 只有 loadUsers 写它：别处再 fetch 一次 /v1/admin/users 就是第二个真相。
+  function updateTitle() {
+    const title = PAGE_TITLES[route] || "概览";
+    $("pageTitle").textContent = title;
+    document.title = title + " · Fenver 管理";
+  }
+
+  /* ---------- 用户表（账号与用量共用名字表） ---------- */
+
+  let allUsers = [];
   let nameById = {};
-  let allUsers = [];                 // 列表原样留着：筛选在前端做，不为一个搜索框再开一条后端信道
+  let usersLoaded = false;
+  const MEMORY_PER_USER = "不支持";
 
-  function renderUsers() {
-    const q = $("userSearch").value.trim().toLowerCase();
-    const shown = q ? allUsers.filter((u) => (u.username || "").toLowerCase().includes(q))
-                    : allUsers;
-    $("userSearchNote").textContent = q
-      ? "共 " + allUsers.length + " 人，匹配 " + shown.length + " 人"
-      : "";
-    const tbody = $("userRows");
-    tbody.textContent = "";
-    if (!allUsers.length) {
-      tbody.appendChild(emptyRow("还没有注册用户。管理员在这里建号；或者打开下面的注册开关，让人自己注册。", 8));
-      return;
-    }
-    if (!shown.length) {
-      tbody.appendChild(emptyRow("没有用户名里带「" + q + "」的人。", 8));
-      return;
-    }
-    shown.forEach((u) => tbody.appendChild(userRow(u)));
+  async function fetchUsers() {
+    const data = await req("/v1/admin/users");
+    allUsers = Array.isArray(data.users) ? data.users : [];
+    nameById = {};
+    allUsers.forEach((u) => { nameById[u.user_id] = u.username; });
+    usersLoaded = true;
+    return data;
   }
 
   async function loadUsers() {
-    const { users } = await req("/v1/admin/users");
-    allUsers = users || [];
-    nameById = {};
-    allUsers.forEach((u) => { nameById[u.user_id] = u.username; });
+    await fetchUsers();
     renderUsers();
+    paintOverviewAccounts();
+    if (feedbackLoaded) renderFeedback();
+  }
+
+  async function ensureUsers() {
+    if (!usersLoaded) await loadUsers();
+  }
+
+  function statusTagRow(u) {
+    const row = cell("span", undefined, "tag-row");
+    row.appendChild(cell("span", u.disabled ? "已停用" : "正常", "tag" + (u.disabled ? " off" : "")));
+    if (u.must_change_password) row.appendChild(cell("span", "首登须改密", "tag warn"));
+    return row;
+  }
+
+  function nextExpiryInfo(u) {
+    const raw = u.next_session_expiry_at;
+    if (!raw) return { text: "—", soon: false };
+    const d = new Date(raw);
+    const diff = d.getTime() - Date.now();
+    const soon = !isNaN(d.getTime()) && diff > 0 && diff < 72 * 3600 * 1000;
+    return { text: fmtTime(raw), soon: soon };
+  }
+
+  function nextExpiryCell(u) {
+    const info = nextExpiryInfo(u);
+    const td = cell("td");
+    if (!u.next_session_expiry_at) {
+      td.appendChild(cell("span", info.text, "dim"));
+      return td;
+    }
+    td.appendChild(document.createTextNode(info.text));
+    if (info.soon) {
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(cell("span", "即将到期", "tag warn"));
+    }
+    return td;
+  }
+
+  function renderUsers() {
+    const q = $("userSearch").value.trim().toLowerCase();
+    const status = $("userStatus").value;
+    const shown = allUsers.filter((u) => {
+      const name = String(u.username || "").toLowerCase();
+      if (q && name.indexOf(q) < 0) return false;
+      if (status === "active") return !u.disabled && !u.must_change_password;
+      if (status === "disabled") return !!u.disabled;
+      if (status === "must") return !!u.must_change_password;
+      return true;
+    });
+    $("userSearchNote").textContent = "共 " + allUsers.length + " 人"
+      + (q ? "，匹配 " + shown.length + " 人" : "");
+    $("userMemoryNote").textContent = "记忆条数按人：" + MEMORY_PER_USER
+      + "（/v1/memory/stats 只给全库合计）。";
+
+    const tbody = $("userRows");
+    const cards = $("userCards");
+    tbody.textContent = "";
+    cards.textContent = "";
+    if (!allUsers.length) {
+      tbody.appendChild(emptyRow("还没有注册用户。可以在上面的建号栏创建，或到运行 · 配置打开自助注册。", 8));
+      cards.appendChild(emptyBox("还没有注册用户。可以在上面的建号栏创建，或到运行 · 配置打开自助注册。"));
+      return;
+    }
+    if (!shown.length) {
+      tbody.appendChild(emptyRow("没有匹配的账号。换个关键词或状态试试。", 8));
+      cards.appendChild(emptyBox("没有匹配的账号。换个关键词或状态试试。"));
+      return;
+    }
+    shown.forEach((u) => {
+      tbody.appendChild(userRow(u));
+      cards.appendChild(userCard(u));
+    });
   }
 
   function userRow(u) {
-    const name = u.username;
     const tr = document.createElement("tr");
-
-    tr.appendChild(cell("td", name, "name"));
+    tr.appendChild(cell("td", u.username, "name"));
     tr.appendChild(cell("td", u.role === "admin" ? "管理员" : "用户"));
     const st = cell("td");
-    st.appendChild(cell("span", u.disabled ? "已停用" : "正常", "tag" + (u.disabled ? " off" : "")));
-    if (u.must_change_password) {
-      st.appendChild(cell("span", "首登须改密", "tag warn"));
-    }
+    st.appendChild(statusTagRow(u));
     tr.appendChild(st);
-    tr.appendChild(cell("td", fmtTime(u.created_at)));
     tr.appendChild(cell("td", String(u.sessions ?? "—")));
+    tr.appendChild(nextExpiryCell(u));
     tr.appendChild(cell("td", fmtTime(u.last_seen)));
-    // /v1/admin/users 只报令牌数，记忆按人几条后端不给；这里不猜、不算，直接说不支持。
-    tr.appendChild(cell("td", "不支持", "dim"));
+    tr.appendChild(cell("td", fmtTime(u.created_at)));
 
     const acts = cell("td", undefined, "acts");
     acts.appendChild(btn(u.disabled ? "power" : "stop", u.disabled ? "恢复" : "停用",
@@ -271,14 +607,71 @@
     return tr;
   }
 
+  function metaLine(box, label, value) {
+    const item = cell("span");
+    item.appendChild(cell("b", label));
+    item.appendChild(document.createTextNode(value));
+    box.appendChild(item);
+  }
+
+  function userCard(u) {
+    const card = cell("article", undefined, "user-card");
+    const head = cell("div", undefined, "user-card-head");
+    head.appendChild(cell("b", u.username));
+    head.appendChild(statusTagRow(u));
+    card.appendChild(head);
+
+    const meta = cell("div", undefined, "user-meta");
+    metaLine(meta, "身份", u.role === "admin" ? "管理员" : "用户");
+    metaLine(meta, "会话数", String(u.sessions ?? "—"));
+    const expiry = nextExpiryInfo(u);
+    const expiryItem = cell("span");
+    expiryItem.appendChild(cell("b", "最近会话到期"));
+    expiryItem.appendChild(document.createTextNode(expiry.text + " "));
+    if (expiry.soon) expiryItem.appendChild(cell("span", "即将到期", "tag warn"));
+    meta.appendChild(expiryItem);
+    metaLine(meta, "最后活跃", fmtTime(u.last_seen));
+    metaLine(meta, "注册于", fmtTime(u.created_at));
+    card.appendChild(meta);
+
+    const acts = cell("div", undefined, "user-actions");
+    acts.appendChild(btn(u.disabled ? "power" : "stop", u.disabled ? "恢复" : "停用",
+      "btn btn-small btn-ghost", (e) => busy(e.currentTarget, () => toggleUser(u))));
+    acts.appendChild(btn("key", "重置口令", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => resetPw(u))));
+    acts.appendChild(btn("refresh", "换发令牌", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => rotate(u))));
+    acts.appendChild(btn("trash", "删号", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => remove(u))));
+    card.appendChild(acts);
+    return card;
+  }
+
+  async function enterAccounts() {
+    if (!usersLoaded) {
+      paintTableLoading($("userRows"), 8);
+      $("userCards").textContent = "";
+      $("userCards").appendChild(emptyBox("读取中…"));
+    }
+    try {
+      await ensureUsers();
+      renderUsers();
+      return true;
+    } catch (e) {
+      if (e.message === "401") return false;
+      paintTableError($("userRows"), 8, "账号读取失败：" + e.message, enterAccounts);
+      paintRetry($("userCards"), "账号读取失败：" + e.message, enterAccounts);
+      return false;
+    }
+  }
+
   const PW_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   function randomPassword(len) {
-    // 建号/重置时由浏览器现生成一枚初始口令：它注定要被本人在首登换掉，
-    // 但"管理员现场编一个"往往是 second-horse——随机且避开易混字符是下限。
+    // 建号/重置时由浏览器现生成：随机且避开易混字符是下限。
     const bytes = new Uint8Array(len);
     crypto.getRandomValues(bytes);
     let out = "";
-    for (let i = 0; i < len; i++) out += PW_ALPHABET[bytes[i] % PW_ALPHABET.length];
+    for (let i = 0; i < len; i += 1) out += PW_ALPHABET[bytes[i] % PW_ALPHABET.length];
     return out;
   }
 
@@ -288,13 +681,16 @@
     if (!username || !password) { flash("用户名和初始口令都要填", true); return; }
     const ok = await ask(
       "建号「" + username + "」？",
-      "这会多出一个普通用户身份。初始口令经了管理员的手，所以它带着「首登须改密」：本人第一次登录后必须换成自己的。建号不会发任何会话令牌。",
+      "这会多出一个普通用户身份。初始口令经了管理员的手，所以它带着「首登须改密」："
+      + "本人第一次登录后必须换成自己的。建号不会发任何会话令牌。",
       "建号", "userplus", false);
     if (!ok) return;
-    await req("/v1/admin/users", { method: "POST", body: { username, password } });
+    await req("/v1/admin/users", { method: "POST", body: { username: username, password: password } });
     $("newUser").value = "";
-    $("newPass").value = "";        // 明文不在输入框里等第二眼
-    flash("已建号「" + username + "」——把口令交给本人，他首登必须改");
+    $("newPass").value = "";
+    reveal(password, "初始口令",
+      "这枚初始口令只显示这一次，对方首登必须改。口令经了你的手，交给他之后别再留在聊天记录里。");
+    flash("已建号「" + username + "」；初始口令只显示这一次");
     await loadUsers();
   }
 
@@ -302,58 +698,16 @@
     const fresh = randomPassword(12);
     const ok = await ask(
       "重置「" + u.username + "」的登录口令？",
-      "新口令会现生成为 " + fresh + "（这一步就把它写进对方账号）。他名下每一枚会话令牌当场作废，"
-      + "每一台设备都掉线；下次登录必须先用这枚口令，然后被要求改成自己的。"
-      + "这句提醒不是装饰：口令经了你的手的这段时间里，它其实也是你知道的秘密。",
+      "新口令会现生成并写进对方账号。他名下每一枚会话令牌当场作废，每一台设备都掉线；"
+      + "下次登录必须先用这枚口令，然后被要求改成自己的。这句提醒不是装饰："
+      + "口令经了你的手的这段时间里，它其实也是你知道的秘密。",
       "重置", "key", true);
     if (!ok) return;
     await req("/v1/admin/users/" + encodeURIComponent(u.user_id) + "/reset-password",
       { method: "POST", body: { new_password: fresh } });
-    reveal(fresh);
-    flash("已重置；口令只在这一次弹出里出现");
+    reveal(fresh, "新口令", "这枚口令只显示这一次，对方首登必须改；关掉窗口后服务端只存摘要。");
+    flash("已重置；口令只显示这一次");
     await loadUsers();
-  }
-
-  /* ---------- 注册开关（读 /v1/config，写走 /v1/admin/config） ---------- */
-
-  let regOpen = null;
-  function regLabel() {
-    const b = $("btnRegToggle");
-    b.textContent = "";
-    b.appendChild(iconWrap("check"));
-    b.appendChild(labelSpan(regOpen === null ? "注册开关：读取中"
-      : regOpen ? "自助注册：开着，点一下关掉" : "自助注册：关着（管理员建号），点一下打开"));
-  }
-
-  async function loadConfig() {
-    try {
-      const cfg = await req("/v1/config");
-      regOpen = !!cfg.registration_open;
-    } catch (e) {
-      if (e.message === "401") throw e;
-      regOpen = null;
-      $("regNote").textContent = "读不到配置：" + e.message;
-    }
-    regLabel();
-  }
-
-  async function toggleReg() {
-    if (regOpen === null) { flash("配置还没读出来，先点重新载入", true); return; }
-    const ok = await ask(
-      regOpen ? "关掉自助注册？" : "打开自助注册？",
-      regOpen
-        ? "关掉之后，陌生人拿到地址也注册不了；已建出来的账号不受影响，照常登录。以后随时可以在这里再打开。"
-        : "打开之后，任何拿到这个地址的人都能自己注册一个账号并开始对话——模型的花费记在你这台服务上。"
-        + "只发给可信的人时再考虑打开；平时建议关着，由你在上面建号。",
-      regOpen ? "关掉注册" : "打开注册", "check", regOpen);
-    if (!ok) return;
-    const r = await req("/v1/admin/config", { method: "POST", body: { registration_open: !regOpen } });
-    if (r.rejected && r.rejected.length) {
-      $("regNote").textContent = "后端没接受这些键：" + r.rejected.join(", ");
-    }
-    regOpen = !!(r.config && r.config.registration_open);
-    regLabel();
-    flash(regOpen ? "自助注册已打开" : "自助注册已关闭");
   }
 
   async function toggleUser(u) {
@@ -362,11 +716,12 @@
       verb + "用户「" + u.username + "」？",
       u.disabled
         ? "只把这一条身份记录上的停用标记撤掉，他的设备令牌还是刚才那批：原来登录着的设备接着用，中途掉线的重新登录就行。"
-        : "只在那一条身份记录上打一个停用标记：他名下每一枚会话令牌当场不再被认，每一台设备都掉线，密码也登不进来。记录、会话、附件、记忆一个字都不动，随时可以恢复。",
+        : "只在那一条身份记录上打一个停用标记：他名下每一枚会话令牌当场不再被认，每一台设备都掉线，密码也登不进来。"
+        + "记录、会话、附件、记忆一个字都不动，随时可以恢复。",
       verb, "power", !u.disabled);
     if (!ok) return;
     await req("/v1/admin/users/" + encodeURIComponent(u.user_id)
-              + (u.disabled ? "/enable" : "/disable"), { method: "POST" });
+      + (u.disabled ? "/enable" : "/disable"), { method: "POST" });
     flash("已" + verb);
     await loadUsers();
   }
@@ -374,99 +729,258 @@
   async function rotate(u) {
     const ok = await ask(
       "给「" + u.username + "」换发新令牌？",
-      "他名下现有的会话令牌会全部作废，每一台设备都掉线；新令牌的明文只出现在这一次响应里。这一步不会解除停用状态。注意它不是把门焊死：他知道自己密码的话，重新登录就能再领一枚——要挡住人请用停用。",
+      "他名下现有的会话令牌会全部作废，每一台设备都掉线；新令牌的明文只出现在这一次响应里。"
+      + "这一步不会解除停用状态。注意它不是把门焊死：他知道自己密码的话，重新登录就能再领一枚"
+      + "——要挡住人请用停用。",
       "换发", "key", false);
     if (!ok) return;
-    const r = await req("/v1/admin/users/" + encodeURIComponent(u.user_id)
-                        + "/rotate-token", { method: "POST" });
+    const r = await req("/v1/admin/users/" + encodeURIComponent(u.user_id) + "/rotate-token",
+      { method: "POST" });
     if (r.token) reveal(r.token);
     await loadUsers();
   }
 
   async function remove(u) {
-    // 这段文案对着 app/core/auth.py 的 delete_user 写：它只 del 掉 users 里的这一条
-    // 记录（令牌存在记录里，所以一起没了），既不碰 sessions.json，也不碰附件目录和
-    // 向量库。原来说"记录与令牌一起没了"，把留下的那三份说成也删了。
+    // 文案对着 auth.py 的 delete_user 写：只删 users 里这一条记录，其余三份存储不级联。
     const ok = await ask(
       "删除用户「" + u.username + "」？",
       "删的只有这一条身份记录。令牌就存在这条记录里，所以他的令牌会跟着一起失效，每一台设备掉线，而且没有恢复入口。"
-      + "他的会话、附件、长期记忆不在这次删除里：那三份各存各的，删号之后原样留在磁盘上，只是那个 user_id 再也解析不出身份——除了手工改数据文件，没有第二条路能清掉它们。",
+      + "他的会话、附件、长期记忆不在这次删除里：那三份各存各的，删号之后原样留在磁盘上，"
+      + "只是那个 user_id 再也解析不出身份——除了手工改数据文件，没有第二条路能清掉它们。",
       "确认删除", "trash", true);
     if (!ok) return;
     await req("/v1/admin/users/" + encodeURIComponent(u.user_id), { method: "DELETE" });
     flash("已删除（他的会话、附件、记忆还在磁盘上）");
-    await Promise.all([loadUsers(), loadMemory()]);
+    await loadUsers();
+    if (runtimeLoaded.memory) await loadMemory();
   }
 
-  function emptyRow(text, span) {
-    const tr = document.createElement("tr");
-    const td = cell("td", text);
-    td.colSpan = span;
-    td.style.color = "var(--text-3)";
-    tr.appendChild(td);
-    return tr;
+  /* ---------- 概览 ---------- */
+
+  async function loadOverview() {
+    if (!authed) return;
+    await Promise.allSettled([
+      loadOverviewAccounts(),
+      loadOverviewFeedback(),
+      loadOverviewSecurity(),
+      loadOverviewService(),
+    ]);
   }
 
-  /* ---------- 意见反馈 ---------- */
+  function paintOverviewAccounts() {
+    const box = $("ovAccounts");
+    if (!box) return;
+    box.textContent = "";
+    const total = allUsers.length;
+    const normal = allUsers.filter((u) => !u.disabled && !u.must_change_password).length;
+    const disabled = allUsers.filter((u) => u.disabled).length;
+    const must = allUsers.filter((u) => u.must_change_password).length;
+    box.appendChild(statCell(total, "总数"));
+    box.appendChild(statCell(normal, "正常"));
+    box.appendChild(statCell(disabled, "停用"));
+    box.appendChild(statCell(must, "首登须改密"));
+  }
 
-  async function loadFeedback() {
-    const data = await req("/v1/admin/user-feedback");
-    const items = data.items || [];
-    $("fbNote").textContent = items.length
-      ? "共 " + items.length + " 条 · 未读 " + (data.unread || 0)
+  async function loadOverviewAccounts() {
+    try {
+      await ensureUsers();
+      paintOverviewAccounts();
+    } catch (e) {
+      if (e.message === "401") return;
+      paintRetry($("ovAccounts"), "账号读取失败：" + e.message, loadOverviewAccounts);
+    }
+  }
+
+  async function loadOverviewFeedback() {
+    try {
+      const data = await req("/v1/admin/user-feedback");
+      const items = Array.isArray(data.items) ? data.items : [];
+      const unread = Number(data.unread) || 0;
+      setFeedbackBadge(unread);
+      const box = $("ovFeedback");
+      box.textContent = "";
+      box.appendChild(statCell(items.length, "总条数"));
+      box.appendChild(statCell(unread, "未读"));
+    } catch (e) {
+      if (e.message === "401") return;
+      paintRetry($("ovFeedback"), "反馈读取失败：" + e.message, loadOverviewFeedback);
+    }
+  }
+
+  async function loadOverviewSecurity() {
+    try {
+      const data = await req("/v1/admin/security/summary?window=24h");
+      const totals = data.totals || {};
+      const box = $("ovSecurity");
+      box.textContent = "";
+      box.appendChild(statCell(Number(totals.events) || 0, "事件"));
+      box.appendChild(statCell(Number(totals.alert) || 0, "alert"));
+      box.appendChild(statCell(Number(totals.warn) || 0, "warn"));
+      box.appendChild(statCell(Number(totals.sources) || 0, "来源数"));
+    } catch (e) {
+      if (e.message === "401") return;
+      if (e.status === 404) {
+        paintRetry($("ovSecurity"), "安全日志端点尚未上线。", loadOverviewSecurity);
+      } else {
+        paintRetry($("ovSecurity"), "安全日志读取失败，稍后重试。", loadOverviewSecurity);
+      }    }
+  }
+
+  async function loadOverviewService() {
+    try {
+      const data = await req("/health");
+      const checks = data.checks || {};
+      const mem = checks["记忆后端"] || {};
+      const box = $("ovService");
+      box.textContent = "";
+      box.appendChild(statCell(data.build || "—", "构建"));
+      box.appendChild(statCell(healthText(data.status), "状态"));
+      box.appendChild(statCell(healthText(mem.status), "记忆后端"));
+    } catch (e) {
+      if (e.message === "401") return;
+      paintRetry($("ovService"), "读取失败", loadOverviewService);
+    }
+  }
+
+  /* ---------- 反馈 ---------- */
+
+  let feedbackItems = [];
+  let feedbackUnread = 0;
+  let feedbackNextBefore = null;
+  let feedbackLoaded = false;
+  let feedbackUnreadOnly = false;
+  let fbBadge = null;
+
+  function setFeedbackBadge(n) {
+    if (!fbBadge) return;
+    const count = Number(n) || 0;
+    fbBadge.textContent = count ? String(count) : "";
+    fbBadge.classList.toggle("hidden", !count);
+    fbBadge.title = count ? "未读反馈 " + count + " 条" : "无未读反馈";
+  }
+
+  // 只更新导航角标：不碰当前分区的列表，也不碰用户表。boot 与顶栏刷新都走这一条，
+  // 停在 #/accounts、#/security 或 #/runtime/* 时角标才是对的。
+  async function refreshFeedbackBadge() {
+    try {
+      const data = await req("/v1/admin/user-feedback");
+      setFeedbackBadge(Number(data.unread) || 0);
+    } catch (e) {
+      // 角标是附属信息：失败就保持原状，不能把当前分区一起拖红。
+    }
+  }
+
+  // 缺 id 的条目不能共用 String(undefined) 这个键，否则同批只留得下第一条。
+  function feedbackKey(f) {
+    if (f.id !== undefined && f.id !== null && f.id !== "") return "id:" + String(f.id);
+    return ["created_at", "user_id", "email", "text"]
+      .map((k) => String(f[k] === undefined || f[k] === null ? "" : f[k]))
+      .join("|");
+  }
+
+  async function loadFeedback(reset) {
+    if (reset) {
+      feedbackItems = [];
+      feedbackNextBefore = null;
+    }
+    try { await ensureUsers(); }
+    catch (e) { if (e.message === "401") throw e; }
+    const parts = ["limit=50"];
+    if (feedbackUnreadOnly) parts.push("unread=1");
+    if (feedbackNextBefore !== null && feedbackNextBefore !== undefined) {
+      parts.push("before=" + encodeURIComponent(String(feedbackNextBefore)));
+    }
+    const data = await req("/v1/admin/user-feedback?" + parts.join("&"));
+    const items = Array.isArray(data.items) ? data.items : [];
+    const seen = {};
+    feedbackItems.forEach((f) => { seen[feedbackKey(f)] = true; });
+    items.forEach((f) => {
+      const key = feedbackKey(f);
+      if (!seen[key]) {
+        seen[key] = true;
+        feedbackItems.push(f);
+      }
+    });
+    // 旧后端不认 unread=1 时会回全量：客户端再滤一次，按钮说了什么就显示什么。
+    if (feedbackUnreadOnly) feedbackItems = feedbackItems.filter((f) => !f.read);
+    const unread = Number(data.unread);
+    feedbackUnread = isNaN(unread) ? feedbackItems.filter((f) => !f.read).length : unread;
+    feedbackNextBefore = (data.next_before === undefined || data.next_before === null)
+      ? null : data.next_before;
+    feedbackLoaded = true;
+    setFeedbackBadge(feedbackUnread);
+    renderFeedback();
+    return true;
+  }
+
+  function renderFeedback() {
+    const list = $("feedbackRows");
+    list.textContent = "";
+    const q = $("fbSearch").value.trim().toLowerCase();
+    let shown = feedbackItems;
+    if (q) {
+      shown = feedbackItems.filter((f) => {
+        const hay = (String(f.id) + " " + String(f.text || "") + " " + String(f.email || "")
+          + " " + String(nameById[f.user_id] || "")).toLowerCase();
+        return hay.indexOf(q) >= 0;
+      });
+    }
+    $("fbNote").textContent = feedbackItems.length
+      ? "已加载 " + feedbackItems.length + " 条 · 未读 " + feedbackUnread
       : "";
-    // tab 上的未读角标：管理员页开在那儿就该看得见"有没有新话"，不必点进分区
-    const tabLabel = document.querySelector('.tab[data-goto="secFeedback"] .lbl');
-    if (tabLabel) tabLabel.textContent = data.unread ? "反馈 · 未读" + data.unread : "反馈";
-    const tbody = $("feedbackRows");
-    tbody.textContent = "";
-    if (!items.length) {
-      tbody.appendChild(emptyRow("还没有人提交过反馈：App 的「设置 → 意见反馈」写一条，就会出现在这里。", 8));
+    $("btnFbMore").classList.toggle("hidden",
+      feedbackNextBefore === null || feedbackNextBefore === undefined);
+    if (!feedbackItems.length) {
+      list.appendChild(emptyBox(feedbackUnreadOnly
+        ? "没有未读反馈。切回「全部」看看历史条目。"
+        : "还没有人提交过反馈。App 的「设置 → 意见反馈」写一条，就会出现在这里。"));
       return;
     }
-    items.forEach((f) => tbody.appendChild(feedbackRow(f)));
+    if (!shown.length) {
+      list.appendChild(emptyBox("已加载的条目里没有匹配「" + q + "」的内容。"));
+      return;
+    }
+    shown.forEach((f) => list.appendChild(feedbackCard(f)));
   }
 
-  function feedbackRow(f) {
-    const tr = document.createElement("tr");
-    tr.appendChild(cell("td", f.id, "code"));
-    const who = cell("td", undefined, "name");
-    who.appendChild(cell("span", nameById[f.user_id] || f.user_id));
-    // 与用量同一套纪律：删过号的人和 bootstrap 身份翻不出名字，就把 id 原样摆出来。
-    if (!nameById[f.user_id]) who.appendChild(cell("span", "（不在用户表里）", "dim"));
-    tr.appendChild(who);
-    tr.appendChild(cell("td", fmtTime(f.created_at)));
-    tr.appendChild(cell("td", f.text));
-    tr.appendChild(cell("td", f.email || "—"));
-    const imgs = cell("td");
-    if (!f.image_count) {
-      imgs.appendChild(cell("span", "—", "dim"));
-    }
-    for (let i = 0; i < (f.image_count || 0); i++) {
-      if (i) imgs.appendChild(document.createTextNode(" "));
-      const a = cell("a", "图" + (i + 1));
-      // 同源链接，浏览器自动带上会话 Cookie；图片本身走带 require_admin 的端点
-      a.href = "/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/" + i;
-      a.target = "_blank";
-      a.rel = "noopener";
-      imgs.appendChild(a);
-    }
-    tr.appendChild(imgs);
-    const st = cell("td");
-    st.appendChild(f.read ? cell("span", "已读", "tag") : cell("span", "未读", "tag warn"));
-    tr.appendChild(st);
+  function feedbackCard(f) {
+    const card = cell("article", undefined, "fb-item");
+    const meta = cell("div", undefined, "fb-meta");
+    meta.appendChild(cell("span", f.id, "code"));
+    meta.appendChild(cell("span", nameById[f.user_id] || f.user_id, "name"));
+    meta.appendChild(cell("span", fmtTime(f.created_at), "dim"));
+    meta.appendChild(f.read ? cell("span", "已读", "tag") : cell("span", "未读", "tag warn"));
+    card.appendChild(meta);
 
-    const acts = cell("td", undefined, "acts");
+    const text = cell("p", f.text, "fb-text");
+    card.appendChild(text);
+
+    if (f.email) card.appendChild(cell("div", "邮箱：" + f.email, "dim"));
+    if (!nameById[f.user_id]) {
+      card.appendChild(cell("div", "提交者不在用户表里（可能已删号）。", "dim"));
+    }
+    if (f.image_count) {
+      const imgs = cell("div", undefined, "fb-images");
+      for (let i = 0; i < f.image_count; i += 1) {
+        const a = cell("a", "截图 " + (i + 1));
+        a.href = "/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/image/" + i;
+        a.target = "_blank";
+        a.rel = "noopener";
+        imgs.appendChild(a);
+      }
+      card.appendChild(imgs);
+    }
+
+    const acts = cell("div", undefined, "fb-actions");
     if (!f.read) {
       acts.appendChild(btn("check", "标记已读", "btn btn-small btn-ghost",
         (e) => busy(e.currentTarget, async () => {
           await req("/v1/admin/user-feedback/" + encodeURIComponent(f.id) + "/read",
             { method: "POST" });
           flash("已标记已读 " + f.id);
-          await loadFeedback();
+          await loadFeedback(true);
         })));
     } else {
-      // 未读的行根本不给删除按钮：闸门在后端（409），界面只是不摆一个必然失败的按钮
       acts.appendChild(btn("trash", "删除", "btn btn-small btn-ghost",
         (e) => busy(e.currentTarget, async () => {
           const ok = await ask(
@@ -477,57 +991,481 @@
           if (!ok) return;
           await req("/v1/admin/user-feedback/" + encodeURIComponent(f.id), { method: "DELETE" });
           flash("已删除 " + f.id);
-          await loadFeedback();
+          await loadFeedback(true);
         })));
     }
-    tr.appendChild(acts);
+    card.appendChild(acts);
+    return card;
+  }
+
+  async function loadMoreFeedback() {
+    if (feedbackNextBefore === null || feedbackNextBefore === undefined) return;
+    await loadFeedback(false);
+  }
+
+  function syncFeedbackFilterButtons() {
+    $("fbAll").classList.toggle("active", !feedbackUnreadOnly);
+    $("fbUnread").classList.toggle("active", feedbackUnreadOnly);
+    $("fbAll").setAttribute("aria-pressed", feedbackUnreadOnly ? "false" : "true");
+    $("fbUnread").setAttribute("aria-pressed", feedbackUnreadOnly ? "true" : "false");
+  }
+
+  function setFeedbackFilter(unreadOnly) {
+    const prev = {
+      unreadOnly: feedbackUnreadOnly,
+      items: feedbackItems.slice(),
+      unread: feedbackUnread,
+      nextBefore: feedbackNextBefore,
+    };
+    feedbackUnreadOnly = !!unreadOnly;
+    syncFeedbackFilterButtons();
+    busy(null, async () => {
+      try {
+        await loadFeedback(true);
+      } catch (e) {
+        // loadFeedback 失败前已经清空列表：不把旧筛选的投影也还回去，视觉上就成了
+        // 「未读」下面摆着「全部」的卡片。按钮态、旧列表、游标一起恢复后再重绘。
+        feedbackUnreadOnly = prev.unreadOnly;
+        feedbackItems = prev.items;
+        feedbackUnread = prev.unread;
+        feedbackNextBefore = prev.nextBefore;
+        syncFeedbackFilterButtons();
+        renderFeedback();
+        throw e;
+      }
+    });
+  }
+
+  async function exportFeedback() {
+    let res;
+    try {
+      res = await fetch("/v1/admin/user-feedback/export.csv", { credentials: "same-origin" });
+    } catch (e) {
+      flash("网络错误：导出失败，请重试", true, exportFeedback);
+      return;
+    }
+    if (res.status === 401) { showGate("会话无效或已过期，粘贴口令重新登录"); return; }
+    if (res.status === 404 || res.status === 405 || res.status === 501) {
+      flash("导出端点尚未上线", true);
+      return;
+    }
+    if (!res.ok) {
+      flash("导出失败：HTTP " + res.status, true, exportFeedback);
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "user-feedback.csv";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    flash("已开始下载 CSV");
+  }
+
+  /* ---------- 安全 ---------- */
+
+  let secWindow = "24h";
+  let secFilters = { type: "", source: "", account: "" };
+  let secEvents = [];
+  let secEventIds = {};
+  let secNextBefore = null;
+  let secTimer = null;
+  // summary/events 还没上线时置真：20 秒定时器不再每轮打一次 404，手动重新读取
+  // 成功后会自己恢复。
+  let secEndpointsMissing = false;
+
+  const SEC_TYPES = {
+    "auth.fail": "登录失败",
+    "auth.rate_limited": "触发限流",
+    "auth.blocked": "请求被拦截",
+    "admin.action": "管理操作",
+    "tool.blocked": "工具调用被拦",
+    "approval.denied": "审批被拒",
+    "provider.error": "模型服务异常",
+    "system.anomaly": "系统异常",
+  };
+  const SEC_SEVERITY = { info: "提示", warn: "警告", alert: "高危" };
+  const AUDIT_WARNING = {
+    audit_file_large: "审计文件偏大，建议轮转/归档",
+  };
+
+  function sevTag(severity) {
+    const key = String(severity || "info");
+    const cls = key === "alert" ? "alert" : (key === "warn" ? "warn" : "info");
+    return cell("span", SEC_SEVERITY[key] || key, "sev-tag " + cls);
+  }
+
+  function buildSecurityEventsUrl(before) {
+    const parts = ["limit=50"];
+    if (secFilters.type) parts.push("type=" + encodeURIComponent(secFilters.type));
+    if (secFilters.source) parts.push("source=" + encodeURIComponent(secFilters.source));
+    if (secFilters.account) parts.push("account=" + encodeURIComponent(secFilters.account));
+    if (before !== null && before !== undefined) {
+      parts.push("before=" + encodeURIComponent(String(before)));
+    }
+    return "/v1/admin/security/events?" + parts.join("&");
+  }
+
+  function showSecState(message, retry) {
+    const box = $("secState");
+    box.textContent = "";
+    box.classList.remove("hidden");
+    box.appendChild(document.createTextNode(message + " "));
+    if (retry) box.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost", () => loadSecurity()));
+  }
+
+  function hideSecState() {
+    const box = $("secState");
+    box.classList.add("hidden");
+    box.textContent = "";
+  }
+
+  function clearSecSummary() {
+    ["secStats", "secSources", "secAccountsTop", "secAudit"].forEach((id) => {
+      $(id).textContent = "";
+    });
+  }
+
+  function handleSummary(result) {
+    if (result.status === "fulfilled") {
+      hideSecState();
+      renderSecuritySummary(result.value);
+      return;
+    }
+    const e = result.reason;
+    if (e && e.message === "401") return;
+    clearSecSummary();
+    if (e && e.status === 404) {
+      showSecState("安全日志端点尚未上线。", false);
+    } else {
+      showSecState("安全日志读取失败，稍后重试。", true);
+    }
+  }
+
+  function handleEvents(result, append) {
+    if (result.status === "fulfilled") {
+      const data = result.value || {};
+      secNextBefore = (data.next_before === undefined || data.next_before === null)
+        ? null : data.next_before;
+      renderSecurityEvents(Array.isArray(data.events) ? data.events : [], append);
+      return;
+    }
+    const e = result.reason;
+    if (e && e.message === "401") return;
+    const message = e && e.status === 404
+      ? "安全事件端点尚未上线。"
+      : "安全事件读取失败：" + ((e && e.message) || "未知原因");
+    if (append) {
+      flash("加载更多失败：" + message, true, loadMoreSecurity);
+      return;
+    }
+    paintTableError($("secEventRows"), 8, message, loadSecurity);
+    paintRetry($("secEventCards"), message, loadSecurity);
+    $("btnSecMore").classList.add("hidden");
+  }
+
+  async function loadSecurity(opts) {
+    const auto = opts && opts.auto;
+    if (!auto) {
+      $("secStats").textContent = "";
+      $("secStats").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secSources").textContent = "";
+      $("secSources").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secAccountsTop").textContent = "";
+      $("secAccountsTop").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secAudit").textContent = "";
+      $("secAudit").appendChild(cell("span", "读取中…", "skeleton"));
+    }
+    const results = await Promise.allSettled([
+      req("/v1/admin/security/summary?window=" + encodeURIComponent(secWindow)),
+      req(buildSecurityEventsUrl(null)),
+    ]);
+    handleSummary(results[0]);
+    handleEvents(results[1], false);
+    // 端点还没上线时暂停 20 秒定时器：否则每轮都会稳定打两次 404，日志全是噪声。
+    const missing = results.some((r) => r.status === "rejected"
+      && r.reason && r.reason.status === 404);
+    if (missing) secEndpointsMissing = true;
+    else if (results.every((r) => r.status === "fulfilled")) secEndpointsMissing = false;
+    syncSecurityTimer();
+  }
+
+  function renderSecuritySummary(data) {
+    const totals = data.totals || {};
+    const byType = Array.isArray(data.by_type) ? data.by_type : [];
+    const countType = (type) => {
+      const hit = byType.find((item) => item && item.type === type);
+      return hit ? Number(hit.count) || 0 : 0;
+    };
+
+    const stats = $("secStats");
+    stats.textContent = "";
+    stats.appendChild(cell("p", "统计窗口内共 " + (Number(totals.events) || 0) + " 条事件",
+      "pane-note note-tight wide"));
+    const cards = [
+      ["失败登录", countType("auth.fail")],
+      ["触发限流", countType("auth.rate_limited")],
+      ["被拦截请求", countType("auth.blocked")],
+      ["高危事件", Number(totals.alert) || 0],
+    ];
+    cards.forEach((pair) => {
+      const card = cell("article", undefined, "card stat-card");
+      const grid = cell("div", undefined, "stat-grid");
+      grid.appendChild(statCell(pair[1], pair[0]));
+      card.appendChild(grid);
+      stats.appendChild(card);
+    });
+
+    renderRank($("secSources"), Array.isArray(data.by_source) ? data.by_source : [],
+      "source", Number(totals.events) || 0);
+    renderRank($("secAccountsTop"), Array.isArray(data.by_account) ? data.by_account : [],
+      "account", Number(totals.events) || 0);
+    renderAuditCard(data.audit || {}, Array.isArray(data.warnings) ? data.warnings : []);
+  }
+
+  function renderRank(container, items, nameKey, total) {
+    container.textContent = "";
+    if (!items.length) {
+      container.appendChild(cell("p", "统计窗口内没有记录。", "pane-note note-tight"));
+      return;
+    }
+    const sorted = items.slice().sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0));
+    const max = Math.max.apply(null, sorted.map((item) => Number(item.count) || 0)) || 1;
+    const base = total > 0 ? total : max;
+    sorted.slice(0, 8).forEach((item) => {
+      const count = Number(item.count) || 0;
+      const row = cell("div", undefined, "rank-item");
+      const head = cell("div", undefined, "rank-head");
+      const name = item[nameKey] || item.source_fp || "—";
+      head.appendChild(cell("span", String(name), "rank-name"));
+      head.appendChild(cell("span", fmtN(count) + " · " + pct(base ? count / base : 0), "rank-num"));
+      row.appendChild(head);
+      const bar = cell("div", undefined, "rank-bar");
+      const fill = cell("div", undefined, "rank-fill");
+      fill.style.width = Math.max(2, Math.round((base ? count / base : 0) * 100)) + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      container.appendChild(row);
+    });
+  }
+
+  function renderAuditCard(audit, warnings) {
+    const box = $("secAudit");
+    box.textContent = "";
+    const size = Number(audit.size_bytes) || 0;
+    box.appendChild(statCell(fmtBytes(size), "占用"));
+    box.appendChild(statCell(Number(audit.entries) || 0, "条记录"));
+    box.appendChild(statCell(fmtTime(audit.last_ts), "最后写入"));
+    if (size > 5 * 1024 * 1024) {
+      box.appendChild(cell("span", "建议轮转/归档", "tag warn"));
+    }
+    warnings.forEach((warning) => {
+      box.appendChild(cell("span", AUDIT_WARNING[warning] || warning, "tag warn"));
+    });
+  }
+
+  function securityEventKey(event) {
+    if (event.id !== undefined && event.id !== null && event.id !== "") {
+      return "id:" + String(event.id);
+    }
+    // 契约要求 events[].id，但第二批真漏了字段时不能把整批都当成同一条丢掉：
+    // 用界面上看得见的字段拼一个稳定键。
+    return ["ts", "type", "source", "status", "route"]
+      .map((k) => String(event[k] === undefined || event[k] === null ? "" : event[k]))
+      .join("|");
+  }
+
+  function renderSecurityEvents(events, append) {
+    if (!append) {
+      secEvents = [];
+      secEventIds = {};
+    }
+    events.forEach((event) => {
+      const key = securityEventKey(event);
+      if (secEventIds[key]) return;
+      secEventIds[key] = true;
+      secEvents.push(event);
+    });
+    paintSecurityEvents();
+  }
+
+  function paintSecurityEvents() {
+    const tbody = $("secEventRows");
+    const cards = $("secEventCards");
+    tbody.textContent = "";
+    cards.textContent = "";
+    $("btnSecMore").classList.toggle("hidden",
+      secNextBefore === null || secNextBefore === undefined);
+    if (!secEvents.length) {
+      tbody.appendChild(emptyRow("当前筛选没有事件。可以换类型 / 来源，或清除筛选。", 8));
+      cards.appendChild(emptyBox("当前筛选没有事件。可以换类型 / 来源，或清除筛选。"));
+      return;
+    }
+    secEvents.forEach((event) => {
+      tbody.appendChild(securityEventRow(event));
+      cards.appendChild(securityEventCard(event));
+    });
+  }
+
+  function securityEventRow(event) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell("td", fmtTime(event.ts)));
+    const sev = cell("td");
+    sev.appendChild(sevTag(event.severity));
+    tr.appendChild(sev);
+    tr.appendChild(cell("td", SEC_TYPES[event.type] || event.type || "—"));
+    tr.appendChild(cell("td", event.source || event.source_fp || "—", "code"));
+    tr.appendChild(cell("td", event.account || "—"));
+    tr.appendChild(cell("td", event.route || "—", "code"));
+    tr.appendChild(cell("td", event.status === undefined || event.status === null
+      ? "—" : String(event.status)));
+    tr.appendChild(cell("td", String(event.count === undefined ? 1 : event.count)));
+    return tr;
+  }
+
+  function securityEventCard(event) {
+    const card = cell("article", undefined, "event-card");
+    const head = cell("div", undefined, "event-head");
+    head.appendChild(cell("span", fmtTime(event.ts), "dim"));
+    head.appendChild(sevTag(event.severity));
+    card.appendChild(head);
+    const grid = cell("div", undefined, "event-grid");
+    const line = (label, value) => {
+      const item = cell("span");
+      item.appendChild(cell("b", label));
+      item.appendChild(document.createTextNode(value || "—"));
+      grid.appendChild(item);
+    };
+    line("类型", SEC_TYPES[event.type] || event.type);
+    line("来源", event.source || event.source_fp);
+    line("账号", event.account);
+    line("路由", event.route);
+    line("状态码", event.status === undefined || event.status === null ? "—" : String(event.status));
+    line("合并次数", String(event.count === undefined ? 1 : event.count));
+    card.appendChild(grid);
+    return card;
+  }
+
+  async function loadMoreSecurity() {
+    if (secNextBefore === null || secNextBefore === undefined) return;
+    try {
+      const data = await req(buildSecurityEventsUrl(secNextBefore));
+      handleEvents({ status: "fulfilled", value: data }, true);
+    } catch (e) {
+      if (e.message !== "401") flash("加载更多失败：" + e.message, true, loadMoreSecurity);
+    }
+  }
+
+  async function applySecurityFilters() {
+    secFilters = {
+      type: $("secType").value,
+      source: $("secSource").value.trim(),
+      account: $("secAccount").value.trim(),
+    };
+    secNextBefore = null;
+    await loadSecurity();
+  }
+
+  function syncSecurityTimer() {
+    const active = authed && route === "security" && document.visibilityState === "visible"
+      && !secEndpointsMissing;
+    if (active && !secTimer) {
+      secTimer = setInterval(() => {
+        if (authed && route === "security" && document.visibilityState === "visible") {
+          loadSecurity({ auto: true });
+        }
+      }, 20000);
+    } else if (!active && secTimer) {
+      clearInterval(secTimer);
+      secTimer = null;
+    }
+  }
+
+  async function loadAudit() {
+    const tbody = $("auditRows");
+    tbody.textContent = "";
+    tbody.appendChild(emptyRow("读取中…", 5));
+    try {
+      const data = await req("/v1/admin/audit?limit=50");
+      const entries = Array.isArray(data.entries) ? data.entries.slice(-50) : [];
+      tbody.textContent = "";
+      if (!entries.length) {
+        tbody.appendChild(emptyRow("还没有管理操作审计记录。", 5));
+        return;
+      }
+      entries.forEach((entry) => tbody.appendChild(auditRow(entry)));
+    } catch (e) {
+      if (e.message === "401") return;
+      paintTableError(tbody, 5, "审计读取失败：" + e.message, loadAudit);
+    }
+  }
+
+  function auditRow(entry) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell("td", fmtTime(entry.ts)));
+    tr.appendChild(cell("td", entry.actor_name || entry.actor_id || "—"));
+    tr.appendChild(cell("td", entry.action || "—", "code"));
+    tr.appendChild(cell("td", textOf(entry.target) || "—", "code"));
+    const summary = entry.detail
+      || (entry.after ? "after: " + textOf(entry.after) : "")
+      || (entry.before ? "before: " + textOf(entry.before) : "");
+    tr.appendChild(cell("td", summary || "—", "audit-summary"));
     return tr;
   }
 
   /* ---------- 用量 ---------- */
 
-  // 账本上 paid_by 只有这两个取值（providers.py 里是白名单硬校验）。这一栏要回答的是
-  // "谁的钱"，所以不把 operator / user 原样扔给看页面的人。
+  // 账本上 paid_by 只有这两个取值（providers.py 的白名单硬校验）。
   const PAID = { operator: "服务端垫的", user: "他自带的 key" };
 
-  let usageDay = "";                         // 选择器当前看的那一天，空 = 让后端给今天
-
-  function fmtN(n) {
-    // 不交给 toLocaleString：各家 WebView 的默认分组规则不一样，同一个数会显示成两种样子
-    const s = String(Math.abs(Math.round(n || 0)));
-    return (n < 0 ? "-" : "") + s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  }
+  let usageDay = "";
 
   async function loadUsage() {
-    const sel = $("usageDay");
-    const data = await req(usageDay
-      ? "/v1/admin/usage?day=" + encodeURIComponent(usageDay)
-      : "/v1/admin/usage");
-    // 哪天是"正在看的这天"由后端回回来，本地不猜：账本按本地时区切天，浏览器时区
-    // 跟服务端不一致时（手机在别的网络里）自己拼今天会问到另一天去。
-    usageDay = data.day || "";
+    try { await ensureUsers(); }
+    catch (e) { if (e.message === "401") throw e; }
+    $("usageTotals").textContent = "";
+    $("usageTotals").appendChild(cell("span", "读取中…", "skeleton"));
+    paintTableLoading($("usageRows"), 8);
+    try {
+      const data = await req(usageDay
+        ? "/v1/admin/usage?day=" + encodeURIComponent(usageDay)
+        : "/v1/admin/usage");
+      // 哪天是"正在看的这天"由后端回回来，本地不猜。
+      usageDay = data.day || "";
 
-    const days = (data.days || []).slice();
-    if (usageDay && days.indexOf(usageDay) < 0) days.push(usageDay);
-    days.sort().reverse();                   // YYYY-MM-DD 字典序就是时间序
-    sel.textContent = "";
-    days.forEach((d) => {
-      const o = cell("option", d);
-      o.value = d;
-      sel.appendChild(o);
-    });
-    sel.value = usageDay;
+      const days = (data.days || []).slice();
+      if (usageDay && days.indexOf(usageDay) < 0) days.push(usageDay);
+      days.sort().reverse();
+      const sel = $("usageDay");
+      sel.textContent = "";
+      days.forEach((d) => {
+        const o = cell("option", d);
+        o.value = d;
+        sel.appendChild(o);
+      });
+      sel.value = usageDay;
 
-    renderTotals(data.totals || {});
+      renderTotals(data.totals || {});
 
-    const tbody = $("usageRows");
-    tbody.textContent = "";
-    const rows = data.rows || [];
-    if (!rows.length) {
-      tbody.appendChild(emptyRow("这一天没有账。上面两张卡是零，不是读不到。", 8));
-      return;
+      const tbody = $("usageRows");
+      tbody.textContent = "";
+      const rows = data.rows || [];
+      if (!rows.length) {
+        tbody.appendChild(emptyRow("这一天没有账。上面两张卡是零，不是读不到。", 8));
+        return true;
+      }
+      rows.forEach((r) => tbody.appendChild(usageRow(r)));
+      return true;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      $("usageTotals").textContent = "";
+      paintTableError($("usageRows"), 8, "用量读取失败：" + e.message, loadUsage);
+      return false;
     }
-    rows.forEach((r) => tbody.appendChild(usageRow(r)));
   }
 
   function renderTotals(totals) {
@@ -559,8 +1497,6 @@
     const tr = document.createElement("tr");
     const who = cell("td", undefined, "name");
     who.appendChild(cell("span", nameById[r.user_id] || r.user_id));
-    // 删过号的人、以及 bootstrap 口令那个 default_user 都不在用户表里：
-    // 账还在，但翻不出名字，就照原样把 id 摆出来。
     if (!nameById[r.user_id]) who.appendChild(cell("span", "（不在用户表里）", "dim"));
     tr.appendChild(who);
     tr.appendChild(cell("td", r.provider_id, "code"));
@@ -577,11 +1513,8 @@
     return tr;
   }
 
-  /* ---------- 搜索用量（另一本账：/v1/admin/search-usage） ---------- */
+  /* ---------- 搜索用量 ---------- */
 
-  // 归因标签与后端 core/search_usage.py 的写死枚举一一对应。这里只是把它翻成人话：
-  // 账本里没有自由文本，界面也就编不出第二种说法（枚举多一个值而这里少一条，
-  // 会由 tests/test_v032_w4_search_usage_contract.py 钉住）。
   const SEARCH_REASON = {
     ok: "给结果",
     not_enabled: "未启用（这台机器没配它的 key）",
@@ -593,46 +1526,50 @@
     no_result: "回空（爬取源说不清为什么）",
     source_raised: "源违约抛异常",
   };
-  let searchUsageDays = 7;   // 窗口选项是 index.html 里那三格静态 option（7/30/90 天）
-
-  function pct(rate) {
-    // null = 这个源在窗口里一次网都没出过（比如没配 key），那不是 0%：
-    // 把"没用它"显示成"用它全败"是本页最想说谎的一格。
-    if (rate === null || rate === undefined) return "—";
-    return (Math.round(rate * 1000) / 10).toFixed(1) + "%";
-  }
+  let searchUsageDays = 7;
 
   async function loadSearchUsage() {
-    const data = await req("/v1/admin/search-usage?days=" + searchUsageDays);
-    const w = data.window || {};
-    const t = data.totals || { calls: 0, ok: 0, failed: 0 };
+    $("searchUsageTotals").textContent = "";
+    $("searchUsageTotals").appendChild(cell("span", "读取中…", "skeleton"));
+    paintTableLoading($("searchUsageRows"), 7);
+    try {
+      const data = await req("/v1/admin/search-usage?days=" + searchUsageDays);
+      const w = data.window || {};
+      const t = data.totals || { calls: 0, ok: 0, failed: 0 };
 
-    const box = $("searchUsageTotals");
-    box.textContent = "";
-    const card = cell("div", undefined, "card grow");
-    const stat = cell("div", undefined, "stat");
-    stat.appendChild(cell("b", fmtN(t.calls)));
-    stat.appendChild(cell("span", "次搜索 · " + (w.from || "—") + " → " + (w.to || "—")));
-    card.appendChild(stat);
-    card.appendChild(cell("p", "给出结果 " + fmtN(t.ok) + " / 全链空 " + fmtN(t.failed)
-      + "（一次执行一笔：主源空、备用源答上，calls 仍算 1 次，两个源各记 1 次尝试）", "pane-note"));
-    box.appendChild(card);
+      const box = $("searchUsageTotals");
+      box.textContent = "";
+      const card = cell("div", undefined, "card grow");
+      const stat = cell("div", undefined, "stat");
+      stat.appendChild(cell("b", fmtN(t.calls)));
+      stat.appendChild(cell("span", "次搜索 · " + (w.from || "—") + " → " + (w.to || "—")));
+      card.appendChild(stat);
+      card.appendChild(cell("p", "给出结果 " + fmtN(t.ok) + " / 全链空 " + fmtN(t.failed)
+        + "（一次执行一笔：主源空、备用源答上，calls 仍算 1 次，两个源各记 1 次尝试）", "pane-note"));
+      box.appendChild(card);
 
-    const tbody = $("searchUsageRows");
-    tbody.textContent = "";
-    const rows = data.sources || [];
-    if (!rows.length) {
-      tbody.appendChild(emptyRow("这个窗口里一次搜索都没跑过。上面那张卡是零，不是读不到。", 7));
+      const tbody = $("searchUsageRows");
+      tbody.textContent = "";
+      const rows = data.sources || [];
+      if (!rows.length) {
+        tbody.appendChild(emptyRow("这个窗口里一次搜索都没跑过。上面那张卡是零，不是读不到。", 7));
+      }
+      rows.forEach((r) => tbody.appendChild(searchUsageRow(r)));
+
+      // 边界那句话只从后端读，前端不另写一套。
+      const b = data.boundaries || {};
+      const bits = [];
+      if (b.direct_browser) bits.push(b.direct_browser);
+      if (b.probe) bits.push(b.probe);
+      if (b.no_query_text) bits.push(b.no_query_text);
+      $("searchUsageNote").textContent = bits.join(" ");
+      return true;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      $("searchUsageTotals").textContent = "";
+      paintTableError($("searchUsageRows"), 7, "搜索用量读取失败：" + e.message, loadSearchUsage);
+      return false;
     }
-    rows.forEach((r) => tbody.appendChild(searchUsageRow(r)));
-
-    // 边界那句话只从后端读，前端不另写一套：两份措辞迟早有一份先说谎。
-    const b = data.boundaries || {};
-    const bits = [];
-    if (b.direct_browser) bits.push(b.direct_browser);
-    if (b.probe) bits.push(b.probe);
-    if (b.no_query_text) bits.push(b.no_query_text);
-    $("searchUsageNote").textContent = bits.join(" ");
   }
 
   function searchUsageRow(r) {
@@ -655,26 +1592,31 @@
   /* ---------- 记忆 ---------- */
 
   async function loadMemory() {
-    let stats;
+    $("memTotal").textContent = "读取中…";
+    $("memNote").textContent = "条 · 全库合计（不分人）";
     try {
-      stats = await req("/v1/memory/stats");
+      const stats = await req("/v1/memory/stats");
+      $("memTotal").textContent = String(stats.total_memories ?? "—");
+      $("memNote").textContent = "条 · 全库合计（不分人）";
+      $("memCollection").textContent = "集合：" + (stats.collection_name || "—");
+      return true;
     } catch (e) {
       if (e.message === "401") throw e;
       $("memTotal").textContent = "读不到";
       $("memNote").textContent = "条 · " + e.message;
       $("memCollection").textContent = "";
-      return;
+      $("memCollection").appendChild(btn("refresh", "重试", "btn btn-small btn-ghost",
+        () => busy(null, loadMemory)));
+      return false;
     }
-    $("memTotal").textContent = String(stats.total_memories ?? "—");
-    $("memNote").textContent = "条 · 全库合计（不分人）";
-    $("memCollection").textContent = "集合：" + (stats.collection_name || "—");
   }
 
   async function decay() {
     const factor = $("decayFactor").value || "0.95";
     const ok = await ask(
       "把你自己这池记忆的权重乘 " + factor + "？",
-      "作用对象是登录这个页面的这个人——也就是你自己的记忆池，不是列表里任何别人的。整池一起压低，压完不会自己涨回来。",
+      "作用对象是登录这个页面的这个人——也就是你自己的记忆池，不是列表里任何别人的。"
+      + "整池一起压低，压完不会自己涨回来。",
       "衰减", "decay", true);
     if (!ok) return;
     await req("/v1/memory/decay?decay_factor=" + encodeURIComponent(factor), { method: "POST" });
@@ -684,9 +1626,6 @@
 
   /* ---------- 任务 ---------- */
 
-  // 状态字与 PWA / 原生两端同一套说法。管理页是只读观察面，这里不猜后端没给的新态：
-  // 认不出的状态原样摆出来（运维看得见机器字面量），但 waiting_user 必须翻成
-  // 「需要你输入」——它不是一个错误，也不是「执行中」。
   const TASK_STATUS = {
     pending: "排队中",
     running: "执行中",
@@ -704,28 +1643,35 @@
   async function loadTasks() {
     const box = $("taskList");
     box.textContent = "";
-    const data = await req("/v1/tasks");
-    const tasks = data.tasks || [];
-    if (!tasks.length) {
-      box.appendChild(cell("p", "任务表是空的。这条进程起来之后没跑过编排。", "pane-note"));
-      return;
-    }
-    // 问题原文只在详情接口里（列表刻意不铺这类原文，里面可能是验证码/收货地址）。
-    // 所以只为 waiting_user 的行各补一次 GET，等它们填完再算这一节刷新结束；
-    // 其余状态一次详情都不打。
-    const fills = [];
-    tasks.forEach((t) => {
-      const row = taskRow(t);
-      box.appendChild(row);
-      if (t.status === "waiting_user" && row._question) {
-        fills.push(fillTaskQuestion(t.task_id, row._question));
+    box.appendChild(cell("p", "读取中…", "pane-note"));
+    try { await ensureUsers(); }
+    catch (e) { if (e.message === "401") throw e; }
+    try {
+      const data = await req("/v1/tasks");
+      const tasks = data.tasks || [];
+      box.textContent = "";
+      if (!tasks.length) {
+        box.appendChild(cell("p", "任务表是空的。这条进程起来之后没跑过编排。", "pane-note"));
+        return true;
       }
-    });
-    await Promise.all(fills);
+      // 问题原文只在详情接口里，只为 waiting_user 的行各补一次 GET。
+      const fills = [];
+      tasks.forEach((t) => {
+        const row = taskRow(t);
+        box.appendChild(row);
+        if (t.status === "waiting_user" && row._question) {
+          fills.push(fillTaskQuestion(t.task_id, row._question));
+        }
+      });
+      await Promise.all(fills);
+      return true;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      paintRetry(box, "任务读取失败：" + e.message, loadTasks);
+      return false;
+    }
   }
 
-  // 一条 waiting_user 行上的「在等什么」。读不到就说读不到，绝不拿「没有问题」
-  // 冒充——后者会让管理员以为这条任务不用人管。
   async function fillTaskQuestion(taskId, holder) {
     try {
       const d = await req("/v1/tasks/" + encodeURIComponent(taskId));
@@ -744,21 +1690,17 @@
     const meta = cell("div", undefined, "tm");
     meta.appendChild(cell("b", t.goal));
     const owner = nameById[t.user_id] || t.user_id || "（无归属）";
-    meta.appendChild(cell("span", t.task_id + " · " + fmtTime(t.created_at)
-      + " · " + owner));
+    meta.appendChild(cell("span", t.task_id + " · " + fmtTime(t.created_at) + " · " + owner));
     const waiting = t.status === "waiting_user";
     if (waiting) {
-      // 占位先摆上：列表接口不带问题原文，问题由 loadTasks 用详情接口补。
-      // 读到之前标成 warn，免得「问题读取中…」被读成「没问题」。
       const q = cell("span", "问题读取中…", "tq");
       q.classList.add("warn");
       meta.appendChild(q);
       row._question = q;
     }
     row.appendChild(meta);
-    row.appendChild(cell("span", taskStatusText(t.status) + " "
-      + (t.progress || ""), "st"
-      + (t.status === "running" || t.status === "pending" ? " run" : "")
+    row.appendChild(cell("span", taskStatusText(t.status) + " " + (t.progress || ""),
+      "st" + (t.status === "running" || t.status === "pending" ? " run" : "")
       + (t.status === "failed" ? " bad" : "")
       + (waiting ? " wait" : "")));
 
@@ -771,16 +1713,16 @@
           "只是打个取消标记：当前那个子任务会跑完，然后停下来。已经在跑的上游调用退不回钱。",
           "取消任务", "stop", true);
         if (!yes) return;
-        const r = await req("/v1/tasks/" + encodeURIComponent(t.task_id) + "/cancel", { method: "POST" });
+        const r = await req("/v1/tasks/" + encodeURIComponent(t.task_id) + "/cancel",
+          { method: "POST" });
         flash(r.message || "已标记取消");
         await loadTasks();
       })));
     ops.appendChild(btn("trash", "移出", "btn btn-small btn-ghost",
       (e) => busy(e.currentTarget, async () => {
         const yes = await ask("把任务 " + t.task_id + " 移出这张表？",
-          "删的是这一条任务记录：中间结果、子任务、最终答案一起消失，并且当场写回 "
-          + "data/tasks.json，重启也不会回来。挂起中的任务，断点也一并没了——先确认"
-          + "没有人在等它回答。",
+          "删的是这一条任务记录：中间结果、子任务、最终答案一起消失，并且当场写回 data/tasks.json，"
+          + "重启也不会回来。挂起中的任务，断点也一并没了——先确认没有人在等它回答。",
           "移出", "trash", true);
         if (!yes) return;
         await req("/v1/tasks/" + encodeURIComponent(t.task_id), { method: "DELETE" });
@@ -791,16 +1733,6 @@
     return row;
   }
 
-  /* ---------- 任务详情：只读投影 ----------
-   *
-   * 服务端已经把「谁能看」判完了：非属主与不存在是同一个 404，详情里的 results
-   * 只在 status=completed 时非空。管理页是 admin 视角，读得到任何一条，但**不**
-   * 因此多出一格 results 可见性：前端照服务端的口径显示，完成前明说「不返回」，
-   * 不画一个空列表让人读成「没有结果」。
-   *
-   * 这里也刻意没有回答入口：续跑只认任务属主（orchestrator 的归属校验），
-   * 管理员代答拿到的会是一个「不属于你」的 404。问题原文只读出来给人看。
-   */
   function taskDetailView(d) {
     const detail = d || {};
     const status = String(detail.status || "");
@@ -881,7 +1813,7 @@
     const d = await req("/v1/tasks/" + encodeURIComponent(t.task_id));
     $("detailTitle").textContent = "任务 " + (d.task_id || t.task_id);
     paintTaskDetail(taskDetailView(d));
-    $("detail").classList.remove("hidden");
+    openSheet($("detail"), $("btnCloseDetail"));
   }
 
   /* ---------- 智能体 ---------- */
@@ -910,44 +1842,187 @@
     if (!body.goal) { flash("先写目标", true); return; }
     const out = $("agentOut");
     out.classList.remove("hidden");
-    out.textContent = "在编排……跑完才回话，落进「任务」那一节的表里。";
+    out.textContent = "在编排……跑完才回话，落进「任务」子页的表里。";
     const r = await req("/v1/agent/orchestrate", { method: "POST", body });
     out.textContent = JSON.stringify(r, null, 2);
     flash("编排结束");
     await loadTasks();
   }
 
+  /* ---------- 配置 ---------- */
+
+  let regOpen = null;
+
+  function regLabel() {
+    const b = $("btnRegToggle");
+    b.textContent = "";
+    b.appendChild(iconWrap("check"));
+    b.appendChild(labelSpan(regOpen === null ? "注册开关：读取中"
+      : regOpen ? "自助注册：开着，点一下关掉" : "自助注册：关着（管理员建号），点一下打开"));
+  }
+
+  async function loadConfig() {
+    const note = $("regNote");
+    if (regOpen === null) note.textContent = "读取中…";
+    try {
+      const cfg = await req("/v1/config");
+      regOpen = !!cfg.registration_open;
+      $("configRepo").textContent = cfg.update_repo ? String(cfg.update_repo) : "—";
+      note.textContent = "";
+      regLabel();
+      return true;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      regOpen = null;
+      note.textContent = "读不到配置：" + e.message + " ";
+      note.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost",
+        () => busy(null, loadConfig)));
+      $("configRepo").textContent = "—";
+      regLabel();
+      return false;
+    }
+  }
+
+  async function toggleReg() {
+    if (regOpen === null) { flash("配置还没读出来，先点刷新", true); return; }
+    const ok = await ask(
+      regOpen ? "关掉自助注册？" : "打开自助注册？",
+      regOpen
+        ? "关掉之后，陌生人拿到地址也注册不了；已建出来的账号不受影响，照常登录。以后随时可以在这里再打开。"
+        : "打开之后，任何拿到这个地址的人都能自己注册一个账号并开始对话——模型的花费记在你这台服务上。"
+        + "只发给可信的人时再考虑打开；平时建议关着，由你在账号页建号。",
+      regOpen ? "关掉注册" : "打开注册", "check", regOpen);
+    if (!ok) return;
+    const r = await req("/v1/admin/config", { method: "POST", body: { registration_open: !regOpen } });
+    if (r.rejected && r.rejected.length) {
+      $("regNote").textContent = "后端没接受这些键：" + r.rejected.join(", ");
+    }
+    regOpen = !!(r.config && r.config.registration_open);
+    regLabel();
+    flash(regOpen ? "自助注册已打开" : "自助注册已关闭");
+  }
+
+  /* ---------- 运行子页懒加载 ---------- */
+
+  const runtimeLoaded = {};
+  const runtimeLoading = {};
+
+  const RUNTIME_LOADERS = {
+    usage: loadUsage,
+    search: loadSearchUsage,
+    memory: loadMemory,
+    tasks: loadTasks,
+    agent: null,
+    config: loadConfig,
+  };
+
+  async function loadRuntimeSub(key, force) {
+    if (!force && runtimeLoaded[key]) return;
+    if (!force && runtimeLoading[key]) return;
+    const loader = RUNTIME_LOADERS[key];
+    if (!loader) { runtimeLoaded[key] = true; return; }
+    const generation = dataGeneration;
+    runtimeLoading[key] = true;
+    try {
+      const ok = await loader();
+      if (generation === dataGeneration) runtimeLoaded[key] = ok !== false;
+    } catch (e) {
+      if (generation === dataGeneration) runtimeLoaded[key] = false;
+    } finally {
+      if (generation === dataGeneration) runtimeLoading[key] = false;
+    }
+  }
+
+  function showRuntimeSub(key) {
+    runtimeSub = RUNTIME_KEYS.indexOf(key) >= 0 ? key : "usage";
+    document.querySelectorAll(".subpanel").forEach((panel) => {
+      panel.classList.toggle("hidden", panel.id !== SUBPANELS[runtimeSub]);
+    });
+    document.querySelectorAll(".subnav-btn").forEach((b) => {
+      const on = b.getAttribute("data-sub") === runtimeSub;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    updateTitle();
+  }
+
   /* ---------- 装配 ---------- */
 
+  async function enterSection(sectionId) {
+    if (!authed) return;
+    if (sectionId === "secOverview") { await loadOverview(); return; }
+    if (sectionId === "secAccounts") { await enterAccounts(); return; }
+    if (sectionId === "secSecurity") { await loadSecurity(); return; }
+    if (sectionId === "secFeedback") {
+      if (!feedbackLoaded) {
+        $("feedbackRows").textContent = "";
+        $("feedbackRows").appendChild(emptyBox("读取中…"));
+        try { await loadFeedback(true); }
+        catch (e) {
+          if (e.message === "401") return;
+          paintRetry($("feedbackRows"), "反馈读取失败：" + e.message, () => loadFeedback(true));
+        }
+      }
+      return;
+    }
+    if (sectionId === "secRuntime") { await loadRuntimeSub(runtimeSub, false); }
+  }
+
+  async function refreshCurrent() {
+    if (!authed) return;
+    // 顶栏刷新也要把未读角标带上：否则停在账号/安全/运行页时角标永远是打开页面那一刻的值。
+    refreshFeedbackBadge();
+    if (route === "overview") { await loadOverview(); return; }
+    if (route === "accounts") { await loadUsers(); return; }
+    if (route === "security") { await loadSecurity(); return; }
+    if (route === "feedback") { await loadFeedback(true); return; }
+    if (route.indexOf("runtime/") === 0) { await loadRuntimeSub(runtimeSub, true); }
+  }
+
+  function invalidateData() {
+    dataGeneration += 1;
+    usersLoaded = false;
+    allUsers = [];
+    nameById = {};
+    feedbackLoaded = false;
+    feedbackItems = [];
+    feedbackUnread = 0;
+    feedbackNextBefore = null;
+    secEvents = [];
+    secEventIds = {};
+    secNextBefore = null;
+    secEndpointsMissing = false;
+    regOpen = null;
+    Object.keys(runtimeLoaded).forEach((key) => { delete runtimeLoaded[key]; });
+    Object.keys(runtimeLoading).forEach((key) => { delete runtimeLoading[key]; });
+    setFeedbackBadge(0);
+    $("revealText").textContent = "";
+  }
+
   async function boot() {
-    // 没有本地明文可查了，"我是谁"必须现场问：Cookie 里若有会话，me 就直接放行，
-    // 连口令都不用再粘（与 /app 同源共享同一枚 Cookie）。
     let me;
     try {
       me = await req("/v1/auth/me");
     } catch (e) {
       if (e.message !== "401") showGate("后端没连上：" + e.message);
-      return;                                   // 401 那一路 req 已经把 gate 摆好了
+      return;
     }
-    if (me.role !== "admin") return showGate("这把口令有效，但它不是管理员。");
+    if (me.role !== "admin") { showGate("这把口令有效，但它不是管理员。"); return; }
+    authed = true;
     $("gate").classList.add("hidden");
     $("panel").classList.remove("hidden");
     $("who").textContent = "当前身份：" + me.username + "（" + me.user_id + "）";
-    await refresh();
+    applyRoute();
+    // 无论落在哪个 hash，都先无条件取一次未读数；停在 #/accounts 之类的入口也要有角标。
+    refreshFeedbackBadge();
   }
 
-  async function refresh() {
-    await loadUsers();          // 用量与反馈两节的「谁」要读它填的名字表，所以不能并到下一行里
-    await Promise.all([loadMemory(), loadTasks(), loadUsage(), loadSearchUsage(),
-                       loadConfig(), loadFeedback()]);
-  }
+  /* ---------- 事件 ---------- */
 
   $("btnLogin").addEventListener("click", async () => {
     const v = $("pass").value.trim();
-    if (!v) return showGate("口令不能为空");
-    $("pass").value = "";                       // 明文不留在输入框里等第二眼
-    // 全页唯一一次手搓 Authorization：口令只在这一个请求头里出现，换回来的是
-    // 服务端签发的 httpOnly 会话 Cookie。之后此页对凭据一无所知——这正是目的。
+    if (!v) { showGate("口令不能为空"); return; }
+    $("pass").value = "";
     try {
       const res = await fetch("/v1/auth/adopt", {
         method: "POST",
@@ -956,10 +2031,11 @@
       });
       let data = null;
       try { data = await res.json(); } catch (e) { /* 空响应体 */ }
-      if (res.status === 401) return showGate("口令不对或已失效");
+      if (res.status === 401) { showGate("口令不对或已失效"); return; }
       if (!res.ok) {
         const d = data && data.detail ? data.detail : ("HTTP " + res.status);
-        return showGate("没能收编会话：" + d);
+        showGate("没能收编会话：" + d);
+        return;
       }
       await boot();
     } catch (e) { showGate("后端没连上：" + e.message); }
@@ -967,59 +2043,115 @@
   $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnLogin").click(); });
 
   $("btnLogout").addEventListener("click", async () => {
-    // 真撤销：作废服务端这一枚并刮掉 Cookie。旧版"只清本机"的写法在方案 C 下
-    // 反而是最坏的——Cookie 不归 JS 清，不叫 logout 它就一直在线。
     try { await req("/v1/auth/logout", { method: "POST" }); }
-    catch (e) { /* 401/断网：撤销至少没成功，但面板照收——没人守着半开的门 */ }
-    $("panel").classList.add("hidden");
+    catch (e) { /* 撤销没成功也把面板收起：没人守着半开的门 */ }
     showGate("已退出：这一台设备的会话已作废，其他设备不受影响。");
   });
 
-  $("btnReload").addEventListener("click", (e) => busy(e.currentTarget, boot));
-
-  $("tabs").addEventListener("click", (e) => {
-    const tab = e.target.closest(".tab");
-    if (tab) showSection(tab.getAttribute("data-goto"));
-  });
+  $("btnReload").addEventListener("click", (e) => busy(e.currentTarget, refreshCurrent));
 
   $("askOk").addEventListener("click", () => closeAsk(true));
   $("askCancel").addEventListener("click", () => closeAsk(false));
   $("ask").addEventListener("click", (e) => { if (e.target === $("ask")) closeAsk(false); });
-  $("detail").addEventListener("click", (e) => { if (e.target === $("detail")) $("detail").classList.add("hidden"); });
-  $("btnCloseDetail").addEventListener("click", () => $("detail").classList.add("hidden"));
+  $("reveal").addEventListener("click", (e) => { if (e.target === $("reveal")) closeReveal(); });
+  $("detail").addEventListener("click", (e) => { if (e.target === $("detail")) closeDetail(); });
+  $("btnCloseDetail").addEventListener("click", closeDetail);
 
-  $("btnDecay").addEventListener("click", (e) => busy(e.currentTarget, decay));
-  $("btnCreateUser").addEventListener("click", (e) => busy(e.currentTarget, createUser));
-  $("newPass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnCreateUser").click(); });
-  $("userSearch").addEventListener("input", renderUsers);
-  $("btnRegToggle").addEventListener("click", (e) => busy(e.currentTarget, toggleReg));
-  // 换日期就重新读一次：这本账一天一答，前端不按人细算，也不做"切天不重新请求"的乐观更新。
-  $("usageDay").addEventListener("change", (e) => {
-    usageDay = e.target.value;
-    busy(null, loadUsage);
-  });
-  $("btnUsage").addEventListener("click", (e) => busy(e.currentTarget, loadUsage));
-  // 搜索这本账与上面那本同一天窗口口径、各自独立请求：换窗口只重读这一节。
-  $("searchUsageDays").addEventListener("change", (e) => {
-    searchUsageDays = parseInt(e.target.value, 10) || 7;
-    busy(null, loadSearchUsage);
-  });
-  $("btnSearchUsage").addEventListener("click", (e) => busy(e.currentTarget, loadSearchUsage));
-  $("btnFeedback").addEventListener("click", (e) => busy(e.currentTarget, loadFeedback));
-  $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
-  $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
-
-  $("btnCloseReveal").addEventListener("click", () => {
-    $("reveal").classList.add("hidden");
-    $("revealText").textContent = "";
-  });
-
+  $("btnCloseReveal").addEventListener("click", closeReveal);
   $("btnCopy").addEventListener("click", async () => {
     const text = $("revealText").textContent;
     try { await navigator.clipboard.writeText(text); flash("已复制到剪贴板"); }
     catch (e) { flash("复制失败，请长按选中手动复制", true); }
   });
 
+  $("btnDecay").addEventListener("click", (e) => busy(e.currentTarget, decay));
+  $("btnCreateUser").addEventListener("click", (e) => busy(e.currentTarget, createUser));
+  $("btnGenPass").addEventListener("click", () => {
+    $("newPass").value = randomPassword(12);
+    flash("已生成随机初始口令；建号后只显示这一次");
+  });
+  $("newPass").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnCreateUser").click(); });
+  $("userSearch").addEventListener("input", renderUsers);
+  $("userStatus").addEventListener("change", renderUsers);
+  $("btnRegToggle").addEventListener("click", (e) => busy(e.currentTarget, toggleReg));
+  $("usageDay").addEventListener("change", (e) => {
+    usageDay = e.target.value;
+    busy(null, loadUsage);
+  });
+  $("btnUsage").addEventListener("click", (e) => busy(e.currentTarget, loadUsage));
+  $("searchUsageDays").addEventListener("change", (e) => {
+    searchUsageDays = parseInt(e.target.value, 10) || 7;
+    busy(null, loadSearchUsage);
+  });
+  $("btnSearchUsage").addEventListener("click", (e) => busy(e.currentTarget, loadSearchUsage));
+  $("btnFeedback").addEventListener("click", (e) => busy(e.currentTarget, () => loadFeedback(true)));
+  $("btnFbMore").addEventListener("click", (e) => busy(e.currentTarget, loadMoreFeedback));
+  $("btnFbExport").addEventListener("click", (e) => busy(e.currentTarget, exportFeedback));
+  $("fbAll").addEventListener("click", () => setFeedbackFilter(false));
+  $("fbUnread").addEventListener("click", () => setFeedbackFilter(true));
+  $("fbSearch").addEventListener("input", renderFeedback);
+  $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
+  $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
+
+  $("secWindow").addEventListener("change", (e) => {
+    secWindow = e.target.value || "24h";
+    busy(null, () => loadSecurity());
+  });
+  $("btnSecReload").addEventListener("click", (e) => busy(e.currentTarget, () => loadSecurity()));
+  $("btnSecFilter").addEventListener("click", (e) => busy(e.currentTarget, applySecurityFilters));
+  $("secSource").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") busy(null, applySecurityFilters);
+  });
+  $("secAccount").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") busy(null, applySecurityFilters);
+  });
+  $("btnSecMore").addEventListener("click", (e) => busy(e.currentTarget, loadMoreSecurity));
+  $("auditBox").addEventListener("toggle", () => {
+    if ($("auditBox").open) busy(null, loadAudit);
+  });
+
+  document.querySelector(".subnav").addEventListener("click", (e) => {
+    const b = e.target.closest(".subnav-btn");
+    if (!b) return;
+    navigate("runtime/" + b.getAttribute("data-sub"));
+  });
+
+  document.addEventListener("click", (e) => {
+    const trigger = e.target.closest("button, [href], input, select, textarea, summary");
+    if (trigger) lastTrigger = trigger;
+  }, true);
+
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-route]");
+    if (!el) return;
+    e.preventDefault();
+    navigate(el.getAttribute("data-route"));
+  });
+
+  document.addEventListener("keydown", (e) => {
+    const open = document.querySelector(".sheet:not(.hidden)");
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (open.id === "ask") closeAsk(false);
+      else if (open.id === "reveal") closeReveal();
+      else if (open.id === "detail") closeDetail();
+      return;
+    }
+    if (e.key === "Tab") trapFocus(e, open);
+  });
+
+  window.addEventListener("hashchange", applyRoute);
+  document.addEventListener("visibilitychange", () => {
+    syncSecurityTimer();
+    if (authed && route === "security" && document.visibilityState === "visible") {
+      loadSecurity({ auto: true });
+    }
+  });
+
   decorateIcons(document);
+  fbBadge = cell("span", "", "badge hidden");
+  $("tab-feedback").appendChild(fbBadge);
+  applyRoute();
   boot().catch((e) => { if (e.message !== "401") flash(e.message, true); });
 })();

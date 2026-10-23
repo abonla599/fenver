@@ -3,204 +3,372 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>管理员 · Fenver</title>
-<!-- 复用 PWA 那一份设计系统：同一进程同源服务，配色/按钮/字号没有第二份真相。
-     admin.css 只补本页自己的骨架（表格、任务卡、弹层），不重定义颜色。 -->
+<meta name="color-scheme" content="dark">
+<title>管理台 · Fenver</title>
+<!-- 设计系统只有 PWA 那一份：同一进程同源服务，颜色、字号、圆角都读 /app/style.css 的
+     --fv-* 令牌。admin.css 只补本页骨架，不重定义配色。 -->
 <link rel="stylesheet" href="/app/style.css">
 <link rel="stylesheet" href="admin.css">
 </head>
 <body class="admin">
-<div class="wrap">
 
-  <!-- 未取到管理员身份时只有这一块可见 -->
-  <section id="gate" class="hidden">
-    <div class="top"><h1>管理员登录</h1></div>
-    <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己那枚会话令牌。口令只在这一次请求的头里出现：服务端认下后换发的是浏览器锁定的会话 Cookie，页面脚本与本机存储都拿不到凭据。</p>
-    <label class="field" style="margin-top:10px">
+<!-- 登录门：口令只在 /v1/auth/adopt 的请求头里出现一次，换回 httpOnly Cookie。
+     页面脚本与本机存储都不持有凭据。 -->
+<section id="gate" class="gate hidden" aria-labelledby="gateTitle">
+  <div class="gate-card card">
+    <div class="gate-brand">
+      <span class="brand-mark" data-icon="shield"></span>
+      <div>
+        <h1 id="gateTitle">Fenver 管理</h1>
+        <p class="pane-note">填 <code>.env</code> 里的 <code>ACCESS_TOKEN</code>，或者管理员账号自己的会话令牌。口令只在这一个请求头里出现：服务端认下后换发的是浏览器锁定的会话 Cookie。</p>
+      </div>
+    </div>
+    <label class="field" for="pass">
       <span>口令</span>
       <input id="pass" type="password" placeholder=".env 里的 ACCESS_TOKEN" autocomplete="off">
     </label>
     <div class="row">
-      <button id="btnLogin" class="btn btn-primary grow" data-icon="login" data-label="进入"></button>
+      <button id="btnLogin" class="btn btn-primary grow" type="button" data-icon="login" data-label="进入"></button>
     </div>
-    <div class="err" id="gateErr"></div>
-  </section>
+    <div class="err" id="gateErr" role="alert"></div>
+  </div>
+</section>
 
-  <main id="panel" class="hidden">
-    <div class="top">
-      <h1>管理</h1>
-      <span class="who" id="who"></span>
-      <span class="spacer"></span>
-      <button id="btnReload" class="btn btn-ghost btn-small" data-icon="refresh" data-label="刷新"></button>
-      <button id="btnLogout" class="btn btn-ghost btn-small" data-icon="exit" data-label="退出"></button>
+<div id="panel" class="shell hidden">
+  <aside class="sidebar" aria-label="管理导航">
+    <div class="brand">
+      <span class="brand-mark" data-icon="shield"></span>
+      <span class="brand-name">Fenver 管理</span>
     </div>
-    <div class="err" id="flash"></div>
-
-    <nav class="tabs" id="tabs">
-      <button class="tab active" type="button" data-goto="secUsers" data-icon="users" data-label="用户"></button>
-      <button class="tab" type="button" data-goto="secFeedback" data-icon="feedback" data-label="反馈"></button>
-      <button class="tab" type="button" data-goto="secUsage" data-icon="usage" data-label="用量"></button>
-      <button class="tab" type="button" data-goto="secMemory" data-icon="memory" data-label="记忆"></button>
-      <button class="tab" type="button" data-goto="secTasks" data-icon="tasks" data-label="任务"></button>
-      <button class="tab" type="button" data-goto="secAgent" data-icon="agent" data-label="智能体"></button>
+    <nav id="tabs" class="nav" role="tablist" aria-label="管理分区">
+      <button id="tab-overview" class="nav-btn active" type="button" role="tab" aria-selected="true" aria-controls="secOverview" data-goto="secOverview" data-route="overview" data-icon="overview" data-label="概览"></button>
+      <button id="tab-accounts" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secAccounts" data-goto="secAccounts" data-route="accounts" data-icon="users" data-label="账号"></button>
+      <button id="tab-security" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secSecurity" data-goto="secSecurity" data-route="security" data-icon="shield" data-label="安全"></button>
+      <button id="tab-feedback" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secFeedback" data-goto="secFeedback" data-route="feedback" data-icon="inbox" data-label="反馈"></button>
+      <button id="tab-runtime" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secRuntime" data-goto="secRuntime" data-route="runtime" data-icon="pulse" data-label="运行"></button>
     </nav>
+    <div class="sidebar-foot">
+      <span class="who" id="who"></span>
+      <button id="btnReload" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="刷新"></button>
+      <button id="btnLogout" class="btn btn-ghost btn-small" type="button" data-icon="exit" data-label="退出"></button>
+    </div>
+  </aside>
 
-    <!-- ---------------- 用户 ---------------- -->
-    <section class="sec" id="secUsers">
-      <h2>用户</h2>
-      <p class="pane-note">「最后活跃」只精确到小时：为避免每次请求都写盘，落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「设备」是这个人当前有效的会话令牌数（手机 + 桌面各算一台，上限 8 枚）。「记忆」按人不给数，理由写在记忆那一节。状态栏的「首登须改密」意思是：这个口令是别人替他设定的，他自己换过一次口令之前，这个旗标不会消。</p>
-      <div class="row">
-        <input id="newUser" type="text" placeholder="新用户名" autocomplete="off">
-        <input id="newPass" type="text" placeholder="初始口令（交给本人，首登必须改）" autocomplete="off">
-        <button id="btnCreateUser" class="btn btn-primary btn-small" data-icon="userplus" data-label="建号"></button>
+  <header class="topbar">
+    <h1 id="pageTitle">概览</h1>
+  </header>
+
+  <main id="main" class="content">
+    <div class="err flash" id="flash" role="status" aria-live="polite"></div>
+
+    <!-- ---------------- 概览 ---------------- -->
+    <section class="sec" id="secOverview" role="tabpanel" aria-labelledby="tab-overview">
+      <div class="sec-head">
+        <h2>概览</h2>
+        <p class="pane-note">账号、反馈、近 24 小时的安全事件与服务端自检。四张卡各自读取，一张失败不影响其他。</p>
       </div>
-      <div class="row">
-        <input id="userSearch" type="text" placeholder="按用户名筛选" autocomplete="off">
-        <span class="dim" id="userSearchNote"></span>
+      <div class="cards">
+        <article class="card stat-card">
+          <div class="card-head"><span data-icon="users"></span><h3>账号</h3></div>
+          <div class="stat-grid" id="ovAccounts"><span class="skeleton">读取中…</span></div>
+          <button class="link-btn" type="button" data-route="accounts" data-icon="arrow" data-label="去账号"></button>
+        </article>
+        <article class="card stat-card">
+          <div class="card-head"><span data-icon="inbox"></span><h3>反馈</h3></div>
+          <div class="stat-grid" id="ovFeedback"><span class="skeleton">读取中…</span></div>
+          <button class="link-btn" type="button" data-route="feedback" data-icon="arrow" data-label="看反馈"></button>
+        </article>
+        <article class="card stat-card">
+          <div class="card-head"><span data-icon="shield"></span><h3>安全 · 24h</h3></div>
+          <div class="stat-grid" id="ovSecurity"><span class="skeleton">读取中…</span></div>
+          <button class="link-btn" type="button" data-route="security" data-icon="arrow" data-label="看安全事件"></button>
+        </article>
+        <article class="card stat-card">
+          <div class="card-head"><span data-icon="pulse"></span><h3>服务</h3></div>
+          <div class="stat-grid" id="ovService"><span class="skeleton">读取中…</span></div>
+        </article>
       </div>
-      <div class="row">
-        <button id="btnRegToggle" class="btn btn-ghost btn-small" data-icon="check" data-label="注册开关：读取中"></button>
-        <span class="dim" id="regNote"></span>
+      <div class="quick">
+        <button class="btn btn-ghost" type="button" data-route="accounts" data-icon="userplus" data-label="去建号"></button>
+        <button class="btn btn-ghost" type="button" data-route="feedback" data-icon="inbox" data-label="看未读反馈"></button>
+        <button class="btn btn-ghost" type="button" data-route="security" data-icon="shield" data-label="看安全事件"></button>
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr>
-          <th>用户名</th><th>身份</th><th>状态</th><th>注册于</th><th>设备</th><th>最后活跃</th><th>记忆</th><th class="acts">操作</th>
-        </tr></thead>
-        <tbody id="userRows"></tbody>
-      </table></div>
     </section>
 
-    <!-- ---------------- 意见反馈 ---------------- -->
-    <section class="sec hidden" id="secFeedback">
-      <h2>意见反馈</h2>
-      <p class="pane-note">这里是 App「设置 → 意见反馈」提交进来的原话：一条一个独立编号（FB- 开头），删除后编号也不回收、不复用。截图在提交那一刻已复制进反馈目录，用户之后删掉自己的附件不影响这里读图。<b>未读的不许删</b>——先点「已读」，再删，这是这条链路的合同。</p>
-      <div class="row">
+    <!-- ---------------- 账号 ---------------- -->
+    <section class="sec hidden" id="secAccounts" role="tabpanel" aria-labelledby="tab-accounts">
+      <div class="sec-head">
+        <h2>账号</h2>
+        <p class="pane-note">「最后活跃」只精确到小时：落盘被节流到一小时以上，所以它读作“至少是那时之前”，不是在线状态。「最近会话到期」读最早到期的活跃会话，72 小时内标为即将到期。「记忆」按人不给数，理由在运行 · 记忆。</p>
+      </div>
+      <p class="notice">自助注册开关已移到 <a href="#/runtime/config">运行 · 配置</a>，账号页只负责建号与账号动作。</p>
+      <div class="card panel">
+        <div class="toolbar">
+          <input id="userSearch" type="search" placeholder="按用户名筛选" autocomplete="off" aria-label="按用户名筛选">
+          <span class="dim" id="userSearchNote"></span>
+          <select id="userStatus" aria-label="按状态筛选">
+            <option value="all">全部状态</option>
+            <option value="active">正常</option>
+            <option value="disabled">停用</option>
+            <option value="must">首登须改密</option>
+          </select>
+        </div>
+        <div class="toolbar create-row">
+          <input id="newUser" type="text" placeholder="新用户名" autocomplete="off" aria-label="新用户名">
+          <input id="newPass" type="text" placeholder="初始口令（交给本人，首登必须改）" autocomplete="off" aria-label="初始口令">
+          <button id="btnGenPass" class="btn btn-ghost btn-small" type="button" data-icon="key" data-label="生成随机口令"></button>
+          <button id="btnCreateUser" class="btn btn-primary btn-small" type="button" data-icon="userplus" data-label="建号"></button>
+        </div>
+        <div class="table-wrap desktop-only">
+          <table>
+            <thead><tr>
+              <th>用户名</th><th>身份</th><th>状态</th><th>会话数</th><th>最近会话到期</th><th>最后活跃</th><th>注册于</th><th class="acts">操作</th>
+            </tr></thead>
+            <tbody id="userRows"></tbody>
+          </table>
+        </div>
+        <div class="card-list mobile-only" id="userCards"></div>
+        <p class="pane-note note-tight" id="userMemoryNote">记忆条数按人：不支持（<code>/v1/memory/stats</code> 只给全库合计）。</p>
+      </div>
+    </section>
+
+    <!-- ---------------- 安全 ---------------- -->
+    <section class="sec hidden" id="secSecurity" role="tabpanel" aria-labelledby="tab-security">
+      <div class="sec-head">
+        <h2>安全</h2>
+        <p class="pane-note">统计窗口内的事件计数、来源与账号排行、审计文件状态；事件列表不随这个窗口筛选。事件与审计都只读。页面可见且停在本分区时每 20 秒自动刷新，自动刷新会回到第一页。</p>
+      </div>
+      <div class="toolbar">
+        <label class="field inline" for="secWindow">
+          <span>统计窗口</span>
+          <select id="secWindow">
+            <option value="1h">1 小时</option>
+            <option value="24h" selected>24 小时</option>
+            <option value="7d">7 天</option>
+          </select>
+        </label>
+        <span class="dim" id="secAutoNote">自动刷新仅在本分区可见时运行，刷新会回到第一页</span>
+        <button id="btnSecReload" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读取"></button>
+      </div>
+      <div class="empty hidden" id="secState" aria-live="polite"></div>
+      <div id="secBody">
+        <div class="cards" id="secStats"><span class="skeleton">读取中…</span></div>
+        <div class="cards two">
+          <article class="card">
+            <h3>攻击来源 Top</h3>
+            <div class="rank-list" id="secSources"><span class="skeleton">读取中…</span></div>
+          </article>
+          <article class="card">
+            <h3>涉及账号 Top</h3>
+            <div class="rank-list" id="secAccountsTop"><span class="skeleton">读取中…</span></div>
+          </article>
+        </div>
+        <article class="card audit-card">
+          <h3>审计文件</h3>
+          <div class="stat-grid" id="secAudit"><span class="skeleton">读取中…</span></div>
+        </article>
+        <div class="toolbar filter-bar">
+          <select id="secType" aria-label="事件类型">
+            <option value="">全部类型</option>
+            <option value="auth.fail">登录失败</option>
+            <option value="auth.rate_limited">触发限流</option>
+            <option value="auth.blocked">请求被拦截</option>
+            <option value="admin.action">管理操作</option>
+            <option value="tool.blocked">工具调用被拦</option>
+            <option value="approval.denied">审批被拒</option>
+            <option value="provider.error">模型服务异常</option>
+            <option value="system.anomaly">系统异常</option>
+          </select>
+          <input id="secSource" type="search" placeholder="来源前缀" autocomplete="off" aria-label="来源前缀">
+          <input id="secAccount" type="search" placeholder="账号" autocomplete="off" aria-label="账号">
+          <button id="btnSecFilter" class="btn btn-ghost btn-small" type="button" data-icon="filter" data-label="筛选"></button>
+        </div>
+        <div class="table-wrap desktop-only">
+          <table>
+            <thead><tr>
+              <th>时间</th><th>级别</th><th>类型</th><th>来源</th><th>账号</th><th>路由</th><th>状态码</th><th>合并次数</th>
+            </tr></thead>
+            <tbody id="secEventRows"></tbody>
+          </table>
+        </div>
+        <div class="card-list mobile-only" id="secEventCards"></div>
+        <div class="row">
+          <button id="btnSecMore" class="btn btn-ghost btn-small hidden" type="button" data-icon="chevron" data-label="加载更多"></button>
+        </div>
+        <details id="auditBox" class="audit-box">
+          <summary>管理操作审计</summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>摘要</th></tr></thead>
+              <tbody id="auditRows"></tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- ---------------- 反馈 ---------------- -->
+    <section class="sec hidden" id="secFeedback" role="tabpanel" aria-labelledby="tab-feedback">
+      <div class="sec-head">
+        <h2>反馈</h2>
+        <p class="pane-note">App「设置 → 意见反馈」提交进来的原话，一条一个独立编号，删除后编号不回收。截图在提交那一刻已复制进反馈目录。<b>未读的不许删</b>：先标记已读，再删。</p>
+      </div>
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="反馈筛选">
+          <button id="fbAll" class="seg-btn active" type="button" aria-pressed="true">全部</button>
+          <button id="fbUnread" class="seg-btn" type="button" aria-pressed="false">未读</button>
+        </div>
+        <input id="fbSearch" type="search" placeholder="搜索编号、正文、邮箱" autocomplete="off" aria-label="搜索已加载反馈">
+        <span class="dim" id="fbSearchNote">仅搜索已加载条目</span>
         <span class="dim" id="fbNote"></span>
-        <button id="btnFeedback" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新拉取"></button>
+        <button id="btnFeedback" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新拉取"></button>
+        <button id="btnFbExport" class="btn btn-ghost btn-small" type="button" data-icon="download" data-label="导出 CSV"></button>
       </div>
-      <div class="table-wrap"><table>
-        <thead><tr>
-          <th>编号</th><th>谁</th><th>时间</th><th>内容</th><th>邮箱</th><th>截图</th><th>状态</th><th class="acts">操作</th>
-        </tr></thead>
-        <tbody id="feedbackRows"></tbody>
-      </table></div>
-    </section>
-
-    <!-- ---------------- 用量 ---------------- -->
-    <section class="sec hidden" id="secUsage">
-      <h2>用量</h2>
-      <p class="pane-note">一行是「这一天 · 这个人 · 这条模型服务」。它由 <code>/v1/chat</code> 的两条路径（非流式与流式）在跑完之后各记一笔，<b>失败的和客户端中途断开的那几次也在账上</b>——只记跑完的那次会系统性低估用量。「智能体」那一节跑的 ReAct 与编排不记：那条链路不经过记账。</p>
+      <div class="card-list" id="feedbackRows"></div>
       <div class="row">
-        <span class="dim" style="font-size:12.5px">看哪天</span>
-        <select id="usageDay"></select>
-        <button id="btnUsage" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新读这一天的账"></button>
+        <button id="btnFbMore" class="btn btn-ghost btn-small hidden" type="button" data-icon="chevron" data-label="加载更多"></button>
       </div>
-      <div class="row" id="usageTotals"></div>
-      <div class="table-wrap"><table>
-        <thead><tr>
-          <th>谁</th><th>模型服务</th><th>谁的钱</th><th>次数</th><th>成 / 败</th><th>token</th><th>工具轮</th><th>账全不全</th>
-        </tr></thead>
-        <tbody id="usageRows"></tbody>
-      </table></div>
-      <p class="pane-note" style="margin-top:10px">token 数一律取上游回传的 <code>usage</code>，服务端不估算：各家分词器不同，本地算出来的数拿去对账是错的。上游没回数字的那几次各项记 0，并在「账全不全」里点出来——那种行的 token 是个<b>下限</b>，不是准确数。日期只认 <code>YYYY-MM-DD</code>，接口也只认 <code>day</code> 这一个参数，所以按人细看就是读完上面这张表，它本来就一人一行。</p>
-
-      <h3 style="margin-top:20px">搜索用量</h3>
-      <p class="pane-note">下面这一节是<b>另一本账</b>（<code>/v1/admin/search-usage</code>，文件是 <code>data/search_usage.json</code>）：它按「这一天 · 这一个源」记 <code>web_search</code> 真跑了多少次、挂在谁身上、每个源成功率。它上面没有「谁」这一栏，不是漏了：搜索工具只收一个 query 参数，拿不到调用者身份，而「谁的钱」归上面那本账管。这本账里没有任何查询原文，也没有哈希——失败原因只有写死的那几个枚举值，凑不出第二套说法。</p>
-      <div class="row">
-        <span class="dim" style="font-size:12.5px">看几天</span>
-        <select id="searchUsageDays">
-          <option value="7">7 天</option>
-          <option value="30">30 天</option>
-          <option value="90">90 天</option>
-        </select>
-        <button id="btnSearchUsage" class="btn btn-ghost btn-small" data-icon="refresh" data-label="重新读搜索这本账"></button>
-      </div>
-      <div class="row" id="searchUsageTotals"></div>
-      <div class="table-wrap"><table>
-        <thead><tr>
-          <th>搜索源</th><th>出网尝试</th><th>给结果</th><th>失败</th><th>没出网</th><th>成功率</th><th>失败归因</th>
-        </tr></thead>
-        <tbody id="searchUsageRows"></tbody>
-      </table></div>
-      <p class="pane-note warn" id="searchUsageNote" style="margin-top:10px"></p>
     </section>
 
-    <!-- ---------------- 记忆 ---------------- -->
-    <section class="sec hidden" id="secMemory">
-      <h2>记忆</h2>
-      <p class="pane-note">这个页面只读条数：长期记忆正文按人隔离，管理员的身份也只是“另一个用户”，跨人去读别人的记忆内容在这套系统里没有接口，也不该有。 <code>/v1/memory/stats</code> 给的是全库合计，不按人拆分，所以上面那张表的「记忆」栏只能是不支持。</p>
-      <div class="card">
-        <div class="stat"><b id="memTotal">—</b><span id="memNote">条 · 全库合计（不分人）</span></div>
-        <p class="pane-note" id="memCollection" style="margin:8px 0 0"></p>
+    <!-- ---------------- 运行 ---------------- -->
+    <section class="sec hidden" id="secRuntime" role="tabpanel" aria-labelledby="tab-runtime">
+      <div class="sec-head">
+        <h2>运行</h2>
+        <p class="pane-note">按需读取：第一次进入某个子页才请求数据，切回不重复拉；顶栏「刷新」只刷新当前子页。</p>
       </div>
-      <div class="row" style="margin-top:14px">
-        <input id="decayFactor" class="num" type="number" step="0.01" min="0.1" max="1" value="0.95">
-        <button id="btnDecay" class="btn btn-ghost" data-icon="decay" data-label="衰减我自己记忆的权重"></button>
+      <div class="subnav" role="tablist" aria-label="运行子页">
+        <button id="subtab-usage" class="subnav-btn active" type="button" role="tab" aria-selected="true" aria-controls="subUsage" data-sub="usage" data-icon="usage" data-label="用量"></button>
+        <button id="subtab-search" class="subnav-btn" type="button" role="tab" aria-selected="false" aria-controls="subSearch" data-sub="search" data-icon="search" data-label="搜索"></button>
+        <button id="subtab-memory" class="subnav-btn" type="button" role="tab" aria-selected="false" aria-controls="subMemory" data-sub="memory" data-icon="memory" data-label="记忆"></button>
+        <button id="subtab-tasks" class="subnav-btn" type="button" role="tab" aria-selected="false" aria-controls="subTasks" data-sub="tasks" data-icon="tasks" data-label="任务"></button>
+        <button id="subtab-agent" class="subnav-btn" type="button" role="tab" aria-selected="false" aria-controls="subAgent" data-sub="agent" data-icon="agent" data-label="智能体"></button>
+        <button id="subtab-config" class="subnav-btn" type="button" role="tab" aria-selected="false" aria-controls="subConfig" data-sub="config" data-icon="gear" data-label="配置"></button>
       </div>
-      <p class="pane-note" style="margin-top:-4px"><code>/v1/memory/decay</code> 只作用于登录这个页面的人自己的记忆池，选不了别人——按用户逐个衰减没有端点。</p>
-    </section>
 
-    <!-- ---------------- 任务 ---------------- -->
-    <section class="sec hidden" id="secTasks">
-      <h2>任务</h2>
-      <p class="pane-note">编排任务从 v0.24 起落盘：重启之后这张表还在，进程里跑的从来不是历史归档的全部。进行中的任务在恢复时会被标成“被重启打断”，不会自动续跑——要你手动重发。「需要你输入」是任务停在断点上等人回答：问题原文只为这一种状态的行现读一次详情，回答入口只在任务发起人自己的 App / 网页里；本页只读，不提供代答。</p>
-      <div class="task-list" id="taskList"></div>
-    </section>
-
-    <!-- ---------------- 智能体 ---------------- -->
-    <section class="sec hidden" id="secAgent">
-      <h2>智能体</h2>
-      <p class="pane-note">两条都是同步接口：请求会一直挂着直到跑完或超时，跑的是服务端自己那份上游配置。编排那条会往上面那张任务表里落一条。</p>
-      <textarea id="agentInput" class="req" rows="3" placeholder="要跑的事，例如：查一下明天上海的天气"></textarea>
-      <div class="row">
-        <span class="dim" style="font-size:12.5px">轮数</span>
-        <input id="agentTurns" class="num" type="number" min="1" max="40" value="10">
-        <span class="dim" style="font-size:12.5px">秒数</span>
-        <input id="agentDuration" class="num" type="number" min="10" max="600" value="120">
-        <button id="btnRunAgent" class="btn btn-ghost" data-icon="play" data-label="ReAct 跑一次"></button>
-        <button id="btnOrchestrate" class="btn btn-primary" data-icon="agent" data-label="编排执行"></button>
+      <div class="subpanel" id="subUsage" role="tabpanel" aria-labelledby="subtab-usage">
+        <div class="toolbar">
+          <span class="dim">看哪天</span>
+          <select id="usageDay" aria-label="用量日期"></select>
+          <button id="btnUsage" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读这一天的账"></button>
+        </div>
+        <div class="cards" id="usageTotals"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>谁</th><th>模型服务</th><th>谁的钱</th><th>次数</th><th>成 / 败</th><th>token</th><th>工具轮</th><th>账全不全</th></tr></thead>
+            <tbody id="usageRows"></tbody>
+          </table>
+        </div>
+        <p class="pane-note note-tight">token 数一律取上游回传的 <code>usage</code>，服务端不估算。上游没回数字的那几次各项记 0，并在「账全不全」里点出来：那种行的 token 是个<b>下限</b>，不是准确数。</p>
       </div>
-      <div class="secret hidden" id="agentOut"></div>
+
+      <div class="subpanel hidden" id="subSearch" role="tabpanel" aria-labelledby="subtab-search">
+        <p class="pane-note">这是另一本账（<code>/v1/admin/search-usage</code>）：按「这一天 · 这一个源」记 <code>web_search</code> 真跑了多少次、每个源成功率。它没有「谁」这一栏——搜索工具只收 query，拿不到调用者身份。账本里没有查询原文，也没有哈希。</p>
+        <div class="toolbar">
+          <span class="dim">看几天</span>
+          <select id="searchUsageDays" aria-label="搜索用量窗口">
+            <option value="7">7 天</option>
+            <option value="30">30 天</option>
+            <option value="90">90 天</option>
+          </select>
+          <button id="btnSearchUsage" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读搜索这本账"></button>
+        </div>
+        <div class="cards" id="searchUsageTotals"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>搜索源</th><th>出网尝试</th><th>给结果</th><th>失败</th><th>没出网</th><th>成功率</th><th>失败归因</th></tr></thead>
+            <tbody id="searchUsageRows"></tbody>
+          </table>
+        </div>
+        <p class="pane-note warn note-tight" id="searchUsageNote"></p>
+      </div>
+
+      <div class="subpanel hidden" id="subMemory" role="tabpanel" aria-labelledby="subtab-memory">
+        <p class="pane-note">这里只读条数：长期记忆正文按人隔离，跨人读别人的记忆内容没有接口，也不该有。<code>/v1/memory/stats</code> 给的是全库合计，不按人拆分。</p>
+        <div class="card">
+          <div class="stat"><b id="memTotal">—</b><span id="memNote">条 · 全库合计（不分人）</span></div>
+          <p class="pane-note note-tight" id="memCollection"></p>
+        </div>
+        <div class="toolbar note-tight">
+          <input id="decayFactor" class="num" type="number" step="0.01" min="0.1" max="1" value="0.95" aria-label="衰减系数">
+          <button id="btnDecay" class="btn btn-ghost" type="button" data-icon="decay" data-label="衰减我自己记忆的权重"></button>
+        </div>
+        <p class="pane-note"><code>/v1/memory/decay</code> 只作用于登录这个页面的人自己的记忆池，选不了别人。</p>
+      </div>
+
+      <div class="subpanel hidden" id="subTasks" role="tabpanel" aria-labelledby="subtab-tasks">
+        <p class="pane-note">编排任务从 v0.24 起落盘：重启之后这张表还在。「需要你输入」是任务停在断点上等人回答；本页只读，不提供代答。</p>
+        <div class="task-list" id="taskList"></div>
+      </div>
+
+      <div class="subpanel hidden" id="subAgent" role="tabpanel" aria-labelledby="subtab-agent">
+        <p class="pane-note">两条都是同步接口：请求会一直挂着直到跑完或超时，跑的是服务端自己那份上游配置。编排那条会往任务表里落一条。</p>
+        <textarea id="agentInput" class="req" rows="3" placeholder="要跑的事，例如：查一下明天上海的天气" aria-label="要跑的事"></textarea>
+        <div class="toolbar">
+          <span class="dim">轮数</span>
+          <input id="agentTurns" class="num" type="number" min="1" max="40" value="10" aria-label="最大轮数">
+          <span class="dim">秒数</span>
+          <input id="agentDuration" class="num" type="number" min="10" max="600" value="120" aria-label="最长秒数">
+          <button id="btnRunAgent" class="btn btn-ghost" type="button" data-icon="play" data-label="ReAct 跑一次"></button>
+          <button id="btnOrchestrate" class="btn btn-primary" type="button" data-icon="agent" data-label="编排执行"></button>
+        </div>
+        <div class="secret hidden" id="agentOut"></div>
+      </div>
+
+      <div class="subpanel hidden" id="subConfig" role="tabpanel" aria-labelledby="subtab-config">
+        <div class="card">
+          <h3>自助注册</h3>
+          <div class="toolbar">
+            <button id="btnRegToggle" class="btn btn-ghost btn-small" type="button" data-icon="check" data-label="注册开关：读取中"></button>
+            <span class="dim" id="regNote"></span>
+          </div>
+          <p class="pane-note note-tight">读 <code>/v1/config</code>，写走 <code>/v1/admin/config</code>。打开后任何拿到地址的人都能注册并开始对话，模型花费记在这台服务上。</p>
+        </div>
+        <div class="card">
+          <h3>更新仓库</h3>
+          <div class="stat-grid">
+            <div class="stat-cell"><b id="configRepo">—</b><span>update_repo（只读）</span></div>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
-
-  <!-- 明文只出现在那一次响应里（库里存的是 sha256 摘要），但这一枚不是他的入场券：
-       他自己的密码就能再领一枚，所以措辞不能说成“不发出去他就进不来”。 -->
-  <div id="reveal" class="sheet hidden">
-    <div class="card">
-      <h2>新令牌</h2>
-      <p id="revealNote">这枚令牌的明文只出现在刚才那一次响应里，服务端存的是摘要，关掉这个窗口就再也查不到。这次换发已经把他名下所有旧令牌一起作废，每一台设备都会掉线。掉线不等于进不来：他在 App 里用自己的用户名和密码登录，就能领一枚新的。</p>
-      <div class="secret" id="revealText"></div>
-      <div class="foot">
-        <button id="btnCopy" class="btn btn-primary btn-small" data-icon="copy" data-label="复制"></button>
-        <button id="btnCloseReveal" class="btn btn-ghost btn-small" data-icon="check" data-label="知道了"></button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 破坏性动作的二次确认：文案要放下“删了什么、留了什么”，window.confirm 放不下 -->
-  <div id="ask" class="sheet hidden">
-    <div class="card">
-      <h2 id="askTitle"></h2>
-      <p id="askBody"></p>
-      <div class="foot">
-        <button id="askCancel" class="btn btn-ghost btn-small" data-icon="close" data-label="取消"></button>
-        <button id="askOk" class="btn btn-small"></button>
-      </div>
-    </div>
-  </div>
-
-  <div id="detail" class="sheet hidden">
-    <div class="card">
-      <h2 id="detailTitle">任务</h2>
-      <div class="task-detail" id="detailText"></div>
-      <div class="foot">
-        <button id="btnCloseDetail" class="btn btn-ghost btn-small" data-icon="check" data-label="关闭"></button>
-      </div>
-    </div>
-  </div>
-
 </div>
+
+<!-- 一次性明文只在这一个弹层里出现：口令与令牌都存摘要，关掉窗口就查不到第二次。 -->
+<div id="reveal" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="revealTitle">
+  <div class="card">
+    <h2 id="revealTitle">新令牌</h2>
+    <p id="revealNote">这枚令牌的明文只出现在刚才那一次响应里，服务端存的是摘要，关掉这个窗口就再也查不到。这次换发已经把他名下所有旧令牌一起作废，每一台设备都会掉线。掉线不等于进不来：他在 App 里用自己的用户名和密码登录，就能领一枚新的。</p>
+    <div class="secret" id="revealText"></div>
+    <div class="foot">
+      <button id="btnCopy" class="btn btn-primary btn-small" type="button" data-icon="copy" data-label="复制"></button>
+      <button id="btnCloseReveal" class="btn btn-ghost btn-small" type="button" data-icon="check" data-label="知道了"></button>
+    </div>
+  </div>
+</div>
+
+<!-- 破坏性动作的二次确认：文案要放下“删了什么、留了什么”。 -->
+<div id="ask" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="askTitle">
+  <div class="card">
+    <h2 id="askTitle"></h2>
+    <p id="askBody"></p>
+    <div class="foot">
+      <button id="askCancel" class="btn btn-ghost btn-small" type="button" data-icon="close" data-label="取消"></button>
+      <button id="askOk" class="btn btn-small" type="button"></button>
+    </div>
+  </div>
+</div>
+
+<div id="detail" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+  <div class="card">
+    <h2 id="detailTitle">任务</h2>
+    <div class="task-detail" id="detailText"></div>
+    <div class="foot">
+      <button id="btnCloseDetail" class="btn btn-ghost btn-small" type="button" data-icon="check" data-label="关闭"></button>
+    </div>
+  </div>
+</div>
+
 <script src="admin.js"></script>
 </body>
 </html>
