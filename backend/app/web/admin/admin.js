@@ -1158,9 +1158,10 @@
   }
 
   function clearSecSummary() {
-    ["secStats", "secSources", "secAccountsTop", "secAudit"].forEach((id) => {
-      $(id).textContent = "";
-    });
+    ["secStats", "secSources", "secAccountsTop", "secTypes", "secAudit", "secNarrative"]
+      .forEach((id) => {
+        $(id).textContent = "";
+      });
   }
 
   function handleSummary(result) {
@@ -1210,6 +1211,9 @@
       $("secSources").appendChild(cell("span", "读取中…", "skeleton"));
       $("secAccountsTop").textContent = "";
       $("secAccountsTop").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secTypes").textContent = "";
+      $("secTypes").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secNarrative").textContent = "读取中…";
       $("secAudit").textContent = "";
       $("secAudit").appendChild(cell("span", "读取中…", "skeleton"));
     }
@@ -1253,11 +1257,58 @@
       stats.appendChild(card);
     });
 
-    renderRank($("secSources"), Array.isArray(data.by_source) ? data.by_source : [],
-      "source", Number(totals.events) || 0);
-    renderRank($("secAccountsTop"), Array.isArray(data.by_account) ? data.by_account : [],
-      "account", Number(totals.events) || 0);
+    const bySource = Array.isArray(data.by_source) ? data.by_source : [];
+    const byAccount = Array.isArray(data.by_account) ? data.by_account : [];
+    renderSecurityNarrative(totals, byType, bySource, byAccount);
+    renderRank($("secSources"), bySource, "source", Number(totals.events) || 0);
+    renderRank($("secAccountsTop"), byAccount, "account", Number(totals.events) || 0);
+    renderRank($("secTypes"), byType.map((item) => ({
+      name: SEC_TYPES[item && item.type] || (item && item.type) || "未知类型",
+      count: item && item.count,
+    })), "name", Number(totals.events) || 0);
     renderAuditCard(data.audit || {}, Array.isArray(data.warnings) ? data.warnings : []);
+  }
+
+  const SEC_WINDOW_LABEL = { "1h": "1 小时", "24h": "24 小时", "7d": "7 天" };
+
+  function renderSecurityNarrative(totals, byType, bySource, byAccount) {
+    const box = $("secNarrative");
+    box.textContent = "";
+    const total = Number(totals.events) || 0;
+    if (!total) {
+      box.appendChild(cell("p",
+        "这个统计窗口内没有安全事件。可以切到 24 小时或 7 天再看。",
+        "security-summary-text"));
+      return;
+    }
+    const count = (type) => {
+      const hit = byType.find((item) => item && item.type === type);
+      return hit ? Number(hit.count) || 0 : 0;
+    };
+    const bits = [];
+    const fail = count("auth.fail");
+    const limited = count("auth.rate_limited");
+    const blocked = count("auth.blocked");
+    if (fail) bits.push(fail + " 次登录失败");
+    if (limited) bits.push(limited + " 次触发限流");
+    if (blocked) bits.push(blocked + " 次请求被拦截");
+    const src = bySource[0];
+    const acct = byAccount[0];
+    let text = "过去 " + (SEC_WINDOW_LABEL[secWindow] || secWindow)
+      + " 共 " + total + " 条安全事件" + (bits.length ? "：" + bits.join("、") + "。" : "。");
+    if (src) {
+      text += " 主要来源 " + (src.source || src.source_fp || "未知")
+        + "（" + (Number(src.count) || 0) + " 次）。";
+    }
+    if (acct && acct.account) {
+      text += " 主要涉及账号 " + acct.account + "（" + (Number(acct.count) || 0) + " 次）。";
+    }
+    const alert = Number(totals.alert) || 0;
+    if (alert) text += " 其中 " + alert + " 条高危，建议优先处理。";
+    box.appendChild(cell("p", text, "security-summary-text"));
+    box.appendChild(cell("p",
+      "级别：高危=需要立即处理；警告=异常但可能误报；提示=记录。来源只显示网络前缀，不显示原始 IP。",
+      "pane-note note-tight"));
   }
 
   function renderRank(container, items, nameKey, total) {

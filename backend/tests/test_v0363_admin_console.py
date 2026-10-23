@@ -258,6 +258,23 @@ def test_security_empty_state_degrades_instead_of_blanking():
     assert "e.status === 404" in js
 
 
+def test_security_page_summarises_attacks_in_plain_language():
+    """安全页先给一句人话总结，再给来源/账号/类型排行，最后才是明细。
+
+    管理员不必先读表头再自己拼结论：窗口内发生了几次什么、主要来自哪里、
+    打的是谁、有没有高危，一眼能看全。来源仍只显示网络前缀，不暴露原始 IP。
+    """
+    js, html, css = _js(), _html(), _css()
+    assert 'id="secNarrative"' in html
+    assert 'id="secTypes"' in html
+    assert "主要来源" in js and "主要涉及账号" in js
+    assert "条高危" in js
+    assert "不显示原始 IP" in js
+    assert "攻击类型" in html
+    assert "最近事件" in html
+    assert ".security-summary" in css
+
+
 # ---------- 6/9. 样式硬约束 ----------
 
 def test_css_has_tap_targets_motion_fallback_and_prewrap():

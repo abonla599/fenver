@@ -152,6 +152,7 @@
       </div>
       <div class="empty hidden" id="secState" aria-live="polite"></div>
       <div id="secBody">
+        <div class="security-summary" id="secNarrative" aria-live="polite"></div>
         <div class="cards" id="secStats"><span class="skeleton">读取中…</span></div>
         <div class="cards two">
           <article class="card">
@@ -161,6 +162,10 @@
           <article class="card">
             <h3>涉及账号 Top</h3>
             <div class="rank-list" id="secAccountsTop"><span class="skeleton">读取中…</span></div>
+          </article>
+          <article class="card">
+            <h3>攻击类型</h3>
+            <div class="rank-list" id="secTypes"><span class="skeleton">读取中…</span></div>
           </article>
         </div>
         <article class="card audit-card">
@@ -183,6 +188,8 @@
           <input id="secAccount" type="search" placeholder="账号" autocomplete="off" aria-label="账号">
           <button id="btnSecFilter" class="btn btn-ghost btn-small" type="button" data-icon="filter" data-label="筛选"></button>
         </div>
+        <h3 class="subhead">最近事件</h3>
+        <p class="pane-note note-tight">按时间倒序；合并次数是同 60 秒内同类事件的次数。高危=需要立即处理，警告=异常但可能误报，提示=记录。</p>
         <div class="table-wrap desktop-only">
           <table>
             <thead><tr>
