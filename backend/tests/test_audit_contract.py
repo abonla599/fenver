@@ -164,3 +164,139 @@ def test_read_marks_a_corrupt_tail_without_losing_the_rest(audit_file):
     rows = audit.read()
     assert any(r["action"] == "user.create" for r in rows)
     assert any(r["action"] == "_corrupt_line" for r in rows)
+
+
+# ---------- 5. 键名之外：完整记录与自由文本里的凭据 ----------
+#
+# 上面的第 3 节只锁住了「键名撞上名单」这一条路。调用方把完整用户记录递进来时，
+# device_secrets / security_answers 这些格子不在旧名单里；detail 与 before/after
+# 的字符串更是只截断不过滤。这一节把这两处缺口钉住，并且都是判「盘上查不到那串
+# 字节」，不判「返回值里没这个键」——前者才挡得住有人顺手把请求体塞进 after。
+
+_DEVICE_AND_RECOVERY_FIELDS = (
+    "device_secret", "device_secrets", "security_answer", "security_answers",
+    "recovery_code", "backup_code", "private_key", "session_token",
+)
+
+
+def _probe(audit_file, action="x.probe", **kw):
+    """贴一条探针再把盘上原文读回来：判据只认落盘的字节。"""
+    audit.log({"user_id": "u_a", "username": "admin", "role": "admin"},
+              action, **kw)
+    return audit_file.read_text(encoding="utf-8")
+
+
+def test_secret_key_names_cover_device_and_recovery_fields():
+    missing = [k for k in _DEVICE_AND_RECOVERY_FIELDS
+               if k not in audit._SECRET_KEYS]
+    assert not missing, f"这些键名还没进脱敏名单，值会原样落盘：{missing}"
+
+
+def test_a_full_user_record_lands_as_stars_not_values(audit_file):
+    """整条用户记录原样递进 after：敏感格一个值都不许出现在盘上。"""
+    record = {
+        "user_id": "u_device_1",
+        "username": "带了两台设备的人",
+        "device_secrets": ["DEV-SECRET-AAAABBBB", "DEV-SECRET-CCCCDDDD"],
+        "device_secret": "DEV-SECRET-EEEEFFFF",
+        "security_answers": {"pet_name": "小蓝", "city": "西安"},
+        "security_answer": "小蓝",
+        "recovery_code": "RECOVERY-1234-5678",
+        "backup_code": "BACKUP-8765-4321",
+        "private_key": "PRIVATEKEYMATERIAL-must-not-land",
+        "session_token": "SESSIONTOKEN-must-not-land",
+    }
+    raw = _probe(audit_file, action="user.create", after=record)
+    for value in ("DEV-SECRET-AAAABBBB", "DEV-SECRET-CCCCDDDD",
+                  "DEV-SECRET-EEEEFFFF", "小蓝", "西安",
+                  "RECOVERY-1234-5678", "BACKUP-8765-4321",
+                  "PRIVATEKEYMATERIAL-must-not-land",
+                  "SESSIONTOKEN-must-not-land"):
+        assert value not in raw, f"完整用户记录里的 {value[:8]}… 原样落了盘"
+    assert raw.count("***") >= len(_DEVICE_AND_RECOVERY_FIELDS), \
+        f"敏感格没有逐格变成 ***：{raw}"
+    assert "带了两台设备的人" in raw, "脱敏把非敏感字段也吃掉了"
+
+
+def test_bearer_token_in_detail_is_hidden_but_the_label_stays(audit_file):
+    raw = _probe(audit_file, detail="上游 401：Bearer abcdefghijklmnop 已过期")
+    assert "abcdefghijklmnop" not in raw, "detail 里的 Bearer token 原样落盘"
+    assert "Bearer" in raw and "***" in raw, \
+        f"凭据被隐了，但标签/遮蔽记号也一起没了：{raw}"
+
+
+def test_openai_style_key_in_detail_is_hidden(audit_file):
+    raw = _probe(audit_file, detail="调用失败：sk-live-abcdef123456")
+    assert "abcdef123456" not in raw, "detail 里的 sk- 密钥原样落盘"
+    assert "***" in raw
+    assert "调用失败" in raw, "脱敏只该吃凭据形状，不该吃文案"
+
+
+def test_labeled_secret_keeps_the_label_and_hides_the_value(audit_file):
+    # 拼出来而不是写成一行字面量：整行的 `api_key=<16 位不透明串>` 会被仓库自带的
+    # secret_scan 当成真凭据（opaque-assignment）。拼起来喂给 log 的仍是同一个串。
+    detail = "请求体 " + "api_key=" + "supersecret12345"
+    raw = _probe(audit_file, detail=detail)
+    assert "supersecret12345" not in raw, "带标签的 api_key 值原样落盘"
+    assert "api_key" in raw, "把标签也隐掉等于把线索一起抹了"
+    assert "***" in raw
+
+
+def test_snake_case_event_names_survive_scrubbing(audit_file):
+    """反向锁：谁把这里换成 providers.scrub_secrets 那一套，这条就会红——那套的
+    第一条正则会连 auth_login_failed 整段吃掉，审计就再也认不出发生过什么。"""
+    raw = _probe(audit_file, detail="auth_login_failed")
+    assert "auth_login_failed" in raw, "脱敏器把下划线事件名当成密钥吃掉了"
+    assert "***" not in raw
+
+
+def test_nested_bearer_tokens_in_before_and_after_are_hidden(audit_file):
+    before = {"headers": [{"name": "Authorization",
+                           "value": "Bearer abcdefghijklmnop"}]}
+    after = {"outer": {"inner": ["ok", "回包 Bearer zyxwvutsrqponmlk"]}}
+    raw = _probe(audit_file, before=before, after=after)
+    assert "abcdefghijklmnop" not in raw, "嵌套 list/dict 里的 Bearer token 漏了"
+    assert "zyxwvutsrqponmlk" not in raw, "嵌套 list/dict 里的 Bearer token 漏了"
+    assert raw.count("Bearer") == 2, f"标签被一起吃掉了：{raw}"
+    assert "ok" in raw, "脱敏把非敏感值也吃掉了"
+
+
+def test_commit_shas_and_digests_survive_scrubbing(audit_file):
+    """不认裸十六进制：40 位 SHA 与摘要会进审计，它们是证据，不能被当密码隐掉。"""
+    sha = "82318778deadbeef" + "0" * 24
+    digest = "a1b2c3d4" * 8
+    raw = _probe(audit_file, detail=f"prev={sha} digest={digest}")
+    assert sha in raw and digest in raw, "脱敏把 commit SHA / 摘要吃掉了"
+    assert "***" not in raw
+
+
+def test_text_scrubber_actually_has_teeth(audit_file, monkeypatch):
+    """负控：同一条「盘上查不到」判据，拆掉 _scrub_text 之后必须当场报红。
+
+    只跑正常路径等于照镜子——断言永远绿，因为你从没见过它红。这里先跑绿，再把
+    _scrub_text 换成恒等函数，要求同一条断言抛 AssertionError（monkeypatch 在用例
+    结束时自动还原）。
+    """
+    def check():
+        audit_file.write_text("", encoding="utf-8")
+        raw = _probe(audit_file, detail="Authorization: Bearer abcdefghijklmnop")
+        assert "abcdefghijklmnop" not in raw, "Bearer token 原样落盘"
+
+    check()                                   # 正常实现：红不了
+    monkeypatch.setattr(audit, "_scrub_text", lambda s: s)
+    with pytest.raises(AssertionError, match="Bearer token 原样落盘"):
+        check()                               # 拆掉脱敏器：必须红
+
+
+def test_key_blacklist_actually_has_teeth(audit_file, monkeypatch):
+    """键名名单的负控：把 device_secrets 从名单里摘掉，同一判据必须报红。"""
+    def check():
+        audit_file.write_text("", encoding="utf-8")
+        raw = _probe(audit_file, after={"device_secrets": ["DEV-SECRET-AAAABBBB"]})
+        assert "DEV-SECRET-AAAABBBB" not in raw, "device_secrets 的值原样落盘"
+
+    check()                                   # 名单在：红不了
+    monkeypatch.setattr(audit, "_SECRET_KEYS",
+                        audit._SECRET_KEYS - {"device_secrets"})
+    with pytest.raises(AssertionError, match="device_secrets 的值原样落盘"):
+        check()                               # 名单被摘：必须红
