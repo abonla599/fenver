@@ -447,5 +447,9 @@ def test_t31_account_actions_are_wired_and_double_confirmed():
     assert "<th>注册于</th>" in html and "fmtTime(u.created_at)" in js, \
         "PRD 要的注册时间列不见了"
     assert "userSearch" in js and "userSearchNote" in js, "账号搜索不见了"
+    # Python 的 str.casefold() 不是 JS 方法；浏览器会抛 TypeError，而调用点又在
+    # loadUsers 的渲染路径上，整个管理页会停在登录门后。只认 JS 的 toLowerCase。
+    assert ".casefold(" not in js, "admin.js 用了 Python 的 casefold()，浏览器会炸"
+    assert '.trim().toLowerCase()' in js, "账号搜索没有统一小写，大小写过滤会失效"
     assert "他自己填用户名和密码就能用" not in js, \
         "注册默认关闭之后，这句空列表文案在说谎"
