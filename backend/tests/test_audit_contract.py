@@ -179,6 +179,29 @@ _DEVICE_AND_RECOVERY_FIELDS = (
 )
 
 
+def test_stats_reports_entries_and_last_ts_without_trusting_corrupt_tail(audit_file):
+    """管理台那张「审计文件」卡读 entries/last_ts，后端必须真的给出这两个字段。
+
+    坏行计入物理行数与 entries（文件体量口径），但 last_ts 只取最后一条可解析记录：
+    被截断的尾巴不能假装成「最近写入」。
+    """
+    audit.log({"user_id": "u_a", "username": "admin", "role": "admin"}, "x.one")
+    audit.log({"user_id": "u_a", "username": "admin", "role": "admin"}, "x.two")
+    with audit_file.open("a", encoding="utf-8") as f:
+        f.write("{not json}\n")
+    got = audit.stats()
+    lines = audit_file.read_text(encoding="utf-8").splitlines()
+    assert got["size_bytes"] == audit_file.stat().st_size
+    assert got["lines"] == 3 and got["entries"] == 3
+    assert got["last_ts"] == json.loads(lines[1])["ts"]
+
+
+def test_stats_is_zero_when_the_ledger_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "missing.jsonl"))
+    assert audit.stats() == {"size_bytes": 0, "lines": 0,
+                             "entries": 0, "last_ts": None}
+
+
 def _probe(audit_file, action="x.probe", **kw):
     """贴一条探针再把盘上原文读回来：判据只认落盘的字节。"""
     audit.log({"user_id": "u_a", "username": "admin", "role": "admin"},

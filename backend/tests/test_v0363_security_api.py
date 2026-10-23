@@ -101,7 +101,8 @@ def test_summary_totals_and_top_lists_reflect_the_events(client):
     assert len(body["by_source"]) == 2
     assert body["by_account"][0] == {"account": "ghost", "count": 2}
     assert isinstance(body["generated_at"], str)
-    assert body["audit"].keys() >= {"size_bytes", "lines"}
+    assert body["audit"].keys() >= {"size_bytes", "lines", "entries", "last_ts"}
+    assert body["audit"]["entries"] == body["audit"]["lines"]
     assert body["warnings"] == []
 
 
