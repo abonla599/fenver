@@ -153,7 +153,18 @@
       <div class="empty hidden" id="secState" aria-live="polite"></div>
       <div id="secBody">
         <div class="security-summary" id="secNarrative" aria-live="polite"></div>
+        <div id="secRisk" class="risk-banner hidden" role="status" aria-live="polite"></div>
         <div class="cards" id="secStats"><span class="skeleton">读取中…</span></div>
+        <div class="cards two">
+          <article class="card">
+            <h3>严重度分布</h3>
+            <div id="secSeverity"><span class="skeleton">读取中…</span></div>
+          </article>
+          <article class="card">
+            <h3>攻击时间线</h3>
+            <div id="secTimeline"><span class="skeleton">读取中…</span></div>
+          </article>
+        </div>
         <div class="cards two">
           <article class="card">
             <h3>攻击来源 Top</h3>
@@ -186,6 +197,12 @@
           </select>
           <input id="secSource" type="search" placeholder="来源前缀" autocomplete="off" aria-label="来源前缀">
           <input id="secAccount" type="search" placeholder="账号" autocomplete="off" aria-label="账号">
+          <select id="secSeverityFilter" aria-label="事件级别">
+            <option value="">全部级别</option>
+            <option value="alert">高危</option>
+            <option value="warn">警告</option>
+            <option value="info">提示</option>
+          </select>
           <button id="btnSecFilter" class="btn btn-ghost btn-small" type="button" data-icon="filter" data-label="筛选"></button>
         </div>
         <h3 class="subhead">最近事件</h3>
@@ -193,7 +210,7 @@
         <div class="table-wrap desktop-only">
           <table>
             <thead><tr>
-              <th>时间</th><th>级别</th><th>类型</th><th>来源</th><th>账号</th><th>路由</th><th>状态码</th><th>合并次数</th>
+              <th>时间</th><th>级别</th><th>类型</th><th>原因</th><th>来源</th><th>账号</th><th>路由</th><th>状态码</th><th>合并次数</th>
             </tr></thead>
             <tbody id="secEventRows"></tbody>
           </table>
