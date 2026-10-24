@@ -1239,6 +1239,7 @@ def admin_security_summary(response: Response, window: str = "1h",
 
 @router.get("/v1/admin/security/events")
 def admin_security_events(response: Response, type: Optional[str] = None,
+                          severity: Optional[str] = None,
                           source: Optional[str] = None,
                           account: Optional[str] = None,
                           before: Optional[str] = None,
@@ -1248,9 +1249,12 @@ def admin_security_events(response: Response, type: Optional[str] = None,
 
     limit/before 声明成字符串再手工解析：FastAPI 的 int 参数在非整数时回 422，
     而这里的契约是 400（一句话说清哪个参数不对）。limit 只收 1–200。
+    severity 只认 info/warn/alert；不认识的级别回 400，不悄悄忽略。
     """
     if type is not None and type not in security_log.TYPES:
         raise HTTPException(status_code=400, detail="type 不是受支持的安全事件类型")
+    if severity is not None and severity not in ("info", "warn", "alert"):
+        raise HTTPException(status_code=400, detail="severity 只能是 info/warn/alert")
     if limit is None or limit == "":
         count = 50
     else:
@@ -1271,7 +1275,7 @@ def admin_security_events(response: Response, type: Optional[str] = None,
     source_filter = (source or "").strip()[:80] or None
     account_filter = (account or "").strip()[:64] or None
     items, next_before = security_log.events(
-        before=cursor, limit=count, type=type,
+        before=cursor, limit=count, type=type, severity=severity,
         source=source_filter, account=account_filter)
     response.headers["Cache-Control"] = "no-store"
     return {"events": items, "next_before": next_before}

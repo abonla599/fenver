@@ -39,6 +39,11 @@ SEC_TYPES = (
     "auth.fail", "auth.rate_limited", "auth.blocked", "admin.action",
     "tool.blocked", "approval.denied", "provider.error", "system.anomaly",
 )
+SEC_DETAILS = (
+    "login.failed", "register.rejected", "reset.rejected", "reauth.denied",
+    "limit.login", "limit.register", "limit.reset", "limit.reauth", "limit.chat",
+    "limit.orchestrate", "token.unknown", "csrf.missing", "unspecified",
+)
 
 
 def _raw(name: str) -> str:
@@ -274,6 +279,105 @@ def test_security_page_summarises_attacks_in_plain_language():
     assert "攻击类型" in html
     assert "最近事件" in html
     assert ".security-summary" in css
+
+
+# ---------- 安全页 v0.36.4：风险横幅 / 严重度分布 / 时间线 / 原因 / 级别筛选 ----------
+
+def test_security_attack_visuals_are_wired_into_the_summary_path():
+    """三个可视化锚点必须在 HTML 里有落点、在 summary 渲染路径上被调用。
+
+    只在文件里出现函数名不算：把 renderSecurityTimeline 定义留着、调用删掉，
+    页面不会报错，时间线却永远空白。所以按 renderSecuritySummary 的函数体切片判。
+    """
+    js, html = _js(), _html()
+    for anchor in ("secRisk", "secSeverity", "secTimeline", "secSeverityFilter"):
+        assert f'id="{anchor}"' in html, f"#{anchor} 没有落点"
+
+    summary = _function_body("renderSecuritySummary", js)
+    assert summary, "renderSecuritySummary 不像原来的形状了"
+    assert "renderRiskBanner(totals)" in summary, "风险横幅没有接进汇总渲染"
+    assert "renderSeverityBreakdown(totals)" in summary, "严重度分布没有接进汇总渲染"
+    assert "renderSecurityTimeline(" in summary, "时间线没有接进汇总渲染"
+    assert "data.timeline" in summary, "时间线没有消费后端 data.timeline"
+
+    risk = _function_body("renderRiskBanner", js)
+    assert risk, "renderRiskBanner 不见了"
+    assert "条高危事件，建议优先处理" in risk, "高危横幅文案不见了"
+    assert "当前窗口没有高危事件" in risk, "安全态横幅文案不见了"
+
+    timeline = _function_body("renderSecurityTimeline", js)
+    assert timeline, "renderSecurityTimeline 不见了"
+    assert "这个窗口没有事件" in timeline, "时间线空态不见了"
+    assert 'setAttribute("aria-label"' in timeline, "柱子没有可读标签"
+    assert "条（高危 " in timeline, "柱子 title/aria-label 没有带高危条数"
+    assert "timeline-bar" in timeline, "没有建柱子"
+
+    severity = _function_body("renderSeverityBreakdown", js)
+    assert severity, "renderSeverityBreakdown 不见了"
+    assert "sev-seg " in severity and "style.width" in severity, "严重度条不是按占比给宽度"
+    assert "sev-legend" in severity, "严重度图例不见了"
+
+
+def test_security_detail_labels_cover_the_backend_enum():
+    js = _js()
+    mapping = re.search(r"const SEC_DETAIL = \{([^}]*)\}", js)
+    assert mapping, "SEC_DETAIL 不见了"
+    assert set(re.findall(r'"([^"]+)":', mapping.group(1))) == set(SEC_DETAILS), \
+        "SEC_DETAIL 没有逐项覆盖后端 DETAILS"
+    row = _function_body("securityEventRow", js)
+    assert "secDetail(event.detail)" in row, "桌面表没有消费原因映射"
+    card = _function_body("securityEventCard", js)
+    assert 'line("原因", secDetail(event.detail))' in card, "手机卡片没有原因一行"
+
+
+def test_security_events_table_gained_the_reason_column_and_nine_colspan():
+    js, html = _js(), _html()
+    assert "<th>时间</th><th>级别</th><th>类型</th><th>原因</th><th>来源</th>" in html, \
+        "桌面表头没有原因列（或列序被改了）"
+    row = _function_body("securityEventRow", js)
+    assert row.count("tr.appendChild") == 9, "事件行不是 9 列"
+    paint = _function_body("paintSecurityEvents", js)
+    assert ", 9)" in paint, "空表 colspan 没有跟着改成 9"
+    events = _function_body("handleEvents", js)
+    assert 'paintTableError($("secEventRows"), 9' in events, "错误行 colspan 没有改成 9"
+
+
+def test_security_severity_filter_is_part_of_every_request():
+    """级别筛选必须进 URL（含加载更多的 before 请求），切换即重取。"""
+    js = _js()
+    url = _function_body("buildSecurityEventsUrl", js)
+    assert url, "buildSecurityEventsUrl 不像原来的形状了"
+    assert 'parts.push("severity=" + encodeURIComponent(secFilters.severity))' in url, \
+        "severity 没有拼进事件 URL"
+    apply = _function_body("applySecurityFilters", js)
+    assert apply, "applySecurityFilters 不像原来的形状了"
+    assert 'severity: $("secSeverityFilter").value' in apply, "筛选状态没有读级别下拉"
+    assert '$("secSeverityFilter").addEventListener("change"' in js, "切换级别不会重取"
+
+
+def test_security_source_shows_the_fingerprint_but_never_the_raw_ip():
+    js, css = _js(), _css()
+    assert "event.source_fp" in js, "页面没有消费 source_fp"
+    assert "slice(0, 8)" in js, "指纹没有截到 8 位"
+    assert '"source-fp"' in js, "指纹没有独立的 dim/mono 样式挂点"
+    assert ".source-fp" in css and "ui-monospace" in _css_rule(".source-fp"), \
+        "指纹不是等宽小字"
+    assert "innerHTML" not in js
+
+
+def test_security_visual_styles_use_existing_tokens():
+    css = _css()
+    for selector in (".risk-banner", ".risk-banner.risk-alert", ".risk-banner.risk-safe",
+                     ".sev-bar", ".sev-seg.alert", ".sev-seg.warn", ".sev-seg.info",
+                     ".sev-legend", ".sev-dot.alert", ".timeline-bars",
+                     ".timeline-bar", ".timeline-alert", ".timeline-axis", ".source-fp"):
+        assert _css_rule(selector), f"{selector} 规则不见了"
+    assert "var(--danger)" in _css_rule(".risk-banner.risk-alert"), "高危横幅没用 danger"
+    assert "var(--fv-danger-soft)" in _css_rule(".risk-banner.risk-alert"), \
+        "高危横幅没读现有淡底令牌"
+    assert "var(--danger)" in _css_rule(".timeline-alert"), "有高危的桶顶没用 danger 色"
+    assert "overflow-x: auto" in _css_rule(".timeline-bars"), "时间线窄屏不能横向滚动"
+    assert not re.findall(r"#[0-9a-fA-F]{3,8}\b", css), "可视化引入了硬编码颜色"
 
 
 # ---------- 6/9. 样式硬约束 ----------

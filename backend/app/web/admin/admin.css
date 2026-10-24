@@ -490,6 +490,112 @@ td.acts button { margin: 0 2px 2px 0; }
 }
 .subhead { margin: 18px 0 6px; font-size: 14px; }
 
+/* ---------- 安全：风险横幅、严重度分布、时间线 ---------- */
+
+.risk-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.risk-banner.risk-alert {
+  border-color: var(--danger);
+  background: var(--fv-danger-soft);
+  color: var(--danger);
+}
+.risk-banner.risk-safe {
+  border-color: var(--fv-ai);
+  background: var(--fv-ai-soft);
+  color: var(--fv-ai);
+}
+.risk-text { font-weight: 600; }
+
+.sev-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--fv-surface-3);
+}
+.sev-seg { display: block; height: 100%; flex: none; }
+.sev-seg.alert { background: var(--danger); }
+.sev-seg.warn { background: var(--fv-ai); }
+.sev-seg.info { background: var(--text-3); }
+.sev-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.sev-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.sev-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.sev-dot.alert { background: var(--danger); }
+.sev-dot.warn { background: var(--fv-ai); }
+.sev-dot.info { background: var(--text-3); }
+
+.timeline-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 2px;
+}
+.timeline-col {
+  flex: 1 1 6px;
+  min-width: 8px;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.timeline-bar {
+  position: relative;
+  width: 100%;
+  border-radius: 4px 4px 0 0;
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+.timeline-bar.has-alert { background: var(--fv-ai-soft); }
+.timeline-alert {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: block;
+  background: var(--danger);
+}
+.timeline-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.source-fp {
+  margin-left: 6px;
+  color: var(--text-3);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  letter-spacing: .5px;
+}
+
 .sev-tag {
   font-size: 11.5px;
   padding: 2px 8px;
