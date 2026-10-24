@@ -426,10 +426,11 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
         resp.tool_ran = ran          # 唯一赋值点：ran=True 只在真调用 func 的那一段给
         return resp
 
-    if tool_name not in tools_registry:
+    # 只取一次：`in` 后再 `[]` 是两次独立快照，整源刷新/注销恰好插在中间会 KeyError。
+    info = tools_registry.get(tool_name)
+    if info is None:
         return _ret(ToolResponse(False, error=f"未知工具: {tool_name}",
                                  hint="使用 help 工具查看可用工具列表"), ran=False)
-    info = tools_registry[tool_name]
     func = info["function"]
     # 模型偶尔会给出数组/字符串当参数。原写法 dict(arguments) 在这一支会直接炸
     # 出 TypeError（还在 try 之外）；这里按同样的口径给出结构化的"参数错误"。
