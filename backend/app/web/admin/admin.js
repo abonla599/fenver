@@ -1102,7 +1102,7 @@
   /* ---------- 安全 ---------- */
 
   let secWindow = "24h";
-  let secFilters = { type: "", source: "", account: "" };
+  let secFilters = { type: "", source: "", account: "", severity: "" };
   let secEvents = [];
   let secEventIds = {};
   let secNextBefore = null;
@@ -1122,6 +1122,22 @@
     "system.anomaly": "系统异常",
   };
   const SEC_SEVERITY = { info: "提示", warn: "警告", alert: "高危" };
+  // detail 是后端固定枚举（security_log.DETAILS）；未知值原样显示，不吞成“未知”。
+  const SEC_DETAIL = {
+    "login.failed": "登录口令错误",
+    "register.rejected": "注册被拒",
+    "reset.rejected": "重置口令被拒",
+    "reauth.denied": "二次验证被拒",
+    "limit.login": "登录频率超限",
+    "limit.register": "注册频率超限",
+    "limit.reset": "重置频率超限",
+    "limit.reauth": "二次验证频率超限",
+    "limit.chat": "对话频率超限",
+    "limit.orchestrate": "编排频率超限",
+    "token.unknown": "令牌无法识别",
+    "csrf.missing": "缺少 CSRF 标记",
+    "unspecified": "未注明",
+  };
   const AUDIT_WARNING = {
     audit_file_large: "审计文件偏大，建议轮转/归档",
   };
@@ -1132,9 +1148,17 @@
     return cell("span", SEC_SEVERITY[key] || key, "sev-tag " + cls);
   }
 
+  function secDetail(detail) {
+    if (detail === undefined || detail === null || detail === "") return "—";
+    const key = String(detail);
+    // 只认映射表自己的键：detail 来自事件字段，`constructor` 之类的原型属性不算命中。
+    return Object.prototype.hasOwnProperty.call(SEC_DETAIL, key) ? SEC_DETAIL[key] : key;
+  }
+
   function buildSecurityEventsUrl(before) {
     const parts = ["limit=50"];
     if (secFilters.type) parts.push("type=" + encodeURIComponent(secFilters.type));
+    if (secFilters.severity) parts.push("severity=" + encodeURIComponent(secFilters.severity));
     if (secFilters.source) parts.push("source=" + encodeURIComponent(secFilters.source));
     if (secFilters.account) parts.push("account=" + encodeURIComponent(secFilters.account));
     if (before !== null && before !== undefined) {
@@ -1158,10 +1182,14 @@
   }
 
   function clearSecSummary() {
-    ["secStats", "secSources", "secAccountsTop", "secTypes", "secAudit", "secNarrative"]
+    ["secStats", "secSources", "secAccountsTop", "secTypes", "secAudit", "secNarrative",
+      "secSeverity", "secTimeline"]
       .forEach((id) => {
         $(id).textContent = "";
       });
+    const risk = $("secRisk");
+    risk.textContent = "";
+    risk.classList.add("hidden");
   }
 
   function handleSummary(result) {
@@ -1197,7 +1225,7 @@
       flash("加载更多失败：" + message, true, loadMoreSecurity);
       return;
     }
-    paintTableError($("secEventRows"), 8, message, loadSecurity);
+    paintTableError($("secEventRows"), 9, message, loadSecurity);
     paintRetry($("secEventCards"), message, loadSecurity);
     $("btnSecMore").classList.add("hidden");
   }
@@ -1214,6 +1242,12 @@
       $("secTypes").textContent = "";
       $("secTypes").appendChild(cell("span", "读取中…", "skeleton"));
       $("secNarrative").textContent = "读取中…";
+      $("secSeverity").textContent = "";
+      $("secSeverity").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secTimeline").textContent = "";
+      $("secTimeline").appendChild(cell("span", "读取中…", "skeleton"));
+      $("secRisk").textContent = "";
+      $("secRisk").classList.add("hidden");
       $("secAudit").textContent = "";
       $("secAudit").appendChild(cell("span", "读取中…", "skeleton"));
     }
@@ -1260,6 +1294,9 @@
     const bySource = Array.isArray(data.by_source) ? data.by_source : [];
     const byAccount = Array.isArray(data.by_account) ? data.by_account : [];
     renderSecurityNarrative(totals, byType, bySource, byAccount);
+    renderRiskBanner(totals);
+    renderSeverityBreakdown(totals);
+    renderSecurityTimeline(Array.isArray(data.timeline) ? data.timeline : []);
     renderRank($("secSources"), bySource, "source", Number(totals.events) || 0);
     renderRank($("secAccountsTop"), byAccount, "account", Number(totals.events) || 0);
     renderRank($("secTypes"), byType.map((item) => ({
@@ -1309,6 +1346,97 @@
     box.appendChild(cell("p",
       "级别：高危=需要立即处理；警告=异常但可能误报；提示=记录。来源只显示网络前缀，不显示原始 IP。",
       "pane-note note-tight"));
+  }
+
+  function renderRiskBanner(totals) {
+    const box = $("secRisk");
+    box.textContent = "";
+    box.classList.remove("risk-alert", "risk-safe");
+    const alert = Number(totals && totals.alert) || 0;
+    if (alert > 0) {
+      box.classList.add("risk-alert");
+      box.appendChild(cell("strong",
+        "检测到 " + fmtN(alert) + " 条高危事件，建议优先处理", "risk-text"));
+    } else {
+      box.classList.add("risk-safe");
+      box.appendChild(cell("span", "当前窗口没有高危事件", "risk-text"));
+    }
+    box.classList.remove("hidden");
+  }
+
+  function renderSeverityBreakdown(totals) {
+    const box = $("secSeverity");
+    box.textContent = "";
+    const rows = [
+      ["alert", "高危", Number(totals && totals.alert) || 0],
+      ["warn", "警告", Number(totals && totals.warn) || 0],
+      ["info", "提示", Number(totals && totals.info) || 0],
+    ];
+    const total = Number(totals && totals.events) || 0;
+    if (!total) {
+      box.appendChild(cell("p", "这个统计窗口没有事件。", "pane-note note-tight"));
+      return;
+    }
+    const bar = cell("div", undefined, "sev-bar");
+    rows.forEach((row) => {
+      if (!row[2]) return;
+      const seg = cell("span", undefined, "sev-seg " + row[0]);
+      seg.style.width = Math.round(row[2] / total * 10000) / 100 + "%";
+      seg.title = row[1] + " " + fmtN(row[2]) + " 条";
+      bar.appendChild(seg);
+    });
+    box.appendChild(bar);
+    const legend = cell("div", undefined, "sev-legend");
+    rows.forEach((row) => {
+      const item = cell("span", undefined, "sev-legend-item");
+      item.appendChild(cell("i", undefined, "sev-dot " + row[0]));
+      item.appendChild(document.createTextNode(
+        row[1] + " " + fmtN(row[2]) + " · " + pct(total ? row[2] / total : 0)));
+      legend.appendChild(item);
+    });
+    box.appendChild(legend);
+  }
+
+  function renderSecurityTimeline(timeline) {
+    const box = $("secTimeline");
+    box.textContent = "";
+    const buckets = Array.isArray(timeline) ? timeline : [];
+    const counts = buckets.map((bucket) => Number(bucket && bucket.count) || 0);
+    const total = counts.reduce((sum, value) => sum + value, 0);
+    if (!buckets.length || !total) {
+      box.appendChild(cell("p", "这个窗口没有事件。", "pane-note note-tight"));
+      return;
+    }
+    const max = Math.max.apply(null, counts) || 1;
+    const bars = cell("div", undefined, "timeline-bars");
+    buckets.forEach((bucket, index) => {
+      const count = Number(bucket && bucket.count) || 0;
+      const alert = Number(bucket && bucket.alert) || 0;
+      const when = bucket && bucket.start ? fmtTime(bucket.start) : "第 " + (index + 1) + " 段";
+      const col = cell("div", undefined, "timeline-col");
+      const bar = cell("div", undefined, "timeline-bar" + (alert ? " has-alert" : ""));
+      bar.style.height = (count ? Math.max(2, Math.round(count / max * 100)) : 0) + "%";
+      const label = when + " · " + fmtN(count) + " 条（高危 " + fmtN(alert) + "）";
+      bar.title = label;
+      bar.setAttribute("aria-label", label);
+      bar.setAttribute("role", "img");
+      if (alert && count) {
+        const top = cell("span", undefined, "timeline-alert");
+        top.style.height = Math.round(alert / count * 100) + "%";
+        bar.appendChild(top);
+      }
+      col.appendChild(bar);
+      bars.appendChild(col);
+    });
+    box.appendChild(bars);
+    const axis = cell("div", undefined, "timeline-axis");
+    const marks = [0, Math.floor((buckets.length - 1) / 2), buckets.length - 1];
+    marks.filter((mark, pos) => marks.indexOf(mark) === pos).forEach((mark) => {
+      const bucket = buckets[mark];
+      axis.appendChild(cell("span",
+        bucket && bucket.start ? fmtTime(bucket.start) : String(mark + 1)));
+    });
+    box.appendChild(axis);
   }
 
   function renderRank(container, items, nameKey, total) {
@@ -1385,8 +1513,8 @@
     $("btnSecMore").classList.toggle("hidden",
       secNextBefore === null || secNextBefore === undefined);
     if (!secEvents.length) {
-      tbody.appendChild(emptyRow("当前筛选没有事件。可以换类型 / 来源，或清除筛选。", 8));
-      cards.appendChild(emptyBox("当前筛选没有事件。可以换类型 / 来源，或清除筛选。"));
+      tbody.appendChild(emptyRow("当前筛选没有事件。可以换类型 / 级别 / 来源，或清除筛选。", 9));
+      cards.appendChild(emptyBox("当前筛选没有事件。可以换类型 / 级别 / 来源，或清除筛选。"));
       return;
     }
     secEvents.forEach((event) => {
@@ -1402,13 +1530,24 @@
     sev.appendChild(sevTag(event.severity));
     tr.appendChild(sev);
     tr.appendChild(cell("td", SEC_TYPES[event.type] || event.type || "—"));
-    tr.appendChild(cell("td", event.source || event.source_fp || "—", "code"));
+    tr.appendChild(cell("td", secDetail(event.detail)));
+    tr.appendChild(securitySourceCell(event));
     tr.appendChild(cell("td", event.account || "—"));
     tr.appendChild(cell("td", event.route || "—", "code"));
     tr.appendChild(cell("td", event.status === undefined || event.status === null
       ? "—" : String(event.status)));
     tr.appendChild(cell("td", String(event.count === undefined ? 1 : event.count)));
     return tr;
+  }
+
+  function securitySourceCell(event) {
+    const td = cell("td", undefined, "code");
+    td.appendChild(document.createTextNode(event.source || event.source_fp || "—"));
+    // 指纹让 "同一 /24 段里的不同机器" 在表上也分得开；原始 IP 从不出现。
+    if (event.source && event.source_fp) {
+      td.appendChild(cell("span", String(event.source_fp).slice(0, 8), "source-fp"));
+    }
+    return td;
   }
 
   function securityEventCard(event) {
@@ -1425,7 +1564,14 @@
       grid.appendChild(item);
     };
     line("类型", SEC_TYPES[event.type] || event.type);
-    line("来源", event.source || event.source_fp);
+    line("原因", secDetail(event.detail));
+    const sourceItem = cell("span");
+    sourceItem.appendChild(cell("b", "来源"));
+    sourceItem.appendChild(document.createTextNode(event.source || event.source_fp || "—"));
+    if (event.source && event.source_fp) {
+      sourceItem.appendChild(cell("span", String(event.source_fp).slice(0, 8), "source-fp"));
+    }
+    grid.appendChild(sourceItem);
     line("账号", event.account);
     line("路由", event.route);
     line("状态码", event.status === undefined || event.status === null ? "—" : String(event.status));
@@ -1447,6 +1593,7 @@
   async function applySecurityFilters() {
     secFilters = {
       type: $("secType").value,
+      severity: $("secSeverityFilter").value,
       source: $("secSource").value.trim(),
       account: $("secAccount").value.trim(),
     };
@@ -2184,6 +2331,8 @@
   });
   $("btnSecReload").addEventListener("click", (e) => busy(e.currentTarget, () => loadSecurity()));
   $("btnSecFilter").addEventListener("click", (e) => busy(e.currentTarget, applySecurityFilters));
+  // 级别是单选：切换即重取，不再要求额外按一次「筛选」。
+  $("secSeverityFilter").addEventListener("change", () => busy(null, applySecurityFilters));
   $("secSource").addEventListener("keydown", (e) => {
     if (e.key === "Enter") busy(null, applySecurityFilters);
   });

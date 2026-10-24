@@ -4,6 +4,7 @@
 这里再各指各的，双保险）。每条用例自带 reset，不把进程内的事件环带出用例。
 """
 import builtins
+import datetime
 import hashlib
 import json
 import os
@@ -255,3 +256,75 @@ def test_snapshot_filters_by_the_window():
     _event(account="new", now=time.time())
     assert [item["account"] for item in security_log.snapshot(3600)] == ["new"]
     assert len(security_log.snapshot(86400)) == 2
+
+
+# ---------- 时间线：固定桶、零桶、夹边界 ----------
+
+@pytest.mark.parametrize("window, bucket_seconds, bucket_count", [
+    (3600, 300, 12),
+    (24 * 3600, 3600, 24),
+    (7 * 24 * 3600, 86400, 7),
+])
+def test_summary_timeline_has_fixed_zero_filled_buckets(window, bucket_seconds,
+                                                         bucket_count):
+    now = 1_700_000_000.0
+    # 窗口起点那一刻 → 首桶（边界算在窗口内）。
+    security_log.record("auth.fail", ip="203.0.113.77", account="edge-start",
+                        route="/v1/auth/login", status=401, detail="login.failed",
+                        now=now - window)
+    # 晚于 now 的事件 → 夹到末桶，不能凭空多出一个桶。
+    security_log.record("auth.fail", ip="203.0.113.77", account="edge-end",
+                        route="/v1/auth/login", status=401, detail="login.failed",
+                        now=now + 120)
+    # 高危事件落在末桶（window 内）。
+    security_log.record("system.anomaly", ip="198.51.100.9", account="boom",
+                        route="/v1/admin/users", status=500, detail="unspecified",
+                        now=now - 30)
+
+    data = security_log.summary(window, now=now)
+    timeline = data["timeline"]
+    assert data["bucket_seconds"] == bucket_seconds
+    assert len(timeline) == bucket_count, "桶数不是固定值"
+    assert sum(bucket["count"] for bucket in timeline) == data["totals"]["events"]
+    assert sum(bucket["alert"] for bucket in timeline) == data["totals"]["alert"]
+
+    starts = [datetime.datetime.fromisoformat(bucket["start"]) for bucket in timeline]
+    assert all(start.tzinfo is not None for start in starts), "start 不是带时区的 ISO 8601"
+    assert starts == sorted(starts), "桶起点必须按时间递增"
+    for earlier, later in zip(starts, starts[1:]):
+        assert (later - earlier).total_seconds() == bucket_seconds
+
+    assert any(bucket["count"] == 0 for bucket in timeline), "零桶没有输出"
+    assert timeline[0]["count"] == 1, "窗口起点的事件没有落进首桶"
+    assert timeline[-1]["count"] >= 2, "晚于 now 的事件没有夹进末桶"
+    assert timeline[-1]["alert"] == 1
+
+
+def test_summary_unknown_window_uses_hourly_buckets():
+    """窗口只认三档；其它值仍要有时间线，桶宽按 3600 兜底。"""
+    data = security_log.summary(2 * 3600, now=1_700_000_000.0)
+    assert data["bucket_seconds"] == 3600
+    assert sum(bucket["count"] for bucket in data["timeline"]) == data["totals"]["events"]
+
+
+# ---------- 级别过滤 ----------
+
+def test_events_filter_by_severity_only_returns_that_level():
+    security_log.record("auth.fail", ip="203.0.113.77", account="warn-user",
+                        route="/v1/auth/login", status=401, detail="login.failed",
+                        now=1000.0)
+    security_log.record("system.anomaly", ip="198.51.100.9", account="alert-user",
+                        route="/v1/admin/users", status=500, detail="unspecified",
+                        now=1001.0)
+    security_log.record("admin.action", ip="203.0.113.77", account="info-user",
+                        route="/v1/admin/users", status=200, detail="unspecified",
+                        now=1002.0)
+
+    for severity, account in (("alert", "alert-user"), ("warn", "warn-user"),
+                              ("info", "info-user")):
+        items, _ = security_log.events(severity=severity)
+        assert [item["account"] for item in items] == [account], severity
+        assert all(item["severity"] == severity for item in items)
+
+    everything, _ = security_log.events()
+    assert len(everything) == 3, "None 不该过滤任何级别"
