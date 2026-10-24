@@ -62,6 +62,12 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_FILE_LINES = 2000
 AUDIT_LARGE_BYTES = 5 * 1024 * 1024          # summary 里 audit_file_large 的阈值
 
+# 管理台时间线的固定桶：窗口 → (桶宽秒数, 桶数)。窗口与三档一一对应，
+# 桶宽 × 桶数 == 窗口；其它窗口值沿用 1 小时口径（24 个 1 小时桶）。
+_TIMELINE_SPEC = {3600: (300, 12), 86400: (3600, 24), 7 * 24 * 3600: (86400, 7)}
+_DEFAULT_BUCKET_SECONDS = 3600
+_DEFAULT_BUCKET_COUNT = 24
+
 _ROUTE_RE = re.compile(r"^/[A-Za-z0-9_./{}-]{0,120}$")
 
 _LOCK = threading.Lock()
@@ -371,9 +377,16 @@ def snapshot(window_seconds) -> list:
         return [dict(event) for event in _EVENTS if event["ts"] >= cutoff]
 
 
-def summary(window_seconds) -> dict:
-    """窗口聚合。`window` 标签由路由补（它才知道用户传的是 1h/24h/7d）。"""
-    cutoff = time.time() - float(window_seconds)
+def summary(window_seconds, now=None) -> dict:
+    """窗口聚合。`window` 标签由路由补（它才知道用户传的是 1h/24h/7d）。
+
+    同时给出固定桶数的时间线（含零桶）：`bucket_seconds` 是桶宽，`timeline` 的
+    `count`/`alert` 合计分别等于 `totals.events`/`totals.alert`。桶边界从 `now`
+    向前推一个窗口；`now` 仅供测试注入，生产调用不传。
+    """
+    moment = float(now) if now is not None else time.time()
+    span = float(window_seconds)
+    cutoff = moment - span
     with _LOCK:
         _ensure_loaded_locked()
         rows = [dict(event) for event in _EVENTS if event["ts"] >= cutoff]
@@ -405,12 +418,26 @@ def summary(window_seconds) -> dict:
     by_account = [{"account": name, "count": count}
                   for name, count in top(account_counts)]
 
+    bucket_seconds, bucket_count = _TIMELINE_SPEC.get(
+        int(span), (_DEFAULT_BUCKET_SECONDS, _DEFAULT_BUCKET_COUNT))
+    timeline = [{"start": _iso(cutoff + index * bucket_seconds), "count": 0, "alert": 0}
+                for index in range(bucket_count)]
+    for event in rows:
+        index = int((float(event["ts"]) - cutoff) // bucket_seconds)
+        index = max(0, min(index, bucket_count - 1))   # 越界事件夹进首/尾桶
+        count = int(event.get("count") or 1)
+        timeline[index]["count"] += count
+        if event.get("severity") == "alert":
+            timeline[index]["alert"] += count
+
     audit_stats = audit.stats()
     warnings = (["audit_file_large"]
                 if int(audit_stats.get("size_bytes") or 0) > AUDIT_LARGE_BYTES else [])
     return {
-        "generated_at": _iso(time.time()),
+        "generated_at": _iso(moment),
         "totals": totals,
+        "bucket_seconds": bucket_seconds,
+        "timeline": timeline,
         "by_type": by_type,
         "by_source": by_source,
         "by_account": by_account,
@@ -419,11 +446,13 @@ def summary(window_seconds) -> dict:
     }
 
 
-def events(before=None, limit=50, type=None, source=None, account=None):
+def events(before=None, limit=50, type=None, source=None, account=None,
+           severity=None):
     """倒序取一页事件，返回 `(items, next_before)`。
 
     `limit + 1` 只用来判断"还有没有更旧的"：`next_before` 是本页最后一条的 id，
     下一页传回来即可。`ts` 在这里转成 ISO 8601（UTC，带 +00:00），其余字段原样。
+    `severity` 只与事件的 severity 字段比较；取值白名单由路由负责，None 不过滤。
     """
     try:
         limit = int(limit)
@@ -439,6 +468,8 @@ def events(before=None, limit=50, type=None, source=None, account=None):
         if before is not None and int(event["id"]) >= int(before):
             continue
         if type is not None and event["type"] != type:
+            continue
+        if severity is not None and event["severity"] != severity:
             continue
         if source is not None and event["source"] != source:
             continue

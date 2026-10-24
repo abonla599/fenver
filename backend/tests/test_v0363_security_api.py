@@ -3,6 +3,7 @@
 admin 端点走 `RequireAdmin`：匿名 401、普通用户 403、管理员 200 且 no-store。
 埋点用例一律通过真实请求产生事件（不直接调 record），证明接线在中间件/端点里。
 """
+import datetime
 import time
 
 import pytest
@@ -12,6 +13,7 @@ from app.core import security_log
 BOOT = {"Authorization": "Bearer boot-token"}
 SUMMARY = "/v1/admin/security/summary"
 EVENTS = "/v1/admin/security/events"
+SEC_BUCKET = {"1h": (300, 12), "24h": (3600, 24), "7d": (86400, 7)}
 
 
 @pytest.fixture(autouse=True)
@@ -134,6 +136,67 @@ def test_source_and_account_filters_are_truncated_not_rejected(client):
     _seed(1)
     assert client.get(EVENTS, params={"source": "x" * 200}).status_code == 200
     assert client.get(EVENTS, params={"account": "y" * 200}).status_code == 200
+
+
+# ---------- 时间线（固定桶）与级别过滤 ----------
+
+@pytest.mark.parametrize("window", ["1h", "24h", "7d"])
+def test_summary_timeline_is_fixed_and_sums_to_totals(client, window):
+    _seed(5)
+    body = client.get(SUMMARY, params={"window": window}).json()
+    bucket_seconds, bucket_count = SEC_BUCKET[window]
+    assert body["bucket_seconds"] == bucket_seconds
+    assert len(body["timeline"]) == bucket_count
+    assert sum(bucket["count"] for bucket in body["timeline"]) == body["totals"]["events"] == 5
+    assert sum(bucket["alert"] for bucket in body["timeline"]) == body["totals"]["alert"] == 0
+    for bucket in body["timeline"]:
+        assert datetime.datetime.fromisoformat(bucket["start"]).tzinfo is not None
+    assert any(bucket["count"] == 0 for bucket in body["timeline"]), "零桶没有输出"
+
+
+def _seed_levels():
+    security_log.record("auth.fail", ip="203.0.113.77", account="warn-user",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+    security_log.record("system.anomaly", ip="198.51.100.9", account="alert-user",
+                        route="/v1/admin/users", status=500, detail="unspecified")
+    security_log.record("admin.action", ip="203.0.113.77", account="info-user",
+                        route="/v1/admin/users", status=200, detail="unspecified")
+
+
+def test_events_filter_by_severity(client):
+    _seed_levels()
+    for severity, event_type in (("alert", "system.anomaly"), ("warn", "auth.fail"),
+                                 ("info", "admin.action")):
+        body = client.get(EVENTS, params={"severity": severity}).json()
+        assert [item["type"] for item in body["events"]] == [event_type], severity
+        assert all(item["severity"] == severity for item in body["events"])
+    assert len(client.get(EVENTS).json()["events"]) == 3, "不带 severity 时不许过滤"
+
+
+@pytest.mark.parametrize("severity", ["critical", "WARN", " info", ""])
+def test_unknown_severity_is_400(client, severity):
+    res = client.get(EVENTS, params={"severity": severity})
+    assert res.status_code == 400
+    assert res.json()["detail"] == "severity 只能是 info/warn/alert"
+
+
+def test_severity_combines_with_type_and_keeps_the_before_cursor(client):
+    for i in range(3):
+        security_log.record("system.anomaly", ip="198.51.100.9",
+                            account="alert-" + str(i), route="/v1/admin/users",
+                            status=500, detail="unspecified")
+    security_log.record("auth.fail", ip="203.0.113.77", account="warn-user",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+
+    assert client.get(EVENTS, params={"severity": "warn", "type": "system.anomaly"}
+                      ).json()["events"] == []
+    first = client.get(EVENTS, params={"severity": "alert", "limit": "2"}).json()
+    assert [item["account"] for item in first["events"]] == ["alert-2", "alert-1"]
+    second = client.get(EVENTS, params={
+        "severity": "alert", "limit": "2",
+        "before": str(first["next_before"])}).json()
+    assert [item["account"] for item in second["events"]] == ["alert-0"]
+    assert second["next_before"] is None
 
 
 # ---------- 真实埋点 ----------
