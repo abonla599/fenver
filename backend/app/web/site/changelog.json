@@ -2,6 +2,41 @@
   "generated_from": "docs/releases/*.md",
   "releases": [
     {
+      "version": "0.37.4",
+      "server_only": true,
+      "title": "v0.37.4 更新说明",
+      "intro": "本版只换服务端，**没有新的安卓包**：安卓 `versionName` 保持不动，官网与 App 的检查更新仍按现有清单报最新可安装版本（以 `data/version.json` 与 `/site/version.json` 为准，本说明不写死）。这一版让助手在搜索之后能打开结果正文再回答。",
+      "sections": [
+        {
+          "heading": "修复了什么",
+          "items": [
+            "服务端出站地址闸补上 local-use NAT64 段（`64:ff9b:1::/48`，RFC 8215）整段拒绝，避免只折算 IPv4 低 32 位时漏掉 `/48` 布局。",
+            "正文读取的单次抓取总时限固定为 8 秒，不再借用 `http_fetch` 的 15 秒默认值；超时会明确说\"8 秒内没抓完\"。",
+            "正文读取遇到把 `https` 降级成 `http` 的重定向时，直接拒绝跟随，不按明文抓取。"
+          ]
+        },
+        {
+          "heading": "优化了什么",
+          "items": [
+            "`web_search` 里拿到句柄的 http/https 结果行首带一枚 `[r_...]`：读正文只需把这枚句柄交给 `web_read`，模型无法指定任意网址；没拿到句柄的行照旧显示标题、摘要与来源 URL。",
+            "`http_fetch`（管理员白名单）与 `web_read`（搜索结果正文）的出站判据合并为一份 `fetch_core`：URL 形状、DNS 解析、逐跳重定向、`net_guard` 地址闸、1 MiB 响应预算与审计只有这一处实现。",
+            "正文最多 3000 字，超出时在文本里写明截断，模型不会把\"看到的部分\"当成全文。",
+            "搜索用量账本仍只记 `web_search` 的降级链执行，不新增\"谁搜的\"这一维；`web_read` 的成败落在审计，不进搜索用量账本。"
+          ]
+        },
+        {
+          "heading": "新增了什么",
+          "items": [
+            "新工具 `web_read`：读取你自己最近 10 分钟搜索结果中、拿到句柄的某一条网页正文，一次一页。只抓 `http` / `https`（端口分别只放 80 / 443），最多跟 3 跳重定向，只收 html / xhtml / text / json，响应体超过 1 MiB 中止。",
+            "频控：每 600 秒最多读 4 页（按服务端识别的用户计）；结果句柄 10 分钟过期，全局最多 512 条、每人 64 条，服务重启即空。",
+            "审计：每次进入 `web_read` 的读取（含句柄形状不对、不属于本人、过期、未知这几种抓取前的拒绝）记一行 `action=web_read`；`target` 记 host/path/status/bytes/hops，另加 origin_host/origin_path 与已剥 URL 的 detail；不记 query/fragment/userinfo、正文、标题、请求头或 Cookie。被频控挡下的调用不会进入工具，因此没有审计行。",
+            "读不到会说：PDF、图片等不是可读正文类型的页面，靠 JavaScript 渲染或空白的页面，站点拒绝或超时，都会返回一句具体原因和\"换一条结果\"的建议；正文抓取失败不会把整次搜索判失败。",
+            "不需要新配置：`.env` 与 `data/config.json` 不加变量，也没有管理员白名单；搜索与读正文共用同一个\"搜索源是否可达\"的可用性判据。DNS rebinding 已把本次解析并校验过的地址钉进连接层（连接时不再二次解析，Host/SNI 仍用原主机名）；残余是 TLS 握手失败后不会换下一个已校验地址（可用性限制，不是 SSRF 回退）。"
+          ]
+        }
+      ]
+    },
+    {
       "version": "0.36.4",
       "server_only": false,
       "title": "v0.36.4 更新说明",
