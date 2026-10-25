@@ -489,6 +489,39 @@ def test_a2f_valid_escaped_surrogate_pair_is_still_accepted(tmp_path):
         assert client.alive is True
 
 
+def test_a2g_deeply_nested_json_kills_instead_of_dead_reader(tmp_path):
+    # 1200 层数组（约 2.4KB，远低于 512KB 行限）：json.loads 在 C 层能过，Python 层
+    # 递归归一化会 RecursionError。若它逃出 reader 线程，进程还活着但没有读端，
+    # 下一次调用只会白等到超时；必须在 <2s 内判协议错误、杀进程、writer 正常退出。
+    with _client(tmp_path, "deepnest", handshake_timeout=5.0) as (client, spawner):
+        started = time.monotonic()
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        elapsed = time.monotonic() - started
+        err = ei.value
+        assert err.retryable is False
+        assert "嵌套" in str(err) and "不可序列化" in str(err)
+        assert elapsed < 2.0, f"深层嵌套应在 2s 内判死，实际 {elapsed:.2f}s"
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+        reader = _reader_thread(client)
+        assert reader is not None
+        assert _wait_for(lambda: not reader.is_alive(), 3.0), "reader 线程应已退出"
+
+
+def test_a2h_exponent_overflow_number_is_protocol_error(tmp_path):
+    # 1e999 是合法 JSON 数字字面量，json.loads 解析成 inf 且不经过 parse_constant；
+    # 只有 allow_nan=False 的严格回写能拦下它。
+    with _client(tmp_path, "infresult") as (client, spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("echo", {"text": "x"})
+        assert ei.value.retryable is False
+        assert "无法严格回写" in str(ei.value)
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+
+
 def test_a4b_empty_next_cursor_is_protocol_error(tmp_path):
     with _client(tmp_path, "empty_cursor") as (client, spawner):
         client.initialize()
@@ -539,6 +572,17 @@ def test_a9c_iserror_text_truncated_to_500(tmp_path):
         assert len(text) - len(prefix) > 400
 
 
+def test_a9d_integer_iserror_is_not_tool_error(tmp_path):
+    # ``isError: 1`` 是真值但不是 True；只有严格的 ``is True`` 才算工具报错，
+    # 否则会把成功结果误判成失败。
+    with _client(tmp_path, "int_iserror") as (client, _spawner):
+        client.initialize()
+        result = client.call_tool("fail_int", {"reason": "int"})
+        assert result["isError"] == 1
+        assert result["content"][0]["text"] == "int isError: int"
+        assert client.alive is True
+
+
 def test_b1c_bool_id_is_stray_not_integer(tmp_path):
     with _client(tmp_path, "trueid", handshake_timeout=1.0) as (client, spawner):
         with pytest.raises(MCPError) as ei:
@@ -586,6 +630,8 @@ def test_b6c_close_during_call_wakes_with_closed_error(tmp_path):
         # 唤醒之后 close() 已经跑完；再关一次不抛、不二次杀崩。
         client.close()
         assert client.alive is False
+        # close() 只应该 terminate 一次：重复 kill 会掩盖“谁杀的进程”这条线索。
+        assert client.stats["kills"] == 1
 
 
 def test_b6d_second_call_while_busy_is_retryable(tmp_path):

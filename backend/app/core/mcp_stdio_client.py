@@ -749,14 +749,27 @@ class MCPStdioClient:
                         )
                     )
                     return
-                message = _normalize_surrogates(message)
                 try:
+                    # 代理项归一化是 Python 层递归：json.loads 在 C 层能过的深层嵌套
+                    # （如 1200 层数组，仍远低于 512KB 行限）会在这里爆 RecursionError。
+                    # 若让它逃出 reader 线程，进程还活着、ready 仍是 True，下一次调用
+                    # 只会白等到超时；所以必须和严格回写放在同一道协议闸里。
+                    message = _normalize_surrogates(message)
                     # 严格回写一次：NaN / Infinity / 孤立代理项等 T4 无法再序列化的
                     # 值必须在这里就判协议错误，不能带进下游。
                     json.dumps(message, ensure_ascii=False, allow_nan=False).encode(
                         "utf-8"
                     )
-                except (ValueError, UnicodeEncodeError, RecursionError):
+                except RecursionError:
+                    self._violate(
+                        MCPError(
+                            "MCP stdio 协议错误：stdout 行嵌套过深，形状不可序列化"
+                            f"（{_fingerprint(raw)}）",
+                            retryable=False,
+                        )
+                    )
+                    return
+                except (ValueError, UnicodeEncodeError):
                     self._violate(
                         MCPError(
                             "MCP stdio 协议错误：stdout 行含无法严格回写的内容"

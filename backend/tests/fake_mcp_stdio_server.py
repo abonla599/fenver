@@ -36,6 +36,10 @@
 - ``surrogate``       ``tools/call`` 的文本是 ``"\\ud800"`` 孤立代理项（裸文本写入）。
 - ``scalarresult``    ``tools/call`` 的 result 是标量。
 - ``str_iserror``     ``tools/call`` 回 ``"isError": "false"``（字符串，不是真值 True）。
+- ``int_iserror``     正常 server；``fail_int`` 回 ``"isError": 1``（整数真值，不是 True）。
+- ``infresult``       ``tools/call`` 裸文本回 ``1e999``（json.loads 解析成 inf，不过
+                      ``parse_constant``）。
+- ``deepnest``        initialize 回 1200 层嵌套数组（约 2.4KB，远低于 512KB 行限）后 sleep。
 - ``empty_cursor``    ``tools/list`` 回 ``nextCursor: ""``。
 - ``bigreqid``        server 请求的 id 是 300KB 字符串（回 -32601 会超过请求上限）。
 - ``eof_alive``       stdout 指到空文件（读端立刻 EOF）+ sleep 60（进程仍活）。
@@ -105,6 +109,7 @@ OK_TOOLS = {
     "echo": _tool("echo", {"text": {"type": "string"}}),
     "add": _tool("add", {"a": {"type": "number"}, "b": {"type": "number"}}),
     "fail": _tool("fail", {"reason": {"type": "string"}}),
+    "fail_int": _tool("fail_int", {"reason": {"type": "string"}}),
     "boom": _tool("boom"),
 }
 
@@ -118,6 +123,7 @@ NORMAL_MODES = {
     "serverreq",
     "slow_call",
     "flood",
+    "int_iserror",
 }
 
 
@@ -165,6 +171,12 @@ def _send_response(message: dict) -> None:
 
 def _handle_initialize(message: dict) -> None:
     request_id = message.get("id")
+    if MODE == "deepnest":
+        # 1200 层嵌套数组（约 2.4KB，远低于 512KB 行限）：json.loads 在 C 层能过，
+        # 客户端 Python 层的代理项归一化会 RecursionError。
+        send_raw("[" * 1200 + "]" * 1200)
+        time.sleep(60)
+        return
     if MODE == "slow_init":
         time.sleep(10)
     if MODE == "bigreqid":
@@ -282,6 +294,8 @@ def _tools_page(cursor):
     if MODE in NORMAL_MODES:
         if cursor is None:
             return [OK_TOOLS["echo"], OK_TOOLS["add"]], "page2"
+        if MODE == "int_iserror":
+            return [OK_TOOLS["fail"], OK_TOOLS["fail_int"], OK_TOOLS["boom"]], None
         return [OK_TOOLS["fail"], OK_TOOLS["boom"]], None
     return [], None
 
@@ -336,6 +350,14 @@ def _handle_call(message: dict) -> None:
         ) % json.dumps(message.get("id"))
         send_raw(line)
         return
+    if MODE == "infresult":
+        # 1e999 是合法 JSON 数字字面量，json.loads 直接解析成 inf，不经过
+        # parse_constant；只能靠客户端严格回写（allow_nan=False）拦下。
+        line = '{"jsonrpc":"2.0","id":%s,"result":{"n":1e999}}' % json.dumps(
+            message.get("id")
+        )
+        send_raw(line)
+        return
     if MODE == "scalarresult":
         send({"jsonrpc": "2.0", "id": message.get("id"), "result": 42})
         return
@@ -377,6 +399,13 @@ def _handle_call(message: dict) -> None:
         result = {
             "content": [{"type": "text", "text": f"工具失败: {reason}"}],
             "isError": True,
+        }
+    elif name == "fail_int":
+        # 整数 1 是真值但不是 True：客户端只能按 ``is True`` 判错。
+        reason = arguments.get("reason", "未说明")
+        result = {
+            "content": [{"type": "text", "text": f"int isError: {reason}"}],
+            "isError": 1,
         }
     elif name == "boom":
         send(
