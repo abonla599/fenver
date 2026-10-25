@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.37.5：本版只换服务端（MCP stdio 外部工具，管理员配置、默认关闭、逐次审批、进程树回收）；APK 仍 0.36.4。 */
 /* release-marker-v0.37.4：本版只换服务端（搜索结果正文读取 web_read + fetch_core 单源出站判据 + local-use NAT64 拒绝）；APK 仍 0.36.4。 */
 /* release-marker-v0.36.4：本版有安卓包（管理台安全页攻击可视化；APK 0.36.4，native 与 0.36.1 相同）；服务端与壳同版。 */
 /* release-marker-v0.36.3：本版只换服务端（管理台五分区改版、安全监控、反馈分页导出与审计脱敏）；APK 仍 0.36.1。 */

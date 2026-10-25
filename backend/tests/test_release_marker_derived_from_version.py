@@ -183,7 +183,13 @@ def _repo_side_bare_expectation(root: Path):
     marker_leads = bool(markers) and _vkey(markers[-1]) > _vkey(gradle_version)
     if newest_leads_server_only and marker_leads:
         target = notes[-1]
-        mode = "bare" if _adjacent(gradle_version, target) else "explicit"
+        # 基线不是 versionName 一个人说了算：只换服务端的版本可以连续发（v0.37.4 之后
+        # 还有 v0.37.5），versionName 按规矩一直停在 0.36.4。工具的裸跑把
+        # 「声明侧与比目标更低的那些发版说明里最高的一个」当基线（见 release_marker.py
+        # 的 baseline），这里必须照同一条算，否则第二枚 server-only 补丁会被测试误判成跳号。
+        baseline = max([gradle_version]
+                       + [n for n in notes if _vkey(n) < _vkey(target)], key=_vkey)
+        mode = "bare" if _adjacent(baseline, target) else "explicit"
         return "server-only", target, mode
     return "installer", gradle_version, "bare"
 
@@ -230,7 +236,7 @@ def test_prose_puts_the_marker_decision_before_the_local_tag_not_in_the_swap_win
 def test_real_repo_marker_equals_the_derived_declared_version(tmp_path):
     """现网这一版：声明侧标记仍在 app.js 里恰好一行；在途 server-only 版可领先。
 
-    跳号发布（v0.36.4 → v0.37.4）按工具规则裸跑必须拒绝；显式 --expect 的两种装机态
+    跳号发布（例如 v0.36.4 → v0.99.0）按工具规则裸跑必须拒绝；显式 --expect 的两种装机态
     用临时假装机包验：没有目标串 ⇒ PASS，已有目标串 ⇒ already-present 拒绝。
     CI 没有 dist\\，所以这里不读真装机包。
     """
@@ -1198,7 +1204,7 @@ def test_bare_marker_ahead_shape_never_reads_the_live_package(tmp_path):
 def test_real_repo_bare_run_names_the_marker_of_the_release_in_flight(tmp_path):
     """真仓库上裸跑给的那一串，必须等于测试**自己独立读一遍**（字面正则、不借判据的尺子）算出来
     的结果，并且逐字符等于 app.js 里最新那枚标记、在文件里恰好一行。
-    跳号 server-only 版裸跑必须拒绝；显式 --expect 用临时假装机包验 PASS / already-present。
+    跳号 server-only 版（例如 v0.36.4 → v0.99.0）裸跑必须拒绝；显式 --expect 用临时假装机包验 PASS / already-present。
     """
     scope, target, mode = _repo_side_bare_expectation(REPO_ROOT)
     expected = "release-marker-v%s" % target
