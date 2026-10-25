@@ -227,22 +227,33 @@ def test_prose_puts_the_marker_decision_before_the_local_tag_not_in_the_swap_win
         "过期话术删了，但没有把正确时刻写清楚：先打本地 tag，再构建")
 
 
-def test_real_repo_marker_equals_the_derived_declared_version():
+def test_real_repo_marker_equals_the_derived_declared_version(tmp_path):
     """现网这一版：声明侧标记仍在 app.js 里恰好一行；在途 server-only 版可领先。
 
-    跳号发布（v0.36.4 → v0.37.4）按工具规则裸跑必须拒绝，允许且只允许
-    `--expect v0.37.4` 明示目标；这里把两种形状都钉住，不替跳号静默盖章。
+    跳号发布（v0.36.4 → v0.37.4）按工具规则裸跑必须拒绝；显式 --expect 的两种装机态
+    用临时假装机包验：没有目标串 ⇒ PASS，已有目标串 ⇒ already-present 拒绝。
+    CI 没有 dist\\，所以这里不读真装机包。
     """
     declared = rm.declared_version(str(REPO_ROOT))
     marker = rm.marker_for(declared)
     scope, target, mode = _repo_side_bare_expectation(REPO_ROOT)
     if mode == "explicit":
-        rc, lines = _run(REPO_ROOT, expect="v%s" % target)
+        bare_rc, bare_lines = _run(REPO_ROOT)
+        assert bare_rc == 1 and any("version-jump" in ln for ln in bare_lines), (
+            "跳号 server-only 版必须裸跑拒绝：%s" % bare_lines)
         expected = "release-marker-v%s" % target
+        clean = tmp_path / "live-clean.js"
+        clean.write_text("/* 装机包还没有本版标记 */\n", encoding="utf-8")
+        rc, lines = _run(REPO_ROOT, expect="v%s" % target, live=str(clean))
+        assert rc == 0 and any("verdict=PASS" in ln for ln in lines), lines
+        present = tmp_path / "live-present.js"
+        present.write_text("/* %s */\n" % expected, encoding="utf-8")
+        rc2, lines2 = _run(REPO_ROOT, expect="v%s" % target, live=str(present))
+        assert rc2 == 1 and any("already-present" in ln for ln in lines2), lines2
     else:
         rc, lines = _run(REPO_ROOT)
         expected = marker
-    assert rc == 0, "仓库现状必须绿，否则下面所有反例都无从对照：%s" % lines
+        assert rc == 0, "仓库现状必须绿，否则下面所有反例都无从对照：%s" % lines
     text = APP_JS.read_text(encoding="utf-8")
     gradle_version = _gradle_versionname()
     assert re.fullmatch(r"\d+\.\d+\.\d+", gradle_version), (
@@ -258,7 +269,6 @@ def test_real_repo_marker_equals_the_derived_declared_version():
         assert expected == "release-marker-v%s" % target
         assert rm.count_marker_lines(text, expected) == 1, (
             "在途 server-only 版 %r 必须恰好一行" % expected)
-    assert any("verdict=PASS" in ln for ln in lines), lines
 
 
 def test_declaration_regex_has_not_drifted_from_pre_tag_gate():
@@ -1185,25 +1195,33 @@ def test_bare_marker_ahead_shape_never_reads_the_live_package(tmp_path):
                                  and "live-lines=1" in ln for ln in expect_lines), expect_lines
 
 
-def test_real_repo_bare_run_names_the_marker_of_the_release_in_flight():
+def test_real_repo_bare_run_names_the_marker_of_the_release_in_flight(tmp_path):
     """真仓库上裸跑给的那一串，必须等于测试**自己独立读一遍**（字面正则、不借判据的尺子）算出来
     的结果，并且逐字符等于 app.js 里最新那枚标记、在文件里恰好一行。
-    写死的版本号会腐烂，所以这里两个方向都由现场推导：只换服务端的一版在途时报那一版，
-    否则报声明侧。
+    跳号 server-only 版裸跑必须拒绝；显式 --expect 用临时假装机包验 PASS / already-present。
     """
     scope, target, mode = _repo_side_bare_expectation(REPO_ROOT)
     expected = "release-marker-v%s" % target
     text = APP_JS.read_text(encoding="utf-8")
     newest_in_app_js = max((m.group(1) for m in NOTE_MARKER_RE.finditer(text)), key=_vkey)
-    rc, lines = _run(REPO_ROOT, expect=("v%s" % target if mode == "explicit" else None))
-    assert rc == 0, "真仓库现状必须绿（这条是常驻锁，红着就是拦路）：%s" % lines
-    assert "scope=%s" % scope in lines[0] and "marker=%s" % expected in lines[0], (
-        "裸跑的 target/scope 与独立推导不符：%s（独立推导=%s/%s）" % (lines[0], scope, target))
-    assert any("verdict=PASS" in ln and expected in ln for ln in lines), lines
     if mode == "explicit":
         bare_rc, bare_lines = _run(REPO_ROOT)
         assert bare_rc == 1 and any("version-jump" in ln for ln in bare_lines), (
-            "跳号 server-only 版必须裸跑拒绝、--expect 才放行：%s" % bare_lines)
+            "跳号 server-only 版必须裸跑拒绝：%s" % bare_lines)
+        clean = tmp_path / "live-clean.js"
+        clean.write_text("/* 装机包还没有本版标记 */\n", encoding="utf-8")
+        rc, lines = _run(REPO_ROOT, expect="v%s" % target, live=str(clean))
+        assert rc == 0, lines
+        present = tmp_path / "live-present.js"
+        present.write_text("/* %s */\n" % expected, encoding="utf-8")
+        rc2, lines2 = _run(REPO_ROOT, expect="v%s" % target, live=str(present))
+        assert rc2 == 1 and any("already-present" in ln for ln in lines2), lines2
+    else:
+        rc, lines = _run(REPO_ROOT)
+        assert rc == 0, "真仓库现状必须绿（这条是常驻锁，红着就是拦路）：%s" % lines
+    assert "scope=%s" % scope in lines[0] and "marker=%s" % expected in lines[0], (
+        "裸跑的 target/scope 与独立推导不符：%s（独立推导=%s/%s）" % (lines[0], scope, target))
+    assert any("verdict=PASS" in ln and expected in ln for ln in lines), lines
     # 判据与探针同构就是恒绿自证，所以这一格反过来问：**独立推导要是算错版本，这条必须红**。
     # 现场 v0.34.3 与 app.js 里最新那枚逐字符相同，由下面这句钉住（"恰好一行"那格由
     # test_real_repo_marker_equals_the_derived_declared_version 钉，那里数过 marker-lines）。
