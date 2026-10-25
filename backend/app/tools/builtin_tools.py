@@ -154,10 +154,10 @@ def _note_search_usage(attempts, ok: bool) -> None:
 _TITLE_LIMIT = 120
 _SNIPPET_LIMIT = 200
 _URL_LIMIT = 300
-# Unicode Cc（控制）与 Cf（格式）字符：换行会把一条结果拆成两行（过程面板与模型都会
-# 把后半截当成新的一条），零宽/RTL 覆盖符能让同一段文本显示成另一句话。外部文本没有
-# 理由把这两类字符带进工具输出，一律去掉、不做替换。
-_DROPPED_CATEGORIES = frozenset(("Cc", "Cf"))
+# Unicode Cc（控制）、Cf（格式）、Zl（行分隔）、Zp（段分隔）字符：换行会把一条结果
+# 拆成两行（过程面板与模型都会把后半截当成新的一条），零宽/RTL 覆盖符能让同一段文本
+# 显示成另一句话。外部文本没有理由把这几类字符带进工具输出，一律去掉、不做替换。
+_DROPPED_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
 
 
 def _drop_control_chars(text: str) -> str:
@@ -241,7 +241,7 @@ def web_search_tool(query: str, user_id: str = "") -> ToolResponse:
     # 真人搜成功一次 = 源此刻好用，这是比定时探测更强的证据，也让探测别再敲源站
     availability.note_search_ok()
     # v0.37.4：为这一批结果签发短期句柄（只存 url/title/owner/created_at）。
-    # 只有 https、有主机名、URL ≤2048 的行拿得到 ID；拿不到的行照旧显示 URL，
+    # http/https、有主机名、URL ≤2048 的行拿得到 ID；拿不到的行照旧显示 URL，
     # 只是不能被读取——发一枚注定读不了的 ID 比不发更糟。
     ids = result_store.remember(rows, owner=user_id)
     # 标注头写在正文之前：结果里的标题与摘要来自别人写的网页，网页作者完全可能

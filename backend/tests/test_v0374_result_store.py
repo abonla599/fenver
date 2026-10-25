@@ -1,7 +1,7 @@
 """v0.37.4 T2：搜索结果句柄（`app/tools/result_store.py`）的合同测试。
 
 判据一句话：这枚 `r_...` 是**有界、短期、绑定 owner 的"结果句柄"**，不是正文缓存。
-- 只给 https + 有主机名 + URL ≤2048 的行签发；http/空主机/超长行返回 None；
+- 只给 http/https + 有主机名 + URL ≤2048 的行签发；其它 scheme/空主机/超长行返回 None；
 - 映射里只有 url/title/owner/created_at 四格，没有正文、snippet、query；
 - TTL 600 s、全局 512、每 owner 64，超出按插入顺序淘汰最旧；
 - owner 不匹配只回原因、不回内容（跨用户重放门）；
@@ -191,7 +191,7 @@ def test_the_map_carries_only_url_title_owner_and_created_at():
 
 # ---------- 签发条件 ----------
 
-def test_only_https_with_a_host_and_a_bounded_url_gets_an_id():
+def test_only_http_and_https_with_a_host_and_a_bounded_url_get_an_id():
     overlong = "https://e.example/" + "a" * result_store.MAX_URL_CHARS
     ids = result_store.remember([
         _row(url="https://e.example/ok"),
@@ -202,9 +202,11 @@ def test_only_https_with_a_host_and_a_bounded_url_gets_an_id():
         _row(url="ftp://e.example/file"),
     ], owner="u")
     assert ids[0] is not None and result_store.RESULT_ID_RE.match(ids[0])
-    assert ids[1:] == [None] * 5, "不满足 https/host/长度的行不该拿到 ID"
+    assert ids[1] is not None, "http 行也应签发：读取侧允许 http/443 之外的 80"
+    assert ids[2:] == [None] * 4, "不满足 http(s)/host/长度的行不该拿到 ID"
     assert result_store.lookup(ids[0], owner="u")[1] == "ok"
-    assert len(result_store._store) == 1, "不可签的行不该在表里留下任何东西"
+    assert result_store.lookup(ids[1], owner="u")[1] == "ok"
+    assert len(result_store._store) == 2, "不可签的行不该在表里留下任何东西"
 
 
 def test_the_stored_title_is_capped_at_120_chars():

@@ -649,8 +649,8 @@ def test_every_https_result_line_carries_a_unique_result_id_but_artifacts_do_not
     assert "中段已省略" not in resp.to_string()
 
 
-def test_an_http_result_still_shows_its_url_but_gets_no_result_id(monkeypatch):
-    """http 行照旧显示 URL，但不签 ID：读取侧只允许 https/443，死 ID 不如不给。"""
+def test_an_http_result_also_gets_a_result_id(monkeypatch):
+    """http/https 都签 ID；读取侧 fetch_core 对 http 只放行默认/80 端口。"""
     from app.tools import web_search as ws
 
     monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
@@ -661,8 +661,8 @@ def test_an_http_result_still_shows_its_url_but_gets_no_result_id(monkeypatch):
     lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
     assert len(lines) == 2, out
     assert lines[0].startswith("- [r_") and "https://e.example/1" in lines[0]
-    assert lines[1].startswith("- 明文页") and "http://e.example/2" in lines[1]
-    assert "r_" not in lines[1], f"http 行拿到了读不了的句柄：{lines[1]!r}"
+    assert lines[1].startswith("- [r_") and "http://e.example/2" in lines[1]
+    assert re.search(r"\[(r_[A-Za-z0-9_-]{16})\]", lines[1]), lines[1]
 
 
 def test_three_extreme_fields_stay_under_the_result_budget(monkeypatch):
@@ -707,9 +707,10 @@ def test_external_fields_cannot_break_the_result_line_structure(monkeypatch):
 
     monkeypatch.setattr(ws, "search", lambda query, max_results=3: [
         {"title": "第一行\n第二行\u200b标题", "url": "https://e.example/1\nx",
-         "snippet": "摘要\r\n尾巴\u202e反向"}])
+         "snippet": "摘要\r\n尾巴\u202e反向\u2028行分隔\u2029段分隔"}])
     out = execute_tool("web_search", {"query": "第一行"}, user_id="u")
     result_lines = [ln for ln in out.splitlines() if ln.startswith("- ")]
     assert len(result_lines) == 1, f"外部文本把一条结果拆成了多行：{out!r}"
     assert "\u200b" not in out and "\u202e" not in out, "格式字符漏进了工具输出"
+    assert "\u2028" not in out and "\u2029" not in out, "行/段分隔符漏进了工具输出"
     assert "https://e.example/1x" in out, "URL 里的控制字符应该只被去掉、不被改写"

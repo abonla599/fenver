@@ -60,10 +60,10 @@ def _row_str(row, key: str) -> str:
 
 
 def _signable(url: str) -> bool:
-    """只有 https、主机名非空、URL ≤ 2048 字的行才配拿句柄。
+    """只有 http/https、主机名非空、URL ≤ 2048 字的行才配拿句柄。
 
-    http 行不签：读取侧最终只允许 https/443，给一条注定读不了的记录发 ID，比不发
-    更糟（模型会拿着它反复失败）。空主机与超长 URL 同理，在进表之前就拒掉。
+    读取侧 `fetch_core` 允许 http/https（端口分别只放 80/443），所以这里两种都签；
+    其它 scheme、空主机、超长 URL 在进表之前就拒掉。
     """
     if not url or len(url) > MAX_URL_CHARS:
         return False
@@ -72,7 +72,7 @@ def _signable(url: str) -> bool:
         host = parsed.hostname
     except ValueError:
         return False
-    return parsed.scheme == "https" and bool(host)
+    return parsed.scheme in ("http", "https") and bool(host)
 
 
 def _clip_title(title: str) -> str:
