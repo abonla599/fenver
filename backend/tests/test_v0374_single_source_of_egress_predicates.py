@@ -13,6 +13,8 @@ v0.37.4 的安全故事只有一句：`http_fetch` 与 `web_read` 共用**同一
 import ast
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).resolve().parent.parent
 TOOLS = BACKEND / "app" / "tools"
 
@@ -69,3 +71,11 @@ def test_scanners_have_teeth():
     assert _function_def_lines("def other():\n    pass\n",
                                "contract_reject_reason") == []
     assert _lines_containing("def other():\n    pass\n", "getaddrinfo") == []
+
+
+def test_fetch_core_refuses_a_missing_policy():
+    """policy=None 是"忘了传"，不是"全放行"；必须在任何解析之前炸。"""
+    from app.tools import fetch_core
+
+    with pytest.raises(TypeError):
+        fetch_core.fetch("https://e.example/a", policy=None)

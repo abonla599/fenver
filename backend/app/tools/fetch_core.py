@@ -370,6 +370,10 @@ def fetch(url: str, *, policy, schemes=DEFAULT_SCHEMES, ports=None,
     factory = make_client if client_factory is None else client_factory
     resolve_host = _resolve_addresses if resolver is None else resolver
     joiner = urljoin if urljoin_func is None else urljoin_func
+    # policy 是目的地准入的唯一入口；None/空值不是"全放行"，而是调用方忘了传。
+    # 静默放行会把"少写一个参数"变成"所有地址都能抓"，所以这里直接炸。
+    if not callable(policy):
+        raise TypeError("fetch_core.fetch 需要 policy(host) callable，None 不是全放行")
     raw_url = str(url or "").strip()
 
     # 审计锚点：从**原始** URL 尽力取 host/path；query/fragment/userinfo 在这一步
