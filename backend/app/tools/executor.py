@@ -34,14 +34,24 @@ _FREQ_LIMITS = {"execute_code": (600.0, 10), "plan_add": (900.0, 6),
                 # 再读下一页），档口与 execute_code 同量级但更紧：4 页/10 分钟，
                 # 最坏上下文约 14.9k 字。键仍是服务端 user_id，不是模型参数。
                 "web_read": (600.0, 4)}
+# v0.37.5 T5：外部来源（MCP stdio）的工具名是动态的，没法进上面那张按名字的白名单，
+# 所以另设一张**按 source 前缀**的小表（仍显式，不做任意匹配）。内置档优先；只有
+# 内置表里没有的工具才按 source 前缀选档。20 次/10 分钟：比 web_read 宽（一个 server
+# 的每条工具各自计数），又足够拦住"模型被外部正文驱动、把一个 server 当脚本循环"。
+_EXTERNAL_FREQ = {"mcp-stdio:": (600.0, 20)}
 _FREQ_LEDGER = defaultdict(list)
 _FREQ_LEDGER_MAX_KEYS = 4096          # 键数上限：超了顺手清过期键，防无界增长
 _FREQ_LOCK = threading.Lock()         # 计数与追加必须同锁：否则并发两条各见 9 次、各放行
 
 
-def _freq_gate(tool_name: str, user_id: str):
-    """放行回 None；超预算回一句给模型看的话（不再执行）。"""
-    limit = _FREQ_LIMITS.get(tool_name)
+def _freq_gate(tool_name: str, user_id: str, limit=None):
+    """放行回 None；超预算回一句给模型看的话（不再执行）。
+
+    ``limit`` 是 v0.37.5 加的可选显式档：显式给了就用它（外部来源按 source 前缀
+    选出的档走这条路），没给才查按工具名的内置白名单；两边都没有 = 不拦。
+    """
+    if limit is None:
+        limit = _FREQ_LIMITS.get(tool_name)
     if limit is None:
         return None
     window, cap = limit
@@ -61,6 +71,23 @@ def _freq_gate(tool_name: str, user_id: str):
             stale = [k for k, v in _FREQ_LEDGER.items() if not v or now - v[-1] >= window]
             for k in stale:
                 del _FREQ_LEDGER[k]
+    return None
+
+
+def _freq_limit_for(tool_name: str, info: dict):
+    """这次调用该用哪一档频控。内置按工具名优先，其次按 source 前缀，都没有 = 无档。
+
+    顺序是刻意的：内置工具的档口不因为有人把 source 改成外部形状而变化；反过来，
+    ``mcp-stdio:`` 这类动态名字只有走到第二张表才有档。
+    """
+    limit = _FREQ_LIMITS.get(tool_name)
+    if limit is not None:
+        return limit
+    source = info.get("source") if isinstance(info, dict) else None
+    if isinstance(source, str):
+        for prefix, tier in _EXTERNAL_FREQ.items():
+            if source.startswith(prefix):
+                return tier
     return None
 
 # ---------- 挂起声明的两样配套（工单 #79 频控档 / 工单 #40 接得住 resume）----------
@@ -509,7 +536,8 @@ def _dispatch(tool_name: str, arguments: dict, user_id: str = None,
                                      hint="按上面那句的理由办，不要重跑已跑过的步骤"), ran=False)
         kwargs["resume"] = {"state": resume["state"], "answer": resume["answer"]}
     # 频控放在真正执行之前、参数清洗之后：被闸门挡下的调用不该已经拉起过容器。
-    if blocked := _freq_gate(tool_name, user_id):
+    # v0.37.5：档口在调用前选好（内置名优先，其次 source 前缀），显式传给闸门。
+    if blocked := _freq_gate(tool_name, user_id, _freq_limit_for(tool_name, info)):
         return _ret(ToolResponse(False, error=blocked,
                                  hint="等待后用一次调用完成剩余步骤"), ran=False)
     try:

@@ -36,6 +36,7 @@
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import random
@@ -183,10 +184,17 @@ def _was_timeout(client: Optional[MCPStdioClient]) -> bool:
 
 
 def _schema_flags(tools: Sequence[Dict[str, Any]]) -> Dict[str, int]:
-    """status 里的 schema 概览：只报计数，绝不回显第三方 schema 原文。"""
+    """status 里的 schema 概览：只报计数，绝不回显第三方 schema 原文。
+
+    ``freeform``（v0.37.5 T5）是"没有 properties、且 additionalProperties 为 True"
+    的条目数：执行器只转发 ``parameters.properties`` 里声明过的键，这类工具被调用时
+    模型给的参数会全部丢掉（计划 §5.7 的既有纪律）。桥接层**仍然注册**它们，状态
+    端点把计数亮出来让管理员知道"这个 server 里有一类工具本版不可用"。
+    """
     with_schema = 0
     object_schema = 0
     no_properties = 0
+    freeform = 0
     for tool in tools:
         schema = tool.get("inputSchema") if isinstance(tool, dict) else None
         if isinstance(schema, dict):
@@ -195,11 +203,14 @@ def _schema_flags(tools: Sequence[Dict[str, Any]]) -> Dict[str, int]:
                 object_schema += 1
             if not schema.get("properties"):
                 no_properties += 1
+                if schema.get("additionalProperties") is True:
+                    freeform += 1
     return {
         "total": len(tools),
         "input_schema": with_schema,
         "object_schema": object_schema,
         "no_properties": no_properties,
+        "freeform": freeform,
     }
 
 
@@ -219,6 +230,8 @@ class _Runtime:
         self.failures = 0
         self.stable_marked = False
         self.tools: List[Dict[str, Any]] = []
+        # T5：桥接层注册成功后的条数。None = 桥还没报过，快照退回 min(total,16)。
+        self.tools_exposed: Optional[int] = None
         self.circuit_until = 0.0
         self.circuit_audited = False
         self.probe_mode = False
@@ -296,6 +309,13 @@ class StdioSupervisor:
         self._runtimes: Dict[str, _Runtime] = {}
         self._global_enabled = False
         self._started = False
+        # T5：桥接层监听回调。只在锁外调用（见 ``_notify_ready`` /
+        # ``_notify_disabled``），否则回调里读 supervisor 状态会与这把锁死锁。
+        self._on_ready_cb: Optional[Callable[[str, List[Dict[str, Any]]], Any]] = None
+        self._on_disabled_cb: Optional[Callable[[str], Any]] = None
+        # 「这一次 ready→disabled 已经通知过」的 server 集合：worker 循环、shutdown
+        # 与 _stop_runtime 都可能在同一次停用上各喊一声，靠这个集合收敛成一次。
+        self._disabled_notified: set = set()
 
     # ------------------------------------------------------------------ 对外 API
 
@@ -318,6 +338,10 @@ class StdioSupervisor:
                 for runtime in runtimes:
                     runtime.state = STATE_DISABLED
                     runtime.thread = None
+            for runtime in runtimes:
+                # _stop_runtime 已经通知过的会被 _disabled_notified 收敛掉；
+                # 这里补的是"线程卡住、状态没走到 disabled"的那几条。
+                self._notify_disabled(runtime.server_id)
             self._started = False
 
     def reload(self) -> Dict[str, Any]:
@@ -365,6 +389,53 @@ class StdioSupervisor:
         if client is None or not client.alive:
             return None
         return client
+
+    def set_tool_callbacks(
+        self,
+        on_ready: Optional[Callable[[str, List[Dict[str, Any]]], Any]] = None,
+        on_disabled: Optional[Callable[[str], Any]] = None,
+    ) -> None:
+        """T5 桥接层注册监听口。传 None = 取消该方向的回调。
+
+        回调一律在 supervisor 的锁**外**调用；回调抛异常只记一行 warning，绝不打
+        死 worker / reload（工具注册失败不该让一个能跑的 server 变成崩溃循环）。
+        """
+        with self._lock:
+            self._on_ready_cb = on_ready
+            self._on_disabled_cb = on_disabled
+
+    def ready_tools(self) -> Dict[str, List[Dict[str, Any]]]:
+        """仅 ready 且进程活着的 ``{server_id: [tools...]}``，深拷贝。
+
+        深拷贝是给桥接层的隔离：它会把这份列表缓存到下一次 ready，调用方（或第三方
+        server）后续改动任何嵌套 dict 都不许改到 supervisor 的运行态。
+        """
+        with self._lock:
+            candidates = [
+                (runtime.server_id, runtime.client, runtime.tools)
+                for runtime in self._runtimes.values()
+                if runtime.state == STATE_READY
+            ]
+        return {
+            server_id: copy.deepcopy(tools)
+            for server_id, client, tools in candidates
+            if client is not None and client.alive
+        }
+
+    def set_tools_exposed(self, server_id: str, count: int) -> None:
+        """桥接层上报"这个 server 真正注册进模型的条数"（T5）。
+
+        只接受非负整数；未知 server（已被删除）静默忽略——那是一次竞态，不是错误。
+        快照优先用这个数；桥还没报过时退回 ``min(total, MAX_TOOLS_EXPOSED)``。
+        """
+        try:
+            value = int(count)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            runtime = self._runtimes.get(server_id)
+            if runtime is not None:
+                runtime.tools_exposed = max(0, value)
 
     def call_tool(
         self,
@@ -563,6 +634,8 @@ class StdioSupervisor:
                 return
             runtime.thread = None
         self._set_state(runtime, STATE_DISABLED)
+        # T5：disabled / remove / 关闭都走这里；crashed/backoff 不走（它们保留注册）。
+        self._notify_disabled(runtime.server_id)
 
     # ------------------------------------------------------------------ worker
 
@@ -572,6 +645,7 @@ class StdioSupervisor:
             while not self._shutdown.is_set() and not stop_event.is_set():
                 if not self._active(runtime):
                     self._set_state(runtime, STATE_DISABLED)
+                    self._notify_disabled(runtime.server_id)
                     self._wait(runtime, self._monitor_interval, stop_event)
                     continue
                 if runtime.state == STATE_CONFIG_ERROR:
@@ -717,6 +791,9 @@ class StdioSupervisor:
                 "restarts": max(0, runtime.spawns - 1),
             },
         )
+        # T5：ready 之后、监控之前通知桥接层注册工具。回调在锁外，且异常被
+        # _notify_ready 吞掉——注册失败不该把一条能跑的 server 打成崩溃循环。
+        self._notify_ready(runtime.server_id, runtime.tools)
         self._monitor_ready(runtime, client, wrapper, stop_event)
 
     def _failed_start(
@@ -944,6 +1021,11 @@ class StdioSupervisor:
         entry = runtime.entry
         command = entry.get("command") or ""
         tools_total = len(runtime.tools)
+        # T5：桥接层报过就以它为准（真注册进模型的条数，含撞名/坏 schema 被拒）；
+        # 还没报过时按曝光上限估一个，保持 T4 的既有语义。
+        exposed = runtime.tools_exposed
+        if exposed is None:
+            exposed = min(tools_total, MAX_TOOLS_EXPOSED)
         return {
             "id": runtime.server_id,
             "enabled": bool(entry.get("enabled")),
@@ -952,7 +1034,7 @@ class StdioSupervisor:
             "restarts": max(0, runtime.spawns - 1),
             "uptime_s": round(self._uptime(runtime), 3),
             "tools_total": tools_total,
-            "tools_exposed": min(tools_total, MAX_TOOLS_EXPOSED),
+            "tools_exposed": exposed,
             "schema_flags": _schema_flags(runtime.tools),
             "command": command,
             "command_basename": command_basename(command),
@@ -963,6 +1045,34 @@ class StdioSupervisor:
         }
 
     # ------------------------------------------------------------------ 小工具
+
+    def _notify_ready(self, server_id: str, tools: Sequence[Dict[str, Any]]) -> None:
+        """锁外通知桥接层 ready；异常只记一行，绝不打死 worker。"""
+        with self._lock:
+            callback = self._on_ready_cb
+            self._disabled_notified.discard(server_id)
+        if callback is None:
+            return
+        try:
+            callback(server_id, copy.deepcopy(list(tools)))
+        except Exception as exc:                             # noqa: BLE001 - 监听不连累
+            logger.warning("MCP stdio on_ready 回调失败 %s: %s",
+                           server_id, type(exc).__name__)
+
+    def _notify_disabled(self, server_id: str) -> None:
+        """锁外通知桥接层 disabled/remove/shutdown；每个停用周期只通知一次。"""
+        with self._lock:
+            if server_id in self._disabled_notified:
+                return
+            self._disabled_notified.add(server_id)
+            callback = self._on_disabled_cb
+        if callback is None:
+            return
+        try:
+            callback(server_id)
+        except Exception as exc:                             # noqa: BLE001 - 监听不连累
+            logger.warning("MCP stdio on_disabled 回调失败 %s: %s",
+                           server_id, type(exc).__name__)
 
     def _set_state(self, runtime: _Runtime, state: str) -> None:
         with self._lock:

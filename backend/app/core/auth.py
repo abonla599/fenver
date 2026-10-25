@@ -418,6 +418,22 @@ class AuthStore:
         with self._lock:
             return any(u.get("role") == role for u in self._users.values())
 
+    def role_of(self, user_id: str) -> str:
+        """这个 user_id 当前的角色；查不到（或记录里没有合法 role）返回 ``"user"``。
+
+        v0.37.5 T5：MCP stdio 工具的管理员闸用它。与 ``has_role`` 同一条纪律——
+        同一把锁内就地读，**不复制记录、不缓存**：停用/删号/改角色必须下一次调用
+        就生效，而记录里躺着口令散列与全部令牌哈希，复制出来的那份没有理由多活一格。
+        只做类型检查，不做角色白名单归一：库里写的是什么就答什么，判 "admin" 是
+        调用方的事；``default_user`` 不在库里，由桥接层单独视为管理员。
+        """
+        with self._lock:
+            record = self._users.get(user_id) if isinstance(user_id, str) else None
+            if not isinstance(record, dict):
+                return "user"
+            role = record.get("role")
+        return role if isinstance(role, str) and role else "user"
+
     def _new_user_id(self) -> str:
         # 取 id 那处必须重取：两个线程撞上同一个 id 时，
         # `self._users[user_id] = record` 会把已有那个人整条记录覆盖掉——
