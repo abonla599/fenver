@@ -21,6 +21,17 @@ from html.parser import HTMLParser
 
 BODY_CHAR_LIMIT = 3000
 
+# 解析器的两道预算：栈深度和标签事件数。外部页面可以合法地写一万个不配对的
+# 结束标签；没有上限时每次结束标签都从栈尾整段扫，CPU 随页面大小二次增长，
+# 而 http_fetch 的总时限只管网络阶段。64 层足够任何正常正文；事件数上限让
+# 1 MiB 的标签洪水也只走线性一遍。
+MAX_NESTING = 64
+MAX_TAG_EVENTS = 200_000
+# 与 http_fetch.MAX_BODY_BYTES 对齐：直接调用 extract_text 的人也不能拿 100 MB
+# 的字符串把线性扫描拖长；超出部分本来也不会进 3000 字的正文。
+MAX_INPUT_CHARS = 1024 * 1024
+
+
 # 没有可见正文时的固定人话。**绝不**回退成原始 HTML：外部页面只要把可见文本做成
 # 空（纯脚本页、挑战页、JS 渲染页），整页 `<script>` 就会变成喂给模型的"正文"。
 EMPTY_BODY_TEXT = "（该页面没有可读正文）"
@@ -62,6 +73,8 @@ class _RegionCollector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._drop_depth = 0
         self._stack = []            # 与 _drop_depth 同进的标签栈，处理未闭合的错叠
+        self._stack_overflow = 0    # 超过 MAX_NESTING 后被丢弃的丢弃容器层数
+        self._tag_events = 0
         self._regions = []          # [(region_name, [chunks])]，闭合的 article/main
         self._open = []             # [(region_name, [chunks])]，还没闭合的嵌套
         self._base = []
@@ -72,37 +85,56 @@ class _RegionCollector(HTMLParser):
         return self._base
 
     def handle_starttag(self, tag, attrs):
+        self._tag_events += 1
+        if self._tag_events > MAX_TAG_EVENTS:
+            return
         if tag in _DROP_TAGS:
             self._drop_depth += 1
-            self._stack.append(tag)
+            if len(self._stack) < MAX_NESTING:
+                self._stack.append(tag)
+            else:
+                self._stack_overflow += 1
             return
-        if tag in _REGION_TAGS:
+        if tag in _REGION_TAGS and len(self._open) < MAX_NESTING:
             entry = (tag, [])
             self._open.append(entry)
         if tag in _BLOCK_TAGS:
             self._sink().append("\n")
 
     def handle_startendtag(self, tag, attrs):
+        self._tag_events += 1
+        if self._tag_events > MAX_TAG_EVENTS:
+            return
         # `<article/>` 这种自闭合区域：内容为空，进栈出栈走同一条例外路径。
-        if tag in _REGION_TAGS:
+        if tag in _REGION_TAGS and len(self._regions) < MAX_NESTING:
             self._regions.append((tag, []))
             return
         if tag in _BLOCK_TAGS and tag not in _DROP_TAGS:
             self._sink().append("\n")
 
     def handle_endtag(self, tag):
+        self._tag_events += 1
+        if self._tag_events > MAX_TAG_EVENTS:
+            return
         if tag in _DROP_TAGS:
             # 弹最近的同名容器再扣 depth：多出来的 `</script>` 找不到配对容器，
             # 一条都不扣——凭空把 depth 减一会把后面真正该跳的脚本内容放进来。
-            if self._stack:
-                for idx in range(len(self._stack) - 1, -1, -1):
-                    if self._stack[idx] == tag:
-                        self._stack.pop(idx)
-                        self._drop_depth = max(0, self._drop_depth - 1)
-                        break
+            matched = False
+            for idx in range(len(self._stack) - 1, -1, -1):
+                if self._stack[idx] == tag:
+                    self._stack.pop(idx)
+                    self._drop_depth = max(0, self._drop_depth - 1)
+                    matched = True
+                    break
+            if not matched and self._stack_overflow > 0:
+                # 栈被 MAX_NESTING 截断后，对应的结束标签只能按"先欠后还"记账；
+                # 不还这笔会让 _drop_depth 永远大于 0，整页正文被静默丢光。
+                self._stack_overflow -= 1
+                self._drop_depth = max(0, self._drop_depth - 1)
             return
         if tag in _REGION_TAGS and self._open:
             # 弹出到最近的同名区域（容忍 `<article><main>` 不闭合就交错的情况）。
+            # _open 已被 MAX_NESTING 截断，单次扫描最多 64 层。
             for idx in range(len(self._open) - 1, -1, -1):
                 if self._open[idx][0] == tag:
                     self._regions.append(self._open.pop(idx))
@@ -146,6 +178,8 @@ def extract_text(content_type: str, text: str, limit: int = BODY_CHAR_LIMIT) -> 
     `EMPTY_BODY_TEXT`，绝不把 `text.strip()`（原始 HTML，含 script/style）当正文。
     外部页面是本工具不可信输入的一端，"没有可见正文"必须是空结果，不是整页原文。
     """
+    if len(text) > MAX_INPUT_CHARS:
+        text = text[:MAX_INPUT_CHARS]
     if content_type in ("text/html", "application/xhtml+xml"):
         try:
             parsed = _RegionCollector()

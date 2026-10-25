@@ -21,7 +21,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core import authz, usage
 # v0.34.0 D1：限流账"住在哪儿"抽成一层后端（默认内存，Redis 那条路不落生产）。
@@ -42,7 +42,7 @@ from app.core.client_ip import LOOPBACK, client_ip
 # 只 import AuthError：找回那一支要不要计费看的是 e.charge 这个显式标记，
 # 不再需要把 RESET_FAIL 那句文案搬进路由层（终审 F4）。
 from app.core.auth import (AuthError, DEVICE_SECRET_INACTIVE_SECONDS,
-                           SESSION_TOKEN_TTL_SECONDS, hash_secret)
+                           SESSION_TOKEN_TTL_SECONDS, USERNAME_MAX, hash_secret)
 from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
 
 router = APIRouter(tags=["身份"])
@@ -506,7 +506,7 @@ def _clear_device_secret(response: Response) -> None:
 
 
 class RegisterRequest(BaseModel):
-    username: str
+    username: str = Field(..., max_length=USERNAME_MAX)
     password: str
     # 三条固定问题的答案，顺序与 auth.RECOVERY_QUESTIONS 对齐。这里是必填：存储层
     # 允许记录没有找回凭据（真实库里就有那之前的老账号），但经 API 新注册的人必须
@@ -515,12 +515,12 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
+    username: str = Field(..., max_length=USERNAME_MAX)
     password: str
 
 
 class ResetRequest(BaseModel):
-    username: str
+    username: str = Field(..., max_length=USERNAME_MAX)
     # 条数不在这里判，和下面的 new_answers 同一层：存储层那道闸门（auth._check_answer_shapes）
     # 在读库与比对之前就会抛出，落到 HTTP 还是那句指着题数的中文 422、照样不计费（判据见
     # tests/test_auth.py 里那条零次 bcrypt 锁与 tests/test_auth_endpoints.py 里那条 free_typo 锁）。

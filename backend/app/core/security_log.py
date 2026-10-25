@@ -58,6 +58,23 @@ MERGE_KEY_LIMIT = 4096
 MERGE_WINDOW_SECONDS = 60.0
 FLUSH_INTERVAL_SECONDS = 5.0
 MAX_AGE_SECONDS = 30 * 24 * 3600
+
+# 账号名先截到有界前缀再跑 category()：公开端点会把用户名原样送到这里，2 MB 的
+# 串逐字符分类就是一条未鉴权的 CPU 放大路径。64 是最终落盘上限，256 给控制字符
+# 留出足够的清洗余量，两者都不是"用户名合法长度"（那是 auth.USERNAME_MAX 的事）。
+MAX_ACCOUNT_CHARS = 64
+ACCOUNT_SCAN_LIMIT = 256
+
+# 匿名 401/403 的埋点限额：攻击者能用不同路径刷满 2000 条内存环，把正常事件挤出去。
+# 三条上限分别管"全局速率""单来源速率""环内占比"，任一触顶就丢弃这条埋点本身，
+# 不丢别的账——正常事件永远优先。
+BLOCKED_WINDOW_SECONDS = 60.0
+MAX_BLOCKED_EVENTS = 120
+MAX_BLOCKED_EVENTS_PER_SOURCE = 12
+MAX_BLOCKED_IN_EVENTS = 500
+_BLOCKED_WINDOW = [0.0, 0]
+_BLOCKED_SOURCES = {}
+
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_FILE_LINES = 2000
 AUDIT_LARGE_BYTES = 5 * 1024 * 1024          # summary 里 audit_file_large 的阈值
@@ -101,11 +118,40 @@ def _warn(message: str) -> None:
 
 
 def _clean_account(value) -> str:
-    """去控制字符（Cc/Cf：含 NUL、零宽连接符）、strip、截断 64；空 → anonymous。"""
-    text = "".join(ch for ch in str(value or "")
+    """去控制字符（Cc/Cf：含 NUL、零宽连接符）、strip、截断 64；空 → anonymous。
+
+    只扫有界前缀：2 MB 用户名不该在这里被逐字符分类（公开端点可并发放大）。
+    """
+    raw = str(value or "")[:ACCOUNT_SCAN_LIMIT]
+    text = "".join(ch for ch in raw
                    if unicodedata.category(ch) not in ("Cc", "Cf"))
-    text = text.strip()[:64]
+    text = text.strip()[:MAX_ACCOUNT_CHARS]
     return text or "anonymous"
+
+
+def _blocked_budget_locked(source: str, now: float) -> bool:
+    """auth.blocked 的埋点预算；调用方已持有 _LOCK。
+
+    只限制这一类事件，正常登录失败/限流/管理员动作不经过这里。
+    """
+    start, count = _BLOCKED_WINDOW
+    if now - start >= BLOCKED_WINDOW_SECONDS:
+        _BLOCKED_WINDOW[0], _BLOCKED_WINDOW[1] = now, 0
+        _BLOCKED_SOURCES.clear()
+    if _BLOCKED_WINDOW[1] >= MAX_BLOCKED_EVENTS:
+        return False
+    entry = _BLOCKED_SOURCES.get(source)
+    if entry is None or now - entry[0] >= BLOCKED_WINDOW_SECONDS:
+        entry = [now, 0]
+        _BLOCKED_SOURCES[source] = entry
+    if entry[1] >= MAX_BLOCKED_EVENTS_PER_SOURCE:
+        return False
+    _BLOCKED_WINDOW[1] += 1
+    entry[1] += 1
+    if len(_BLOCKED_SOURCES) > 4096:
+        # 来源前缀本身已被限到 /24、/48；这里再兜一层内存上限。
+        _BLOCKED_SOURCES.clear()
+    return True
 
 
 def _clean_route(value) -> str:
@@ -262,6 +308,13 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
 
         with _LOCK:
             _ensure_loaded_locked()
+            if event_type == "auth.blocked":
+                if not _blocked_budget_locked(source, moment):
+                    return None
+                blocked_in_ring = sum(
+                    1 for existing in _EVENTS if existing["type"] == "auth.blocked")
+                if blocked_in_ring >= MAX_BLOCKED_IN_EVENTS:
+                    return None
             key = (event_type, source, source_fp, clean_account, clean_route,
                    clean_status, detail)
             last = _MERGE.get(key)
@@ -502,6 +555,8 @@ def reset_for_tests(path=None, autoflush=False) -> None:
         _FILE_LINES = 0
         _PATH_OVERRIDE = path
         _AUTOFLUSH = bool(autoflush)
+        _BLOCKED_WINDOW[0], _BLOCKED_WINDOW[1] = 0.0, 0
+        _BLOCKED_SOURCES.clear()
         # 测试从空状态出发，不读盘；要演懒加载的用例显式把 _LOADED 置回 False。
         _LOADED = True
 
