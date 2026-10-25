@@ -34,6 +34,7 @@ from app.core.auth import AuthStore
 from app.core.mcp_stdio import (
     STATE_BACKOFF,
     STATE_READY,
+    STATE_STOPPING,
     StdioSupervisor,
     _Runtime,
     _schema_flags,
@@ -86,11 +87,34 @@ def _tool(name, *, description="演示工具", schema=None):
     return item
 
 
+def _clone_tools(tools):
+    """测试夹层的深拷贝；深嵌套 schema 拷不动时退回浅拷贝。
+
+    真实 supervisor 的逐条安全复制是 T5 BLOCK 的修复点（见 mcp_stdio.py）；
+    夹层自己不能先被同一颗雷打中，否则测不到被测层的 fail-closed。
+    """
+    try:
+        return copy.deepcopy(tools)
+    except RecursionError:
+        return list(tools)
+
+
+def _deep_schema(depth=300):
+    """``json.loads`` 可解析、``copy.deepcopy`` 在默认递归上限下必爆的 schema。"""
+    schema = {"type": "object", "properties": {}}
+    node = schema
+    for _ in range(depth):
+        child = {"type": "object", "properties": {}}
+        node["properties"]["n"] = child
+        node = child
+    return schema
+
+
 class FakeSupervisor:
     """只实现桥接层依赖的五个方法 + 可观测的调用账本。"""
 
     def __init__(self, tools=None, ready=None):
-        self.tools = copy.deepcopy(tools or {})
+        self.tools = {sid: _clone_tools(value) for sid, value in (tools or {}).items()}
         self.ready = set(self.tools) if ready is None else set(ready)
         self.callbacks = {}
         self.exposed = {}
@@ -101,7 +125,7 @@ class FakeSupervisor:
         self.callbacks = {"ready": on_ready, "disabled": on_disabled}
 
     def ready_tools(self):
-        return {sid: copy.deepcopy(self.tools[sid])
+        return {sid: _clone_tools(self.tools[sid])
                 for sid in self.ready if sid in self.tools}
 
     def is_ready(self, sid):
@@ -127,10 +151,10 @@ class FakeSupervisor:
 
     def fire_ready(self, sid, tools=None):
         if tools is not None:
-            self.tools[sid] = copy.deepcopy(tools)
+            self.tools[sid] = _clone_tools(tools)
         self.ready.add(sid)
         callback = self.callbacks["ready"]
-        callback(sid, copy.deepcopy(self.tools[sid]))
+        callback(sid, _clone_tools(self.tools[sid]))
 
     def fire_disabled(self, sid):
         self.ready.discard(sid)
@@ -665,3 +689,262 @@ def test_supervisor_status_reports_total_17_exposed_16():
     snapshot = supervisor.status()["servers"][0]
     assert snapshot["tools_total"] == 17
     assert snapshot["tools_exposed"] == 16
+
+
+# --------------------------------------------------------------------------- BLOCK 深嵌套
+# 审查复现：json.loads 可解析但 copy.deepcopy 在 ~300 层抛 RecursionError。
+# 修法要求"坏 schema 该条拒、其余仍注册"，且单 server 的异常不中断后面的 server。
+
+
+def test_deep_schema_rejects_only_that_tool_and_other_server_still_registers():
+    """BLOCK：A 的深 schema 只拒自己；A 的好工具与排在后面的 B 都注册。"""
+    sid_a, sid_b = "srvdeep", "srvok"
+    deep = _deep_schema()
+    # 前提校准：这份 schema 确实是"可解析但拷不动"的形状，而不是构造错了。
+    assert isinstance(json.loads(json.dumps(deep)), dict)
+    raw_a = [_tool("good_a"), _tool("deep_tool", schema=deep)]
+    raw_b = [_tool("good_b")]
+    supervisor = FakeSupervisor({sid_a: raw_a, sid_b: raw_b}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.attach()
+
+    supervisor.fire_ready(sid_a)           # 不抛
+    supervisor.fire_ready(sid_b)           # A 的坏工具不能挡住 B
+
+    good_a = bridge_mod._mapped_tool_name(sid_a, "good_a")
+    good_b = bridge_mod._mapped_tool_name(sid_b, "good_b")
+    assert good_a in tools_registry
+    assert good_b in tools_registry
+    assert bridge_mod._mapped_tool_name(sid_a, "deep_tool") not in tools_registry
+    report = bridge.rejection_report()[sid_a]
+    assert any(item["name"] == "deep_tool" and "嵌套过深" in item["reason"]
+               for item in report), report
+    assert supervisor.exposed[sid_a] == 1, "坏工具不能把 exposed 报成 2 或 0"
+    assert supervisor.exposed[sid_b] == 1
+
+
+def test_supervisor_ready_tools_and_notify_ready_skip_deep_items():
+    """BLOCK 生产者侧：ready_tools / _notify_ready 逐条复制，好工具保留、不抛。"""
+    supervisor = StdioSupervisor(
+        config_reader=lambda: {"mcp_stdio_enabled": False, "mcp_stdio_servers": []})
+    runtime = _Runtime("sdeep", {"id": "sdeep", "command": "C:/fake.exe", "args": [],
+                                 "enabled": True, "env_allowlist": []})
+    runtime.client = _AliveClient()
+    runtime.state = STATE_READY
+    runtime.tools = [_tool("good"), _tool("deep_tool", schema=_deep_schema())]
+    supervisor._runtimes["sdeep"] = runtime
+
+    ready = supervisor.ready_tools()       # 不抛
+    assert [item["name"] for item in ready["sdeep"]] == ["good"]
+    assert [item["name"] for item in runtime.tools] == ["good", "deep_tool"], \
+        "复制失败不能改到 supervisor 运行态"
+
+    seen = []
+    supervisor.set_tool_callbacks(
+        on_ready=lambda sid, tools: seen.append((sid, tools)))
+    supervisor._notify_ready("sdeep", runtime.tools)   # 不抛
+    assert len(seen) == 1 and seen[0][0] == "sdeep"
+    assert [item["name"] for item in seen[0][1]] == ["good"]
+
+
+def test_schema_or_reason_handles_deep_nesting_directly():
+    """BLOCK 预检侧：_schema_or_reason 自己就吞掉 RecursionError（不只靠外层兜）。"""
+    schema, reason = bridge_mod._schema_or_reason(
+        _tool("deep", schema=_deep_schema()))
+    assert schema is None
+    assert reason == "schema 嵌套过深"
+
+
+def test_build_entries_folds_per_tool_exception(monkeypatch):
+    """BLOCK 构建侧：单工具处理抛 RecursionError 时该条拒，好工具仍进 entries。"""
+    sid = "srvfold"
+    bridge = _bridge(FakeSupervisor({}))
+    original = bridge_mod._schema_or_reason
+
+    def _schema(raw_tool):
+        if raw_tool.get("name") == "boom":
+            raise RecursionError("simulated")
+        return original(raw_tool)
+
+    monkeypatch.setattr(bridge_mod, "_schema_or_reason", _schema)
+    entries, rejected = bridge._build_entries(sid, [_tool("good"), _tool("boom")])
+
+    assert [entry["name"] for entry in entries] == [
+        bridge_mod._mapped_tool_name(sid, "good")]
+    assert rejected == [{"name": "boom", "reason": "schema 嵌套过深"}]
+
+
+def test_build_entries_direct_with_deep_schema_rejects_only_that_tool():
+    """BLOCK 构建侧：_build_entries 直接收到深 schema 时逐条折成 rejection。"""
+    sid = "srvdirect"
+    bridge = _bridge(FakeSupervisor({}))
+    entries, rejected = bridge._build_entries(
+        sid, [_tool("good"), _tool("deep_tool", schema=_deep_schema())])
+
+    assert [entry["name"] for entry in entries] == [
+        bridge_mod._mapped_tool_name(sid, "good")]
+    assert rejected == [{"name": "deep_tool", "reason": "schema 嵌套过深"}]
+
+
+def test_attach_with_deep_nested_seed_keeps_good_tools():
+    """BLOCK 种子侧：attach 的 ready_tools 快照含深 schema 时仍能补种好工具。"""
+    sid = "srvattachdeep"
+    supervisor = FakeSupervisor(
+        {sid: [_tool("seed_good"), _tool("seed_deep", schema=_deep_schema())]},
+        ready={sid})
+    bridge = _bridge(supervisor)
+    bridge.attach()                        # 不抛
+
+    assert bridge_mod._mapped_tool_name(sid, "seed_good") in tools_registry
+    assert bridge_mod._mapped_tool_name(sid, "seed_deep") not in tools_registry
+    assert supervisor.exposed[sid] == 1
+    report = bridge.rejection_report()[sid]
+    assert any(item["name"] == "seed_deep" and "嵌套过深" in item["reason"]
+               for item in report), report
+
+
+def test_refresh_build_failure_isolated_to_one_server(monkeypatch):
+    """BLOCK 外层兜底：单 server 的 _build_entries 抛错，后面的 server 照常注册。"""
+    sid_a, sid_b = "srvbuildbad", "srvbuildok"
+    supervisor = FakeSupervisor({sid_a: [_tool("a")], sid_b: [_tool("b")]}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.attach()
+    original = bridge._build_entries
+
+    def _build(server_id, tools):
+        if server_id == sid_a:
+            raise RecursionError("simulated deep schema")
+        return original(server_id, tools)
+
+    monkeypatch.setattr(bridge, "_build_entries", _build)
+    supervisor.fire_ready(sid_a)           # 不抛
+    supervisor.fire_ready(sid_b)
+
+    assert bridge_mod._mapped_tool_name(sid_b, "b") in tools_registry
+    assert bridge_mod._mapped_tool_name(sid_a, "a") not in tools_registry
+    assert supervisor.exposed[sid_a] == 0
+    assert supervisor.exposed[sid_b] == 1
+    assert any("嵌套过深" in item["reason"]
+               for item in bridge.rejection_report()[sid_a])
+
+
+def test_refresh_register_failure_isolated_and_reported(monkeypatch):
+    """BLOCK 注册侧：register_external_tools 对 A 抛错，B 仍注册；A 报 0 并记账。"""
+    sid_a, sid_b = "srvregbad", "srvregok"
+    supervisor = FakeSupervisor({sid_a: [_tool("a")], sid_b: [_tool("b")]}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.attach()
+    real_register = bridge_mod.register_external_tools
+
+    def _register(source, entries):
+        if source == SOURCE_PREFIX + sid_a:
+            raise RuntimeError("registry boom")
+        return real_register(source, entries)
+
+    monkeypatch.setattr(bridge_mod, "register_external_tools", _register)
+    supervisor.fire_ready(sid_a)           # 不抛
+    supervisor.fire_ready(sid_b)
+
+    assert bridge_mod._mapped_tool_name(sid_b, "b") in tools_registry
+    assert bridge_mod._mapped_tool_name(sid_a, "a") not in tools_registry
+    assert supervisor.exposed[sid_a] == 0
+    assert supervisor.exposed[sid_b] == 1
+    assert any("注册失败" in item["reason"]
+               for item in bridge.rejection_report()[sid_a])
+
+
+# --------------------------------------------------------------------------- N1 正文清洗
+
+
+def test_render_result_strips_controls_and_caps_length():
+    """N1：NUL/RLO/零宽不进输出；换行/制表保留；超长截断有提示。"""
+    dirty = "a\x00b\u202ec\u200bd\ne\tf"
+    rendered = bridge_mod._render_result(
+        {"content": [{"type": "text", "text": dirty}]})
+    assert rendered.startswith(_NOTE)
+    body = rendered[len(_NOTE):]
+    for ch in ("\x00", "\u202e", "\u200b"):
+        assert ch not in body
+    assert body == "abcd\ne\tf"
+
+    oversized = "x" * (bridge_mod.MAX_RESULT_TEXT_LEN + 500)
+    rendered = bridge_mod._render_result(
+        {"content": [{"type": "text", "text": oversized}]})
+    assert "（正文超长已截断）" in rendered
+    assert len(rendered) <= (len(_NOTE) + bridge_mod.MAX_RESULT_TEXT_LEN
+                             + len("（正文超长已截断）"))
+
+
+# --------------------------------------------------------------------------- N2 remove 漏注销
+
+
+class _StuckThread:
+    """模拟收尸卡住的旧代线程：is_alive 恒 True，join 立即返回（超时）。"""
+
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        return None
+
+
+def test_stop_runtime_join_timeout_still_notifies_disabled():
+    """N2：线程仍活/close 卡住时，_stop_runtime 也必须通知桥接注销 source。"""
+    supervisor = StdioSupervisor(
+        config_reader=lambda: {"mcp_stdio_enabled": False, "mcp_stdio_servers": []})
+    runtime = _Runtime("stuck", {"id": "stuck", "command": "C:/fake.exe", "args": [],
+                                 "enabled": True, "env_allowlist": []})
+    runtime.thread = _StuckThread()
+    runtime.state = STATE_READY
+    supervisor._runtimes["stuck"] = runtime
+    disabled = []
+    supervisor.set_tool_callbacks(on_disabled=disabled.append)
+
+    supervisor._stop_runtime(runtime)      # 不抛
+
+    assert disabled == ["stuck"], "join 超时分支漏了 _notify_disabled"
+    assert runtime.state == STATE_STOPPING, "线程没死就别谎称 disabled"
+
+
+# --------------------------------------------------------------------------- N3 attach 竞态
+
+
+def test_attach_skips_server_that_left_ready_during_snapshot():
+    """N3：快照里有、合并时已不 ready 的 server 不写回、不注册。"""
+    class _RacySupervisor(FakeSupervisor):
+        def ready_tools(self):
+            return {
+                "sracy": [_tool("racy_tool")],
+                "sok": [_tool("ok_tool")],
+            }
+
+        def is_ready(self, sid):
+            return sid == "sok"
+
+    supervisor = _RacySupervisor({})
+    bridge = _bridge(supervisor)
+    bridge.attach()
+
+    assert bridge_mod._mapped_tool_name("sok", "ok_tool") in tools_registry
+    assert bridge_mod._mapped_tool_name("sracy", "racy_tool") not in tools_registry
+    assert bridge.exposed_ids() == ["sok"]
+    assert "sracy" not in supervisor.exposed
+
+
+# --------------------------------------------------------------------------- N4 停用号
+
+
+def test_auth_store_role_of_disabled_account_is_user(tmp_path):
+    """N4：停用的 admin（新旧停用字段都算）不得再被当作管理员。"""
+    path = tmp_path / "users.json"
+    path.write_text(json.dumps({
+        "u_status": {"user_id": "u_status", "username": "s", "role": "admin",
+                     "status": "disabled"},
+        "u_legacy": {"user_id": "u_legacy", "username": "l", "role": "admin",
+                     "disabled": True},
+        "u_on": {"user_id": "u_on", "username": "o", "role": "admin"},
+    }), encoding="utf-8")
+    store = AuthStore(str(path))
+    assert store.role_of("u_status") == "user"
+    assert store.role_of("u_legacy") == "user"
+    assert store.role_of("u_on") == "admin"

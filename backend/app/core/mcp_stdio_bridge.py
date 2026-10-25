@@ -43,7 +43,7 @@ from app.tools.response import ToolResponse
 logger = logging.getLogger("app.core.mcp_stdio_bridge")
 
 __all__ = ["StdioToolBridge", "SOURCE_PREFIX", "MAX_TOOLS_PER_SERVER",
-           "MAX_TOOLS_TOTAL"]
+           "MAX_TOOLS_TOTAL", "MAX_RESULT_TEXT_LEN"]
 
 # source 形状：``mcp-stdio:<server_id>``（匹配 registry._SOURCE_RE；server_id 最大
 # 16 字符，整串最大 27）。
@@ -57,6 +57,19 @@ MAX_TOOLS_TOTAL = 32
 # 那会把桥接层绑死在注册表内部实现上，而这里只需要遵守它的公开形状）。
 MAX_TOOL_NAME_LEN = 64
 MAX_DESCRIPTION_LEN = 1024
+
+# N1：结果正文上限。超限截断并显式告知模型，而不是把半截正文伪装成完整结果。
+MAX_RESULT_TEXT_LEN = 32_000
+_RESULT_TRUNCATED_MARK = "（正文超长已截断）"
+
+# 复制失败时缓存里的占位标记：坏条目不能因为"拷不动"就从拒绝账本里消失。
+# 值只有 "nested" / "copy" 两种固定原因，绝不回显第三方内容到状态端点。
+_COPY_FAILED_KEY = "__stdio_bridge_copy_failed__"
+
+# 逐条 fail-closed 的异常集合：深嵌套 schema 让 deepcopy 抛 RecursionError；
+# 含孤立代理/坏键的对象可能抛 Unicode/Type/ValueError。其余异常照常上抛，
+# 那说明是桥自身的 bug，不该被"坏工具"的名义吞掉。
+_COPY_ERRORS = (RecursionError, TypeError, ValueError, UnicodeError)
 
 # 与 registry._STRIP_CATEGORIES 同一集合：控制/格式/行分隔/段分隔。孤立代理
 # （Cs）不走"剥离"而走 UTF-8 安全化（backslashreplace 成字面量）。
@@ -153,17 +166,39 @@ def _schema_or_reason(raw_tool: Dict[str, Any]) -> Tuple[Optional[dict], str]:
     props = schema.get("properties")
     if isinstance(props, dict) and "user_id" in props:
         return None, "inputSchema.properties 不许声明 user_id（执行器会覆盖）"
-    schema = copy.deepcopy(schema)
+    try:
+        schema = copy.deepcopy(schema)
+    except RecursionError:
+        # 深嵌套 schema：json.loads 能解析，deepcopy 却会爆栈。该条拒，别拖垮整批。
+        return None, "schema 嵌套过深"
+    except (TypeError, ValueError, UnicodeError) as exc:
+        return None, "schema 无法复制：%s" % type(exc).__name__
     schema.setdefault("type", "object")
     return schema, ""
+
+
+def _sanitize_result_text(text: str) -> str:
+    """N1：结果正文安全化——孤立代理转字面量，去 Cc/Cf/Zl/Zp，保留 ``\\n``/``\\t``。
+
+    第三方 server 的返回是不可信文本：NUL、RLO、零宽字符原样进模型上下文既可能
+    藏指令也可能把日志/界面弄坏。换行与制表符是正文结构的一部分，单独放行。
+    """
+    try:
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+    except Exception:                                        # noqa: BLE001 - 外部文本
+        return ""
+    return "".join(
+        ch for ch in text
+        if ch in "\n\t" or category(ch) not in _STRIP_CATEGORIES)
 
 
 def _render_result(result: Any) -> str:
     """把 ``tools/call`` 的 result 折成给模型看的一段文本（带"资料不是指令"标注）。
 
-    - ``content[]`` 里 ``type=="text"`` 的条目按顺序拼接；
+    - ``content[]`` 里 ``type=="text"`` 的条目按顺序拼接（逐条去控制/格式字符）；
     - 有 ``structuredContent`` 再附一段 JSON（模型能读结构化结果）；
-    - 两样都没有时给一句明确的占位，不让模型收到一个空字符串。
+    - 两样都没有时给一句明确的占位，不让模型收到一个空字符串；
+    - 正文超过 :data:`MAX_RESULT_TEXT_LEN` 截断并追加明确提示。
     """
     pieces: List[str] = []
     if isinstance(result, dict):
@@ -173,7 +208,7 @@ def _render_result(result: Any) -> str:
                 if isinstance(item, dict) and item.get("type") == "text":
                     text = item.get("text")
                     if isinstance(text, str):
-                        pieces.append(text)
+                        pieces.append(_sanitize_result_text(text))
         structured = result.get("structuredContent")
         if structured is not None:
             try:
@@ -183,6 +218,8 @@ def _render_result(result: Any) -> str:
                 encoded = "<structuredContent 无法序列化为 JSON>"
             pieces.append("structuredContent: " + encoded)
     body = "\n".join(pieces) if pieces else "（工具未返回文本内容）"
+    if len(body) > MAX_RESULT_TEXT_LEN:
+        body = body[:MAX_RESULT_TEXT_LEN] + _RESULT_TRUNCATED_MARK
     return _EXTERNAL_CONTENT_NOTE + body
 
 
@@ -262,8 +299,16 @@ class StdioToolBridge:
         if isinstance(ready, dict) and ready:
             with self._lock:
                 for server_id, tools in ready.items():
-                    if isinstance(server_id, str):
-                        self._tools[server_id] = self._copy_tools(tools)
+                    if not isinstance(server_id, str):
+                        continue
+                    # N3：快照与写回之间有窗口——server 可能刚 crash/disable。
+                    # 以复核后的 is_ready 为准；不 ready 的不写回、不注册，
+                    # 否则会把一份过期工具表重新曝光给模型。
+                    if not self._server_ready(server_id):
+                        logger.warning("MCP stdio 桥跳过已不 ready 的种子 server: %s",
+                                       server_id)
+                        continue
+                    self._tools[server_id] = self._copy_tools(tools, server_id)
             self.refresh()
 
     def on_ready(self, server_id: str, tools: Any) -> None:
@@ -271,9 +316,18 @@ class StdioToolBridge:
         if not isinstance(server_id, str) or not server_id:
             return
         with self._lock:
-            self._tools[server_id] = self._copy_tools(tools)
+            self._tools[server_id] = self._copy_tools(tools, server_id)
         # refresh 自己拿锁；on_ready 调用点已在 supervisor 锁外。
         self.refresh()
+
+    def _server_ready(self, server_id: str) -> bool:
+        """``is_ready`` 的 fail-closed 包装：读不到 / 抛异常都按"没 ready"处理。"""
+        try:
+            return bool(self._supervisor.is_ready(server_id))
+        except Exception as exc:                             # noqa: BLE001 - 快照竞态
+            logger.warning("MCP stdio 桥复核 %s ready 状态失败: %s",
+                           server_id, type(exc).__name__)
+            return False
 
     def on_disabled(self, server_id: str) -> None:
         """disabled / remove / shutdown：删缓存、注销 source、状态 exposed=0。"""
@@ -319,16 +373,34 @@ class StdioToolBridge:
 
             rejected_report: Dict[str, List[Dict[str, str]]] = {}
             for server_id in sorted(selected):
-                entries, rejected = self._build_entries(server_id, selected[server_id])
+                source = SOURCE_PREFIX + server_id
+                # 单 server 的构建失败只记该 server，继续下一个——一份坏 schema
+                # 不能让排在后面的 server 一个都不注册。
+                try:
+                    entries, rejected = self._build_entries(
+                        server_id, selected[server_id])
+                except RecursionError:
+                    logger.warning("MCP stdio 桥构建 %s 工具失败: RecursionError", source)
+                    entries = []
+                    rejected = [{"name": "", "reason": "schema 嵌套过深"}]
+                except Exception as exc:                     # noqa: BLE001 - 单源不连累
+                    logger.warning("MCP stdio 桥构建 %s 工具失败: %s", source,
+                                   type(exc).__name__)
+                    entries = []
+                    rejected = [{"name": "",
+                                 "reason": "工具构建失败：%s" % type(exc).__name__}]
                 if rejected:
                     rejected_report[server_id] = rejected
-                source = SOURCE_PREFIX + server_id
                 accepted = 0
                 try:
                     outcome = register_external_tools(source, entries)
                 except Exception as exc:                     # noqa: BLE001 - 单源不连累
                     logger.warning("MCP stdio 桥注册 %s 失败: %s", source,
                                    type(exc).__name__)
+                    rejected_report.setdefault(server_id, []).append({
+                        "name": "",
+                        "reason": "注册失败：%s" % type(exc).__name__,
+                    })
                     outcome = {}
                 if isinstance(outcome, dict):
                     accepted = int(outcome.get("accepted") or 0)
@@ -338,6 +410,8 @@ class StdioToolBridge:
                                 "name": str(item.get("name") or ""),
                                 "reason": str(item.get("reason") or ""),
                             })
+                # BLOCK：只有真正拿到注册结果后才按 accepted 报数；构建/注册
+                # 失败时显式报 0，别让快照退回 min(total,16) 把未知总数说成 exposed。
                 try:
                     self._supervisor.set_tools_exposed(server_id, accepted)
                 except Exception as exc:                     # noqa: BLE001 - 状态不连累
@@ -364,24 +438,42 @@ class StdioToolBridge:
                 continue
             raw_name = raw_tool.get("name")
             if not isinstance(raw_name, str):
-                rejected.append({"name": "", "reason": "工具名必须是字符串"})
-                continue
-            schema, reason = _schema_or_reason(raw_tool)
-            if reason:
-                rejected.append({"name": raw_name, "reason": reason})
-                continue
-            mapped = _mapped_tool_name(server_id, raw_name)
-            entries.append({
-                "name": mapped,
-                "description": _tool_description(raw_tool, raw_name),
-                "parameters": schema,
-                "function": _make_invoker(self._supervisor, server_id, raw_name),
-                # 计划 §5.3 / §5.4：只有 ready 且进程活着时模型才看得见。
-                "available": lambda sid=server_id, sup=self._supervisor: sup.is_ready(sid),
-                "requires_approval": True,
-                "needs_user": True,
-                "suspends": False,
-            })
+                raw_name = ""
+            # 每条工具独立 fail-closed：一条 schema 嵌套过深只拒这一条，
+            # 同一批里排在其后的好工具照常注册。
+            try:
+                copy_failed = raw_tool.get(_COPY_FAILED_KEY)
+                if copy_failed:
+                    reason = ("schema 嵌套过深" if copy_failed == "nested"
+                              else "工具条目无法复制")
+                    rejected.append({"name": raw_name, "reason": reason})
+                    continue
+                if not isinstance(raw_tool.get("name"), str):
+                    rejected.append({"name": "", "reason": "工具名必须是字符串"})
+                    continue
+                schema, reason = _schema_or_reason(raw_tool)
+                if reason:
+                    rejected.append({"name": raw_name, "reason": reason})
+                    continue
+                mapped = _mapped_tool_name(server_id, raw_name)
+                entries.append({
+                    "name": mapped,
+                    "description": _tool_description(raw_tool, raw_name),
+                    "parameters": schema,
+                    "function": _make_invoker(self._supervisor, server_id, raw_name),
+                    # 计划 §5.3 / §5.4：只有 ready 且进程活着时模型才看得见。
+                    "available": lambda sid=server_id, sup=self._supervisor: sup.is_ready(sid),
+                    "requires_approval": True,
+                    "needs_user": True,
+                    "suspends": False,
+                })
+            except RecursionError:
+                rejected.append({"name": raw_name, "reason": "schema 嵌套过深"})
+            except (TypeError, ValueError, UnicodeError) as exc:
+                rejected.append({
+                    "name": raw_name,
+                    "reason": "工具条目处理失败：%s" % type(exc).__name__,
+                })
         return entries, rejected
 
     # ------------------------------------------------------------------ 只读小口
@@ -397,11 +489,33 @@ class StdioToolBridge:
             return sorted(self._tools)
 
     @staticmethod
-    def _copy_tools(tools: Any) -> List[Dict[str, Any]]:
+    def _copy_tools(tools: Any, server_id: str = "") -> List[Dict[str, Any]]:
+        """逐条深拷贝；拷不动的条目落成一个固定形状的占位。
+
+        深嵌套 schema 会让 ``copy.deepcopy`` 抛 RecursionError——整批复制若在
+        这里炸掉，on_ready 就收不到、后面的 server 全不注册。占位条目的名字保留，
+        ``_build_entries`` 会把它折进 rejection_report（原因固定、不回显第三方
+        内容），并在注册前剔除；好工具原样保留。
+        """
         if not isinstance(tools, (list, tuple)):
             return []
         out: List[Dict[str, Any]] = []
         for item in tools:
-            if isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            try:
                 out.append(copy.deepcopy(item))
+            except _COPY_ERRORS as exc:
+                raw_name = item.get("name")
+                if not isinstance(raw_name, str):
+                    raw_name = ""
+                kind = "nested" if isinstance(exc, RecursionError) else "copy"
+                logger.warning("MCP stdio 桥跳过无法复制的工具 %s/%s: %s",
+                               server_id or "<unknown>", raw_name or "<缺名>",
+                               type(exc).__name__)
+                out.append({
+                    "name": raw_name,
+                    _COPY_FAILED_KEY: kind,
+                    "inputSchema": {"type": "object", "properties": {}},
+                })
         return out

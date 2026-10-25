@@ -426,10 +426,14 @@ class AuthStore:
         就生效，而记录里躺着口令散列与全部令牌哈希，复制出来的那份没有理由多活一格。
         只做类型检查，不做角色白名单归一：库里写的是什么就答什么，判 "admin" 是
         调用方的事；``default_user`` 不在库里，由桥接层单独视为管理员。
+
+        N4：停用账号一律答 ``"user"``——``status == "disabled"`` 或老的
+        ``disabled is True`` 任一成立都算。否则一个被停用的 admin 仍能通过
+        MCP stdio 的管理员闸拉起子进程，那等于停用只停了登录、没停权限。
         """
         with self._lock:
             record = self._users.get(user_id) if isinstance(user_id, str) else None
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or _is_disabled(record):
                 return "user"
             role = record.get("role")
         return role if isinstance(role, str) and role else "user"

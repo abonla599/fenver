@@ -214,6 +214,34 @@ def _schema_flags(tools: Sequence[Dict[str, Any]]) -> Dict[str, int]:
     }
 
 
+# T5 BLOCK：深嵌套 schema 能让 deepcopy 抛 RecursionError。工具复制必须逐条
+# fail-closed——坏条目跳过并记 warning，好条目保留；整份 deepcopy 会让一次坏
+# 工具拖垮该 server 的全部注册，甚至让排在后面的 server 一个都收不到通知。
+_COPY_ERRORS = (RecursionError, TypeError, ValueError, UnicodeError)
+
+
+def _safe_copy_tools(server_id: str, tools: Any) -> List[Dict[str, Any]]:
+    """逐条深拷贝 ``tools``；坏条目跳过并计数，任何一条都不许拖垮整批。"""
+    if not isinstance(tools, (list, tuple)):
+        return []
+    out: List[Dict[str, Any]] = []
+    skipped = 0
+    for item in tools:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        try:
+            out.append(copy.deepcopy(item))
+        except _COPY_ERRORS as exc:
+            skipped += 1
+            logger.warning("MCP stdio 工具复制失败已跳过 %s: %s",
+                           server_id, type(exc).__name__)
+    if skipped:
+        logger.warning("MCP stdio %s 有 %d 条工具因形状/复制问题被跳过",
+                       server_id, skipped)
+    return out
+
+
 class _Runtime:
     """一个 server 条目的运行态。所有字段由 supervisor 的 ``_lock`` 保护。"""
 
@@ -405,10 +433,11 @@ class StdioSupervisor:
             self._on_disabled_cb = on_disabled
 
     def ready_tools(self) -> Dict[str, List[Dict[str, Any]]]:
-        """仅 ready 且进程活着的 ``{server_id: [tools...]}``，深拷贝。
+        """仅 ready 且进程活着的 ``{server_id: [tools...]}``，逐条深拷贝。
 
-        深拷贝是给桥接层的隔离：它会把这份列表缓存到下一次 ready，调用方（或第三方
-        server）后续改动任何嵌套 dict 都不许改到 supervisor 的运行态。
+        拷贝是给桥接层的隔离：它会把这份列表缓存到下一次 ready，调用方（或第三方
+        server）后续改动任何嵌套 dict 都不许改到 supervisor 的运行态。逐条做是
+        BLOCK 的修法：一条深嵌套 schema 只跳过它自己，不能把整份快照变成异常。
         """
         with self._lock:
             candidates = [
@@ -416,11 +445,11 @@ class StdioSupervisor:
                 for runtime in self._runtimes.values()
                 if runtime.state == STATE_READY
             ]
-        return {
-            server_id: copy.deepcopy(tools)
-            for server_id, client, tools in candidates
-            if client is not None and client.alive
-        }
+        ready: Dict[str, List[Dict[str, Any]]] = {}
+        for server_id, client, tools in candidates:
+            if client is not None and client.alive:
+                ready[server_id] = _safe_copy_tools(server_id, tools)
+        return ready
 
     def set_tools_exposed(self, server_id: str, count: int) -> None:
         """桥接层上报"这个 server 真正注册进模型的条数"（T5）。
@@ -629,10 +658,16 @@ class StdioSupervisor:
             thread.join(timeout=STOP_JOIN_TIMEOUT)
         with self._lock:
             thread = runtime.thread
-            if thread is not None and thread.is_alive():
+            stuck = thread is not None and thread.is_alive()
+            if stuck:
                 runtime.state = STATE_STOPPING
-                return
-            runtime.thread = None
+            else:
+                runtime.thread = None
+        if stuck:
+            # N2：旧代线程卡在收尸里也不能把 source 留在注册表——否则 remove/disable
+            # 之后工具永久残留。状态如实停在 stopping（不谎称 disabled）。
+            self._notify_disabled(runtime.server_id)
+            return
         self._set_state(runtime, STATE_DISABLED)
         # T5：disabled / remove / 关闭都走这里；crashed/backoff 不走（它们保留注册）。
         self._notify_disabled(runtime.server_id)
@@ -1047,14 +1082,19 @@ class StdioSupervisor:
     # ------------------------------------------------------------------ 小工具
 
     def _notify_ready(self, server_id: str, tools: Sequence[Dict[str, Any]]) -> None:
-        """锁外通知桥接层 ready；异常只记一行，绝不打死 worker。"""
+        """锁外通知桥接层 ready；异常只记一行，绝不打死 worker。
+
+        BLOCK：复制逐条做。之前整份 ``copy.deepcopy(list(tools))`` 会被一条深嵌套
+        schema 打爆，on_ready 根本发不出去，该 server 的好工具也全部不注册。
+        """
         with self._lock:
             callback = self._on_ready_cb
             self._disabled_notified.discard(server_id)
         if callback is None:
             return
+        safe_tools = _safe_copy_tools(server_id, tools)
         try:
-            callback(server_id, copy.deepcopy(list(tools)))
+            callback(server_id, safe_tools)
         except Exception as exc:                             # noqa: BLE001 - 监听不连累
             logger.warning("MCP stdio on_ready 回调失败 %s: %s",
                            server_id, type(exc).__name__)
