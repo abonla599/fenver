@@ -52,6 +52,11 @@
                       写 ``<argv[2]>/cwd.json``，再走正常协议。
 - ``sleep``           只 sleep 60（``tree`` 在 PyInstaller 冻结包里用它当孙进程，
                       frozen 解释器没有 ``-c``）。
+- ``crash_once``       用 cwd 下 ``crash-once.count`` 计数：第一次启动 ``os._exit(3)``，
+                      第二次走正常 ``ok`` 协议。``spawn.count`` 记每次启动。
+- ``crash_always``     每次启动写 ``spawn.count`` 后 ``os._exit(3)``，并往 stderr 写一行
+                      诱饵（审计测试用：正文绝不允许进审计）。
+- ``hang``             正常 initialize 后不再响应任何请求（用于超时/寿命场景）。
 """
 import json
 import os
@@ -64,6 +69,8 @@ PROTOCOL = "2025-06-18"
 MODE = sys.argv[1] if len(sys.argv) > 1 else "ok"
 RECORD_DIR = sys.argv[2] if len(sys.argv) > 2 else None
 EOL = b"\r\n" if MODE == "crlf" else b"\n"
+# 审计测试的诱饵：stderr 正文永远不许出现在审计里。测试侧按同一常量断言。
+STDERR_DECOY = "STDERR_DECOY_SUPERVISOR_7f21"
 
 OUT = sys.stdout.buffer
 WRITE_LOCK = threading.Lock()
@@ -138,6 +145,7 @@ NORMAL_MODES = {
     "tree",
     "hog",
     "record_argv",
+    "crash_once",
 }
 
 _HOG_REF = []
@@ -206,7 +214,40 @@ def _hog() -> None:
     time.sleep(60)
 
 
+def _bump_count(name: str) -> int:
+    """在 **cwd**（supervisor 固定的 ``<mcp_root>/<id>``）里自增一个计数文件。
+
+    只给新模式下"证明 spawn 了几次"用；不写仓库外固定路径。
+    """
+    path = os.path.join(os.getcwd(), name)
+    value = 0
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = int(handle.read().strip() or "0")
+    except (OSError, ValueError):
+        value = 0
+    value += 1
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(str(value))
+    except OSError:
+        pass
+    return value
+
+
 def _startup() -> None:
+    if MODE == "crash_always":
+        _bump_count("spawn.count")
+        try:
+            sys.stderr.write(STDERR_DECOY + "\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+        os._exit(3)
+    if MODE == "crash_once":
+        _bump_count("spawn.count")
+        if _bump_count("crash-once.count") == 1:
+            os._exit(3)
     if MODE == "eof":
         sys.exit(0)
     if MODE == "sleep":
@@ -545,6 +586,10 @@ def main() -> None:
             method = message.get("method")
             if method == "initialize":
                 _handle_initialize(message)
+                if MODE == "hang":
+                    # 正常回了 initialize，之后对任何请求都不再响应。
+                    time.sleep(60)
+                    return
             elif method == "tools/list":
                 _handle_list(message)
             elif method == "tools/call":
