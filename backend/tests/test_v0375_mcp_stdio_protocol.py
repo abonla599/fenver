@@ -13,11 +13,17 @@
 - CRLF / BOM；server 主动请求收到 ``-32601``（读记录文件）；通知洪水杀；
 - ``close()`` 幂等。
 
-全部落点用 pytest 的 ``tmp_path``；每个用例在 ``finally`` 里 ``close()`` 并补杀进程。
+协议形状收紧（T2 审查补充）：
+- 非字符串 ``protocolVersion``、5000 位整数、NaN、孤立代理项、空 ``nextCursor``、
+  标量 ``result``、``null`` error、布尔 ``id``、连续 3 次错 id、EOF 但进程仍活、
+  回不了的 server 请求 → 全部协议错误并杀；合法转义代理对仍放行；
+- 单在途/窄窗口：慢调用期间第二次调用「正忙」、``close()`` 立即唤醒在途调用、
+  出站 id 从 1 递增。
 """
 import json
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -28,7 +34,7 @@ from app.core.mcp_client import (
     DEFAULT_PROTOCOL_VERSION,
     MCPError,
 )
-from app.core.mcp_stdio_client import MCPStdioClient
+from app.core.mcp_stdio_client import MCPStdioClient, _same_id
 
 SERVER = Path(__file__).with_name("fake_mcp_stdio_server.py")
 
@@ -45,13 +51,24 @@ class _Spawner:
     def __call__(self):
         self.spawns += 1
         self.record_dir.mkdir(parents=True, exist_ok=True)
+        stdout = subprocess.PIPE
+        sink = None
+        if self.mode == "eof_alive":
+            # Windows 上子进程关 stdout 管道句柄不一定让读端看到 EOF（句柄有内部副本）。
+            # 用空文件模拟“stdout 已到 EOF、进程仍活着”：读端立刻见底，进程继续 sleep。
+            sink_path = self.record_dir / "stdout-empty.log"
+            sink = open(sink_path, "wb")
+            stdout = sink
         self.proc = subprocess.Popen(
             [sys.executable, "-u", str(SERVER), self.mode, str(self.record_dir)],
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdout=stdout,
             stderr=subprocess.PIPE,
             cwd=str(self.record_dir.parent),
         )
+        if sink is not None:
+            sink.close()
+            self.proc.stdout = open(sink_path, "rb")
         return self.proc
 
 
@@ -399,3 +416,239 @@ def test_close_without_start_is_safe(tmp_path):
     assert client.alive is False
     with pytest.raises(MCPError):
         client.initialize()
+
+
+# ---------------------------------------------------------------- 审查补充用例
+
+
+def _reader_thread(client):
+    for thread in client._threads:
+        if thread.name.startswith("mcp-stdio-reader-"):
+            return thread
+    return None
+
+
+def test_same_id_rejects_equal_values_of_other_types():
+    # True == 1、1.0 == 1 在 Python 里都成立，但 JSON-RPC 的 id 必须类型一致。
+    assert _same_id(1, 1) is True
+    assert _same_id("x", "x") is True
+    assert _same_id(True, 1) is False
+    assert _same_id(1, True) is False
+    assert _same_id(1.0, 1) is False
+
+
+def test_a2b_non_string_protocol_version_kills(tmp_path):
+    with _client(tmp_path, "bad_version_type") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        err = ei.value
+        assert isinstance(err, MCPError)  # 不是 TypeError 逃逸
+        assert err.retryable is False
+        assert "协议版本" in str(err)
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+
+
+def test_a2c_huge_integer_json_value_kills_and_stops_reader(tmp_path):
+    with _client(tmp_path, "hugeint") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        assert ei.value.retryable is False
+        assert "协议错误" in str(ei.value)
+        _wait_dead(client, spawner)
+        reader = _reader_thread(client)
+        assert reader is not None
+        assert _wait_for(lambda: not reader.is_alive(), 3.0), "reader 线程应已退出"
+
+
+def test_a2d_nan_in_result_is_protocol_error(tmp_path):
+    with _client(tmp_path, "nanresult") as (client, spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("echo", {"text": "x"})
+        assert ei.value.retryable is False
+        assert "协议错误" in str(ei.value)
+        _wait_dead(client, spawner)
+
+
+def test_a2e_lone_surrogate_is_protocol_error(tmp_path):
+    with _client(tmp_path, "surrogate") as (client, spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("echo", {"text": "x"})
+        assert "代理项" in str(ei.value)
+        _wait_dead(client, spawner)
+
+
+def test_a2f_valid_escaped_surrogate_pair_is_still_accepted(tmp_path):
+    # ensure_ascii=True 的 server 会把 emoji 转义成合法代理对，不能误杀。
+    with _client(tmp_path, "escapedpair") as (client, _spawner):
+        client.initialize()
+        result = client.call_tool("echo", {"text": "x"})
+        assert result["content"][0]["text"] == "😀"
+        assert client.alive is True
+
+
+def test_a4b_empty_next_cursor_is_protocol_error(tmp_path):
+    with _client(tmp_path, "empty_cursor") as (client, spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.list_tools()
+        assert "nextCursor" in str(ei.value)
+        _wait_dead(client, spawner)
+
+
+def test_a8b_scalar_call_result_is_protocol_error(tmp_path):
+    with _client(tmp_path, "scalarresult") as (client, spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("echo", {"text": "x"})
+        assert "result 不是对象" in str(ei.value)
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+
+
+def test_a10b_null_error_is_protocol_error_and_kill(tmp_path):
+    with _client(tmp_path, "nullerror") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        assert "error 字段不是对象" in str(ei.value)
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+
+
+def test_a9b_string_iserror_is_not_tool_error(tmp_path):
+    with _client(tmp_path, "str_iserror") as (client, _spawner):
+        client.initialize()
+        result = client.call_tool("echo", {"text": "x"})
+        # 只有严格的布尔 True 才算工具报错；"false" 是真值字符串，但不能误判。
+        assert result["isError"] == "false"
+        assert result["content"][0]["text"] == "still ok"
+        assert client.alive is True
+
+
+def test_a9c_iserror_text_truncated_to_500(tmp_path):
+    with _client(tmp_path, "ok") as (client, _spawner):
+        client.initialize()
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("fail", {"reason": "长" * 600})
+        text = str(ei.value)
+        prefix = "工具 fail 返回错误: "
+        assert text.startswith(prefix)
+        assert len(text) - len(prefix) <= 500
+        assert len(text) - len(prefix) > 400
+
+
+def test_b1c_bool_id_is_stray_not_integer(tmp_path):
+    with _client(tmp_path, "trueid", handshake_timeout=1.0) as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        # id: true 不能被当成 id=1 配对；无正确响应，最终走超时并杀进程。
+        assert client.stats["stray_responses"] >= 1
+        assert client.stats["responses"] == 0
+        assert ei.value.retryable is False
+        _wait_dead(client, spawner)
+
+
+def test_b1d_three_stray_responses_are_protocol_error(tmp_path):
+    with _client(tmp_path, "stray3") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        assert "协议失步" in str(ei.value)
+        assert client.stats["stray_responses"] >= 3
+        _wait_dead(client, spawner)
+
+
+def test_b6c_close_during_call_wakes_with_closed_error(tmp_path):
+    with _client(tmp_path, "slow_call", call_timeout=10.0) as (client, _spawner):
+        client.initialize()
+        errors = []
+        marks = []
+        started = [0.0]
+
+        def worker():
+            try:
+                client.call_tool("add", {"a": 1, "b": 2})
+            except MCPError as exc:
+                errors.append(exc)
+                marks.append(time.monotonic() - started[0])
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        assert _wait_for(lambda: client.stats["requests_sent"] >= 2, 2.0)
+        started[0] = time.monotonic()
+        client.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive(), "close() 必须立即唤醒在途调用"
+        assert errors and "关闭" in str(errors[0])
+        assert marks and marks[0] < 2.0, f"在途调用唤醒耗时 {marks}"
+        assert client.alive is False
+        # 唤醒之后 close() 已经跑完；再关一次不抛、不二次杀崩。
+        client.close()
+        assert client.alive is False
+
+
+def test_b6d_second_call_while_busy_is_retryable(tmp_path):
+    with _client(tmp_path, "slow_call", call_timeout=10.0) as (client, _spawner):
+        client.initialize()
+        errors = []
+
+        def worker():
+            try:
+                client.call_tool("add", {"a": 1, "b": 2})
+            except MCPError as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        assert _wait_for(lambda: client.stats["requests_sent"] >= 2, 2.0)
+        with pytest.raises(MCPError) as ei:
+            client.call_tool("echo", {"text": "busy"})
+        assert ei.value.retryable is True
+        assert "正忙" in str(ei.value)
+        client.close()
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert errors and "关闭" in str(errors[0])
+
+
+def test_b7b_eof_with_live_process_kills(tmp_path):
+    with _client(tmp_path, "eof_alive") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        assert "stdout 已关闭但进程仍在运行" in str(ei.value)
+        _wait_dead(client, spawner)
+
+
+def test_b10c_unanswerable_server_request_is_not_silent(tmp_path):
+    with _client(tmp_path, "bigreqid") as (client, spawner):
+        with pytest.raises(MCPError) as ei:
+            client.initialize()
+        assert "无法回复 server 请求" in str(ei.value)
+        assert client.stats["protocol_errors"] >= 1
+        _wait_dead(client, spawner)
+
+
+def test_a1b_outbound_ids_start_at_one_and_increment(tmp_path):
+    with _client(tmp_path, "record") as (client, spawner):
+        client.initialize()
+        client.list_tools()
+        path = spawner.record_dir / "messages.jsonl"
+        assert _wait_for(
+            lambda: {
+                m.get("method")
+                for m in _read_jsonl(path)
+                if isinstance(m, dict) and m.get("method")
+            }
+            >= {"initialize", "tools/list"},
+            3.0,
+        )
+        requests = [
+            m
+            for m in _read_jsonl(path)
+            if isinstance(m, dict) and m.get("method") and m.get("id") is not None
+        ]
+        init = next(m for m in requests if m["method"] == "initialize")
+        first_list = next(m for m in requests if m["method"] == "tools/list")
+        assert init["id"] == 1
+        assert first_list["id"] == 2

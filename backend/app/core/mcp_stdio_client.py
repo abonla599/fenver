@@ -14,6 +14,9 @@
 - 响应匹配：只接受 ``id`` 全等且形状合法的响应；错 id / 未知 id / 迟到重复一律
   丢弃并计数，**不串给下一次**；连续 3 次判协议失步并杀进程。单次请求期间通知
   >1000 条判洪水并杀。
+- 入站 JSON 严格化：``parse_constant`` 拒绝 NaN / Infinity；合法代理对合成为真码点，
+  孤立代理项与任何无法严格回写的值一律协议错误并杀。``result`` / ``error`` 形状
+  不对同样杀，不给下游留半截形状。
 - server 主动请求（``id`` + ``method``）：立即回 JSON-RPC ``-32601``；绝不反向执行
   sampling / roots / elicitation。通知只计数，绝不进模型。
 - 握手：``initialize`` 后校验 ``result.protocolVersion`` 白名单，成功后发
@@ -98,6 +101,36 @@ _REDACTIONS: Tuple[Tuple[re.Pattern[str], str], ...] = (
 def _fingerprint(raw: bytes) -> str:
     """stdout 行的取证指纹：只留长度与截断哈希，原文绝不进日志 / 异常。"""
     return f"len={len(raw)} sha256={hashlib.sha256(raw).hexdigest()[:16]}"
+
+
+def _reject_json_constant(token: str) -> Any:
+    """``json.loads`` 的 ``parse_constant``：拒绝 NaN / Infinity 这类非标准 JSON。"""
+    raise ValueError(f"非标准 JSON 常量: {token}")
+
+
+def _normalize_surrogates(value: Any) -> Any:
+    """把 JSON 转义解出的合法代理对合成真码点，孤立代理项原样保留。
+
+    严格回写（``ensure_ascii=False`` + UTF-8）只拒绝孤立代理项；合法代理对若不合成就
+    会被误杀，所以先归一化。非字符串 / 不含代理项的字符串原样返回。
+    """
+    if isinstance(value, str):
+        if not any("\ud800" <= char <= "\udfff" for char in value):
+            return value
+        try:
+            return value.encode("utf-16-le", "surrogatepass").decode(
+                "utf-16-le", "surrogatepass"
+            )
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return value
+    if isinstance(value, dict):
+        return {
+            _normalize_surrogates(key): _normalize_surrogates(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_surrogates(item) for item in value]
+    return value
 
 
 def _same_id(left: Any, right: Any) -> bool:
@@ -365,15 +398,23 @@ class MCPStdioClient:
                     self._violate(error)
                     raise error
                 next_cursor = result.get("nextCursor")
-                if next_cursor is not None and not isinstance(next_cursor, str):
+                if next_cursor is None:
+                    return tools
+                if not isinstance(next_cursor, str):
                     error = MCPError(
                         "MCP stdio 协议错误：tools/list 的 nextCursor 不是字符串",
                         retryable=False,
                     )
                     self._violate(error)
                     raise error
-                if not next_cursor:
-                    return tools
+                if next_cursor == "":
+                    error = MCPError(
+                        "MCP stdio 协议错误：tools/list 的 nextCursor 是空字符串"
+                        "（只有 null/缺省才表示结束）",
+                        retryable=False,
+                    )
+                    self._violate(error)
+                    raise error
                 if next_cursor in seen_cursors:
                     error = MCPError(
                         "MCP stdio 协议错误：tools/list 的 cursor 重复，判定死循环",
@@ -402,13 +443,20 @@ class MCPStdioClient:
                 {"name": name, "arguments": arguments or {}},
                 deadline=deadline,
             )
-            if isinstance(result, dict) and result.get("isError"):
+            if not isinstance(result, dict):
+                error = MCPError(
+                    "MCP stdio 协议错误：tools/call 的 result 不是对象",
+                    retryable=False,
+                )
+                self._violate(error)
+                raise error
+            if result.get("isError") is True:
                 # 对端正常回了话，只是工具自己报错：不杀进程、算传输成功。
                 raise MCPError(
                     f"工具 {name} 返回错误: {_tool_error_text(result)}",
                     retryable=False,
                 )
-            return result if isinstance(result, dict) else {"result": result}
+            return result
 
     def close(self) -> None:
         """幂等关闭：注销在途 → 关 stdin → 等 3s → terminate → join → 关句柄。"""
@@ -501,7 +549,7 @@ class MCPStdioClient:
             self._violate(error)
             raise error
         version = result.get("protocolVersion")
-        if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        if not isinstance(version, str) or version not in SUPPORTED_PROTOCOL_VERSIONS:
             error = MCPError(
                 f"MCP stdio 协议错误：server 协商的协议版本不受支持（{str(version)[:64]}）",
                 retryable=False,
@@ -535,7 +583,23 @@ class MCPStdioClient:
         with self._state_lock:
             if self._pending is not None:
                 raise MCPError("该 MCP server 正忙", retryable=True)
-            self._pending = pending
+            # close() / EOF / 协议失败与注册 pending 之间存在窄窗口：在同一把锁内
+            # 复查一次，命中就给 pending 塞明确错误并放弃注册，绝不空等整段超时。
+            if self._closed:
+                pending.error = MCPError("MCP stdio 客户端已关闭", retryable=True)
+            elif self._fatal_error is not None:
+                fatal = self._fatal_error
+                pending.error = MCPError(
+                    str(fatal),
+                    retryable=fatal.retryable,
+                    jsonrpc_code=fatal.jsonrpc_code,
+                )
+            elif self._writer_stop.is_set():
+                pending.error = MCPError("server 已退出", retryable=True)
+            else:
+                self._pending = pending
+        if pending.error is not None:
+            raise pending.error
         try:
             self._put_payload(payload, deadline)
             remaining = deadline - time.monotonic()
@@ -672,12 +736,31 @@ class MCPStdioClient:
                     )
                     return
                 try:
-                    message = json.loads(text)
-                except (json.JSONDecodeError, RecursionError):
+                    message = json.loads(text, parse_constant=_reject_json_constant)
+                except (ValueError, RecursionError):
+                    # JSONDecodeError 是 ValueError 子类；而超长整数等会让 int() 抛
+                    # 普通 ValueError，同样必须走协议错误，不能让 reader 线程带
+                    # traceback 死掉、在途请求只剩超时。
                     self._violate(
                         MCPError(
                             "MCP stdio 协议错误：stdout 行不是合法 JSON"
                             f"（{_fingerprint(raw)}）",
+                            retryable=False,
+                        )
+                    )
+                    return
+                message = _normalize_surrogates(message)
+                try:
+                    # 严格回写一次：NaN / Infinity / 孤立代理项等 T4 无法再序列化的
+                    # 值必须在这里就判协议错误，不能带进下游。
+                    json.dumps(message, ensure_ascii=False, allow_nan=False).encode(
+                        "utf-8"
+                    )
+                except (ValueError, UnicodeEncodeError, RecursionError):
+                    self._violate(
+                        MCPError(
+                            "MCP stdio 协议错误：stdout 行含无法严格回写的内容"
+                            "（NaN/Infinity/孤立代理项）",
                             retryable=False,
                         )
                     )
@@ -748,6 +831,16 @@ class MCPStdioClient:
                 )
             )
             return False
+        if has_error and not isinstance(message.get("error"), dict):
+            # error 为 null / list 等形状：不是 JSON-RPC 错误对象，判协议错误并杀，
+            # 不能只抛 MCPError 却把进程留下来。
+            self._violate(
+                MCPError(
+                    "MCP stdio 协议错误：JSON-RPC error 字段不是对象",
+                    retryable=False,
+                )
+            )
+            return False
         pending = self._pending
         if pending is None or not _same_id(pending.request_id, message.get("id")):
             # 错 id / 未知 id / 迟到重复：丢弃并计数，绝不串给下一次调用。
@@ -784,7 +877,15 @@ class MCPStdioClient:
         }
         try:
             payload = self._encode(message)
-        except MCPError:
+        except MCPError as exc:
+            # server 请求的 id 不可回写（不可序列化 / 回包超过请求上限）：不能静默
+            # 吞掉，否则对端永远等不到 -32601、客户端也毫无记录。
+            self._violate(
+                MCPError(
+                    f"MCP stdio 协议错误：无法回复 server 请求（{exc}）",
+                    retryable=False,
+                )
+            )
             return
         try:
             self._write_q.put_nowait(payload)
@@ -853,8 +954,8 @@ class MCPStdioClient:
                 return
             if not raw:
                 return
-            if len(raw) > STDERR_LINE_LIMIT:
-                raw = raw[:STDERR_LINE_LIMIT]
+            # 先脱敏再截断：截断放在 _sanitize_stderr_line 末尾，避免 4KB 边界把
+            # ``sk-...`` 截成不足 6 字符后绕过打码。
             text = _sanitize_stderr_line(raw.decode("utf-8", "replace"))
             if not text:
                 continue

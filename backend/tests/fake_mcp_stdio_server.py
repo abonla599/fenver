@@ -26,6 +26,19 @@
 - ``paginate_more``   6 页。
 - ``toomany``         70 条工具。
 - ``cursor_repeat``   ``nextCursor`` 永远是同一个值（死循环）。
+- ``record``          正常 server；``messages.jsonl`` 记录收到的请求 id（出站 id 递增用）。
+- ``bad_version_type`` initialize 回 ``"protocolVersion": []``。
+- ``hugeint``         initialize 响应含一个 5000 位整数（裸文本写入）。
+- ``trueid``          initialize 响应 ``id: true``（不能当成 id=1）。
+- ``stray3``          initialize 连发 3 条错 id 响应，不再回正确响应。
+- ``nullerror``       initialize 回 ``"error": null``。
+- ``nanresult``       ``tools/call`` 的 result 里含 NaN。
+- ``surrogate``       ``tools/call`` 的文本是 ``"\\ud800"`` 孤立代理项（裸文本写入）。
+- ``scalarresult``    ``tools/call`` 的 result 是标量。
+- ``str_iserror``     ``tools/call`` 回 ``"isError": "false"``（字符串，不是真值 True）。
+- ``empty_cursor``    ``tools/list`` 回 ``nextCursor: ""``。
+- ``bigreqid``        server 请求的 id 是 300KB 字符串（回 -32601 会超过请求上限）。
+- ``eof_alive``       stdout 指到空文件（读端立刻 EOF）+ sleep 60（进程仍活）。
 """
 import json
 import os
@@ -72,6 +85,14 @@ def send(obj, *, bom: bool = False) -> None:
         OUT.flush()
 
 
+def send_raw(text: str) -> None:
+    """写一条手搓的 JSON 行（用于构造 json.dumps 本身产不出的坏形状）。"""
+    data = text.encode("utf-8")
+    with WRITE_LOCK:
+        OUT.write(data + EOL)
+        OUT.flush()
+
+
 def _tool(name: str, properties=None) -> dict:
     return {
         "name": name,
@@ -87,11 +108,26 @@ OK_TOOLS = {
     "boom": _tool("boom"),
 }
 
-NORMAL_MODES = {"ok", "wrongid", "dup", "crlf", "bom", "serverreq", "slow_call", "flood"}
+NORMAL_MODES = {
+    "ok",
+    "record",
+    "wrongid",
+    "dup",
+    "crlf",
+    "bom",
+    "serverreq",
+    "slow_call",
+    "flood",
+}
 
 
 def _startup() -> None:
     if MODE == "eof":
+        sys.exit(0)
+    if MODE == "eof_alive":
+        # stdout 由测试 spawner 指到空文件：读端一到文件尾就是 EOF，而进程继续 sleep。
+        # （Windows 上子进程关管道句柄不一定产生可观测 EOF，句柄有内部副本。）
+        time.sleep(60)
         sys.exit(0)
     if MODE == "bigline":
         OUT.write(b"x" * (600 * 1024))
@@ -131,6 +167,56 @@ def _handle_initialize(message: dict) -> None:
     request_id = message.get("id")
     if MODE == "slow_init":
         time.sleep(10)
+    if MODE == "bigreqid":
+        # server 主动请求的 id 是 300KB 字符串：客户端回 -32601 会超过请求体上限。
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": "x" * 300_000,
+                "method": "sampling/createMessage",
+                "params": {},
+            }
+        )
+        return
+    if MODE == "nullerror":
+        send({"jsonrpc": "2.0", "id": request_id, "error": None})
+        return
+    if MODE == "trueid":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": True,
+                "result": {
+                    "protocolVersion": PROTOCOL,
+                    "capabilities": {},
+                    "serverInfo": {"name": "fake-stdio", "version": "1.0"},
+                },
+            }
+        )
+        return
+    if MODE == "stray3":
+        for bad in (999, 998, 997):
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": bad,
+                    "result": {
+                        "protocolVersion": PROTOCOL,
+                        "capabilities": {},
+                        "serverInfo": {"name": "fake-stdio", "version": "1.0"},
+                    },
+                }
+            )
+        return
+    if MODE == "hugeint":
+        # 5000 位整数：json.dumps 自己也打不出来，只能手搓裸文本。
+        line = (
+            '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s",'
+            '"capabilities":{},"serverInfo":{"name":"fake-stdio","version":"1.0"},'
+            '"n":%s}}'
+        ) % (json.dumps(request_id), PROTOCOL, "9" * 5000)
+        send_raw(line)
+        return
     if MODE == "refuse_init":
         send(
             {
@@ -140,7 +226,12 @@ def _handle_initialize(message: dict) -> None:
             }
         )
         return
-    version = "2024-11-05" if MODE == "version_mismatch" else PROTOCOL
+    if MODE == "version_mismatch":
+        version = "2024-11-05"
+    elif MODE == "bad_version_type":
+        version = []
+    else:
+        version = PROTOCOL
     if MODE == "serverreq":
         send(
             {
@@ -196,6 +287,15 @@ def _tools_page(cursor):
 
 
 def _handle_list(message: dict) -> None:
+    if MODE == "empty_cursor":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {"tools": [_tool("echo")], "nextCursor": ""},
+            }
+        )
+        return
     params = message.get("params") or {}
     tools, next_cursor = _tools_page(params.get("cursor"))
     result = {"tools": tools}
@@ -210,6 +310,47 @@ def _handle_call(message: dict) -> None:
     arguments = params.get("arguments") or {}
     if MODE == "slow_call":
         time.sleep(10)
+    if MODE == "nanresult":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {
+                    "content": [{"type": "text", "text": float("nan")}],
+                    "isError": False,
+                },
+            }
+        )
+        return
+    if MODE == "surrogate":
+        line = (
+            '{"jsonrpc":"2.0","id":%s,"result":{"content":'
+            '[{"type":"text","text":"\\ud800"}],"isError":false}}'
+        ) % json.dumps(message.get("id"))
+        send_raw(line)
+        return
+    if MODE == "escapedpair":
+        line = (
+            '{"jsonrpc":"2.0","id":%s,"result":{"content":'
+            '[{"type":"text","text":"\\ud83d\\ude00"}],"isError":false}}'
+        ) % json.dumps(message.get("id"))
+        send_raw(line)
+        return
+    if MODE == "scalarresult":
+        send({"jsonrpc": "2.0", "id": message.get("id"), "result": 42})
+        return
+    if MODE == "str_iserror":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {
+                    "content": [{"type": "text", "text": "still ok"}],
+                    "isError": "false",
+                },
+            }
+        )
+        return
     if MODE == "flood":
         for index in range(1200):
             send(
