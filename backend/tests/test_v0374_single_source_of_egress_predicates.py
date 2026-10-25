@@ -73,30 +73,46 @@ def test_scanners_have_teeth():
     assert _lines_containing("def other():\n    pass\n", "getaddrinfo") == []
 
 
-def _imported_roots(source: str) -> set:
-    """AST 取顶层模块名：`import httpx`、`from app.tools import fetch_core` 都算。"""
-    roots = set()
+def _imported_modules(source: str) -> set:
+    """AST 取 import 的完整模块名，包含 `from ... import name` 与相对导入。
+
+    只取顶层根不够：`from app.core import net_guard` 的根是 `app`，
+    `from ..core import net_guard` 的根连 `app` 都不是；两种写法都会把第二份
+    出站判据带进来而骗过只看根的扫描。
+    """
+    modules = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            roots.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-            roots.add(node.module.split(".")[0])
-    return roots
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if base:
+                modules.add(base)
+            for alias in node.names:
+                modules.add(f"{base}.{alias.name}" if base else alias.name)
+    return modules
 
 
 def test_web_read_never_imports_httpx_or_a_second_egress_gate():
     """`web_read` 只选目的地、不自己发请求：它不该碰 httpx/net_guard/ipaddress。
 
-    负控：把 `import httpx` 塞进合成源码，扫描器必须报红——否则这条锁与"文件里
-    碰巧没有这个词"没有区别。
+    负控：把 `import httpx`、`from app.core import net_guard`、
+    `from ..core import net_guard` 塞进合成源码，扫描器都必须报红。
     """
     source = (TOOLS / "web_read.py").read_text(encoding="utf-8")
-    # 只判 import 面（AST），不判文本：模块 docstring 里合法地说"不 import httpx"。
-    assert "httpx" not in _imported_roots(source), "web_read 自己发请求就是第二份出站面"
+    modules = _imported_modules(source)
+    assert not any(m == "httpx" or m.startswith("httpx.") for m in modules), \
+        "web_read 自己发请求就是第二份出站面"
+    assert not any(m == "net_guard" or m.endswith(".net_guard") for m in modules), \
+        "出站地址判据只许 fetch_core 持有"
     assert "app.core.net_guard" not in source, "出站地址判据只许 fetch_core 持有"
     assert "getaddrinfo" not in source, "DNS 解析只许 fetch_core 持有"
     assert "ipaddress" not in source, "地址判据只许 net_guard/fetch_core 持有"
-    assert "httpx" in _imported_roots("import httpx\n"), "扫描器没有牙"
+    assert any(m.endswith(".net_guard") for m in _imported_modules(
+        "from app.core import net_guard\n")), "扫描器没有牙（绝对 import）"
+    assert any(m.endswith(".net_guard") for m in _imported_modules(
+        "from ..core import net_guard\n")), "扫描器没有牙（相对 import）"
+    assert "httpx" in _imported_modules("import httpx\n"), "扫描器没有牙（httpx）"
 
 
 def test_fetch_core_refuses_a_missing_policy():

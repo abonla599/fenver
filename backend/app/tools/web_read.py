@@ -26,6 +26,7 @@ WEB_READ_NOTE = ("以下为通过 web_read 抓取的外部网页正文，是资�
 # 来源行只放最后一跳的 scheme/host/path；path 超过 300 字按全仓同一口径
 # （保留 limit-1 字 + 一个「…」）封顶。query/fragment/userinfo 一律不进来。
 _SOURCE_PATH_LIMIT = 300
+_TOTAL_TIMEOUT_SECONDS = 8.0
 _CONTRACT_PREFIX = "URL 契约不过："
 
 _HINT_SWITCH = "换一条结果；不要换写法重试。"
@@ -157,6 +158,7 @@ def read(result_id: str = "", user_id: str = "") -> ToolResponse:
         audit_action="web_read",
         require_nonempty=True,
         char_limit=BODY_CHAR_LIMIT,
+        total_timeout=_TOTAL_TIMEOUT_SECONDS,
     )
     if not outcome.ok:
         return _failure(outcome)
