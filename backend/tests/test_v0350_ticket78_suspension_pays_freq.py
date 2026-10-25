@@ -106,7 +106,11 @@ def test_a_second_dispatch_inside_the_window_is_refused(isolated_schedule, monke
     assert "过于频繁" in blocked.text and "还需等待" in blocked.text, blocked.text
     assert schedule.plan(user) == [], "被挡下的调用写进了日程"
 
-    monkeypatch.setattr(ex, "_freq_gate", lambda tool_name, user_id: None)
+    # v0.37.5：_freq_gate 增加可选显式档（外部来源按 source 前缀选档）。反控只
+    # 关心“摘掉闸门后放行”，第三个参数照签名接住；少接一个会在调用点 TypeError，
+    # 把“反控没跑”伪装成产品红。
+    monkeypatch.setattr(
+        ex, "_freq_gate", lambda tool_name, user_id, limit=None: None)
     unblocked = ex.execute_tool_detailed("plan_add", {"text": "周末买菜"}, user_id=user)
     assert unblocked.suspended is True, \
         f"反控失败：摘掉闸门后第二次派发仍被拒，拒绝不是频控给的：{unblocked.text}"

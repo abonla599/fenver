@@ -668,6 +668,11 @@ DECLARED_HAND_WRITTEN = {
         "带的是本轮正文，与 done 同一立场（跨属主本来就看得见回答本身）",
     **{k: "给上游 provider 的 schema / 消息分片，不是流上的帧"
        for k in _SCHEMA_SHAPE_KEYS},
+    ("core/mcp_stdio.py", "object"):
+        "MCP 工具 inputSchema 与内部占位条目的 JSON Schema 类型字面量，"
+        "只进工具注册表，不是流上的帧",
+    ("core/mcp_stdio_bridge.py", "object"):
+        "桥接层给注册表补的 inputSchema 类型字面量，不是流上的帧",
     **{("core/guardrails.py", n): "RoundGuard 的内部事件记录（护栏的账），进程内读，不上流"
        for n in _GUARD_INTERNAL_EVENTS},
 }
