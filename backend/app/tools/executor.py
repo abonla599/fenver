@@ -29,7 +29,11 @@ _FREQ_LIMITS = {"execute_code": (600.0, 10), "plan_add": (900.0, 6),
                 # v0.37.0 http_fetch：与 execute_code 同档。这条工具的产出会被
                 # 喂回模型，"外部正文 → 模型 → 连敲白名单站点"与注入驱动拉容器
                 # 是同一条链，档口必须一样密。
-                "http_fetch": (600.0, 10)}
+                "http_fetch": (600.0, 10),
+                # v0.37.4 web_read：正文抓取是注入链的下一步（外部正文 → 模型 →
+                # 再读下一页），档口与 execute_code 同量级但更紧：4 页/10 分钟，
+                # 最坏上下文约 14.9k 字。键仍是服务端 user_id，不是模型参数。
+                "web_read": (600.0, 4)}
 _FREQ_LEDGER = defaultdict(list)
 _FREQ_LEDGER_MAX_KEYS = 4096          # 键数上限：超了顺手清过期键，防无界增长
 _FREQ_LOCK = threading.Lock()         # 计数与追加必须同锁：否则并发两条各见 9 次、各放行
