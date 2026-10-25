@@ -128,6 +128,22 @@ async def lifespan(app: FastAPI):
     # 放在启动摘要之后，是因为这条之前已经有人往日志里写过东西。
     from app.core import logsanitizer
     logsanitizer.install_std_filters()
+    # v0.37.5 T6：MCP stdio supervisor + 工具桥。默认配置是双关（全局 false、
+    # 条目空），start() 只读配置、不 spawn；这里失败也绝不打死服务——一个可选的
+    # 第三方工具面起不来，不该让聊天、记忆、管理台一起陪葬。
+    _mcp_supervisor = None
+    _mcp_bridge = None
+    try:
+        from app.core.mcp_stdio import get_supervisor
+        from app.core.mcp_stdio_bridge import StdioToolBridge
+        _mcp_supervisor = get_supervisor()
+        _mcp_bridge = StdioToolBridge(_mcp_supervisor)
+        _mcp_bridge.attach()
+        _mcp_supervisor.start()
+        app.state.mcp_supervisor = _mcp_supervisor
+        app.state.mcp_bridge = _mcp_bridge
+    except Exception as _mcp_exc:                    # noqa: BLE001 - 可选面不拖垮启动
+        print(f"⚠️ MCP stdio 未启动: {type(_mcp_exc).__name__}")
     # 搜索源探测在后台线程里跑，但线程得早点起：第一轮要十几秒（DNS 被黑洞时
     # getaddrinfo 不吃 socket 超时），而这段时间工具清单按"能用"处理。
     from app.tools.availability import start_probe
@@ -140,6 +156,15 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时执行（如果需要清理资源）
     print("服务正在关闭...")
+    # v0.37.5 T6：先停 MCP stdio 子进程（幂等；桥接注销由 supervisor 回调处理），
+    # 再把 state 上的引用摘掉，后续读口不会拿到一个已关闭的实例。
+    if _mcp_supervisor is not None:
+        try:
+            _mcp_supervisor.shutdown()
+        except Exception as _mcp_exc:                # noqa: BLE001 - 关闭不抛
+            print(f"⚠️ MCP stdio 关闭失败: {type(_mcp_exc).__name__}")
+    app.state.mcp_supervisor = None
+    app.state.mcp_bridge = None
     # 放掉数据根锁。不放也能启动（判据会把它当陈旧锁接管），但那样每次重启
     # 都要走一遍"接管上一个自己"的路径，把一条本该干净的启动判据变脏。
     release_data_root_lock(_data_root_lock)
@@ -152,6 +177,10 @@ from app.memory.memory_router import router as memory_router
 # 这里只负责挂载，不在此处再判一遍凭据。
 from app.core.auth_router import router as auth_router
 from app.core.auth_router import throttle_orchestrate_attempt, throttle_paid_upstream
+
+# v0.37.5 T6：MCP stdio 的配置/状态面。路由都挂在 /v1/admin/* 之下且带
+# RequireAdmin，路由契约与中间件两把锁都覆盖得到（不新增顶层前缀）。
+from app.core.mcp_stdio_admin import router as mcp_stdio_admin_router
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_admin, mount_pwa
@@ -203,6 +232,10 @@ app.include_router(memory_router)
 
 # 注册身份端点（/v1/auth/*、/v1/admin/*）
 app.include_router(auth_router)
+
+# 注册 MCP stdio 管理端点（/v1/admin/mcp/stdio*）。放在身份路由之后、PWA 之前：
+# 契约按路由表扫，位置本身不带语义；顺序只是让同类管理面挨着。
+app.include_router(mcp_stdio_admin_router)
 
 # 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
 mount_pwa(app)
