@@ -48,6 +48,7 @@ MAX_BODY_BYTES = 1024 * 1024          # 解码后 1 MiB：超过就中止，不�
 MAX_REDIRECTS = 3                     # 初始请求之外最多跟 3 跳，每跳重过全部闸
 READ_TIMEOUT = 8.0                    # 单次 socket 读/写/池等待的默认上限
 CONNECT_TIMEOUT = 3.5                 # 单次连接的上限
+PER_ADDRESS_CONNECT_CAP = 1.0         # 多地址时单个地址的尝试上限：别让前两个黑洞吃光预算
 HARD_TOTAL_TIMEOUT = 15.0             # 一次 fetch() 的**墙钟硬总时限**（含 DNS/重定向/读体）
 DNS_TIMEOUT = 3.0                     # 一次 getaddrinfo 的等待上限（daemon 线程 + 队列）
 COOLDOWN_SECONDS = 600.0              # 一次真实网络失败后工具下线 10 分钟
@@ -124,7 +125,8 @@ class _PinnedBackend(httpcore.SyncBackend):
                 left = deadline - time.monotonic()
                 if left <= 0:
                     break
-                attempt_timeout = min(float(timeout), left)
+                attempt_timeout = (min(left, PER_ADDRESS_CONNECT_CAP)
+                                   if len(targets) > 1 else left)
             try:
                 return super().connect_tcp(
                     target, port, timeout=attempt_timeout,
@@ -159,8 +161,10 @@ def make_client(*, hop_timeout=None, pins=None) -> httpx.Client:
 
 
 def _resolve_addresses(host: str, timeout=None) -> list:
-    """主机名 → 地址字面量列表（去重、稳定排序）。本模块自带的注入点。
+    """主机名 → 地址字面量列表（去重、保留 `getaddrinfo` 的原序）。
 
+    原序不是装饰：双栈机器上系统通常把可用的 IPv6 排在前面，而本机实测 IPv4
+    出口被拒、IPv6 可通。排序会把 IPv4 顶到前面，白白耗掉连接预算。
     与 providers 同形但**不 import 它**（见模块 docstring）：conftest 的 autouse
     DNS 桩钉的是 providers 那一枚，本模块的测试各自 monkeypatch 这里；真实出站
     解析走 socket.getaddrinfo，端口固定问 443（这一条路只走 https）。
@@ -197,7 +201,13 @@ def _resolve_addresses(host: str, timeout=None) -> list:
         raise TimeoutError(f"DNS 解析超时（{limit:.1f} 秒）") from None
     if kind == "err":
         raise payload
-    return sorted({info[4][0] for info in payload})
+    ordered, seen = [], set()
+    for info in payload:
+        ip = info[4][0]
+        if ip not in seen:
+            seen.add(ip)
+            ordered.append(ip)
+    return ordered
 
 
 def contract_reject_reason(url: str) -> str:

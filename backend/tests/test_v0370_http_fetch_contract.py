@@ -1061,6 +1061,39 @@ def test_pinned_backend_shares_one_timeout_budget(monkeypatch):
     assert calls == [0.5], f"每个地址都拿完整超时，实际尝试了 {len(calls)} 次"
 
 
+def test_pinned_backend_caps_each_address_when_multiple(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(http_fetch.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def fake_connect(self, host, port, timeout=None, local_address=None,
+                     socket_options=None):
+        calls.append(timeout)
+        clock[0] += timeout
+        raise OSError("blackhole")
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+    backend = http_fetch._PinnedBackend(
+        {OK_HOST: ["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"]})
+    with pytest.raises(OSError):
+        backend.connect_tcp(OK_HOST, 443, timeout=3.5)
+    assert calls == [1.0, 1.0, 1.0, 0.5], calls
+
+
+def test_resolver_keeps_system_preference_order(monkeypatch):
+    infos = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "",
+         ("2606:4700:10::6814:179a", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "",
+         ("2606:4700:10::6814:179a", 443, 0, 0)),
+    ]
+    monkeypatch.setattr(http_fetch.socket, "getaddrinfo",
+                        lambda *args, **kwargs: infos)
+    assert http_fetch._resolve_addresses("example.com", timeout=1) == [
+        "2606:4700:10::6814:179a", "93.184.216.34"]
+
+
 def test_a_real_request_uses_the_pinned_ip_and_keeps_host():
     """真 httpx/httpcore 连接：pins 生效，Host 仍是原主机名。"""
     seen = {}
