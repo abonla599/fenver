@@ -19,6 +19,12 @@ import threading
 from typing import Tuple
 
 from app.core.atomic_write import write_json_atomic
+from app.core.mcp_stdio_config import (
+    MCP_ENABLED_KEY,
+    MCP_SERVERS_KEY,
+    normalize_servers,
+    sanitize_servers,
+)
 from app.core.paths import data_root
 
 # 安全默认：开源版就是"给你自己用的"，注册默认关；想开放，管理端点或 env 说一声。
@@ -76,6 +82,12 @@ DEFAULTS = {
     # 必须是同一个可见状态，而不是一个每次调用都失败的摆设。条目形状见
     # _FETCH_HOST_RE：小写 ASCII LDH、≥2 标签、无通配/端口/@/尾点、整表 ≤50 条。
     "fetch_allowed_hosts": [],
+    # v0.37.5 MCP stdio：默认双关（全局 false，条目 enabled 也缺省 false）。
+    # 启用一个 stdio server = 允许那个程序以服务账号身份运行，所以"没配过"必须
+    # 停在不动的那一头。不加 env 口子是有意的：多一个环境变量写入面，就多一条
+    # 绕过管理端点与审计改配置的路。条目形状与上限见 mcp_stdio_config。
+    MCP_ENABLED_KEY: False,
+    MCP_SERVERS_KEY: [],
 }
 
 # 一个窗口数值能取到的**最大秒数**。下游 `task_store.waiting_deadline()` 会做
@@ -181,6 +193,10 @@ _VALUE_CHECKS = {
     # 而不是悄悄收一半——管理员要的是"这份名单没被接受"，不是"哪一条没进"。
     "fetch_allowed_hosts": lambda v: (isinstance(v, list) and len(v) <= _FETCH_HOST_MAX
                                       and all(_fetch_host_ok(e) for e in v)),
+    # MCP 的两个键同样整表判：条目消毒在 mcp_stdio_config 里一份实现，写入口带
+    # verify_command=True（请求线程里判命令存在性/可执行），任何一条坏就整键拒。
+    MCP_ENABLED_KEY: lambda v: isinstance(v, bool),
+    MCP_SERVERS_KEY: lambda v: not normalize_servers(v, verify_command=True)[1],
 }
 
 
@@ -287,17 +303,38 @@ def _write() -> None:
     write_json_atomic(_default_path(), _config)
 
 
+def _copy_servers(value) -> list:
+    """MCP server 表的深拷贝：条目 dict、args、env_allowlist 都换新对象。
+
+    `_config` 初始化时是 `DEFAULTS` 的浅拷贝，调用方一次
+    `read()["mcp_stdio_servers"][0]["args"].append(...)` 就会改掉全局默认值，
+    也会把 "下一条用例/下一个请求看到的配置" 污染成别人手里的那份。
+    """
+    out = []
+    for entry in value or []:
+        if not isinstance(entry, dict):
+            continue
+        copied = dict(entry)
+        if isinstance(copied.get("args"), list):
+            copied["args"] = list(copied["args"])
+        if isinstance(copied.get("env_allowlist"), list):
+            copied["env_allowlist"] = list(copied["env_allowlist"])
+        out.append(copied)
+    return out
+
+
 def read() -> dict:
     """当前生效的配置（env 已合并）。每次现读 env，改了不用重启——与 AUTH_MODE 同口径。
 
-    `fetch_allowed_hosts` 必须**返回副本**：`_config` 初始化时是 `dict(DEFAULTS)`
-    的浅拷贝，`DEFAULTS` 里那个 list 会被 `read()` 的调用方直接拿到；一次
-    `read()["fetch_allowed_hosts"].append(...)` 就会改掉全局默认值（v0.37.0
-    审查 N5 的实测路径）。其余键是标量/不可变子树，浅拷贝即可。
+    `fetch_allowed_hosts` 与 `mcp_stdio_servers` 必须**返回副本**：`_config` 初始化时
+    是 `dict(DEFAULTS)` 的浅拷贝，`DEFAULTS` 里那两个 list 会被 `read()` 的调用方
+    直接拿到；一次 append 就会改掉全局默认值（v0.37.0 审查 N5 的实测路径）。
+    其余键是标量/不可变子树，浅拷贝即可。
     """
     with _lock:
         out = dict(_config)
         out["fetch_allowed_hosts"] = list(out.get("fetch_allowed_hosts") or [])
+        out[MCP_SERVERS_KEY] = _copy_servers(out.get(MCP_SERVERS_KEY))
     env_open = _env_registration_open()
     if env_open is not None:
         out["registration_open"] = env_open
@@ -465,6 +502,12 @@ def _sanitize_loaded(key: str, value):
         return _sanitize_credit_benchmark(value)
     if key == "fetch_allowed_hosts":
         return _normalize_fetch_hosts(value)
+    if key == MCP_ENABLED_KEY:
+        # 只保留 bool；盘上手写的 "true" 不是"差不多"，它会让"默认关"翻成开。
+        return value if isinstance(value, bool) else DEFAULTS[key]
+    if key == MCP_SERVERS_KEY:
+        # 还原路径纯形状消毒：不碰磁盘、零 raise；坏条目逐条丢（见 mcp_stdio_config）。
+        return sanitize_servers(value)
     default = DEFAULTS[key]
     if isinstance(default, (int, float)) and not isinstance(default, bool):
         if isinstance(value, int) and not isinstance(value, bool):
@@ -676,10 +719,25 @@ def apply_update(partial: dict) -> Tuple[dict, list]:
             _config[key] = _sanitize_loaded(key, value)
         _write()
         out = dict(_config)
+        out[MCP_SERVERS_KEY] = _copy_servers(out.get(MCP_SERVERS_KEY))
     env_open = _env_registration_open()
     if env_open is not None:
         out["registration_open"] = env_open
     return out, rejected
+
+
+def public_view(cfg: dict) -> dict:
+    """通用配置口的可见视图：剔除 MCP 的两个键（浅拷贝，其余原样）。
+
+    这是**唯一剔除点**：`GET /v1/config`、`POST /v1/admin/config` 的响应体与
+    审计 before/after 都从这里取，别在调用方各写一遍。理由：`mcp_stdio_servers`
+    的 args 可能含密钥/路径，一旦进通用配置响应或 `data/audit.jsonl`，一次
+    "切换注册开关"就会把它们写进只增账；管理员要看/改 MCP 走专用端点。
+    """
+    out = dict(cfg or {})
+    out.pop(MCP_ENABLED_KEY, None)
+    out.pop(MCP_SERVERS_KEY, None)
+    return out
 
 
 def log_config_summary() -> None:

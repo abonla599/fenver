@@ -1197,8 +1197,11 @@ def get_config(principal: Principal = CurrentPrincipal):
     策略原样，普通用户多知道一个白名单域名，就多一枚社工话术素材（"去抓这个
     站点吧"，而那站点真的会被服务端替他去抓）。普通用户拿到的响应里这个键
     整个不出现，而不是给个空表——空表会引导用户去配一个他写不动的格子。
+
+    v0.37.5：MCP 的两个键对**所有角色**都不出现（`public_view` 是唯一剔除点）：
+    `mcp_stdio_servers` 的 args 可能写着密钥/本机路径，管理员要看走专用端点。
     """
-    cfg = config_store.read()
+    cfg = config_store.public_view(config_store.read())
     if principal.role != "admin":
         cfg.pop("fetch_allowed_hosts", None)
     return cfg
@@ -1207,15 +1210,18 @@ def get_config(principal: Principal = CurrentPrincipal):
 @router.post("/v1/admin/config")
 def update_config(req: ConfigUpdateRequest, actor: Principal = RequireAdmin):
     """改配置并落盘。未知/类型不对的键原样退回，不静默吞。"""
-    before = config_store.read()
+    # v0.37.5：审计与响应都只拿 public_view——一次"切换注册开关"不许把
+    # mcp_stdio_servers 的 args 抄进 data/audit.jsonl，也不许回给管理端浏览器。
+    before = config_store.public_view(config_store.read())
     partial = {k: v for k, v in req.model_dump().items() if v is not None}
     cfg, rejected = config_store.apply_update(partial)
+    visible = config_store.public_view(cfg)
     # 每一次配置写都进账，不因为"值恰好没变"而消音：排障要知道的是"谁在什么时候试图
     # 动过全站闸门"，改前改后各是什么——即便这次按下没改变结果，按下本身就是该留痕的
     # 运营动作。被拒的键一并记下，那正是"有人想改改不动"的证据。
-    audit.log(actor, "config.update", before=before, after=cfg,
+    audit.log(actor, "config.update", before=before, after=visible,
               detail="被拒的键：" + ", ".join(sorted(rejected)) if rejected else "")
-    return {"config": cfg, "rejected": rejected}
+    return {"config": visible, "rejected": rejected}
 
 
 @router.get("/v1/admin/audit")
