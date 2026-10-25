@@ -36,6 +36,7 @@ import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import httpcore
 
 from app.core import audit, config_store
 from app.core.net_guard import reject_reason
@@ -96,10 +97,51 @@ def client_kwargs(*, hop_timeout=None) -> dict:
             "timeout": httpx.Timeout(read_timeout, connect=connect_timeout)}
 
 
-def make_client(*, hop_timeout=None) -> httpx.Client:
+class _PinnedBackend(httpcore.SyncBackend):
+    """只连 net_guard 校验过的地址字面量；主机名只用于 Host/SNI。
+
+    一个主机名可能解析出多个公网地址；按校验时的顺序逐个尝试，全部失败才把
+    最后一个异常抛出去。任何情况下都不把原主机名交回 `getaddrinfo`——那正是
+    rebinding 窗口的入口。
+    """
+
+    def __init__(self, pins):
+        self._pins = {str(host).lower(): tuple(str(ip) for ip in ips)
+                      for host, ips in pins.items()}
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None,
+                    socket_options=None):
+        targets = self._pins.get(str(host).lower(), ())
+        if not targets:
+            raise RuntimeError(f"没有为 {host} 钉住已校验地址，拒绝连接")
+        last_exc = None
+        for target in targets:
+            try:
+                return super().connect_tcp(
+                    target, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options)
+            except Exception as exc:             # noqa: BLE001 - 换下一个已校验地址
+                last_exc = exc
+        raise last_exc
+
+
+def make_client(*, hop_timeout=None, pins=None) -> httpx.Client:
     """每跳新建、绝不复用：httpx 的 client 会攒 Set-Cookie，复用就把上一跳的
-    cookie 带给了下一跳，那是"不转发 Cookie"的反面。"""
-    return httpx.Client(**client_kwargs(hop_timeout=hop_timeout))
+    cookie 带给了下一跳，那是"不转发 Cookie"的反面。
+
+    `pins` 是 `{hostname: [已由 net_guard 校验过的地址]}`：httpx/httpcore 默认会
+    在连接时再解析一次，DNS 可以在两次解析之间换答案（rebinding/TOCTOU）。这里
+    把传输层的 `connect_tcp` 换成只连校验过的字面量；TLS 的 SNI 与 Host 头仍由
+    httpcore 用原主机名设置，证书校验不受影响。"""
+    client = httpx.Client(**client_kwargs(hop_timeout=hop_timeout))
+    if pins:
+        transport = getattr(client, "_transport", None)
+        pool = getattr(transport, "_pool", None)
+        if pool is None or not hasattr(pool, "_network_backend"):
+            client.close()
+            raise RuntimeError("httpx 传输层结构变化，无法把已校验地址钉进连接")
+        pool._network_backend = _PinnedBackend(pins)
+    return client
 
 
 def _resolve_addresses(host: str, timeout=None) -> list:
@@ -324,10 +366,19 @@ def fetch(url: str, *, user_id: str = ""):
             return fail(f"主机 {host} 不在 fetch_allowed_hosts 白名单里",
                         "off_allowlist", hops=hops,
                         hint="只有管理员配置的站点抓得到；别换写法绕，告诉用户站点没被允许。")
-        # resolve 在**调用时**从模块属性取（裸全局名每次现查）——monkeypatch 打桩
-        # 才生效，与 providers 同一条注入点纪律。
-        why = reject_reason(host, resolve=_resolve_addresses, allow_loopback=False,
-                            where="url", loopback_hint="")
+        # 解析只做一次：这一份地址列表既交给 net_guard 判，也交给连接层钉住。
+        # 两次解析之间的 DNS 换答案就是 rebinding 窗口，不能留。
+        try:
+            addresses = _resolve_addresses(host)
+        except Exception as e:                   # noqa: BLE001 - 解析失败一律不放行
+            return fail(f"主机 {host} 解析失败，服务端不放行", "blocked_address",
+                        hops=hops,
+                        detail=f"resolve_error={type(e).__name__}: {str(e)[:120]}")
+        if not addresses:
+            return fail(f"主机 {host} 解析结果为空，服务端不放行",
+                        "blocked_address", hops=hops, detail="resolve_empty")
+        why = reject_reason(host, resolve=lambda _h: addresses,
+                            allow_loopback=False, where="url", loopback_hint="")
         if why:
             # 详细理由（含解析出的内网 IP）只进审计；给模型的只留类别与主机名。
             return fail(_public_block_reason(host, why), "blocked_address",
@@ -340,7 +391,7 @@ def fetch(url: str, *, user_id: str = ""):
         client = None
         total = 0
         try:
-            client = make_client(hop_timeout=remaining)
+            client = make_client(hop_timeout=remaining, pins={host: addresses})
             with client.stream("GET", current, headers=FIXED_HEADERS) as resp:
                 status_code = resp.status_code
                 if 300 <= status_code < 400:

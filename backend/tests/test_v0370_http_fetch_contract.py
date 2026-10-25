@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
+import httpcore
 import pytest
 
 from app.core import audit, config_store
@@ -988,6 +989,78 @@ def test_restore_from_disk_sanitizes(tmp_path, monkeypatch, config_restored):
     config_store.restore(path=str(path))
     # "Example.COM" 归一成 example.com 照收（getter 归一化口径），"evil"/"*.x.com" 丢弃。
     assert config_store.fetch_allowed_hosts() == ["example.com", "ok.example.com"]
+
+
+# ---------- 10b. DNS rebinding：校验过的地址必须钉进连接 ----------
+
+def test_pinned_backend_connects_to_the_validated_ip(monkeypatch):
+    calls = []
+
+    def fake_connect(self, host, port, timeout=None, local_address=None,
+                     socket_options=None):
+        calls.append((host, port))
+        return object()
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+    backend = http_fetch._PinnedBackend({OK_HOST: [PUBLIC_IP]})
+    assert backend.connect_tcp(OK_HOST, 443) is not None
+    assert calls == [(PUBLIC_IP, 443)], "连接用了主机名而不是校验过的地址"
+
+
+def test_pinned_backend_tries_every_validated_address(monkeypatch):
+    calls = []
+
+    def fake_connect(self, host, port, timeout=None, local_address=None,
+                     socket_options=None):
+        calls.append(host)
+        if len(calls) == 1:
+            raise OSError("first address unreachable")
+        return object()
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+    backend = http_fetch._PinnedBackend(
+        {OK_HOST: ["203.0.113.10", PUBLIC_IP]})
+    assert backend.connect_tcp(OK_HOST, 443) is not None
+    assert calls == ["203.0.113.10", PUBLIC_IP]
+
+
+def test_make_client_installs_the_pinned_backend():
+    client = http_fetch.make_client(pins={OK_HOST: [PUBLIC_IP]})
+    try:
+        backend = client._transport._pool._network_backend
+        assert isinstance(backend, http_fetch._PinnedBackend)
+    finally:
+        client.close()
+
+
+def test_hostname_is_resolved_once_and_that_answer_is_pinned(
+        allowlist, monkeypatch):
+    """校验与连接之间不许再解析：模拟第二次 DNS 已换成内网地址。"""
+    allowlist([OK_HOST])
+    calls = []
+
+    def fake_resolve(host):
+        calls.append(host)
+        return [PUBLIC_IP]
+
+    monkeypatch.setattr(http_fetch, "_resolve_addresses", fake_resolve)
+    seen = {}
+
+    def fake_client(**kwargs):
+        # 模拟 DNS 在校验之后、连接之前换答案；实现只能继续用第一次的地址。
+        monkeypatch.setattr(http_fetch, "_resolve_addresses",
+                            lambda host: ["10.0.0.7"])
+        seen.update(kwargs)
+        return httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "text/plain"}, content=b"hello")))
+
+    monkeypatch.setattr(http_fetch, "make_client", fake_client)
+    out = _fetch()
+    assert out.success, out.to_string()
+    assert calls == [OK_HOST], f"一次请求解析了 {len(calls)} 次：{calls}"
+    assert seen["pins"] == {OK_HOST: [PUBLIC_IP]}, \
+        "连接层没有拿到校验时的地址，DNS 换答案仍可生效"
 
 
 # ---------- 11. 注册表形状（与隔离锁互补的一小钉） ----------
