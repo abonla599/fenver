@@ -73,6 +73,32 @@ def test_scanners_have_teeth():
     assert _lines_containing("def other():\n    pass\n", "getaddrinfo") == []
 
 
+def _imported_roots(source: str) -> set:
+    """AST 取顶层模块名：`import httpx`、`from app.tools import fetch_core` 都算。"""
+    roots = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+def test_web_read_never_imports_httpx_or_a_second_egress_gate():
+    """`web_read` 只选目的地、不自己发请求：它不该碰 httpx/net_guard/ipaddress。
+
+    负控：把 `import httpx` 塞进合成源码，扫描器必须报红——否则这条锁与"文件里
+    碰巧没有这个词"没有区别。
+    """
+    source = (TOOLS / "web_read.py").read_text(encoding="utf-8")
+    # 只判 import 面（AST），不判文本：模块 docstring 里合法地说"不 import httpx"。
+    assert "httpx" not in _imported_roots(source), "web_read 自己发请求就是第二份出站面"
+    assert "app.core.net_guard" not in source, "出站地址判据只许 fetch_core 持有"
+    assert "getaddrinfo" not in source, "DNS 解析只许 fetch_core 持有"
+    assert "ipaddress" not in source, "地址判据只许 net_guard/fetch_core 持有"
+    assert "httpx" in _imported_roots("import httpx\n"), "扫描器没有牙"
+
+
 def test_fetch_core_refuses_a_missing_policy():
     """policy=None 是"忘了传"，不是"全放行"；必须在任何解析之前炸。"""
     from app.tools import fetch_core

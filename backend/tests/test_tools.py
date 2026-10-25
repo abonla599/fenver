@@ -616,8 +616,10 @@ def test_web_search_declares_needs_user_but_keeps_user_id_out_of_the_schema(monk
     assert set(props) == {"query"}, f"schema 多出了参数：{sorted(props)}"
     assert "user_id" not in props, "归属人只能由执行器注入，schema 里绝不许出现"
     assert "[r_...]" in info["description"], "模型不知道行首那个标识是什么"
-    assert "web_read" not in info["description"], \
-        "本批没有注册 web_read，描述里提它就是指向不存在的能力"
+    # T3 起 web_read 已注册：搜索描述要告诉模型这枚 ID 能拿来读正文，否则它
+    # 只看见一枚不解释用途的标识。
+    assert "web_read(result_id=" in info["description"], \
+        "搜索结果描述了 [r_...]，却没告诉模型可以用来 web_read"
 
     # 给模型的那份（availability 筛过）也必须是同一条 query-only schema
     monkeypatch.setattr(availability, "search_reachable", lambda: True)
