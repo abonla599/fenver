@@ -103,7 +103,8 @@ def _run(*, tools=None, trace_out=None, messages=None):
     """
     frames = list(streaming.stream_chat_events(
         "fake-chat", messages or [{"role": "user", "content": "hi"}],
-        provider_id="fake-model", tools=tools, trace_out=trace_out))
+        provider_id="fake-model", tools=tools, trace_out=trace_out,
+        user_id="u"))
     return frames, (trace_out or [])
 
 

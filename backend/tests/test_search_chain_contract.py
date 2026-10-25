@@ -129,7 +129,9 @@ def test_a_source_that_raises_degrades_like_an_empty_one(monkeypatch):
 def test_a_raising_source_still_ages_nothing_and_the_tool_survives(monkeypatch, capsys):
     monkeypatch.setattr(search_chain, "SOURCES", [_FakeSource("only", raises=True)])
     monkeypatch.setattr(availability, "note_search_ok", lambda: pytest.fail("空结果不许刷新可用性"))
-    out = execute_tool("web_search", {"query": "x"})
+    # v0.37.4 T2：web_search 声明 needs_user 后，执行器要求注入身份；这条用例测的是
+    # 降级链与日志，补一个服务端身份即可（不改变它断言的东西）。
+    out = execute_tool("web_search", {"query": "x"}, user_id="u")
     assert "没有返回结果" in out, out
     logged = capsys.readouterr().out
     assert "only" in logged and "抛异常" in logged, f"降级没留一行可查的日志：{logged!r}"

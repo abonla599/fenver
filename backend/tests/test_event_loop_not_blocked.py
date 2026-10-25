@@ -276,7 +276,8 @@ def test_a_stalled_search_does_not_freeze_the_loop(monkeypatch):
     def _make_gen():
         return mod.stream_chat(
             "deepseek-chat", [{"role": "user", "content": "查天气"}],
-            tools=[{"type": "function", "function": {"name": "web_search"}}])
+            tools=[{"type": "function", "function": {"name": "web_search"}}],
+            user_id="u")
 
     async def drive(with_threadpool):
         """用指定方式把生成器抽干，同时数事件循环在此期间跳了多少拍。"""

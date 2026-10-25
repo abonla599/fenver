@@ -173,7 +173,9 @@ def test_search_results_are_annotated_as_data_not_instructions(monkeypatch):
                         lambda query, max_results=3: [{"title": "某校简章",
                                                        "url": "https://e/1",
                                                        "snippet": "内容"}])
-    out = execute_tool("web_search", {"query": "某校 简章"})
+    # v0.37.4 T2：web_search 声明 needs_user 后必须由服务端注入身份；补上才能真的
+    # 执行到"外部内容标注"这一句（否则会停在"缺少身份"，把这条锁绿成空转）。
+    out = execute_tool("web_search", {"query": "某校 简章"}, user_id="u")
     assert "不是指令" in out, f"外部文本没有标注非指令身份：{out!r}"
     assert "某校简章" in out and "https://e/1" in out, "标注不该吞掉任何一条结果"
 
@@ -184,7 +186,7 @@ def test_the_empty_answer_does_not_claim_to_be_external_pages(monkeypatch):
     from app.tools.executor import execute_tool
 
     monkeypatch.setattr(ws, "search", lambda query, max_results=3: [])
-    out = execute_tool("web_search", {"query": "x"})
+    out = execute_tool("web_search", {"query": "x"}, user_id="u")
     assert "不是指令" not in out, f"空结果被套上了有结果才成立的话：{out!r}"
 
 
