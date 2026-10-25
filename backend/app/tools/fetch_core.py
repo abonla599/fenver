@@ -302,12 +302,21 @@ def contract_reject_reason(url: str, *, schemes=DEFAULT_SCHEMES, ports=None) -> 
     return ""
 
 
+def _scrub_audit_detail(detail: str) -> str:
+    """审计 detail 里出现 URL 时整段替换：异常原文可能带 query/fragment/userinfo。"""
+    text = re.sub(r"(?i)\b(?:https?://|//)[^\s'\"<>]+", "<url>", str(detail))
+    text = re.sub(r"(?i)\b[A-Za-z0-9._%+-]+:[^/\s@'\"<>]+@[^\s'\"<>]+", "<url>", text)
+    text = re.sub(r"\?[^\s'\"<>]*", "?<redacted>", text)
+    text = re.sub(r"#[^\s'\"<>]*", "#<redacted>", text)
+    return text[:400]
+
+
 def audit_fetch(action: str, user_id: str, host: str, path: str, status: str,
                 nbytes: int, hops: int, *, origin_host: str = "",
                 origin_path: str = "", detail: str = "") -> None:
     """一次调用一笔账，成败都记。写账失败绝不把一次好抓取变成失败（抄 core/audit）。
 
-    `target` 只落 host/path/status/bytes/hops（另加 origin_* 与 detail）；
+    `target` 只落 host/path/status/bytes/hops（另加 origin_* 与已剥 URL 的 detail）；
     query/fragment/userinfo 在调用方由 urlparse 剥掉，正文、标题、头部值不传进来。
     """
     try:
@@ -319,7 +328,7 @@ def audit_fetch(action: str, user_id: str, host: str, path: str, status: str,
         if detail:
             # 细节（解析出的内网 IP、DNS 超时原文、content-type）只进审计，
             # 不进给模型看的错误文案。
-            target["detail"] = str(detail)[:400]
+            target["detail"] = _scrub_audit_detail(detail)
         audit.log({"user_id": user_id or "anon"}, action, target=target)
     except Exception as e:                       # noqa: BLE001 - 审计不许带崩抓取
         print(f"⚠️ {action} 的审计这本账在漏（这次记不上）：{e}")
