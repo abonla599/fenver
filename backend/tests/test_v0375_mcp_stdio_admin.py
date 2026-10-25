@@ -518,3 +518,18 @@ def test_lifespan_survives_a_failing_mcp_config(config_sandbox, fresh_supervisor
         assert app.state.mcp_supervisor is not None
 
     assert app.state.mcp_supervisor is None
+
+
+def test_lifespan_survives_supervisor_construction_failure(
+        config_sandbox, fresh_supervisor, monkeypatch):
+    """lifespan 的 try/except 是承重的：supervisor 造不出来时服务必须照常启动。"""
+    import app.core.mcp_stdio as mcp_stdio
+
+    def boom(**_kwargs):
+        raise RuntimeError("supervisor boom")
+
+    monkeypatch.setattr(mcp_stdio, "get_supervisor", boom)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert app.state.mcp_supervisor is None
+    assert app.state.mcp_supervisor is None
