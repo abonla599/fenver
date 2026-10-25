@@ -7,9 +7,11 @@ sandbox 就等于给"沙箱容器无网络"这条隔离补一个带 URL 的旁�
 行是最容易被"顺手复用一下"改掉的东西，所以钉成 AST。
 
 四把锁：
-1. `http_fetch.py` 的 import 面（AST 遍历 Import/ImportFrom，正面写明认得的形状：
-   绝对导入、`from app.x import y` 都算）里不许出现 `app.sandbox*` 或
-   `app.core.providers`；源码文本不许出现 ALLOW_LOCALHOST；
+1. `http_fetch.py` 与 `fetch_core.py` 的 import 面（AST 遍历 Import/ImportFrom，
+   正面写明认得的形状：绝对导入、`from app.x import y` 都算）里不许出现
+   `app.sandbox*` 或 `app.core.providers`；两份源码文本都不许出现 ALLOW_LOCALHOST；
+   v0.37.4 把出站判据搬进 fetch_core，`allow_loopback=False` 写死的锚点跟着搬，
+   不许在薄壳里留第二枚可传开关的痕迹；
 2. `sandbox_manager.py` 里 `*.containers.create` 调用上的 `network_disabled=True`——
    AST 找调用、只在该调用自己的 keywords 里断言；行号不参与判据（v0.37.0 审查
    N12：硬编码行号是会腐烂的散文坐标，上方插一行注释不该让锁红）；
@@ -32,7 +34,15 @@ from app.tools.registry import tools_registry
 
 BACKEND = Path(__file__).resolve().parent.parent
 HTTP_FETCH_SRC = (BACKEND / "app" / "tools" / "http_fetch.py").read_text(encoding="utf-8")
+FETCH_CORE_SRC = (BACKEND / "app" / "tools" / "fetch_core.py").read_text(encoding="utf-8")
 SANDBOX_SRC = (BACKEND / "app" / "sandbox" / "sandbox_manager.py").read_text(encoding="utf-8")
+
+# v0.37.4：判据搬进 fetch_core，薄壳只剩策略/冷却/文案；两处都必须过同一把
+# import 面锁（薄壳再 import providers 也照样是焊穿）。
+FETCH_SOURCES = {
+    "http_fetch.py": ("app.tools.http_fetch", HTTP_FETCH_SRC),
+    "fetch_core.py": ("app.tools.fetch_core", FETCH_CORE_SRC),
+}
 
 _FORBIDDEN_ROOTS = ("app.sandbox", "app.core.providers")
 
@@ -77,22 +87,29 @@ def _imported_modules(source: str, module: str = "app.tools.http_fetch") -> set:
     return found
 
 
+@pytest.mark.parametrize("name", list(FETCH_SOURCES))
 @pytest.mark.parametrize("forbidden", _FORBIDDEN_ROOTS)
-def test_http_fetch_never_imports_the_other_two_surfaces(forbidden):
-    mods = _imported_modules(HTTP_FETCH_SRC)
+def test_fetch_sources_never_import_the_other_two_surfaces(name, forbidden):
+    module, source = FETCH_SOURCES[name]
+    mods = _imported_modules(source, module)
     hit = [m for m in mods if m == forbidden or m.startswith(forbidden + ".")]
-    assert not hit, f"http_fetch 焊穿了隔离面：import 了 {hit}"
+    assert not hit, f"{name} 焊穿了隔离面：import 了 {hit}"
 
 
-def test_http_fetch_source_has_no_localhost_switch():
-    """providers 那枚 ALLOW_LOCALHOST_BASE_URL 不许以任何形式被搬进/引用进 fetch 源码。
+def test_fetch_sources_have_no_localhost_switch():
+    """providers 那枚 ALLOW_LOCALHOST_BASE_URL 不许以任何形式被搬进/引用进出站源码。
 
     fetch 调 net_guard 时 `allow_loopback=False` 是写死的字面量（判据见契约测试
     "名单不是免检通道"一组），这里钉的是另一半：连开关名字都不许出现，防止
-    "从别处读开关再传进来"的二手借用。
+    "从别处读开关再传进来"的二手借用。v0.37.4 把这段判据搬进 fetch_core，
+    锚点跟着搬；薄壳里再出现一枚可传开关就是第二份出站判据。
     """
-    assert "ALLOW_LOCALHOST" not in HTTP_FETCH_SRC
-    assert "allow_loopback=False" in HTTP_FETCH_SRC
+    for name, (_module, source) in FETCH_SOURCES.items():
+        assert "ALLOW_LOCALHOST" not in source, f"{name} 出现了 providers 的本机开关名"
+    assert "allow_loopback=False" in FETCH_CORE_SRC, \
+        "fetch_core 必须把 allow_loopback=False 写死"
+    assert "allow_loopback" not in HTTP_FETCH_SRC, \
+        "薄壳不该再碰 allow_loopback：判据只有 fetch_core 一份"
 
 
 def _dotted_call_name(node) -> str:

@@ -344,8 +344,9 @@ def execute_code(code: str, language: str = "python", max_retries=2) -> str:
 
 
 # ---------- 抓取白名单站点正文（v0.37.0）----------
-# 判据与实现都在 app/tools/http_fetch.py：URL 契约、白名单、net_guard 地址闸、
-# 逐跳重验、1 MiB 体预算与审计。这里只负责注册。needs_user 的理由与日程两兄弟
+# 判据与实现都在 app/tools/fetch_core.py：URL 契约、目的地 policy、net_guard
+# 地址闸、逐跳重验、1 MiB 体预算与审计；http_fetch.py 只留白名单策略、冷却与文案。
+# 这里只负责注册。needs_user 的理由与日程两兄弟
 # 不同——不是为了取数据归属，而是审计归因：账上要能说出"是谁让服务端去抓的"，
 # 而 user_id 绝不进 schema（多一个模型可填的口子，就等于请它编一个背锅人）。
 from app.tools import http_fetch as _http_fetch
