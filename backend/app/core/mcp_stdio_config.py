@@ -30,10 +30,11 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,15}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 # 计划 §2.4 的硬拒清单：名字里出现这些片段就不许从服务进程环境里复制值过去。
-# 大小写不敏感；`DYLD_` 是前缀，其余按子串匹配（`_TOKEN` 同时覆盖 `GITHUB_TOKEN`，
+# 大小写不敏感；`DYLD_` 是前缀，其余按子串匹配（`API_KEY` 同时覆盖裸 `API_KEY`、
+# `MY_API_KEY`、`OPENAI_API_KEY`；`_TOKEN` 同时覆盖 `GITHUB_TOKEN`，
 # `AUTH` 同时覆盖 `OAUTH_*`——宁可误伤也不把凭据递给第三方代码）。
 _ENV_DENY_PARTS = (
-    "_API_KEY", "APIKEY", "ACCESS_TOKEN", "_TOKEN", "TOKEN_",
+    "API_KEY", "APIKEY", "ACCESS_TOKEN", "_TOKEN", "TOKEN_",
     "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE", "SESSION",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "_PROXY",
     "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "DYLD_",
@@ -222,7 +223,10 @@ def sanitize_servers(raw) -> list:
     out, seen = [], set()
     for item in raw:
         entry_id = item.get("id") if isinstance(item, dict) else None
-        label = entry_id if isinstance(entry_id, str) and entry_id else "?"
+        # 只有通过 ID_RE 的 id 才允许进日志：手改配置里带 CR/LF 的 id 能伪造一行
+        # stdout（`bad\nFAKE`）。fullmatch 而不是 match：`$` 会放过末尾换行。
+        label = (entry_id if isinstance(entry_id, str)
+                 and ID_RE.fullmatch(entry_id) else "?")
         if len(out) >= MAX_SERVERS:
             print(f"⚠️ 配置项 mcp_stdio_servers 超过 {MAX_SERVERS} 条上限，"
                   f"丢弃条目 {label}: too_many_servers")

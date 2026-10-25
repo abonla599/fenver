@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core import config_store
+from app.core import config_store, mcp_stdio_config
 from app.core.config_store import MCP_ENABLED_KEY, MCP_SERVERS_KEY
 from app.core.mcp_stdio_config import (
     ARG_MAX_CHARS,
@@ -117,13 +117,41 @@ def test_restore_drops_bad_entries_and_truncates(config_sandbox):
     assert config_store.read()[MCP_SERVERS_KEY][0]["args"] == ["-m", "mcp_server"]
 
 
-def test_restore_keeps_missing_command_and_never_touches_disk(config_sandbox):
+def test_restore_keeps_missing_command_and_never_touches_disk(config_sandbox,
+                                                             monkeypatch):
     ghost = _abs_missing_tool()
     _write_cfg(config_sandbox, [{"id": "ghost", "command": ghost}])
     config_store.restore(path=str(config_sandbox))
     servers = config_store.read()[MCP_SERVERS_KEY]
     assert [entry["id"] for entry in servers] == ["ghost"]
     assert servers[0]["command"] == ghost
+
+    # 把存在性判据全部换成会炸的桩：restore 只要碰一次盘（isfile 换成 exists /
+    # access 也一样）就红，而不是靠"这个路径恰好不存在"这种弱证据。
+    def boom(*args, **kwargs):
+        raise AssertionError("restore 路径不许碰磁盘")
+
+    monkeypatch.setattr(mcp_stdio_config.os.path, "isfile", boom)
+    monkeypatch.setattr(mcp_stdio_config.os.path, "exists", boom)
+    monkeypatch.setattr(mcp_stdio_config.os, "access", boom)
+    config_store.restore(path=str(config_sandbox))
+    servers = config_store.read()[MCP_SERVERS_KEY]
+    assert [entry["id"] for entry in servers] == ["ghost"]
+    assert servers[0]["command"] == ghost, "摘掉磁盘探针后 ghost 仍必须原样保留"
+    direct = mcp_stdio_config.sanitize_servers(
+        [{"id": "ghost", "command": ghost}])
+    assert [entry["id"] for entry in direct] == ["ghost"]
+
+
+def test_restore_never_echoes_forged_id_from_log(capsys):
+    """手改配置里的 id 带 CR/LF 时不能伪造一行 stdout。"""
+    out = mcp_stdio_config.sanitize_servers([
+        {"id": "bad\nFAKE", "command": sys.executable},
+    ])
+    assert out == []
+    captured = capsys.readouterr().out
+    assert "FAKE" not in captured, "id 里的换行把伪造内容写进了日志"
+    assert "丢弃条目 ?: bad_id" in captured, "不可信的 id 必须以 ? 落日志"
 
 
 # ---------- 3. apply_update：一条坏 → 整键拒，旧值不变 ----------
@@ -145,6 +173,18 @@ def test_apply_update_rejects_whole_table_on_one_bad_entry(config_sandbox):
     assert [entry["id"] for entry in cfg[MCP_SERVERS_KEY]] == ["one", "two"]
 
 
+def test_apply_update_rejects_bare_api_key_env(config_sandbox):
+    """裸 `API_KEY` 也是凭据名：T3 会按 allowlist 从服务进程环境复制值。"""
+    cfg, rejected = config_store.apply_update({MCP_SERVERS_KEY: [_entry("keep")]})
+    assert rejected == []
+    before = config_store.read()[MCP_SERVERS_KEY]
+
+    poisoned = [_entry("leak", env_allowlist=["API_KEY"])]
+    cfg, rejected = config_store.apply_update({MCP_SERVERS_KEY: poisoned})
+    assert rejected == [MCP_SERVERS_KEY], "裸 API_KEY 必须让整条配置进 rejected"
+    assert config_store.read()[MCP_SERVERS_KEY] == before
+
+
 # ---------- 4. enabled 必须是 bool ----------
 
 def test_enabled_must_be_bool(config_sandbox):
@@ -158,9 +198,16 @@ def test_enabled_must_be_bool(config_sandbox):
 
 # ---------- 5. read()/apply_update() 深拷贝 ----------
 
-def test_read_returns_deep_copies_for_servers(config_sandbox):
+def test_read_and_apply_update_return_deep_copies_for_servers(config_sandbox):
     good = _entry("copy")
-    config_store.apply_update({MCP_SERVERS_KEY: [good]})
+    cfg, rejected = config_store.apply_update({MCP_SERVERS_KEY: [good]})
+    assert rejected == []
+    # apply_update 的返回值同样是副本：改它不许污染下一次 read()。
+    cfg[MCP_SERVERS_KEY][0]["args"].append("MUTATED_UPDATE")
+    cfg[MCP_SERVERS_KEY][0]["env_allowlist"].append("MUTATED_UPDATE_ENV")
+    cfg[MCP_SERVERS_KEY][0]["id"] = "mutated_update"
+    cfg[MCP_SERVERS_KEY].append(_entry("extra_update"))
+
     first = config_store.read()
     first[MCP_SERVERS_KEY][0]["args"].append("MUTATED")
     first[MCP_SERVERS_KEY][0]["env_allowlist"].append("MUTATED_ENV")
@@ -314,6 +361,7 @@ def test_posix_requires_the_executable_bit(tmp_path):
 @pytest.mark.parametrize("name", [
     "GITHUB_TOKEN", "DEEPSEEK_API_KEY", "HTTPS_PROXY", "PYTHONPATH",
     "github_token", "SOME_SECRET", "DYLD_INSERT_LIBRARIES",
+    "API_KEY", "api_key",
 ])
 def test_env_denylist_covers_secret_and_proxy_shapes(name):
     assert env_name_denied(name) is True
@@ -330,6 +378,22 @@ def test_env_allowlist_accepts_plain_names():
     entry, _ = normalize_entry(
         _entry("files", env_allowlist=["GITHUB_TOKEN"]), verify_command=False)
     assert entry is None, "被硬拒的 env 名必须让整条配置失效"
+
+
+def test_env_allowlist_boundary_is_16_with_literal_counts():
+    """16 个合法名通过、17 个拒：计数用字面量，别拿实现常量当预期。"""
+    assert MAX_ENV_ALLOWLIST == 16
+    names = [f"MCP_VAR_{index:02d}" for index in range(17)]
+    assert len(names) == 17
+
+    entry, reason = normalize_entry(
+        _entry("files", env_allowlist=names[:16]), verify_command=False)
+    assert entry is not None, reason
+    assert len(entry["env_allowlist"]) == 16
+
+    entry, reason = normalize_entry(
+        _entry("files", env_allowlist=names), verify_command=False)
+    assert entry is None and reason == "env_allowlist_too_many"
 
 
 # ---------- 11. args 与整表上限 ----------
@@ -369,3 +433,32 @@ def test_servers_table_limits():
              "args": ["x" * 1000] * 32} for i in range(MAX_SERVERS)]
     got, errors = normalize_servers(huge, verify_command=False)
     assert got == [] and errors, "整表序列化超过 32KB 必须被拒"
+
+
+def test_hard_caps_are_pinned_to_literal_boundaries():
+    """条目/参数/参数长度的硬上限各钉一处字面量，避免实现常量同源恒绿。"""
+    assert MAX_SERVERS == 3
+    assert MAX_ARGS == 32
+    assert ARG_MAX_CHARS == 1024
+
+    base = {"id": "cap", "command": sys.executable}
+    entry, reason = normalize_entry({**base, "args": ["x"] * 32},
+                                    verify_command=False)
+    assert entry is not None, reason
+    entry, reason = normalize_entry({**base, "args": ["x"] * 33},
+                                    verify_command=False)
+    assert entry is None and reason == "args_too_many"
+
+    entry, reason = normalize_entry({**base, "args": ["x" * 1024]},
+                                    verify_command=False)
+    assert entry is not None, reason
+    entry, reason = normalize_entry({**base, "args": ["x" * 1025]},
+                                    verify_command=False)
+    assert entry is None and reason == "arg_too_long"
+
+    three = [{"id": f"cap{i}", "command": sys.executable} for i in range(3)]
+    got, errors = normalize_servers(three, verify_command=False)
+    assert errors == [] and len(got) == 3
+    four = [{"id": f"cap{i}", "command": sys.executable} for i in range(4)]
+    got, errors = normalize_servers(four, verify_command=False)
+    assert got == [] and errors == ["too_many_servers"]
