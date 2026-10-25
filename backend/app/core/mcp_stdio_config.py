@@ -120,7 +120,9 @@ def normalize_entry(raw, *, verify_command: bool):
         return None, "unsupported_field:" + ",".join(unknown)
 
     server_id = raw.get("id")
-    if not isinstance(server_id, str) or not ID_RE.match(server_id):
+    # fullmatch 而不是 match：`$` 会放过末尾换行，`"abc\n"` 会被当成合法 id 拼进
+    # T4 的工具名/来源/日志。与 sanitize_servers 的日志标签门保持同一判据。
+    if not isinstance(server_id, str) or not ID_RE.fullmatch(server_id):
         return None, "bad_id"
 
     command = raw.get("command")

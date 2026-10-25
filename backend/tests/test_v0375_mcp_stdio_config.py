@@ -309,6 +309,16 @@ def test_unknown_entry_fields_reject_the_entry():
         assert entry is None and reason
 
 
+def test_id_with_trailing_newline_is_rejected():
+    """`$` 会放过末尾换行：`"abc\\n"` 若被接受，T4 拼进工具名/日志就能伪造一行。"""
+    entry, reason = normalize_entry(_entry("abc\n"), verify_command=False)
+    assert entry is None and reason == "bad_id", "末尾换行的 id 必须按 bad_id 拒"
+
+    entry, reason = normalize_entry(_entry("abc"), verify_command=False)
+    assert entry is not None, reason
+    assert entry["id"] == "abc"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows 可执行判据")
 @pytest.mark.parametrize("name", [
     "cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe",
