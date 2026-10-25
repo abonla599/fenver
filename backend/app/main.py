@@ -131,6 +131,10 @@ async def lifespan(app: FastAPI):
     # v0.37.5 T6：MCP stdio supervisor + 工具桥。默认配置是双关（全局 false、
     # 条目空），start() 只读配置、不 spawn；这里失败也绝不打死服务——一个可选的
     # 第三方工具面起不来，不该让聊天、记忆、管理台一起陪葬。
+    # 先把 state 上的两个引用置空：启动失败时读口拿到的是 None，而不是一个
+    # "这个属性根本不存在"的 AttributeError（测试与运维都按同一种形状读它）。
+    app.state.mcp_supervisor = None
+    app.state.mcp_bridge = None
     _mcp_supervisor = None
     _mcp_bridge = None
     try:
