@@ -23,7 +23,8 @@ import httpx
 import pytest
 
 from app.core import audit
-from app.tools import availability, builtin_tools, extract, fetch_core, result_store, web_read
+from app.tools import (availability, builtin_tools, extract, fetch_core,
+                       http_fetch, result_store, web_read)
 from app.tools.registry import get_available_tools_schema, tools_registry
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -74,12 +75,19 @@ def _install_transport(monkeypatch, response, addresses):
     """真 fetch_core 的字节来源桩：DNS 按给定答案、httpx 用 MockTransport。
 
     出站判据（contract/net_guard/逐跳/预算/提取）一条不改，只有字节来源是假的。
+    `response` 可以是单格 `(status, headers, body)`，也可以是多格脚本（第 N 次
+    请求消费第 N 格，用完重复最后一格）；`body` 为异常实例时该请求直接抛出，
+    用来演 `ReadTimeout` 一类的真实网络失败。
     """
     seen = []
+    script = list(response) if isinstance(response, list) else [response]
 
     def handler(request):
         seen.append(request)
-        status, headers, body = response
+        idx = min(len(seen) - 1, len(script) - 1)
+        status, headers, body = script[idx]
+        if isinstance(body, Exception):
+            raise body
         return httpx.Response(status, headers=headers, content=body)
 
     def resolver(host):
@@ -416,3 +424,179 @@ def test_web_search_mints_live_ids_that_web_read_accepts(monkeypatch):
     resp = web_read.read(rid, user_id="u")
     assert resp.success is True, resp.error
     assert resp.data.startswith(web_read.WEB_READ_NOTE)
+
+
+# ---------- 6. 真实出站路径的负控（审查 N3）与 8 秒预算回归锁（D1） ----------
+
+def test_read_passes_an_explicit_eight_second_total_timeout(monkeypatch):
+    """8 秒预算的回归锁：删掉 `total_timeout=` 那一行，本条必须红。
+
+    修的是行为不是锁（delta 复审 D1）：`web_read` 吃 `fetch_core` 默认的 15s 时，
+    错误文案仍写「8 秒内」，慢滴/多跳会在第 15 秒说一句假话。
+    """
+    rid = _mint()
+    calls = _fake_fetch(monkeypatch, _ok_outcome())
+    web_read.read(rid, user_id="u")
+    _, kwargs = calls[0]
+    assert "total_timeout" in kwargs, "web_read 吃回了 core 的 15s 默认值"
+    assert kwargs["total_timeout"] == 8.0
+    assert web_read._TOTAL_TIMEOUT_SECONDS == 8.0
+
+
+def test_redirect_to_a_private_address_is_blocked_at_the_second_hop(monkeypatch):
+    rid = _mint(url="http://public.example/start", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(302, {"location": "https://metadata.example/latest/meta-data"}, b"")],
+        {"public.example": ["93.184.216.34"],
+         "metadata.example": ["169.254.169.254"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "内网/本机地址" in resp.error
+    assert "169.254.169.254" not in resp.to_string(), "解析出的内网 IP 只许进审计"
+    assert len(seen) == 1, "第二跳已被 net_guard 拒，却仍然发了请求"
+    assert str(seen[0].url) == "http://public.example/start"
+    target = _last_web_read_target()
+    assert target["status"] == "blocked_address" and target["hops"] == 1
+    assert target["host"] == "metadata.example"
+
+
+def test_https_to_http_downgrade_is_rejected(monkeypatch):
+    rid = _mint(url="https://secure.example/a", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(302, {"location": "http://secure.example/b"}, b"")],
+        {"secure.example": ["93.184.216.34"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "降级成 http" in resp.error and "已拒绝" in resp.error
+    assert len(seen) == 1, "降级目标已经被请求过了"
+    target = _last_web_read_target()
+    assert target["status"] == "redirect_downgrade" and target["hops"] == 1
+
+
+@pytest.mark.parametrize("url,needle", [
+    ("http://example.com:8080/x", "8080"),
+    ("https://example.com:8443/x", "8443"),
+    ("http://user:pass@example.com/x", "userinfo"),
+    ("http://例え.テスト/x", "IDN"),
+    ("https://xn--r8jz45g.xn--q9jyb4c/x", "punycode"),
+    ("http://example.com./x", "尾点"),
+])
+def test_url_shapes_are_rejected_before_dns_or_connection(monkeypatch, url, needle):
+    rid = _mint(url=url, owner="u")
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError(f"契约该先拒的 URL 走到了 DNS/连接：{url}")
+
+    monkeypatch.setattr(fetch_core, "_resolve_addresses", boom)
+    monkeypatch.setattr(fetch_core, "make_client", boom)
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "网址不能抓取" in resp.error
+    assert needle in resp.error, f"契约理由没落到模型可见处：{resp.error}"
+    assert url not in resp.to_string(), "错误文案回显了整条结果 URL"
+    assert _last_web_read_target()["status"] == "contract_rejected"
+
+
+def test_a_pdf_page_is_rejected_for_its_content_type(monkeypatch):
+    rid = _mint(url="https://docs.example/file", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(200, {"content-type": "application/pdf"}, b"%PDF-1.7")],
+        {"docs.example": ["93.184.216.34"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "不是可读正文类型" in resp.error
+    assert "application/pdf" not in resp.to_string(), "服务端 header 不回显给模型"
+    assert len(seen) == 1
+    target = _last_web_read_target()
+    assert target["status"] == "content_type"
+    assert "application/pdf" in target.get("detail", ""), "类型原文只许进审计"
+
+
+def test_four_redirects_end_with_too_many_redirects(monkeypatch):
+    rid = _mint(url="https://hop.example/0", owner="u")
+    script = [(302, {"location": f"https://hop.example/{i + 1}"}, b"")
+              for i in range(4)]
+    seen = _install_transport(monkeypatch, script,
+                              {"hop.example": ["93.184.216.34"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "重定向次数过多" in resp.error
+    assert len(seen) == 4, f"初始 + 3 跳就该停，实际发了 {len(seen)} 次"
+    target = _last_web_read_target()
+    assert target["status"] == "too_many_redirects" and target["hops"] == 3
+
+
+def test_a_read_timeout_is_a_network_error_without_global_cooldown(monkeypatch):
+    before = http_fetch._cooldown_until
+    rid = _mint(url="https://slow.example/a", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(0, {}, httpx.ReadTimeout("read timed out"))],
+        {"slow.example": ["93.184.216.34"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "8 秒内没抓完/连不上" in resp.error
+    assert "read timed out" not in resp.to_string(), "底层异常原文不进模型文案"
+    assert len(seen) == 1
+    assert _last_web_read_target()["status"] == "network_error:ReadTimeout"
+    assert http_fetch._cooldown_until == before, \
+        "web_read 的一条坏结果把 http_fetch 全局冷却 10 分钟了"
+
+
+@pytest.mark.parametrize("status,network_error,needle", [
+    ("timeout", "", "8 秒内没抓完"),
+    ("too_many_redirects", "", "重定向次数过多"),
+    ("redirect_no_location", "", "重定向地址不合法"),
+    ("redirect_downgrade", "", "https 降级成 http"),
+    ("failed", "", "服务端内部出错"),
+])
+def test_remaining_failure_statuses_have_explicit_text(
+        monkeypatch, status, network_error, needle):
+    rid = _mint()
+    _fake_fetch(monkeypatch, fetch_core.FetchOutcome(
+        ok=False, text="x", status=status, network_error=network_error))
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "web_read 失败：" in resp.error and needle in resp.error
+
+
+def test_an_empty_body_through_the_real_path_is_a_clean_failure(monkeypatch):
+    rid = _mint(url="https://empty.example/js", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(200, {"content-type": "text/html; charset=utf-8"},
+          "<html><script>document.write('x')</script><nav>导航</nav></html>"
+          .encode("utf-8"))],
+        {"empty.example": ["93.184.216.34"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "没有可读正文" in resp.error
+    assert len(seen) == 1
+    assert _last_web_read_target()["status"] == "empty_body"
+
+
+def test_a_crlf_location_is_never_followed_on_the_real_protocol_path(monkeypatch):
+    """CRLF Location：httpx 0.28 在算 next_request 时就抛 RemoteProtocolError，
+    core 自己的控制字符检查是给非 httpx 传输的后备（见 fetch_core 用例）。
+
+    这里钉的是生产路径的**行为**而不是某一条 status：目标一个字节都没被请求、
+    失败是 fail-closed、注入头不回显。把 status 固定成两者之一，是为了在
+    httpx 升级改变拦截层时不误报，同时也不放过"竟然跟随了"的回归。
+    """
+    rid = _mint(url="http://public.example/start", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(302, {"location": "https://next.example/x\r\nX-Injected: 1"}, b"")],
+        {"public.example": ["93.184.216.34"],
+         "next.example": ["93.184.216.35"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "X-Injected" not in resp.to_string()
+    assert len(seen) == 1, "CRLF Location 的目标被请求了"
+    assert str(seen[0].url) == "http://public.example/start"
+    status = _last_web_read_target()["status"]
+    assert status in ("network_error:RemoteProtocolError",
+                      "redirect_invalid_location"), status
