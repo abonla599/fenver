@@ -44,6 +44,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from unicodedata import category
 
 from app.core import audit as audit_module
 from app.core.config_store import read as config_store_read
@@ -69,7 +70,8 @@ from app.core.paths import data_root
 
 logger = logging.getLogger("app.core.mcp_stdio")
 
-__all__ = ["STATES", "StdioSupervisor", "get_supervisor", "COPY_FAILED_KEY"]
+__all__ = ["STATES", "StdioSupervisor", "get_supervisor", "COPY_FAILED_KEY",
+           "safe_report_name", "REPORT_NAME_LIMIT"]
 
 # 生命周期状态（计划 §3.2）。对外只暴露这八个字符串。
 STATE_DISABLED = "disabled"
@@ -137,6 +139,42 @@ def _clean_reason(text: Any, *, limit: int = 64) -> str:
     """把异常文本收成短码：只留安全字符，截断。绝不回显整条命令。"""
     raw = str(text or "").strip() or "error"
     return _REASON_CLEAN.sub("_", raw)[:limit]
+
+
+# 拒绝账本 / 日志里的第三方工具名上限。名字来自不可信 server，可能是 5 KB 长名、
+# 含 NUL/RLO/零宽，甚至带孤立代理（直接 ``json.dumps(...).encode("utf-8")`` 会抛）。
+# 账本与日志只允许出现清洗后的形状；真正调用第三方工具时仍用原始名。
+REPORT_NAME_LIMIT = 128
+
+
+def safe_report_name(raw: Any, limit: int = REPORT_NAME_LIMIT) -> str:
+    """把第三方工具名收成可安全落账本 / 落日志的形状（长度 ≤ ``limit``）。
+
+    - 非 str → ``"?"``；
+    - 孤立代理先 ``backslashreplace`` 成字面量，结果恒可 UTF-8 编码；
+    - 去掉 Cc/Cf（NUL、RLO、零宽、换行等控制/格式字符）；
+    - 超长截断（保留前 ``limit-1`` 个字符 + ``…``），空串 → ``"?"``。
+
+    只用于报告与日志。调用第三方工具、注册映射名仍走原始字符串。
+    """
+    if not isinstance(raw, str):
+        return "?"
+    try:
+        text = raw.encode("utf-8", "backslashreplace").decode("utf-8")
+    except Exception:                                        # noqa: BLE001 - 外部文本
+        return "?"
+    cleaned = "".join(ch for ch in text if category(ch) not in ("Cc", "Cf")).strip()
+    if not cleaned:
+        return "?"
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = REPORT_NAME_LIMIT
+    if limit <= 0:
+        return "?"
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1] + "…"
+    return cleaned
 
 
 def _refused_reason(text: str) -> str:
@@ -250,7 +288,7 @@ def _safe_copy_tools(server_id: str, tools: Any) -> List[Dict[str, Any]]:
                 raw_name = ""
             kind = "nested" if isinstance(exc, RecursionError) else "copy"
             logger.warning("MCP stdio 工具复制失败 %s/%s: %s",
-                           server_id, raw_name or "<缺名>", type(exc).__name__)
+                           server_id, safe_report_name(raw_name), type(exc).__name__)
             out.append({
                 "name": raw_name,
                 COPY_FAILED_KEY: kind,

@@ -37,7 +37,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unicodedata import category
 
-from app.core.mcp_stdio import COPY_FAILED_KEY
+from app.core.mcp_stdio import COPY_FAILED_KEY, safe_report_name
 from app.tools.registry import register_external_tools, tools_registry, unregister_source
 from app.tools.response import ToolResponse
 
@@ -431,7 +431,7 @@ class StdioToolBridge:
                     for item in outcome.get("rejected") or []:
                         if isinstance(item, dict):
                             rejected_report.setdefault(server_id, []).append({
-                                "name": str(item.get("name") or ""),
+                                "name": safe_report_name(item.get("name")),
                                 "reason": str(item.get("reason") or ""),
                             })
                 # G2：exposed 必须是注册表里的真实条数，不是本批 accepted。
@@ -460,7 +460,8 @@ class StdioToolBridge:
         rejected: List[Dict[str, str]] = []
         for raw_tool in tools:
             if not isinstance(raw_tool, dict):
-                rejected.append({"name": "", "reason": "工具条目必须是对象"})
+                rejected.append({"name": safe_report_name(""),
+                                 "reason": "工具条目必须是对象"})
                 continue
             raw_name = raw_tool.get("name")
             if not isinstance(raw_name, str):
@@ -472,14 +473,15 @@ class StdioToolBridge:
                 if copy_failed:
                     reason = ("schema 嵌套过深" if copy_failed == "nested"
                               else "工具条目无法复制")
-                    rejected.append({"name": raw_name, "reason": reason})
+                    rejected.append({"name": safe_report_name(raw_name), "reason": reason})
                     continue
                 if not isinstance(raw_tool.get("name"), str):
-                    rejected.append({"name": "", "reason": "工具名必须是字符串"})
+                    rejected.append({"name": safe_report_name(raw_name),
+                                     "reason": "工具名必须是字符串"})
                     continue
                 schema, reason = _schema_or_reason(raw_tool)
                 if reason:
-                    rejected.append({"name": raw_name, "reason": reason})
+                    rejected.append({"name": safe_report_name(raw_name), "reason": reason})
                     continue
                 mapped = _mapped_tool_name(server_id, raw_name)
                 entries.append({
@@ -494,10 +496,11 @@ class StdioToolBridge:
                     "suspends": False,
                 })
             except RecursionError:
-                rejected.append({"name": raw_name, "reason": "schema 嵌套过深"})
+                rejected.append({"name": safe_report_name(raw_name),
+                                 "reason": "schema 嵌套过深"})
             except (TypeError, ValueError, UnicodeError) as exc:
                 rejected.append({
-                    "name": raw_name,
+                    "name": safe_report_name(raw_name),
                     "reason": "工具条目处理失败：%s" % type(exc).__name__,
                 })
         return entries, rejected
@@ -537,7 +540,7 @@ class StdioToolBridge:
                     raw_name = ""
                 kind = "nested" if isinstance(exc, RecursionError) else "copy"
                 logger.warning("MCP stdio 桥跳过无法复制的工具 %s/%s: %s",
-                               server_id or "<unknown>", raw_name or "<缺名>",
+                               server_id or "<unknown>", safe_report_name(raw_name),
                                type(exc).__name__)
                 out.append({
                     "name": raw_name,

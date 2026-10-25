@@ -25,6 +25,8 @@
 import copy
 import hashlib
 import json
+import logging
+import unicodedata
 
 import pytest
 
@@ -1056,3 +1058,121 @@ def test_auth_store_role_of_disabled_account_is_user(tmp_path):
     assert store.role_of("u_status") == "user"
     assert store.role_of("u_legacy") == "user"
     assert store.role_of("u_on") == "admin"
+
+
+# --------------------------------------------------------------------------- BLOCK 账本名清洗
+# 审查复现：第三方工具名可能含 RLO/NUL、孤立代理或 5 KB 长名。原样进
+# rejection_report() 会让 ``json.dumps(..., ensure_ascii=False).encode("utf-8")``
+# 抛 UnicodeEncodeError（T6 状态端点 500），超长名还会让单条 warning 达 196KB。
+
+_BAD_REPORT_NAMES = (
+    "tool\u202e\u0000x",
+    "tool\ud800",
+    "N" * 5006,
+)
+
+
+def _assert_report_name_safe(name):
+    assert isinstance(name, str) and name
+    assert len(name) <= stdio_mod.REPORT_NAME_LIMIT
+    assert all(unicodedata.category(ch) not in ("Cc", "Cf") for ch in name)
+    name.encode("utf-8")          # 孤立代理会在这里抛 UnicodeEncodeError
+
+
+def test_safe_report_name_contract():
+    """单源清洗函数：非 str / 空 / Cc/Cf / 孤立代理 / 超长全部收口。"""
+    assert stdio_mod.safe_report_name("plain_tool") == "plain_tool"
+    assert stdio_mod.safe_report_name(None) == "?"
+    assert stdio_mod.safe_report_name(123) == "?"
+    assert stdio_mod.safe_report_name("") == "?"
+    assert stdio_mod.safe_report_name("\x00\u202e\n") == "?"
+    assert stdio_mod.safe_report_name("a\nb\tc") == "abc"
+    surrogate = stdio_mod.safe_report_name("tool\ud800")
+    assert surrogate == "tool\\ud800", "孤立代理必须转字面量后仍可 UTF-8 编码"
+    assert surrogate.encode("utf-8")
+    assert stdio_mod.safe_report_name("N" * 5006) == "N" * 127 + "…"
+
+
+def test_build_entries_reports_safe_names():
+    """桥构建侧：三个坏名进 rejected 时已被清洗/截断。"""
+    sid = "srvbadsafe"
+    bridge = _bridge(FakeSupervisor({}))
+    raw = [_tool("good")] + [
+        _tool(name, schema=_MISSING) for name in _BAD_REPORT_NAMES]
+    entries, rejected = bridge._build_entries(sid, raw)
+
+    assert [entry["name"] for entry in entries] == [
+        bridge_mod._mapped_tool_name(sid, "good")]
+    assert len(rejected) == 3
+    for item in rejected:
+        _assert_report_name_safe(item["name"])
+        assert "\u202e" not in item["name"] and "\x00" not in item["name"]
+    long_names = [item["name"] for item in rejected if item["name"].startswith("N")]
+    assert long_names == ["N" * 127 + "…"]
+    json.dumps(rejected, ensure_ascii=False).encode("utf-8")   # 不抛
+
+
+def test_rejection_report_is_safe_via_on_ready():
+    """桥 on_ready 真实入口：好工具注册，坏名只进账本且账本可 UTF-8 序列化。"""
+    sid = "srvreport"
+    raw = [_tool("good")] + [
+        _tool(name, schema=_MISSING) for name in _BAD_REPORT_NAMES]
+    supervisor = FakeSupervisor({sid: raw})
+    bridge = _bridge(supervisor)
+    bridge.attach()
+    supervisor.fire_ready(sid)
+
+    assert bridge_mod._mapped_tool_name(sid, "good") in tools_registry
+    for name in _BAD_REPORT_NAMES:
+        assert bridge_mod._mapped_tool_name(sid, name) not in tools_registry
+
+    report = bridge.rejection_report()[sid]
+    assert len(report) == 3
+    for item in report:
+        _assert_report_name_safe(item["name"])
+    assert json.dumps(bridge.rejection_report(), ensure_ascii=False).encode("utf-8")
+
+
+def test_real_safe_copy_placeholders_and_warnings_use_safe_names(caplog):
+    """真实 _safe_copy_tools：占位喂回桥后账本安全；两处复制失败 warning 不吐全文。"""
+    sid = "srvcopysafe"
+    tools = [_tool("good")] + [
+        _tool(name, schema=_deep_schema()) for name in _BAD_REPORT_NAMES]
+    with caplog.at_level(logging.WARNING, logger="app.core.mcp_stdio"):
+        copied = stdio_mod._safe_copy_tools(sid, tools)
+
+    assert [item["name"] for item in copied] == ["good", *_BAD_REPORT_NAMES]
+    for item in copied[1:]:
+        assert item[stdio_mod.COPY_FAILED_KEY] == "nested"
+
+    messages = [record.getMessage() for record in caplog.records
+                if record.name == "app.core.mcp_stdio"]
+    copy_warnings = [message for message in messages if "复制失败" in message]
+    assert len(copy_warnings) == 3
+    assert all(len(message) < 1000 for message in copy_warnings)
+    assert all(_BAD_REPORT_NAMES[2] not in message for message in messages), \
+        "warning 里出现了 5006 字符原始工具名"
+
+    supervisor = FakeSupervisor({}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.on_ready(sid, copied)
+    assert bridge_mod._mapped_tool_name(sid, "good") in tools_registry
+    for name in _BAD_REPORT_NAMES:
+        assert bridge_mod._mapped_tool_name(sid, name) not in tools_registry
+
+    report = bridge.rejection_report()[sid]
+    assert len(report) == 3
+    for item in report:
+        _assert_report_name_safe(item["name"])
+    json.dumps(report, ensure_ascii=False).encode("utf-8")
+
+    # 桥自身的复制失败 warning 也必须用清洗后的名字。
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app.core.mcp_stdio_bridge"):
+        bridge.on_ready("srvcopywarn",
+                        [_tool(_BAD_REPORT_NAMES[2], schema=_deep_schema())])
+    bridge_warnings = [record.getMessage() for record in caplog.records
+                       if record.name == "app.core.mcp_stdio_bridge"]
+    assert any("无法复制" in message for message in bridge_warnings), bridge_warnings
+    assert all(_BAD_REPORT_NAMES[2] not in message for message in bridge_warnings)
+    _assert_report_name_safe(bridge.rejection_report()["srvcopywarn"][0]["name"])
