@@ -630,8 +630,11 @@ def test_b6c_close_during_call_wakes_with_closed_error(tmp_path):
         # 唤醒之后 close() 已经跑完；再关一次不抛、不二次杀崩。
         client.close()
         assert client.alive is False
-        # close() 只应该 terminate 一次：重复 kill 会掩盖“谁杀的进程”这条线索。
-        assert client.stats["kills"] == 1
+        # kills 只钉上限，不钉“必须杀一次”：0 = server 读到 stdin EOF 后在宽限期内
+        # 自行退出，close() 的 wait 直接收尸；1 = 进程没退、需要 terminate 收尸。
+        # 两种都是正确关闭；强凑 kills==1 就得对已退出进程再动手，会重新引入
+        # PID 复用/二次杀的风险。
+        assert client.stats["kills"] in (0, 1)
 
 
 def test_b6d_second_call_while_busy_is_retryable(tmp_path):
