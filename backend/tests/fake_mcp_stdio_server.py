@@ -48,7 +48,8 @@
                       ``<argv[2]>/tree.json``，并每 0.2s 追加心跳到
                       ``<argv[2]>/heartbeat.txt``；再走正常协议。
 - ``hog``             先正常回 initialize，再分块分配约 128MB（保持引用）后 sleep 60。
-- ``record_argv``     把 ``sys.argv`` 写 ``<argv[2]>/argv.json``，再走正常协议。
+- ``record_argv``     把 ``sys.argv`` 写 ``<argv[2]>/argv.json``、把 ``os.getcwd()``
+                      写 ``<argv[2]>/cwd.json``，再走正常协议。
 - ``sleep``           只 sleep 60（``tree`` 在 PyInstaller 冻结包里用它当孙进程，
                       frozen 解释器没有 ``-c``）。
 """
@@ -215,6 +216,7 @@ def _startup() -> None:
         _write_json("env.json", dict(os.environ))
     elif MODE == "record_argv":
         _write_json("argv.json", list(sys.argv))
+        _write_json("cwd.json", os.getcwd())
     elif MODE == "tree":
         _start_tree()
     if MODE == "eof_alive":

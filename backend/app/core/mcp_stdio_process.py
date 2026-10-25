@@ -38,6 +38,7 @@ from app.core.mcp_stdio_config import (
     ID_RE,
     command_problem,
     env_name_denied,
+    env_name_reserved,
     normalize_entry,
 )
 
@@ -135,6 +136,10 @@ if os.name == "nt":  # pragma: no cover - 仅在 Windows 上执行
         wintypes.LPVOID,
     ]
     _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+    _kernel32.GetWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    _kernel32.GetWindowsDirectoryW.restype = wintypes.UINT
+    _kernel32.GetSystemDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    _kernel32.GetSystemDirectoryW.restype = wintypes.UINT
     _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
     _kernel32.GetExitCodeProcess.argtypes = [
@@ -153,26 +158,73 @@ else:  # pragma: no cover - POSIX 分支没有 Job Object
 # --------------------------------------------------------------------------- 小工具
 
 
-def _system_root() -> str:
-    """Windows 系统目录：优先真实 ``SystemRoot``，否则按盘符推默认值。
+def _strip_root_sep(path: str) -> str:
+    """去掉尾部 ``\\`` / ``/``，但**保住盘符根**：``C:\\`` 不能变成 ``C:``。
 
-    只读这两个固定名字，不是为了继承环境，而是为了让 ``SystemRoot`` /
-    ``COMSPEC`` / ``PATH`` 指向真实系统目录（写死 ``C:\\Windows`` 在系统盘不是 C
-    的机器上会起不来任何东西）。
+    ``os.path.join("C:", "System32")`` 是驱动器相对路径 ``C:System32``，会把
+    PATH/COMSPEC 指到"当前目录所在盘"而不是系统目录。
     """
+    stripped = path.rstrip("\\/")
+    if len(stripped) == 2 and stripped[1] == ":":
+        return stripped + "\\"
+    return stripped or path
+
+
+def _windows_api_dir(api) -> Optional[str]:
+    """调 ``GetWindowsDirectoryW`` / ``GetSystemDirectoryW``；失败返回 None。"""
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = api(buffer, len(buffer))
+        if length <= 0:
+            return None
+        if length >= len(buffer):
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            length = api(buffer, len(buffer))
+            if length <= 0:
+                return None
+        return buffer.value or None
+    except Exception:  # noqa: BLE001 - 观测设施，绝不因为取路径失败而拒绝启动
+        return None
+
+
+def _system_root() -> str:
+    """Windows 系统目录：以系统 API 为真，环境变量只是 API 失败时的退路。
+
+    ``SystemRoot`` 可能被服务进程的环境污染（或被伪装成别的目录），而子进程的
+    ``SystemRoot`` / ``PATH`` / ``COMSPEC`` 必须指向真实系统目录，否则第三方
+    server 会加载到攻击者放下的 DLL/exe。``GetWindowsDirectoryW`` 不受环境变量
+    影响。
+    """
+    real = _windows_api_dir(_kernel32.GetWindowsDirectoryW) if os.name == "nt" else None
+    if real:
+        return _strip_root_sep(real)
     root = os.environ.get("SystemRoot") or os.environ.get("windir") or ""
     if root and os.path.isabs(root):
-        return root.rstrip("\\/")
+        return _strip_root_sep(root)
     drive = os.environ.get("SystemDrive") or "C:"
-    return drive.rstrip("\\/") + "\\Windows"
+    return _strip_root_sep(drive.rstrip("\\/") + "\\Windows")
+
+
+def _system32_directory() -> str:
+    """真实 System32：API 优先，失败才退回 ``<system_root>/System32``。"""
+    real = _windows_api_dir(_kernel32.GetSystemDirectoryW) if os.name == "nt" else None
+    if real:
+        return _strip_root_sep(real)
+    return os.path.join(_system_root(), "System32")
+
+
+def _taskkill_path() -> str:
+    """taskkill 的固定路径：只从 ``GetSystemDirectoryW`` 拼，不经过 PATH。"""
+    return os.path.join(_system32_directory(), "taskkill.exe")
 
 
 def _system_drive(system_root: str) -> str:
-    drive = os.environ.get("SystemDrive") or ""
-    if drive:
-        return drive
+    """系统盘：从真实系统根推（环境里的 ``SystemDrive`` 可能被污染）。"""
     head, _tail = os.path.splitdrive(system_root)
-    return head or "C:"
+    if head:
+        return head
+    drive = os.environ.get("SystemDrive") or ""
+    return drive or "C:"
 
 
 def _config_error(reason: str) -> MCPStdioConfigError:
@@ -216,8 +268,10 @@ def build_env_plan(server_id: str, allowlist, mcp_root: str, *, command: Optiona
     - ``PATH`` 固定为系统目录 + ``command`` 所在目录，不继承服务进程 PATH；
     - POSIX 不注入 Windows 专属变量，``PATH`` 固定为 ``/usr/local/bin:/usr/bin:/bin``。
 
-    allowlist 里被 ``env_name_denied`` 命中的名字、非 str 名字、服务进程里不存在的
-    名字一律丢。返回值只含字符串键值；**值不写日志**。
+    allowlist 只是"额外允许复制"：``env_name_denied`` 命中的名字、非 str 名字、
+    服务进程里不存在的名字、以及 ``env_name_reserved`` 命中的固定注入项一律丢。
+    **固定注入值最后覆盖**，所以哪怕调用方绕过写入口把 ``PATH``/``TEMP`` 递进来，
+    也改不了边界。返回值只含字符串键值；**值不写日志**。
     """
     if not isinstance(server_id, str) or not ID_RE.fullmatch(server_id):
         raise _config_error("bad_server_id")
@@ -229,6 +283,18 @@ def build_env_plan(server_id: str, allowlist, mcp_root: str, *, command: Optiona
     for directory in (server_dir, home_dir, tmp_dir):
         _makedirs_private(directory)
 
+    # 先收集 allowlist 到临时 dict；固定 env 构造完再覆盖它（固定值永远胜出）。
+    allowlisted: Dict[str, str] = {}
+    if isinstance(allowlist, (list, tuple)):
+        for name in allowlist:
+            if not isinstance(name, str) or env_name_denied(name):
+                continue
+            if env_name_reserved(name):
+                continue
+            value = os.environ.get(name)
+            if isinstance(value, str):
+                allowlisted[name] = value
+
     env: Dict[str, str] = {}
     command_dir = ""
     if isinstance(command, str) and os.path.isabs(command):
@@ -236,7 +302,7 @@ def build_env_plan(server_id: str, allowlist, mcp_root: str, *, command: Optiona
 
     if os.name == "nt":
         system_root = _system_root()
-        system32 = os.path.join(system_root, "System32")
+        system32 = _system32_directory()
         path_dirs = [
             system32,
             system_root,
@@ -279,13 +345,9 @@ def build_env_plan(server_id: str, allowlist, mcp_root: str, *, command: Optiona
     else:
         env["TMPDIR"] = tmp_dir
 
-    if isinstance(allowlist, (list, tuple)):
-        for name in allowlist:
-            if not isinstance(name, str) or env_name_denied(name):
-                continue
-            value = os.environ.get(name)
-            if isinstance(value, str):
-                env[name] = value
+    # 固定注入项最后覆盖 allowlist：边界不是"可配置项"。
+    allowlisted.update(env)
+    env = allowlisted
 
     # 只留字符串键值：调用方（Popen）不接受别的类型。
     return {
@@ -296,12 +358,17 @@ def build_env_plan(server_id: str, allowlist, mcp_root: str, *, command: Optiona
 
 
 def argv_fingerprint(command: str, args: Sequence[Any]) -> str:
-    """审计用的 argv 摘要：**只 hash 命令与 flag，不含 flag 的值/位置参数**。
+    """审计用的 argv 摘要：**只 hash 命令与 flag 名，不含 flag 的值/位置参数**。
 
     整串 argv 的哈希对低熵密钥（如 4 位 PIN）可穷举，等于把秘密写成可离线爆破的
-    摘要；只取 flag 足以发现"配置换过参数形态"，又不把值带进只增账（§2.7）。
+    摘要；只取 flag 名足以发现"配置换过参数形态"，又不把值带进只增账（§2.7）。
+    ``--flag=value`` 只取第一个 ``=`` 之前的 ``--flag``：值同样可能是密钥。
     """
-    flags = [arg for arg in (args or []) if str(arg).startswith("-")]
+    flags = []
+    for arg in args or []:
+        text = str(arg)
+        if text.startswith("-"):
+            flags.append(text.split("=", 1)[0])
     payload = json.dumps([command, *flags], ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
@@ -489,7 +556,7 @@ class StdioProcess:
         self.job_attached = job is not None
         self.job_error = job_error
         self._lock = threading.Lock()
-        self._terminated = False
+        self._reaped = False
 
     # T2 客户端直接读这些属性；包装层不复制管道。
     @property
@@ -505,21 +572,33 @@ class StdioProcess:
         return self.proc.stderr
 
     def poll(self):
-        return self.proc.poll()
+        """非阻塞探测；发现已退出时顺手关 Job 句柄（幂等、加锁）。
+
+        只 poll 不 wait 的调用方也该让 ``KILL_ON_JOB_CLOSE`` 生效，否则 Job 句柄
+        会一直挂到对象被回收。
+        """
+        code = self.proc.poll()
+        if code is not None:
+            with self._lock:
+                self._reaped = True
+                self._close_job_locked()
+        return code
 
     def wait(self, timeout: Optional[float] = None):
-        """等进程退出；成功收尸后关 Job 句柄（``KILL_ON_JOB_CLOSE`` 再清一次子树）。"""
+        """等进程退出；成功收尸后记 ``_reaped`` 并关 Job 句柄。
+
+        ``_reaped`` 是 ``terminate_tree`` 的安全前提：收尸之后 PID 可能被系统复用，
+        再按 PID 发 taskkill/killpg 会误杀无关进程树。
+        """
         result = self.proc.wait(timeout=timeout)
-        self._close_job()
+        with self._lock:
+            self._reaped = True
+            self._close_job_locked()
         return result
 
     def kill(self) -> bool:
         """T2 客户端的 ``proc.kill()`` 入口：等价于 ``terminate_tree``（杀整棵树）。"""
         return self.terminate_tree()
-
-    def _close_job(self) -> None:
-        with self._lock:
-            self._close_job_locked()
 
     def _close_job_locked(self) -> None:
         job = self.job
@@ -535,53 +614,58 @@ class StdioProcess:
     def terminate_tree(self, timeout: float = 5.0) -> bool:
         """杀整棵进程树；幂等，绝不把异常抛给调用方。
 
-        顺序（计划 §3.6）：``TerminateJobObject`` → ``taskkill /F /T /PID`` →
-        ``proc.kill()`` → ``proc.wait(timeout)`` → 关 Job 句柄。POSIX 用
-        ``os.killpg(os.getpgid(pid), SIGKILL)``。返回进程是否已不在。
+        顺序（计划 §3.6）：``TerminateJobObject``（句柄操作，先兜孙进程）→
+        ``taskkill /F /T /PID`` → ``proc.kill()`` → ``proc.wait(timeout)`` → 关 Job。
+        已 ``wait``/``poll`` 收尸后**不再按 PID 发任何信号**：PID 会被复用，旧 PID
+        上的 taskkill 可能误杀无关进程树。POSIX 对应 ``killpg``，同样只对活进程发。
+        返回进程是否已不在。
         """
         with self._lock:
             proc = self.proc
-            if os.name == "nt":
-                if self.job is not None:
-                    try:
-                        _kernel32.TerminateJobObject(self.job, 1)
-                    except Exception:  # noqa: BLE001 - 兜底
-                        pass
-                self._taskkill_locked()
-                if proc.poll() is None:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
+            if os.name == "nt" and self.job is not None:
+                # 先处理 Job：TerminateJobObject 是句柄操作，对已收尸的 PID 也安全，
+                # 且能兜住 Job 分配后迟到的孙进程。
                 try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
+                    _kernel32.TerminateJobObject(self.job, 1)
+                except Exception:  # noqa: BLE001 - 兜底
                     pass
                 self._close_job_locked()
+
+            if self._reaped:
+                return True
+
+            if proc.poll() is not None:
+                # 进程已经退出但调用方没 wait/poll 过：在这里收尸，下次直接幂等。
+                self._reaped = True
+                self._close_job_locked()
+                return True
+
+            if os.name == "nt":
+                self._taskkill_locked()
             else:
                 try:
                     os.killpg(os.getpgid(self.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
-                if proc.poll() is None:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
+            if proc.poll() is None:
                 try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except OSError:
                     pass
-            self._terminated = True
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
+            else:
+                self._reaped = True
+            self._close_job_locked()
             return proc.poll() is not None
 
     def _taskkill_locked(self) -> None:
-        """第二道：固定路径的 taskkill，不经过 shell，不把输出带回来。"""
-        system_root = _system_root()
-        taskkill = os.path.join(system_root, "System32", "taskkill.exe")
+        """第二道：固定系统目录下的 taskkill，不经过 shell，不把输出带回来。"""
         try:
             subprocess.run(
-                [taskkill, "/F", "/T", "/PID", str(self.pid)],
+                [_taskkill_path(), "/F", "/T", "/PID", str(self.pid)],
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,

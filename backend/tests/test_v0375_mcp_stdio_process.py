@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core import mcp_stdio_process
 from app.core.mcp_stdio_process import (
     DEFAULT_ACTIVE_PROCESSES,
     DEFAULT_CPU_TIME_100NS,
@@ -234,6 +235,12 @@ def test_shell_metacharacters_stay_argv(tmp_path):
         assert argv[-3] == redirect
         assert argv[-2] == injected
         assert argv[-1] == unquoted
+        # record_argv 顺带记 cwd：子进程实际工作目录必须是 <mcp_root>/<id>，
+        # 不是服务进程的 cwd，也不是配置里能写的任何路径（cwd 键由 T1 整条拒）。
+        # helper 是仓库外的预构建产物，字节可能早于这条埋点；这种情况由下面
+        # 不依赖 helper 的 test_child_cwd_is_mcp_root_server_id 兜底。
+        if not _HELPER_EXE:
+            assert os.path.samefile(_read_json(record_dir / "cwd.json"), root / "sh1")
     finally:
         assert wrapper.terminate_tree() is True
 
@@ -250,14 +257,19 @@ def test_env_plan_is_blank_slate_and_allowlist_only(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", evil_path + os.pathsep + os.environ.get("PATH", ""))
 
     root = tmp_path / "mcp"
-    plan = build_env_plan("env1", ["MCP_LOG_LEVEL"], root, command=sys.executable)
+    # 保留名（含大小写变体）与普通名一起递进来：allowlist 只能"额外允许"，
+    # 绝不能覆盖固定注入的 HOME/TEMP/TMP/PATH。
+    allowlist = ["MCP_LOG_LEVEL", "PATH", "TEMP", "HOME", "Path", "path"]
+    plan = build_env_plan("env1", allowlist, root, command=sys.executable)
 
     assert "DEEPSEEK_API_KEY" not in plan
     assert "HTTP_PROXY" not in plan
     assert plan["MCP_LOG_LEVEL"] == "debug"
     assert plan["HOME"] == str(root / "env1" / "home")
     assert plan["TEMP"] == str(root / "env1" / "tmp")
+    assert plan["TMP"] == str(root / "env1" / "tmp")
     assert evil_path not in plan["PATH"]
+    assert "Path" not in plan and "path" not in plan, "保留名的大小写变体漏进了 env"
     assert all(isinstance(k, str) and isinstance(v, str) for k, v in plan.items())
     if os.name == "nt":
         for name in ("SystemRoot", "SystemDrive", "windir", "COMSPEC", "PATHEXT", "PATH",
@@ -271,20 +283,43 @@ def test_env_plan_is_blank_slate_and_allowlist_only(tmp_path, monkeypatch):
     assert "DEEPSEEK_API_KEY" not in denied
     assert "HTTP_PROXY" not in denied
 
-    # 子进程实际拿到的 env：用 envdump 从 child 侧取证
+    # 子进程实际拿到的 env：这里故意绕过 `normalize_entry` 直接喂 `build_env_plan`。
+    # 写入口（T1）已经会拒保留名，本用例要证明的是**第二层（构造层）自己也能
+    # 挡住**——否则任何绕过写入口的调用方都能改边界。
     record_dir = tmp_path / "rec"
-    wrapper = spawn_stdio(
-        _entry("envdump", record_dir, sid="env1", allowlist=["MCP_LOG_LEVEL"]), str(root)
+    command, child_args = _invocation("envdump", record_dir)
+    child_cwd = root / "env1"
+    child_cwd.mkdir(parents=True, exist_ok=True)
+    child_env = build_env_plan("env1", allowlist, root, command=command)
+    completed = subprocess.run(
+        [command, *child_args],
+        cwd=str(child_cwd),
+        env=child_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
     )
-    try:
-        dumped = _read_json(record_dir / "env.json")
-        assert "DEEPSEEK_API_KEY" not in dumped
-        assert "HTTP_PROXY" not in dumped
-        assert dumped["MCP_LOG_LEVEL"] == "debug"
-        assert Path(dumped["HOME"]) == root / "env1" / "home"
-        assert Path(dumped["TEMP"]) == root / "env1" / "tmp"
-    finally:
-        assert wrapper.terminate_tree() is True
+    assert completed.returncode == 0
+    dumped = _read_json(record_dir / "env.json")
+    assert "DEEPSEEK_API_KEY" not in dumped
+    assert "HTTP_PROXY" not in dumped
+    assert dumped["MCP_LOG_LEVEL"] == "debug"
+    assert Path(dumped["HOME"]) == root / "env1" / "home"
+    assert Path(dumped["TEMP"]) == root / "env1" / "tmp"
+    assert Path(dumped["TMP"]) == root / "env1" / "tmp"
+    assert dumped["PATH"] != os.environ.get("PATH")
+    assert evil_path not in dumped["PATH"]
+    assert "Path" not in dumped and "path" not in dumped
+
+    # 写入口那一层：带保留名的条目必须整条拒（T1 锁在 T3 侧再钉一次）。
+    with pytest.raises(MCPStdioConfigError) as excinfo:
+        spawn_stdio(
+            _entry("envdump", tmp_path / "rec2", sid="env1", allowlist=["PATH"]),
+            str(root),
+        )
+    assert "env_name_reserved" in str(excinfo.value)
 
 
 def test_home_and_tmp_directories_created(tmp_path):
@@ -315,6 +350,12 @@ def test_argv_fingerprint_ignores_argument_values_but_tracks_flags():
     assert with_flag != base
     assert argv_fingerprint(command + ".other", ["srv.py", "--port", "1"]) != base
 
+    # --flag=value：值同样可能是低熵密钥，只 hash flag 名。
+    equal_a = argv_fingerprint(command, ["srv.py", "--token=AAA", "pos-a"])
+    equal_b = argv_fingerprint(command, ["srv.py", "--token=BBB", "pos-b"])
+    assert equal_a == equal_b, "--flag=value 的值进了摘要"
+    assert argv_fingerprint(command, ["srv.py", "--other=AAA"]) != equal_a
+
     assert command_basename(command) == "fake_mcp_stdio_server.py"
 
 
@@ -343,6 +384,68 @@ def test_job_limits_readback(tmp_path):
         assert limits["process_memory_limit"] == DEFAULT_PROCESS_MEMORY_BYTES == 512 * 1024 * 1024
         assert limits["job_memory_limit"] == DEFAULT_JOB_MEMORY_BYTES == 1024 * 1024 * 1024
         assert limits["per_job_user_time_limit"] == DEFAULT_CPU_TIME_100NS == 15 * 60 * 10_000_000
+
+        # 独立 ctypes 结构体回读：不调实现的 query_job_limits，也不 import 它的
+        # 结构体。setter/reader 同错（例如两边一起改错字段偏移）在这里会红。
+        import ctypes
+        from ctypes import wintypes as wt
+
+        class IndependentIoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class IndependentBasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class IndependentExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", IndependentBasicLimits),
+                ("IoInfo", IndependentIoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        k32.QueryInformationJobObject.restype = ctypes.c_int
+        raw = IndependentExtendedLimits()
+        assert k32.QueryInformationJobObject(
+            int(wrapper.job), 9, ctypes.byref(raw), ctypes.sizeof(raw), None
+        ), "独立结构体回读失败"
+        raw_flags = int(raw.BasicLimitInformation.LimitFlags)
+        for flag in (
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_TIME,
+        ):
+            assert raw_flags & flag == flag, "独立回读缺 flag " + hex(flag)
+        assert int(raw.BasicLimitInformation.ActiveProcessLimit) == 8
+        assert int(raw.ProcessMemoryLimit) == 512 * 1024 * 1024
+        assert int(raw.JobMemoryLimit) == 1024 * 1024 * 1024
+        assert int(raw.BasicLimitInformation.PerJobUserTimeLimit) == 15 * 60 * 10_000_000
     finally:
         assert wrapper.terminate_tree() is True
     _assert_gone(wrapper.pid)
@@ -418,6 +521,109 @@ def test_terminate_tree_kills_grandchild_and_stops_heartbeat(tmp_path):
 
 
 # --------------------------------------------------------------------------- 幂等
+
+
+@SPAWN_OK
+def test_child_cwd_is_mcp_root_server_id(tmp_path):
+    """不依赖 helper 字节：子进程自己报告 cwd，必须是 ``<mcp_root>/<id>``。"""
+    root = tmp_path / "mcp"
+    out = tmp_path / "cwd.txt"
+    code = (
+        "import os,sys;"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(os.getcwd())"
+    )
+    entry = {
+        "id": "cwd1",
+        "command": sys.executable,
+        "args": ["-c", code, str(out)],
+        "env_allowlist": [],
+        "enabled": True,
+    }
+    wrapper = spawn_stdio(entry, str(root))
+    try:
+        _wait_until(
+            lambda: out.exists() and out.read_text(encoding="utf-8").strip(),
+            10.0,
+            "子进程没有写出 cwd",
+        )
+        reported = out.read_text(encoding="utf-8").strip()
+        assert os.path.samefile(reported, root / "cwd1"), reported
+    finally:
+        wrapper.terminate_tree()
+
+
+@WINDOWS_ONLY
+@SPAWN_OK
+def test_terminate_tree_never_taskkills_a_reaped_pid(tmp_path, monkeypatch):
+    """wait()/poll() 收尸后 PID 可能被复用：terminate_tree 只许碰 Job，不许 taskkill。"""
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("args"))
+        raise AssertionError("已收尸的 PID 上仍发了 taskkill")
+
+    monkeypatch.setattr(mcp_stdio_process.subprocess, "run", fake_run)
+    root = tmp_path / "mcp"
+
+    waited = spawn_stdio(_entry("ok", tmp_path / "rec1", sid="reap1"), str(root))
+    assert waited.job is not None, "用例前提：Job 已附加（否则测不到句柄关闭）"
+    waited.proc.stdin.close()
+    assert waited.wait(timeout=15) == 0
+    assert waited.job is None, "wait() 收尸后必须关 Job 句柄"
+    assert waited.terminate_tree() is True
+    assert waited.terminate_tree() is True
+
+    polled = spawn_stdio(_entry("ok", tmp_path / "rec2", sid="reap2"), str(root))
+    assert polled.job is not None, "用例前提：Job 已附加"
+    polled.proc.stdin.close()
+    _wait_until(lambda: polled.poll() is not None, 15, "stdin EOF 后进程没有退出")
+    assert polled.job is None, "poll() 发现退出后也必须关 Job 句柄"
+    assert polled.terminate_tree() is True
+    assert calls == [], f"taskkill 被调用: {calls}"
+
+
+@WINDOWS_ONLY
+@SPAWN_OK
+def test_system_paths_come_from_windows_api_not_env(tmp_path, monkeypatch):
+    """SystemRoot/windir/SystemDrive 被污染时，子进程仍拿到真实系统目录。"""
+    fake = tmp_path / "fake-windows"
+    (fake / "System32").mkdir(parents=True)
+    monkeypatch.setenv("SystemRoot", str(fake))
+    monkeypatch.setenv("windir", str(fake))
+    monkeypatch.setenv("SystemDrive", "Q:")
+
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    assert ctypes.windll.kernel32.GetWindowsDirectoryW(buffer, len(buffer)) > 0
+    real_root = buffer.value
+    system_buffer = ctypes.create_unicode_buffer(32768)
+    assert ctypes.windll.kernel32.GetSystemDirectoryW(
+        system_buffer, len(system_buffer)) > 0
+    real_system32 = system_buffer.value
+
+    root = tmp_path / "mcp"
+    wrapper = spawn_stdio(_entry("envdump", tmp_path / "rec", sid="sys1"), str(root))
+    try:
+        dumped = _read_json(tmp_path / "rec" / "env.json")
+    finally:
+        wrapper.terminate_tree()
+
+    # Windows 的 os.environ 会归一化键名大小写；按大写比较，别依赖存储形态。
+    dumped = {str(key).upper(): value for key, value in dumped.items()}
+    assert os.path.normcase(dumped["SYSTEMROOT"]) == os.path.normcase(real_root)
+    assert os.path.normcase(dumped["WINDIR"]) == os.path.normcase(real_root)
+    assert os.path.normcase(dumped["COMSPEC"]) == os.path.normcase(
+        os.path.join(real_system32, "cmd.exe"))
+    assert os.path.normcase(dumped["PATH"].split(";")[0]) == os.path.normcase(
+        real_system32)
+    assert str(fake).lower() not in dumped["PATH"].lower()
+    assert os.path.normcase(dumped["SYSTEMDRIVE"]) == os.path.normcase(
+        os.path.splitdrive(real_root)[0])
+    taskkill = mcp_stdio_process._taskkill_path()
+    assert os.path.isfile(taskkill)
+    assert os.path.normcase(os.path.dirname(taskkill)) == os.path.normcase(
+        real_system32)
 
 
 @SPAWN_OK

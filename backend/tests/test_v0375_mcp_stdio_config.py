@@ -390,6 +390,32 @@ def test_env_allowlist_accepts_plain_names():
     assert entry is None, "被硬拒的 env 名必须让整条配置失效"
 
 
+@pytest.mark.parametrize("name", [
+    "PATH", "Path", "path", "TEMP", "Tmp", "HOME", "home", "USERPROFILE",
+    "APPDATA", "LOCALAPPDATA", "COMSPEC", "SystemRoot", "SYSTEMDRIVE",
+    "WINDIR", "PATHEXT", "PYTHONUTF8", "PYTHONIOENCODING",
+    "PYTHONUNBUFFERED", "NO_COLOR", "TERM",
+])
+def test_env_allowlist_rejects_reserved_fixed_names(name):
+    """保留名是 T3 的隔离边界（HOME/TEMP/PATH 等），allowlist 不许覆盖。
+
+    大小写不敏感：Windows 的环境块本来就按大小写不敏感匹配，`Path`/`path`
+    与 `PATH` 等价，漏掉任何一个变体都等于边界可写。
+    """
+    entry, reason = normalize_entry(
+        _entry("files", env_allowlist=[name]), verify_command=False)
+    assert entry is None and reason == "env_name_reserved", name
+
+
+def test_reserved_env_names_cover_the_fixed_injection_set():
+    """名字集合按字面量钉死：实现里少一个，上一条参数化就会漏一个变体。"""
+    assert mcp_stdio_config.RESERVED_ENV_NAMES == frozenset({
+        "PATH", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+        "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT",
+        "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONUNBUFFERED", "NO_COLOR", "TERM",
+    })
+
+
 def test_env_allowlist_boundary_is_16_with_literal_counts():
     """16 个合法名通过、17 个拒：计数用字面量，别拿实现常量当预期。"""
     assert MAX_ENV_ALLOWLIST == 16

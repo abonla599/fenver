@@ -40,6 +40,16 @@ _ENV_DENY_PARTS = (
     "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "DYLD_",
 )
 
+# ``build_env_plan`` 固定注入的变量名（全大写，比较时大小写不敏感）。这些是
+# 安全边界本身：HOME/TEMP 指到 ``<mcp_root>/<id>``、PATH 不继承服务进程。
+# allowlist 只是"额外允许复制"，绝不能覆盖它们——写入口直接拒，构造层再跳过
+# 一次（纵深），固定值永远胜出。
+RESERVED_ENV_NAMES = frozenset({
+    "PATH", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT",
+    "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONUNBUFFERED", "NO_COLOR", "TERM",
+})
+
 # 宿主解释器/外壳：配置里写了也不启动。Windows 名单按 basename 小写精确匹配；
 # POSIX 名单没有扩展名（`sh` 等），同一份判据在两条平台上各用各的表。
 _WINDOWS_HOST_DENY = frozenset({
@@ -58,6 +68,17 @@ def env_name_denied(name) -> bool:
         return True
     upper = name.upper()
     return any(part in upper for part in _ENV_DENY_PARTS)
+
+
+def env_name_reserved(name) -> bool:
+    """这个名字是不是 ``build_env_plan`` 固定注入项（大小写不敏感）。
+
+    ``PATH`` / ``Path`` / ``path`` 都算：Windows 的环境块大小写不敏感，任何
+    一个写法都能覆盖固定值，所以判据必须先把名字归一成大写再比对。
+    """
+    if not isinstance(name, str):
+        return False
+    return name.upper() in RESERVED_ENV_NAMES
 
 
 def _has_control_chars(text: str) -> bool:
@@ -157,6 +178,8 @@ def normalize_entry(raw, *, verify_command: bool):
             return None, "env_name_invalid"
         if env_name_denied(env_name):
             return None, "env_name_denied"
+        if env_name_reserved(env_name):
+            return None, "env_name_reserved"
 
     enabled = raw.get("enabled", False)
     if not isinstance(enabled, bool):
