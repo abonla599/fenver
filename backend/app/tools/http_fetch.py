@@ -100,9 +100,10 @@ def client_kwargs(*, hop_timeout=None) -> dict:
 class _PinnedBackend(httpcore.SyncBackend):
     """只连 net_guard 校验过的地址字面量；主机名只用于 Host/SNI。
 
-    一个主机名可能解析出多个公网地址；按校验时的顺序逐个尝试，全部失败才把
-    最后一个异常抛出去。任何情况下都不把原主机名交回 `getaddrinfo`——那正是
-    rebinding 窗口的入口。
+    一个主机名可能解析出多个公网地址；按传入顺序逐个尝试，全部失败才把
+    最后一个异常抛出去。总尝试时间不超过单跳 timeout。TLS 握手发生在
+    httpcore 拿到 stream 之后，不在这层回退（httpcore retries=0）。
+    任何情况下都不把原主机名交回 `getaddrinfo`——那正是 rebinding 窗口的入口。
     """
 
     def __init__(self, pins):
@@ -114,15 +115,25 @@ class _PinnedBackend(httpcore.SyncBackend):
         targets = self._pins.get(str(host).lower(), ())
         if not targets:
             raise RuntimeError(f"没有为 {host} 钉住已校验地址，拒绝连接")
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
         last_exc = None
         for target in targets:
+            if deadline is None:
+                attempt_timeout = None
+            else:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                attempt_timeout = min(float(timeout), left)
             try:
                 return super().connect_tcp(
-                    target, port, timeout=timeout, local_address=local_address,
-                    socket_options=socket_options)
+                    target, port, timeout=attempt_timeout,
+                    local_address=local_address, socket_options=socket_options)
             except Exception as exc:             # noqa: BLE001 - 换下一个已校验地址
                 last_exc = exc
-        raise last_exc
+        if last_exc is not None:
+            raise last_exc
+        raise TimeoutError(f"连接 {host} 的所有已校验地址超过单跳超时")
 
 
 def make_client(*, hop_timeout=None, pins=None) -> httpx.Client:
@@ -134,7 +145,10 @@ def make_client(*, hop_timeout=None, pins=None) -> httpx.Client:
     把传输层的 `connect_tcp` 换成只连校验过的字面量；TLS 的 SNI 与 Host 头仍由
     httpcore 用原主机名设置，证书校验不受影响。"""
     client = httpx.Client(**client_kwargs(hop_timeout=hop_timeout))
-    if pins:
+    if pins is not None:
+        if not pins:
+            client.close()
+            raise ValueError("pins 不能为空：没有已校验地址就不该建客户端")
         transport = getattr(client, "_transport", None)
         pool = getattr(transport, "_pool", None)
         if pool is None or not hasattr(pool, "_network_backend"):

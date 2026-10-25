@@ -85,7 +85,10 @@ def test_a_request_over_the_threshold_is_called_out(capsys, monkeypatch):
         client.get("/slow")
         client.get("/quick")
 
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    # apk-cache / releases 的预取线程会把诊断行打到 stdout（生产要留），
+    # 它可能在本用例捕获窗口内落地；这不是请求日志，按已知前缀滤掉（#180）。
+    lines = [ln for ln in capsys.readouterr().out.splitlines()
+             if ln.strip() and not ln.startswith(("[apk-cache]", "[releases]"))]
     assert len(lines) == 2, lines
     assert "慢" in lines[0] and "/slow" in lines[0], f"120ms 的请求没被标出来: {lines[0]!r}"
     assert "慢" not in lines[1], f"每个请求都被标慢，这个标记就没人看了: {lines[1]!r}"

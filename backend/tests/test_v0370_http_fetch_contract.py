@@ -25,8 +25,10 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1031,6 +1033,64 @@ def test_make_client_installs_the_pinned_backend():
         assert isinstance(backend, http_fetch._PinnedBackend)
     finally:
         client.close()
+
+
+def test_empty_pins_fail_closed():
+    with pytest.raises(ValueError):
+        http_fetch.make_client(pins={})
+    with pytest.raises(RuntimeError):
+        http_fetch._PinnedBackend({OK_HOST: []}).connect_tcp(OK_HOST, 443)
+
+
+def test_pinned_backend_shares_one_timeout_budget(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(http_fetch.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def fake_connect(self, host, port, timeout=None, local_address=None,
+                     socket_options=None):
+        calls.append(timeout)
+        clock[0] += timeout
+        raise OSError("blackhole")
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+    backend = http_fetch._PinnedBackend(
+        {OK_HOST: ["203.0.113.1", "203.0.113.2", "203.0.113.3"]})
+    with pytest.raises(OSError):
+        backend.connect_tcp(OK_HOST, 443, timeout=0.5)
+    assert calls == [0.5], f"每个地址都拿完整超时，实际尝试了 {len(calls)} 次"
+
+
+def test_a_real_request_uses_the_pinned_ip_and_keeps_host():
+    """真 httpx/httpcore 连接：pins 生效，Host 仍是原主机名。"""
+    seen = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["host"] = self.headers.get("Host", "")
+            body = b"pinned-ok"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    client = http_fetch.make_client(pins={"pinned.example": ["127.0.0.1"]})
+    try:
+        response = client.get(f"http://pinned.example:{port}/probe", timeout=5)
+        assert response.status_code == 200 and response.text == "pinned-ok"
+        assert seen["host"] == f"pinned.example:{port}"
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_hostname_is_resolved_once_and_that_answer_is_pinned(
