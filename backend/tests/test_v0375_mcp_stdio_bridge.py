@@ -29,6 +29,7 @@ import json
 import pytest
 
 from app.core import approval
+from app.core import mcp_stdio as stdio_mod
 from app.core import mcp_stdio_bridge as bridge_mod
 from app.core.auth import AuthStore
 from app.core.mcp_stdio import (
@@ -723,8 +724,8 @@ def test_deep_schema_rejects_only_that_tool_and_other_server_still_registers():
     assert supervisor.exposed[sid_b] == 1
 
 
-def test_supervisor_ready_tools_and_notify_ready_skip_deep_items():
-    """BLOCK 生产者侧：ready_tools / _notify_ready 逐条复制，好工具保留、不抛。"""
+def test_supervisor_ready_tools_and_notify_ready_keep_placeholders_for_deep_items():
+    """BLOCK 生产者侧：逐条复制，好工具保留；深 schema 落成占位而不是消失。"""
     supervisor = StdioSupervisor(
         config_reader=lambda: {"mcp_stdio_enabled": False, "mcp_stdio_servers": []})
     runtime = _Runtime("sdeep", {"id": "sdeep", "command": "C:/fake.exe", "args": [],
@@ -735,16 +736,48 @@ def test_supervisor_ready_tools_and_notify_ready_skip_deep_items():
     supervisor._runtimes["sdeep"] = runtime
 
     ready = supervisor.ready_tools()       # 不抛
-    assert [item["name"] for item in ready["sdeep"]] == ["good"]
+    assert [item["name"] for item in ready["sdeep"]] == ["good", "deep_tool"]
+    placeholder = ready["sdeep"][1]
+    assert placeholder[stdio_mod.COPY_FAILED_KEY] == "nested"
+    assert placeholder["inputSchema"] == {"type": "object", "properties": {}}
     assert [item["name"] for item in runtime.tools] == ["good", "deep_tool"], \
         "复制失败不能改到 supervisor 运行态"
+    assert stdio_mod.COPY_FAILED_KEY not in runtime.tools[1]
 
     seen = []
     supervisor.set_tool_callbacks(
         on_ready=lambda sid, tools: seen.append((sid, tools)))
     supervisor._notify_ready("sdeep", runtime.tools)   # 不抛
     assert len(seen) == 1 and seen[0][0] == "sdeep"
-    assert [item["name"] for item in seen[0][1]] == ["good"]
+    assert [item["name"] for item in seen[0][1]] == ["good", "deep_tool"]
+    assert seen[0][1][1][stdio_mod.COPY_FAILED_KEY] == "nested"
+
+
+def test_real_safe_copy_output_feeds_bridge_rejection_report():
+    """G1 真实链路：_safe_copy_tools 的占位 → 桥 on_ready → rejection_report 非空。
+
+    不起真实子进程，但走的是生产者真实输出与桥的真实入口（不是 FakeSupervisor
+    直接塞深 schema 绕过复制层）。
+    """
+    sid = "srvrealchain"
+    # 契约字面量：生产者与消费者必须认同一个键。
+    assert stdio_mod.COPY_FAILED_KEY == "__stdio_bridge_copy_failed__"
+
+    copied = stdio_mod._safe_copy_tools(
+        sid, [_tool("good"), _tool("deep_tool", schema=_deep_schema())])
+    assert [item["name"] for item in copied] == ["good", "deep_tool"]
+    assert copied[1][stdio_mod.COPY_FAILED_KEY] == "nested"
+
+    supervisor = FakeSupervisor({}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.on_ready(sid, copied)
+
+    assert bridge_mod._mapped_tool_name(sid, "good") in tools_registry
+    assert bridge_mod._mapped_tool_name(sid, "deep_tool") not in tools_registry
+    report = bridge.rejection_report()[sid]
+    assert any(item["name"] == "deep_tool" and item["reason"] == "schema 嵌套过深"
+               for item in report), report
+    assert supervisor.exposed[sid] == 1
 
 
 def test_schema_or_reason_handles_deep_nesting_directly():
@@ -853,6 +886,64 @@ def test_refresh_register_failure_isolated_and_reported(monkeypatch):
                for item in bridge.rejection_report()[sid_a])
 
 
+# --------------------------------------------------------------------------- G2 真实曝光数
+
+
+def test_same_name_bad_refresh_keeps_old_tool_and_reports_real_count():
+    """G2：同名更新被 registry 拒时旧版本保留；exposed 报真实 1，不是 accepted=0。
+
+    ``_deep_schema(10)`` 能过桥的复制/预检，却超过 registry 的 ``_SCHEMA_MAX_DEPTH``
+    （8 层）——正好落在"registry 拒但保留旧条目"这条 v0.37.1 既有语义上。
+    """
+    sid = "srvrepl"
+    supervisor = FakeSupervisor({sid: [_tool("x")]}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.attach()
+    supervisor.fire_ready(sid)
+    mapped = bridge_mod._mapped_tool_name(sid, "x")
+    assert mapped in tools_registry
+    assert supervisor.exposed[sid] == 1
+    old_record = tools_registry.get(mapped)
+
+    # 预检校准：桥这一侧确实接受这份 schema（不是被 _build_entries 提前拦掉）。
+    schema, reason = bridge_mod._schema_or_reason(_tool("x", schema=_deep_schema(10)))
+    assert reason == "" and schema is not None
+
+    supervisor.fire_ready(sid, [_tool("x", schema=_deep_schema(10))])
+
+    assert tools_registry.get(mapped) is old_record, "旧版本必须原样保留"
+    assert supervisor.exposed[sid] == 1, "状态必须报注册表里的真实条数，不是 accepted"
+    report = bridge.rejection_report()[sid]
+    assert any(item["name"] == mapped and "嵌套" in item["reason"]
+               for item in report), report
+
+
+def test_register_exception_keeps_old_source_and_reports_real_count(monkeypatch):
+    """G2：register 抛错时旧 source 原样在；exposed 报真实条数并记注册失败原因。"""
+    sid = "srvregerr"
+    supervisor = FakeSupervisor({sid: [_tool("x")]}, ready=set())
+    bridge = _bridge(supervisor)
+    bridge.attach()
+    supervisor.fire_ready(sid)
+    mapped = bridge_mod._mapped_tool_name(sid, "x")
+    old_record = tools_registry.get(mapped)
+
+    real_register = bridge_mod.register_external_tools
+
+    def _register(source, entries):
+        if source == SOURCE_PREFIX + sid:
+            raise RuntimeError("registry boom")
+        return real_register(source, entries)
+
+    monkeypatch.setattr(bridge_mod, "register_external_tools", _register)
+    bridge.refresh()                       # 用缓存重跑，注册抛错
+
+    assert tools_registry.get(mapped) is old_record, "注册失败不许动旧 source"
+    assert supervisor.exposed[sid] == 1
+    assert any(item["reason"] == "注册失败：RuntimeError"
+               for item in bridge.rejection_report()[sid])
+
+
 # --------------------------------------------------------------------------- N1 正文清洗
 
 
@@ -873,6 +964,23 @@ def test_render_result_strips_controls_and_caps_length():
     assert "（正文超长已截断）" in rendered
     assert len(rendered) <= (len(_NOTE) + bridge_mod.MAX_RESULT_TEXT_LEN
                              + len("（正文超长已截断）"))
+
+
+def test_render_result_sanitizes_structured_content_json():
+    """G3：structuredContent 的 JSON（ensure_ascii=False）里 RLO/零宽也必须清洗。"""
+    rendered = bridge_mod._render_result({
+        "structuredContent": {"a": "x\u202ey\u200bz", "n": 1}})
+    assert "structuredContent:" in rendered
+    for ch in ("\u202e", "\u200b"):
+        assert ch not in rendered
+    assert '"a": "xyz"' in rendered
+    # 结构化 JSON 与正文同路：拼接后整段再洗一次，不破坏既有换行。
+    both = bridge_mod._render_result({
+        "content": [{"type": "text", "text": "line1\nline2"}],
+        "structuredContent": {"a": "p\u202eq"},
+    })
+    assert "line1\nline2" in both
+    assert "\u202e" not in both and '"a": "pq"' in both
 
 
 # --------------------------------------------------------------------------- N2 remove 漏注销

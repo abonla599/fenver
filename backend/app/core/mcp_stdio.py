@@ -69,7 +69,7 @@ from app.core.paths import data_root
 
 logger = logging.getLogger("app.core.mcp_stdio")
 
-__all__ = ["STATES", "StdioSupervisor", "get_supervisor"]
+__all__ = ["STATES", "StdioSupervisor", "get_supervisor", "COPY_FAILED_KEY"]
 
 # 生命周期状态（计划 §3.2）。对外只暴露这八个字符串。
 STATE_DISABLED = "disabled"
@@ -215,13 +215,24 @@ def _schema_flags(tools: Sequence[Dict[str, Any]]) -> Dict[str, int]:
 
 
 # T5 BLOCK：深嵌套 schema 能让 deepcopy 抛 RecursionError。工具复制必须逐条
-# fail-closed——坏条目跳过并记 warning，好条目保留；整份 deepcopy 会让一次坏
+# fail-closed——坏条目落成占位并记 warning，好条目保留；整份 deepcopy 会让一次坏
 # 工具拖垮该 server 的全部注册，甚至让排在后面的 server 一个都收不到通知。
 _COPY_ERRORS = (RecursionError, TypeError, ValueError, UnicodeError)
 
+# 复制失败占位条目的固定键（与 ``mcp_stdio_bridge`` 共用同一字面量）。值只有
+# "nested" / "copy" 两种：桥接层凭它把原因记进 rejection_report，绝不回显第三方
+# 内容。以前这里直接丢条目，桥从未收到坏名字，真实链路的 rejection_report 恒为 {}。
+COPY_FAILED_KEY = "__stdio_bridge_copy_failed__"
+
 
 def _safe_copy_tools(server_id: str, tools: Any) -> List[Dict[str, Any]]:
-    """逐条深拷贝 ``tools``；坏条目跳过并计数，任何一条都不许拖垮整批。"""
+    """逐条深拷贝 ``tools``；拷不动的条目落成固定形状的占位，绝不拖垮整批。
+
+    占位保留原始 ``name``（截断/清洗交给桥接层）和最小合法 ``inputSchema``，
+    并带 :data:`COPY_FAILED_KEY`。桥接层**优先**识别这个键并拒绝，不进 schema
+    校验——这样"复制失败"这个事实能穿过真实 ``_notify_ready`` 链路进入
+    ``rejection_report()``，而不是只在 FakeSupervisor 直连桥的测试里可见。
+    """
     if not isinstance(tools, (list, tuple)):
         return []
     out: List[Dict[str, Any]] = []
@@ -234,10 +245,19 @@ def _safe_copy_tools(server_id: str, tools: Any) -> List[Dict[str, Any]]:
             out.append(copy.deepcopy(item))
         except _COPY_ERRORS as exc:
             skipped += 1
-            logger.warning("MCP stdio 工具复制失败已跳过 %s: %s",
-                           server_id, type(exc).__name__)
+            raw_name = item.get("name")
+            if not isinstance(raw_name, str):
+                raw_name = ""
+            kind = "nested" if isinstance(exc, RecursionError) else "copy"
+            logger.warning("MCP stdio 工具复制失败 %s/%s: %s",
+                           server_id, raw_name or "<缺名>", type(exc).__name__)
+            out.append({
+                "name": raw_name,
+                COPY_FAILED_KEY: kind,
+                "inputSchema": {"type": "object", "properties": {}},
+            })
     if skipped:
-        logger.warning("MCP stdio %s 有 %d 条工具因形状/复制问题被跳过",
+        logger.warning("MCP stdio %s 有 %d 条工具因形状/复制问题落成占位",
                        server_id, skipped)
     return out
 
@@ -1086,6 +1106,8 @@ class StdioSupervisor:
 
         BLOCK：复制逐条做。之前整份 ``copy.deepcopy(list(tools))`` 会被一条深嵌套
         schema 打爆，on_ready 根本发不出去，该 server 的好工具也全部不注册。
+        拷不动的条目现在落成带 :data:`COPY_FAILED_KEY` 的占位一起交给桥——
+        桥据此把"这个工具为什么没注册"写进 rejection_report。
         """
         with self._lock:
             callback = self._on_ready_cb

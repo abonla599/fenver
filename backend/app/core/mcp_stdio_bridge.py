@@ -37,7 +37,8 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unicodedata import category
 
-from app.tools.registry import register_external_tools, unregister_source
+from app.core.mcp_stdio import COPY_FAILED_KEY
+from app.tools.registry import register_external_tools, tools_registry, unregister_source
 from app.tools.response import ToolResponse
 
 logger = logging.getLogger("app.core.mcp_stdio_bridge")
@@ -62,9 +63,9 @@ MAX_DESCRIPTION_LEN = 1024
 MAX_RESULT_TEXT_LEN = 32_000
 _RESULT_TRUNCATED_MARK = "（正文超长已截断）"
 
-# 复制失败时缓存里的占位标记：坏条目不能因为"拷不动"就从拒绝账本里消失。
-# 值只有 "nested" / "copy" 两种固定原因，绝不回显第三方内容到状态端点。
-_COPY_FAILED_KEY = "__stdio_bridge_copy_failed__"
+# 复制失败时缓存里的占位标记（字面量由生产者 ``mcp_stdio.COPY_FAILED_KEY`` 单源
+# 定义）：坏条目不能因为"拷不动"就从拒绝账本里消失。值只有 "nested" / "copy"
+# 两种固定原因，绝不回显第三方内容到状态端点。
 
 # 逐条 fail-closed 的异常集合：深嵌套 schema 让 deepcopy 抛 RecursionError；
 # 含孤立代理/坏键的对象可能抛 Unicode/Type/ValueError。其余异常照常上抛，
@@ -198,6 +199,9 @@ def _render_result(result: Any) -> str:
     - ``content[]`` 里 ``type=="text"`` 的条目按顺序拼接（逐条去控制/格式字符）；
     - 有 ``structuredContent`` 再附一段 JSON（模型能读结构化结果）；
     - 两样都没有时给一句明确的占位，不让模型收到一个空字符串；
+    - 拼接完成后对**整段正文**再走一次 :func:`_sanitize_result_text`：JSON 是
+      ``ensure_ascii=False`` 序列化的，RLO/零宽会原样躲在 structuredContent 里，
+      只清洗 ``content[].text`` 不够；
     - 正文超过 :data:`MAX_RESULT_TEXT_LEN` 截断并追加明确提示。
     """
     pieces: List[str] = []
@@ -218,6 +222,9 @@ def _render_result(result: Any) -> str:
                 encoded = "<structuredContent 无法序列化为 JSON>"
             pieces.append("structuredContent: " + encoded)
     body = "\n".join(pieces) if pieces else "（工具未返回文本内容）"
+    # G3：structuredContent 的 JSON 里也可能带 RLO/零宽（ensure_ascii=False）。
+    # 对整段正文再洗一次，换行/制表保留；清洗先于截断，别把半截坏字符留在上限处。
+    body = _sanitize_result_text(body)
     if len(body) > MAX_RESULT_TEXT_LEN:
         body = body[:MAX_RESULT_TEXT_LEN] + _RESULT_TRUNCATED_MARK
     return _EXTERNAL_CONTENT_NOTE + body
@@ -270,6 +277,25 @@ def _make_invoker(supervisor: Any, server_id: str, raw_name: str) -> Callable[..
         return ToolResponse(True, data=_render_result(result))
 
     return _invoke
+
+
+def _count_registered_source(source: str) -> int:
+    """按真实注册表统计该 source 的条目数（``info["source"] == source``）。
+
+    为什么不用 ``register_external_tools`` 返回的 accepted：
+    - 同名坏刷新被 registry 拒时，registry 按 v0.37.1 语义**保留旧版本**，
+      accepted=0 而该 source 实际仍有条目；
+    - 注册整批抛错时旧 source 根本没人动，accepted 更无从谈起。
+    状态端点说真话的判据只能是注册表本身；这里不改 registry 的既有语义。
+    """
+    try:
+        items = tools_registry.items()
+    except Exception as exc:                                 # noqa: BLE001 - 状态不连累
+        logger.warning("MCP stdio 桥统计注册表失败: %s", type(exc).__name__)
+        return 0
+    return sum(
+        1 for _name, info in items
+        if isinstance(info, dict) and info.get("source") == source)
 
 
 class StdioToolBridge:
@@ -391,7 +417,6 @@ class StdioToolBridge:
                                  "reason": "工具构建失败：%s" % type(exc).__name__}]
                 if rejected:
                     rejected_report[server_id] = rejected
-                accepted = 0
                 try:
                     outcome = register_external_tools(source, entries)
                 except Exception as exc:                     # noqa: BLE001 - 单源不连累
@@ -403,20 +428,21 @@ class StdioToolBridge:
                     })
                     outcome = {}
                 if isinstance(outcome, dict):
-                    accepted = int(outcome.get("accepted") or 0)
                     for item in outcome.get("rejected") or []:
                         if isinstance(item, dict):
                             rejected_report.setdefault(server_id, []).append({
                                 "name": str(item.get("name") or ""),
                                 "reason": str(item.get("reason") or ""),
                             })
-                # BLOCK：只有真正拿到注册结果后才按 accepted 报数；构建/注册
-                # 失败时显式报 0，别让快照退回 min(total,16) 把未知总数说成 exposed。
+                # G2：exposed 必须是注册表里的真实条数，不是本批 accepted。
+                # 同名坏刷新被 registry 拒时旧版本保留、整批注册抛错时旧 source
+                # 原样不动——两种情况下 accepted 都是 0，而模型仍看得见旧工具。
+                actual = _count_registered_source(source)
                 try:
-                    self._supervisor.set_tools_exposed(server_id, accepted)
+                    self._supervisor.set_tools_exposed(server_id, actual)
                 except Exception as exc:                     # noqa: BLE001 - 状态不连累
                     logger.warning("MCP stdio 桥上报 %s exposed=%s 失败: %s",
-                                   server_id, accepted, type(exc).__name__)
+                                   server_id, actual, type(exc).__name__)
             self._rejected = rejected_report
 
         callback = self._on_registered
@@ -442,7 +468,7 @@ class StdioToolBridge:
             # 每条工具独立 fail-closed：一条 schema 嵌套过深只拒这一条，
             # 同一批里排在其后的好工具照常注册。
             try:
-                copy_failed = raw_tool.get(_COPY_FAILED_KEY)
+                copy_failed = raw_tool.get(COPY_FAILED_KEY)
                 if copy_failed:
                     reason = ("schema 嵌套过深" if copy_failed == "nested"
                               else "工具条目无法复制")
@@ -515,7 +541,7 @@ class StdioToolBridge:
                                type(exc).__name__)
                 out.append({
                     "name": raw_name,
-                    _COPY_FAILED_KEY: kind,
+                    COPY_FAILED_KEY: kind,
                     "inputSchema": {"type": "object", "properties": {}},
                 })
         return out
