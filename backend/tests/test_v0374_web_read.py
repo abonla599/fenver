@@ -576,3 +576,27 @@ def test_an_empty_body_through_the_real_path_is_a_clean_failure(monkeypatch):
     assert "没有可读正文" in resp.error
     assert len(seen) == 1
     assert _last_web_read_target()["status"] == "empty_body"
+
+
+def test_a_crlf_location_is_never_followed_on_the_real_protocol_path(monkeypatch):
+    """CRLF Location：httpx 0.28 在算 next_request 时就抛 RemoteProtocolError，
+    core 自己的控制字符检查是给非 httpx 传输的后备（见 fetch_core 用例）。
+
+    这里钉的是生产路径的**行为**而不是某一条 status：目标一个字节都没被请求、
+    失败是 fail-closed、注入头不回显。把 status 固定成两者之一，是为了在
+    httpx 升级改变拦截层时不误报，同时也不放过"竟然跟随了"的回归。
+    """
+    rid = _mint(url="http://public.example/start", owner="u")
+    seen = _install_transport(
+        monkeypatch,
+        [(302, {"location": "https://next.example/x\r\nX-Injected: 1"}, b"")],
+        {"public.example": ["93.184.216.34"],
+         "next.example": ["93.184.216.35"]})
+    resp = web_read.read(rid, user_id="u")
+    assert resp.success is False
+    assert "X-Injected" not in resp.to_string()
+    assert len(seen) == 1, "CRLF Location 的目标被请求了"
+    assert str(seen[0].url) == "http://public.example/start"
+    status = _last_web_read_target()["status"]
+    assert status in ("network_error:RemoteProtocolError",
+                      "redirect_invalid_location"), status
