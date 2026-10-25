@@ -57,7 +57,7 @@ def test_username_fields_are_capped_before_the_store(client):
 
 @pytest.mark.parametrize("open_tag,close_tag", [
     ("<main>", "</article>"),     # 扫 _open（正文候选栈）
-    ("<script>", "</style>"),     # 扫 _stack（丢弃容器栈）
+    ("<nav>", "</style>"),        # 扫 _stack（非 CDATA 的丢弃容器栈）
 ])
 def test_unmatched_end_tag_storm_is_bounded(open_tag, close_tag):
     n = 10_000
@@ -78,6 +78,21 @@ def test_deeply_nested_regions_still_return_text():
     assert "正文还在" in text
 
 
+def test_tag_budget_exhaustion_does_not_leak_script_content():
+    page = ("<b>" * 200_005
+            + "<script>SECRET_LEAK_XYZ</script><p>VISIBLE_OK</p>")
+    text = extract_text("text/html", page)
+    assert "SECRET_LEAK_XYZ" not in text, "标签预算耗尽后脚本内容进了正文"
+
+
+@pytest.mark.parametrize("tag", ["script", "style", "svg", "nav"])
+def test_self_closing_drop_tag_does_not_leak(tag):
+    page = f"<{tag}/>SECRET_SELF_CLOSE</{tag}><p>ok</p>"
+    text = extract_text("text/html", page)
+    assert "SECRET_SELF_CLOSE" not in text, f"<{tag}/> 绕过了丢弃容器"
+    assert "ok" in text
+
+
 # ---------- 3. auth.blocked 洪水不能挤掉正常事件 ----------
 
 def test_blocked_flood_from_one_source_is_capped_and_keeps_normal_events():
@@ -95,8 +110,39 @@ def test_blocked_flood_from_one_source_is_capped_and_keeps_normal_events():
 
 def test_blocked_flood_across_sources_has_a_global_cap():
     for i in range(600):
-        security_log.record("auth.blocked", ip=f"198.51.{i // 256}.{i % 256}",
+        security_log.record("auth.blocked", ip=f"10.{i // 256}.{i % 256}.1",
                             status=401, route=f"/v1/x/{i}", detail="token.unknown")
 
     blocked, _ = security_log.events(type="auth.blocked", limit=500)
     assert len(blocked) <= 150, f"跨来源写了 {len(blocked)} 条 auth.blocked，没有全局限额"
+
+
+def test_rate_limited_flood_with_rotating_accounts_keeps_normal_events():
+    security_log.record("auth.fail", ip="203.0.113.9", account="alice",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+    for i in range(3000):
+        security_log.record("auth.rate_limited", ip="203.0.113.9",
+                            account=f"u{i}", route="/v1/auth/login", status=429,
+                            detail="limit.login")
+
+    limited, _ = security_log.events(type="auth.rate_limited", limit=500)
+    fails, _ = security_log.events(type="auth.fail", limit=500)
+    assert len(limited) <= 20, f"轮换用户名写了 {len(limited)} 条限流事件"
+    assert len(fails) == 1, "正常登录失败事件被限流洪水挤出了内存环"
+
+
+def test_abuse_ring_cap_leaves_room_for_normal_events(monkeypatch):
+    monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS", 10**9)
+    monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS_PER_SOURCE", 10**9)
+    for i in range(security_log.MAX_ABUSE_IN_EVENTS + 5):
+        security_log.record("auth.blocked", ip=f"10.{i // 256}.{i % 256}.1",
+                            status=401, route=f"/v1/x/{i}", detail="token.unknown")
+
+    blocked = [e for e in security_log._EVENTS if e["type"] == "auth.blocked"]
+    assert len(blocked) == security_log.MAX_ABUSE_IN_EVENTS, \
+        "环内滥用事件没有被 500 条上限截住"
+
+    security_log.record("auth.fail", ip="203.0.113.9", account="alice",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+    fails, _ = security_log.events(type="auth.fail", limit=500)
+    assert len(fails) == 1, "环内滥用事件占满后，正常事件仍应能写入"

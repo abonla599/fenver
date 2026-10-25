@@ -65,15 +65,16 @@ MAX_AGE_SECONDS = 30 * 24 * 3600
 MAX_ACCOUNT_CHARS = 64
 ACCOUNT_SCAN_LIMIT = 256
 
-# 匿名 401/403 的埋点限额：攻击者能用不同路径刷满 2000 条内存环，把正常事件挤出去。
-# 三条上限分别管"全局速率""单来源速率""环内占比"，任一触顶就丢弃这条埋点本身，
-# 不丢别的账——正常事件永远优先。
-BLOCKED_WINDOW_SECONDS = 60.0
-MAX_BLOCKED_EVENTS = 120
-MAX_BLOCKED_EVENTS_PER_SOURCE = 12
-MAX_BLOCKED_IN_EVENTS = 500
-_BLOCKED_WINDOW = [0.0, 0]
-_BLOCKED_SOURCES = {}
+# 匿名拒绝/限流埋点的限额：攻击者能用不同路径或不同用户名刷满 2000 条内存环，
+# 把正常事件挤出去。三条上限分别管"全局速率""单来源速率""环内占比"，任一触顶就
+# 丢弃这条埋点本身，不丢别的账；环满时先保证非这一类事件有位置。
+ABUSE_TYPES = frozenset({"auth.blocked", "auth.rate_limited"})
+ABUSE_WINDOW_SECONDS = 60.0
+MAX_ABUSE_EVENTS = 120
+MAX_ABUSE_EVENTS_PER_SOURCE = 12
+MAX_ABUSE_IN_EVENTS = 500
+_ABUSE_WINDOW = [0.0, 0]
+_ABUSE_SOURCES = {}
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_FILE_LINES = 2000
@@ -129,28 +130,28 @@ def _clean_account(value) -> str:
     return text or "anonymous"
 
 
-def _blocked_budget_locked(source: str, now: float) -> bool:
-    """auth.blocked 的埋点预算；调用方已持有 _LOCK。
+def _abuse_budget_locked(source: str, now: float) -> bool:
+    """auth.blocked / auth.rate_limited 的埋点预算；调用方已持有 _LOCK。
 
-    只限制这一类事件，正常登录失败/限流/管理员动作不经过这里。
+    只限制这两类匿名洪水事件，正常登录失败/管理员动作不经过这里。
     """
-    start, count = _BLOCKED_WINDOW
-    if now - start >= BLOCKED_WINDOW_SECONDS:
-        _BLOCKED_WINDOW[0], _BLOCKED_WINDOW[1] = now, 0
-        _BLOCKED_SOURCES.clear()
-    if _BLOCKED_WINDOW[1] >= MAX_BLOCKED_EVENTS:
+    start, count = _ABUSE_WINDOW
+    if now - start >= ABUSE_WINDOW_SECONDS:
+        _ABUSE_WINDOW[0], _ABUSE_WINDOW[1] = now, 0
+        _ABUSE_SOURCES.clear()
+    if _ABUSE_WINDOW[1] >= MAX_ABUSE_EVENTS:
         return False
-    entry = _BLOCKED_SOURCES.get(source)
-    if entry is None or now - entry[0] >= BLOCKED_WINDOW_SECONDS:
+    entry = _ABUSE_SOURCES.get(source)
+    if entry is None or now - entry[0] >= ABUSE_WINDOW_SECONDS:
         entry = [now, 0]
-        _BLOCKED_SOURCES[source] = entry
-    if entry[1] >= MAX_BLOCKED_EVENTS_PER_SOURCE:
+        _ABUSE_SOURCES[source] = entry
+    if entry[1] >= MAX_ABUSE_EVENTS_PER_SOURCE:
         return False
-    _BLOCKED_WINDOW[1] += 1
+    _ABUSE_WINDOW[1] += 1
     entry[1] += 1
-    if len(_BLOCKED_SOURCES) > 4096:
+    if len(_ABUSE_SOURCES) > 4096:
         # 来源前缀本身已被限到 /24、/48；这里再兜一层内存上限。
-        _BLOCKED_SOURCES.clear()
+        _ABUSE_SOURCES.clear()
     return True
 
 
@@ -308,12 +309,12 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
 
         with _LOCK:
             _ensure_loaded_locked()
-            if event_type == "auth.blocked":
-                if not _blocked_budget_locked(source, moment):
+            if event_type in ABUSE_TYPES:
+                abuse_in_ring = sum(
+                    1 for existing in _EVENTS if existing["type"] in ABUSE_TYPES)
+                if abuse_in_ring >= MAX_ABUSE_IN_EVENTS:
                     return None
-                blocked_in_ring = sum(
-                    1 for existing in _EVENTS if existing["type"] == "auth.blocked")
-                if blocked_in_ring >= MAX_BLOCKED_IN_EVENTS:
+                if not _abuse_budget_locked(source, moment):
                     return None
             key = (event_type, source, source_fp, clean_account, clean_route,
                    clean_status, detail)
@@ -555,9 +556,8 @@ def reset_for_tests(path=None, autoflush=False) -> None:
         _FILE_LINES = 0
         _PATH_OVERRIDE = path
         _AUTOFLUSH = bool(autoflush)
-        _BLOCKED_WINDOW[0], _BLOCKED_WINDOW[1] = 0.0, 0
-        _BLOCKED_SOURCES.clear()
-        # 测试从空状态出发，不读盘；要演懒加载的用例显式把 _LOADED 置回 False。
+        _ABUSE_WINDOW[0], _ABUSE_WINDOW[1] = 0.0, 0
+        _ABUSE_SOURCES.clear()        # 测试从空状态出发，不读盘；要演懒加载的用例显式把 _LOADED 置回 False。
         _LOADED = True
 
 

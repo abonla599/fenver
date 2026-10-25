@@ -75,6 +75,7 @@ class _RegionCollector(HTMLParser):
         self._stack = []            # 与 _drop_depth 同进的标签栈，处理未闭合的错叠
         self._stack_overflow = 0    # 超过 MAX_NESTING 后被丢弃的丢弃容器层数
         self._tag_events = 0
+        self._budget_exhausted = False
         self._regions = []          # [(region_name, [chunks])]，闭合的 article/main
         self._open = []             # [(region_name, [chunks])]，还没闭合的嵌套
         self._base = []
@@ -84,9 +85,17 @@ class _RegionCollector(HTMLParser):
             return self._open[-1][1]
         return self._base
 
-    def handle_starttag(self, tag, attrs):
+    def _over_budget(self) -> bool:
+        if self._tag_events >= MAX_TAG_EVENTS:
+            # 预算耗尽后连 handle_data 也不再收：否则丢弃容器的深度记账停住，
+            # 后面的 `<script>` 文本会作为普通 data 进正文（审查实测 600 KB 可触发）。
+            self._budget_exhausted = True
+            return True
         self._tag_events += 1
-        if self._tag_events > MAX_TAG_EVENTS:
+        return False
+
+    def handle_starttag(self, tag, attrs):
+        if self._over_budget():
             return
         if tag in _DROP_TAGS:
             self._drop_depth += 1
@@ -102,19 +111,26 @@ class _RegionCollector(HTMLParser):
             self._sink().append("\n")
 
     def handle_startendtag(self, tag, attrs):
-        self._tag_events += 1
-        if self._tag_events > MAX_TAG_EVENTS:
+        if self._over_budget():
+            return
+        # HTMLParser 把 `<script/>` 当自闭合调到这里；浏览器实际会把它当开始标签，
+        # 内容一直延续到 `</script>`。不在这里进丢弃模式，26 字符就能让脚本进正文。
+        if tag in _DROP_TAGS:
+            self._drop_depth += 1
+            if len(self._stack) < MAX_NESTING:
+                self._stack.append(tag)
+            else:
+                self._stack_overflow += 1
             return
         # `<article/>` 这种自闭合区域：内容为空，进栈出栈走同一条例外路径。
         if tag in _REGION_TAGS and len(self._regions) < MAX_NESTING:
             self._regions.append((tag, []))
             return
-        if tag in _BLOCK_TAGS and tag not in _DROP_TAGS:
+        if tag in _BLOCK_TAGS:
             self._sink().append("\n")
 
     def handle_endtag(self, tag):
-        self._tag_events += 1
-        if self._tag_events > MAX_TAG_EVENTS:
+        if self._over_budget():
             return
         if tag in _DROP_TAGS:
             # 弹最近的同名容器再扣 depth：多出来的 `</script>` 找不到配对容器，
@@ -143,7 +159,7 @@ class _RegionCollector(HTMLParser):
             self._sink().append("\n")
 
     def handle_data(self, data):
-        if self._drop_depth > 0:
+        if self._budget_exhausted or self._drop_depth > 0:
             return
         # 只有空白的数据块不能整段丢：`<b>a</b> <i>b</i>` 靠中间那个空格才不会
         # 粘成 `ab`。压一个空格交给 _join 折叠（行首尾会被 strip，块间空行会被丢）。
