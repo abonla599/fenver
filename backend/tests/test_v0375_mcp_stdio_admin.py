@@ -16,6 +16,7 @@
 
 所有用例结束恢复 config_store 缓存与 supervisor 单例，避免污染别的文件。
 """
+import asyncio
 import copy
 import json
 import os
@@ -23,6 +24,7 @@ import sys
 import threading
 import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -153,6 +155,38 @@ def test_bootstrap_admin_gets_200_on_status(client, config_sandbox, fake_supervi
     assert res.status_code == 200
 
 
+# --------------------------------------------------------------------------- N2
+
+
+def test_state_none_is_503_and_never_creates_a_singleton(
+        client, config_sandbox, fresh_supervisor):
+    """lifespan 没装上 supervisor 时，管理面不许替它造一个没人收尾的单例。
+
+    变异实验：把 ``_supervisor_for`` 的 ``return get_supervisor()`` 兜底加回来，
+    这里会拿到 200/202，且 ``mcp_stdio._SUPERVISOR`` 不再是 None。
+    """
+    import app.core.mcp_stdio as mcp_stdio
+
+    app.state.mcp_supervisor = None
+    try:
+        assert mcp_stdio._SUPERVISOR is None
+        for method, path, kwargs in (
+            ("get", "/v1/admin/mcp/stdio", {}),
+            ("put", "/v1/admin/mcp/stdio/servers/files", {"json": _entry("files")}),
+            ("delete", "/v1/admin/mcp/stdio/servers/files", {}),
+            ("put", "/v1/admin/mcp/stdio/settings", {"json": {"enabled": False}}),
+        ):
+            res = client.request(method, path, **kwargs)
+            assert res.status_code == 503, f"{method.upper()} {path} 应回 503"
+            assert res.json()["detail"] == "MCP stdio 未初始化"
+        assert mcp_stdio._SUPERVISOR is None, (
+            "state 为 None 时回退 get_supervisor() 会留下跨重启残留的单例")
+    finally:
+        app.state.mcp_supervisor = None
+    assert config_store.read()[MCP_SERVERS_KEY] == []
+    assert config_store.read()[MCP_ENABLED_KEY] is False
+
+
 # --------------------------------------------------------------------------- E2
 
 
@@ -218,6 +252,34 @@ def test_put_legal_persists_and_reloads(client, config_sandbox, fake_supervisor)
     assert stored["args"] == ["--mode", DECOY_ARG]
     on_disk = json.loads(config_sandbox.read_text(encoding="utf-8"))
     assert on_disk[MCP_SERVERS_KEY][0]["args"] == ["--mode", DECOY_ARG]
+
+
+def test_put_and_delete_response_have_the_get_shape_without_runtime(
+        client, config_sandbox):
+    """运行态里还没有这条时，PUT/DELETE 的响应仍要有 GET 的全套白名单键。"""
+    supervisor = FakeSupervisor(status={"enabled": True, "servers": []})
+
+    def reload_only():
+        supervisor.reloads += 1
+
+    supervisor.reload = reload_only
+    app.state.mcp_supervisor = supervisor
+    try:
+        put = client.put("/v1/admin/mcp/stdio/servers/files", json=_entry("files"))
+        assert put.status_code == 202
+        put_server = put.json()["server"]
+        assert set(put_server) == set(_SERVER_STATUS_KEYS)
+        assert put_server["state"] == "unknown"
+        assert put_server["pid"] is None and put_server["last_error"] is None
+
+        delete = client.delete("/v1/admin/mcp/stdio/servers/files")
+        assert delete.status_code == 200
+        delete_server = delete.json()["server"]
+        assert set(delete_server) == set(_SERVER_STATUS_KEYS)
+        assert delete_server["state"] == "disabled"
+        assert delete_server["id"] == "files"
+    finally:
+        app.state.mcp_supervisor = None
 
 
 def test_put_replaces_same_entry_instead_of_appending(client, config_sandbox,
@@ -313,6 +375,33 @@ def test_put_rejects_bad_env_allowlist_without_echo(client, config_sandbox,
     assert _ids() == []
 
 
+# --------------------------------------------------------------------------- N3
+
+
+def test_put_rejects_valid_json_sent_as_text_plain(client, config_sandbox,
+                                                   fake_supervisor):
+    """Content-Type 不是 JSON 时，哪怕正文能解析也不许写。
+
+    变异实验：删掉 ``_json_object`` 里的 Content-Type 检查，这条会变成 202。
+    """
+    res = client.put("/v1/admin/mcp/stdio/servers/files",
+                     content=json.dumps(_entry("files")),
+                     headers={"Content-Type": "text/plain"})
+    assert res.status_code == 400
+    assert res.json()["detail"] == "invalid_body"
+    assert _ids() == []
+    assert fake_supervisor.reloads == 0
+
+
+def test_put_accepts_json_content_type_with_charset(client, config_sandbox,
+                                                    fake_supervisor):
+    res = client.put("/v1/admin/mcp/stdio/servers/files",
+                     content=json.dumps(_entry("files")),
+                     headers={"Content-Type": "application/json; charset=utf-8"})
+    assert res.status_code == 202
+    assert _ids() == ["files"]
+
+
 # --------------------------------------------------------------------------- E5
 
 
@@ -394,7 +483,7 @@ def test_audit_has_no_args_env_decoys(client, config_sandbox, fake_supervisor):
     assert res.status_code == 202
     last = _last_audit()
     assert last["action"] == "mcp.stdio.config"
-    assert last["target"] == "files"
+    assert last["target"] == "server:files", "server_id 与全局 settings 的 target 必须分开"
     assert DECOY_ARG not in json.dumps(last, ensure_ascii=False)
     assert DECOY_ENV_VALUE not in json.dumps(last, ensure_ascii=False)
     assert last["after"] == [{
@@ -407,7 +496,7 @@ def test_audit_has_no_args_env_decoys(client, config_sandbox, fake_supervisor):
     assert client.delete("/v1/admin/mcp/stdio/servers/files").status_code == 200
     last = _last_audit()
     assert last["action"] == "mcp.stdio.config"
-    assert last["target"] == "files"
+    assert last["target"] == "server:files"
     assert last["after"] == []
     assert DECOY_ARG not in json.dumps(last, ensure_ascii=False)
 
@@ -415,7 +504,7 @@ def test_audit_has_no_args_env_decoys(client, config_sandbox, fake_supervisor):
                       json={"enabled": True}).status_code == 200
     last = _last_audit()
     assert last["action"] == "mcp.stdio.config"
-    assert last["target"] == "settings"
+    assert last["target"] == "global"
     assert last["before"] == {"enabled": False}
     assert last["after"] == {"enabled": True}
     assert "args" not in json.dumps(last, ensure_ascii=False)
@@ -471,6 +560,71 @@ def test_concurrent_put_cannot_overwrite_a_newer_entry(
     assert outcomes == {"alpha": 202, "beta": 202}
     assert set(_ids()) == {"alpha", "beta"}, (
         "并发 PUT 丢了一条配置：读-改-写没有被 _WRITE_LOCK 串行")
+
+
+# --------------------------------------------------------------------------- N1
+
+
+@pytest.mark.asyncio
+async def test_put_and_settings_keep_event_loop_alive_during_reload(config_sandbox):
+    """reload 的停进程等待必须在线程池里跑，事件循环要能继续排心跳。
+
+    用同步 ``time.sleep(0.3)`` 的假 reload 模拟停子进程。若端点直接调用
+    ``_apply_settings_update`` / ``_apply_server_update``（去掉 run_in_threadpool），
+    事件循环被占住，0.3s 内心跳一次都排不上，下面的 ticks 断言会红。
+    """
+    supervisor = FakeSupervisor()
+
+    def slow_reload():
+        supervisor.reloads += 1
+        time.sleep(0.3)
+
+    supervisor.reload = slow_reload
+    app.state.mcp_supervisor = supervisor
+
+    beats = []
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(0.01)
+            beats.append(time.monotonic())
+
+    def max_gap(started, finished):
+        """请求窗口内相邻心跳的最大间隔；事件循环被占住时它约等于阻塞时长。"""
+        samples = [started] + [t for t in beats if started < t < finished] + [finished]
+        return max(b - a for a, b in zip(samples, samples[1:]))
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://testserver") as async_client:
+            beat = asyncio.create_task(heartbeat())
+            try:
+                put_started = time.monotonic()
+                put = await async_client.put("/v1/admin/mcp/stdio/servers/files",
+                                             json=_entry("files"))
+                put_finished = time.monotonic()
+
+                settings_started = time.monotonic()
+                settings = await async_client.put("/v1/admin/mcp/stdio/settings",
+                                                  json={"enabled": True})
+                settings_finished = time.monotonic()
+            finally:
+                beat.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await beat
+    finally:
+        app.state.mcp_supervisor = None
+
+    assert put.status_code == 202
+    assert settings.status_code == 200
+    assert supervisor.reloads == 2
+    assert put_finished - put_started >= 0.25
+    assert settings_finished - settings_started >= 0.25
+    assert max_gap(put_started, put_finished) < 0.15, (
+        "PUT 的 reload 占住了事件循环（心跳间隔接近阻塞时长）")
+    assert max_gap(settings_started, settings_finished) < 0.15, (
+        "settings 的 reload 占住了事件循环（心跳间隔接近阻塞时长）")
 
 
 # --------------------------------------------------------------------------- F1/F2

@@ -141,10 +141,13 @@ async def lifespan(app: FastAPI):
         from app.core.mcp_stdio import get_supervisor
         from app.core.mcp_stdio_bridge import StdioToolBridge
         _mcp_supervisor = get_supervisor()
+        # 构造成功就立刻挂到 state：attach/start 失败时管理面读到的也是这个实例，
+        # 而它由下面的 shutdown 负责收尾。构造失败则保持 None，管理面答 503，
+        # 绝不替 lifespan 再造就一个没人 shutdown 的单例。
+        app.state.mcp_supervisor = _mcp_supervisor
         _mcp_bridge = StdioToolBridge(_mcp_supervisor)
         _mcp_bridge.attach()
         _mcp_supervisor.start()
-        app.state.mcp_supervisor = _mcp_supervisor
         app.state.mcp_bridge = _mcp_bridge
     except Exception as _mcp_exc:                    # noqa: BLE001 - 可选面不拖垮启动
         print(f"⚠️ MCP stdio 未启动: {type(_mcp_exc).__name__}")

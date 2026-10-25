@@ -19,11 +19,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.core import audit, config_store
 from app.core.authz import Principal, RequireAdmin
 from app.core.config_store import MCP_ENABLED_KEY, MCP_SERVERS_KEY
-from app.core.mcp_stdio import get_supervisor
 from app.core.mcp_stdio_config import ID_RE, MAX_SERVERS, normalize_entry
 from app.core.mcp_stdio_process import argv_fingerprint
 
@@ -53,19 +53,25 @@ DETAIL_TOO_MANY_SERVERS = "too_many_servers"
 DETAIL_CONFIG_REJECTED = "config_rejected"
 DETAIL_SETTINGS_SHAPE = "settings_must_be_enabled_bool"
 DETAIL_SERVER_NOT_FOUND = "server_not_found"
+DETAIL_NOT_INITIALIZED = "MCP stdio 未初始化"
 
 
 # --------------------------------------------------------------------------- 取口
 
 
 def _supervisor_for(request: Request):
-    """优先取 lifespan 装上的实例；没有才退回模块级单例（测试与旧路径）。"""
+    """只认 lifespan 装上的实例。
+
+    这里**不再**回退 ``get_supervisor()``：lifespan 构造失败时管理面若替它造一个
+    单例，这个实例没人 attach/start，退出时也没人 shutdown——后续启服还能读到
+    它，跨重启残留。没装上就是 503，把"未初始化"如实回给管理员。
+    """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
     supervisor = getattr(state, "mcp_supervisor", None)
-    if supervisor is not None:
-        return supervisor
-    return get_supervisor()
+    if supervisor is None:
+        raise HTTPException(status_code=503, detail=DETAIL_NOT_INITIALIZED)
+    return supervisor
 
 
 def _public_status(supervisor) -> Dict[str, Any]:
@@ -95,11 +101,15 @@ def _server_status(supervisor, server_id: str,
     for item in status.get("servers") or []:
         if item.get("id") == server_id:
             return item
-    return {
+    # 运行态还没建时也返回与 GET 相同的键集合：PUT / DELETE 的响应形状不该因为
+    # "supervisor 还没看见这条"而少键，管理台才能用同一份渲染。
+    fallback = {key: None for key in _SERVER_STATUS_KEYS}
+    fallback.update({
         "id": server_id,
         "enabled": bool((entry or {}).get("enabled")),
         "state": fallback_state,
-    }
+    })
+    return fallback
 
 
 # --------------------------------------------------------------------------- 小工具
@@ -151,8 +161,22 @@ def _summary(entries: List[dict]) -> List[dict]:
     return out
 
 
+def _content_type_is_json(request: Request) -> bool:
+    """Content-Type 必须是 application/json（允许 ``; charset=...`` 参数）。
+
+    只看媒体类型本身：``application/json-patch+json`` 这类不算，``text/plain``
+    也不是——之前直接 ``request.json()`` 会照收，等于把"发错格式却写进配置"的
+    请求当成了合法写入。
+    """
+    raw = request.headers.get("content-type", "")
+    media_type = raw.split(";", 1)[0].strip().lower()
+    return media_type == "application/json"
+
+
 async def _json_object(request: Request) -> Dict[str, Any]:
-    """请求体必须是 JSON 对象；解析失败与形状不对都回同一句 400。"""
+    """请求体必须是 JSON 对象；格式不对、形状不对都回同一句 400。"""
+    if not _content_type_is_json(request):
+        raise HTTPException(status_code=400, detail=DETAIL_INVALID_BODY)
     try:
         body = await request.json()
     except Exception:                                        # noqa: BLE001 - 客户端输入
@@ -162,12 +186,67 @@ async def _json_object(request: Request) -> Dict[str, Any]:
     return body
 
 
+# --------------------------------------------------------------- 同步的写事务
+# 加锁→读-改-写→审计→reload 整段放在同步函数里，由端点用 run_in_threadpool 调。
+# reload 会停子进程（每台最多 5s+5s），直接跑在事件循环里哪怕只有一台也会把
+# /health 和聊天一起冻住；这里是 I/O 与等待，属于线程池。
+
+
+def _apply_server_update(actor: Principal, server_id: str, entry: dict,
+                         supervisor) -> Dict[str, Any]:
+    """整条替换并落盘；返回该条目在 reload 之后的公开状态。"""
+    with _WRITE_LOCK:
+        entries = _current_entries()
+        before = _summary(entries)
+        replaced = False
+        for index, item in enumerate(entries):
+            if item.get("id") == server_id:
+                entries[index] = entry
+                replaced = True
+                break
+        if not replaced:
+            if len(entries) >= MAX_SERVERS:
+                raise HTTPException(status_code=400,
+                                    detail=DETAIL_TOO_MANY_SERVERS)
+            entries.append(entry)
+
+        cfg, rejected = config_store.apply_update({MCP_SERVERS_KEY: entries})
+        if MCP_SERVERS_KEY in rejected:
+            # apply_update 是整键拒，坏表不会写一半；配置仍是写前的样子。
+            raise HTTPException(status_code=400, detail=DETAIL_CONFIG_REJECTED)
+        after = _summary(cfg.get(MCP_SERVERS_KEY) or [])
+        # server_id 可以是 "settings"（合法 id），与全局开关的审计 target 同名；
+        # 加上前缀才能分开记。
+        audit.log(actor, "mcp.stdio.config", target=f"server:{server_id}",
+                  before=before, after=after)
+        _reload(supervisor)
+        return _server_status(supervisor, server_id, entry)
+
+
+def _apply_settings_update(actor: Principal, enabled: bool, supervisor) -> bool:
+    """写全局开关并 reload；返回落盘后的实际值。"""
+    with _WRITE_LOCK:
+        try:
+            before_enabled = bool(config_store.read().get(MCP_ENABLED_KEY, False))
+        except Exception:                                    # noqa: BLE001 - 审计摘要尽力
+            before_enabled = False
+        cfg, rejected = config_store.apply_update({MCP_ENABLED_KEY: enabled})
+        if MCP_ENABLED_KEY in rejected:
+            raise HTTPException(status_code=400, detail=DETAIL_CONFIG_REJECTED)
+        after_enabled = bool(cfg.get(MCP_ENABLED_KEY, enabled))
+        audit.log(actor, "mcp.stdio.config", target="global",
+                  before={"enabled": before_enabled},
+                  after={"enabled": after_enabled})
+        _reload(supervisor)
+        return after_enabled
+
+
 # --------------------------------------------------------------------------- 端点
 
 
 @router.get("/v1/admin/mcp/stdio")
-def get_mcp_stdio(request: Request, response: Response,
-                  _: Principal = RequireAdmin):
+async def get_mcp_stdio(request: Request, response: Response,
+                        _: Principal = RequireAdmin):
     """当前全局开关与每条 server 的状态摘要。
 
     ``Cache-Control: no-store``：这份快照会随子进程起落变化，缓存住只会让管理员
@@ -202,31 +281,9 @@ async def put_mcp_stdio_server(server_id: str, request: Request,
                             detail="invalid_entry:" + _safe_entry_reason(reason))
 
     supervisor = _supervisor_for(request)
-    with _WRITE_LOCK:
-        entries = _current_entries()
-        before = _summary(entries)
-        replaced = False
-        for index, item in enumerate(entries):
-            if item.get("id") == server_id:
-                entries[index] = entry
-                replaced = True
-                break
-        if not replaced:
-            if len(entries) >= MAX_SERVERS:
-                raise HTTPException(status_code=400,
-                                    detail=DETAIL_TOO_MANY_SERVERS)
-            entries.append(entry)
-
-        cfg, rejected = config_store.apply_update({MCP_SERVERS_KEY: entries})
-        if MCP_SERVERS_KEY in rejected:
-            # apply_update 是整键拒，坏表不会写一半；配置仍是写前的样子。
-            raise HTTPException(status_code=400, detail=DETAIL_CONFIG_REJECTED)
-        after = _summary(cfg.get(MCP_SERVERS_KEY) or [])
-        audit.log(actor, "mcp.stdio.config", target=server_id,
-                  before=before, after=after)
-        _reload(supervisor)
-        payload = _server_status(supervisor, server_id, entry)
-
+    # 写事务整体进线程池：reload 的停进程等待不能占着事件循环。
+    payload = await run_in_threadpool(
+        _apply_server_update, actor, server_id, entry, supervisor)
     return JSONResponse(status_code=202,
                         content={"status": "accepted", "server": payload})
 
@@ -234,7 +291,11 @@ async def put_mcp_stdio_server(server_id: str, request: Request,
 @router.delete("/v1/admin/mcp/stdio/servers/{server_id}")
 def delete_mcp_stdio_server(server_id: str, request: Request,
                             actor: Principal = RequireAdmin):
-    """删除一条配置；停进程、审计、重新加载配置，再显式兜一次注销。"""
+    """删除一条配置；停进程、审计、重新加载配置，再显式兜一次注销。
+
+    ``def`` 而不是 ``async def``：Starlette 本来就把同步端点丢进线程池，reload
+    的停进程等待不会占着事件循环。
+    """
     supervisor = _supervisor_for(request)
     with _WRITE_LOCK:
         entries = _current_entries()
@@ -246,7 +307,7 @@ def delete_mcp_stdio_server(server_id: str, request: Request,
         if MCP_SERVERS_KEY in rejected:
             raise HTTPException(status_code=400, detail=DETAIL_CONFIG_REJECTED)
         after = _summary(cfg.get(MCP_SERVERS_KEY) or [])
-        audit.log(actor, "mcp.stdio.config", target=server_id,
+        audit.log(actor, "mcp.stdio.config", target=f"server:{server_id}",
                   before=before, after=after)
         _reload(supervisor)
         payload = _server_status(supervisor, server_id,
@@ -274,18 +335,6 @@ async def put_mcp_stdio_settings(request: Request,
 
     enabled = bool(body["enabled"])
     supervisor = _supervisor_for(request)
-    with _WRITE_LOCK:
-        try:
-            before_enabled = bool(config_store.read().get(MCP_ENABLED_KEY, False))
-        except Exception:                                    # noqa: BLE001 - 审计摘要尽力
-            before_enabled = False
-        cfg, rejected = config_store.apply_update({MCP_ENABLED_KEY: enabled})
-        if MCP_ENABLED_KEY in rejected:
-            raise HTTPException(status_code=400, detail=DETAIL_CONFIG_REJECTED)
-        after_enabled = bool(cfg.get(MCP_ENABLED_KEY, enabled))
-        audit.log(actor, "mcp.stdio.config", target="settings",
-                  before={"enabled": before_enabled},
-                  after={"enabled": after_enabled})
-        _reload(supervisor)
-
+    after_enabled = await run_in_threadpool(
+        _apply_settings_update, actor, enabled, supervisor)
     return {"enabled": after_enabled}
