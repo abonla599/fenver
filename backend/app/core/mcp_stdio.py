@@ -21,8 +21,11 @@
   server 拒绝 initialize）都进 ``config_error`` 终态，只等 reload。否则"命令路径写错"
   会变成无限重启。传输类错误（``retryable=True``、EOF、超时、进程崩溃、写管道失败）
   才走退避 + 熔断。
-- **熔断计数只在传输失败时发生**：每次成功就绪都 ``record_success``，所以 8h 到点回收
-  不会毒化熔断（刚 ready 过就清零）。
+- **成功要稳定才算数**：ready 那一刻不清零失败计数；同一代稳定运行满
+  ``stable_seconds``（默认 300s）才 ``record_success``，且每代只清零一次。这样
+  "握手成功 50ms 就退出"会按传输失败累计到熔断，而不是无限热重启。
+- **8h 寿命回收不算失败**：到点 teardown 后固定短延迟重启，不写失败计数、不碰预算，
+  exit 审计仍保留 ``reason=killed``。
 - **circuit_open 到期只探一次**：预算里的 ``check`` 只负责闸门；探活失败后由 supervisor
   自己的 ``circuit_until`` 再压一个 cooldown，绝不在 check 松口的瞬间打成热循环。
 - **审计只落摘要**：``id`` / ``pid`` / ``argv_fingerprint``（只 hash 命令与 flag）/
@@ -50,6 +53,7 @@ from app.core.mcp_stdio_client import (
     MCPStdioClient,
 )
 from app.core.mcp_stdio_config import (
+    MAX_SERVERS,
     MCP_ENABLED_KEY,
     MCP_SERVERS_KEY,
     normalize_entry,
@@ -94,8 +98,15 @@ DEFAULT_BACKOFF: Tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0)
 DEFAULT_MAX_LIFE = 8 * 3600.0
 DEFAULT_MONITOR_INTERVAL = 0.05
 DEFAULT_COOLDOWN = 900.0
+# 计划 §3.2：一次成功只算"稳定 5 分钟"，之后崩溃才按新的失败链计数。
+DEFAULT_STABLE_SECONDS = 300.0
+# max_life 到点回收不是失败：收尸后固定短延迟重启，避免同一秒内反复换进程。
+MAX_LIFE_RESTART_DELAY = 1.0
 STOP_JOIN_TIMEOUT = 5.0
 TEARDOWN_WAIT_SECONDS = 5.0
+
+# 超过这一条数的 server 不 spawn（与写入口 ``mcp_stdio_config.MAX_SERVERS`` 同一上限）。
+MAX_SERVERS_REASON = "max_servers"
 
 # 退避抖动的幅度：±20%。单点抖动避免多个 server 在同一秒一起重启。
 _JITTER = 0.2
@@ -206,10 +217,12 @@ class _Runtime:
         self.spawned_at: Optional[float] = None
         self.spawns = 0
         self.failures = 0
+        self.stable_marked = False
         self.tools: List[Dict[str, Any]] = []
         self.circuit_until = 0.0
         self.circuit_audited = False
         self.probe_mode = False
+        self.refused_audited = False
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
 
@@ -228,6 +241,7 @@ class StdioSupervisor:
         mcp_root: Optional[str] = None,
         backoff: Sequence[float] = DEFAULT_BACKOFF,
         max_life: float = DEFAULT_MAX_LIFE,
+        stable_seconds: float = DEFAULT_STABLE_SECONDS,
         monitor_interval: float = DEFAULT_MONITOR_INTERVAL,
         handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT,
         call_timeout: float = DEFAULT_CALL_TIMEOUT,
@@ -243,6 +257,8 @@ class StdioSupervisor:
             raise ValueError("monitor_interval 必须为正数")
         if max_life < 0:
             raise ValueError("max_life 不能为负数")
+        if stable_seconds < 0:
+            raise ValueError("stable_seconds 不能为负数")
         if handshake_timeout <= 0 or call_timeout <= 0:
             raise ValueError("握手/调用超时必须为正数")
 
@@ -250,6 +266,7 @@ class StdioSupervisor:
         self._mcp_root = os.path.abspath(mcp_root) if mcp_root else _default_mcp_root()
         self._backoff = intervals
         self._max_life = float(max_life)
+        self._stable_seconds = float(stable_seconds)
         self._monitor_interval = float(monitor_interval)
         self._handshake_timeout = float(handshake_timeout)
         self._call_timeout = float(call_timeout)
@@ -396,6 +413,7 @@ class StdioSupervisor:
             return []
         out: List[Tuple[Dict[str, Any], str]] = []
         seen = set()
+        accepted = 0
         for item in raw:
             server_id = item.get("id") if isinstance(item, dict) else None
             if not isinstance(server_id, str) or not server_id or server_id in seen:
@@ -409,10 +427,16 @@ class StdioSupervisor:
                     "command": command if isinstance(command, str) else "",
                     "args": [],
                     "env_allowlist": [],
-                    "enabled": False,
+                    # 坏条目也要保留配置里的原始开关，别把 enabled=True 写成 False。
+                    "enabled": bool(item.get("enabled", False)),
                 }
                 out.append((entry, "config_error:" + _clean_reason(reason or "invalid_entry")))
                 continue
+            if accepted >= MAX_SERVERS:
+                # 第 4 条起不再 spawn：手改配置绕过写入口时，supervisor 再判一次上限。
+                out.append((normalized, MAX_SERVERS_REASON))
+                continue
+            accepted += 1
             out.append((normalized, ""))
         return out
 
@@ -446,6 +470,7 @@ class StdioSupervisor:
 
         # 再落新配置并决定哪些要起线程。
         planned: List[_Runtime] = []
+        refused_max: List[_Runtime] = []
         with self._lock:
             for server_id, (entry, reason) in desired.items():
                 runtime = self._runtimes.get(server_id)
@@ -453,6 +478,9 @@ class StdioSupervisor:
                     runtime = _Runtime(server_id, entry)
                     self._runtimes[server_id] = runtime
                 runtime.entry = dict(entry)
+                if not reason:
+                    # 条目重新变合法后，下次再撞上限仍要留一条 refused 审计。
+                    runtime.refused_audited = False
                 if not global_enabled:
                     runtime.state = STATE_DISABLED
                     runtime.last_error = ""
@@ -460,6 +488,9 @@ class StdioSupervisor:
                 if reason:
                     runtime.state = STATE_CONFIG_ERROR
                     runtime.last_error = reason
+                    if reason == MAX_SERVERS_REASON and not runtime.refused_audited:
+                        runtime.refused_audited = True
+                        refused_max.append(runtime)
                     continue
                 # 注意：``config_error`` 只在**条目变更**后重试。条目没变时 reload
                 # 不是"配置变更"，绝不能把终态翻回 disabled 再 spawn 一次。
@@ -468,6 +499,12 @@ class StdioSupervisor:
                 else:
                     runtime.state = STATE_DISABLED
 
+        for runtime in refused_max:
+            self._audit(
+                "mcp.stdio.refused",
+                runtime,
+                {"id": runtime.server_id, "reason": MAX_SERVERS_REASON},
+            )
         for runtime in planned:
             self._ensure_running(runtime)
 
@@ -478,17 +515,23 @@ class StdioSupervisor:
             if self._shutdown.is_set():
                 return
             if runtime.thread is not None and runtime.thread.is_alive():
+                # 旧代还没走完收尸（例如卡在 client.close）：保留线程引用并停在
+                # stopping，拒绝再起一代。旧代绑定的是自己的 stop_event，醒来后
+                # 不会读到这里的新事件而"复活"再 spawn。
+                if runtime.stop_event.is_set():
+                    runtime.state = STATE_STOPPING
                 return
             if not (self._global_enabled and runtime.entry.get("enabled")):
                 runtime.state = STATE_DISABLED
                 return
             if runtime.state == STATE_CONFIG_ERROR:
                 return
-            runtime.stop_event = threading.Event()
+            stop_event = threading.Event()
+            runtime.stop_event = stop_event
             runtime.state = STATE_STARTING
             thread = threading.Thread(
                 target=self._worker,
-                args=(runtime,),
+                args=(runtime, stop_event),
                 name="mcp-stdio-sup-%s" % runtime.server_id,
                 daemon=True,
             )
@@ -496,8 +539,13 @@ class StdioSupervisor:
         thread.start()
 
     def _stop_runtime(self, runtime: _Runtime) -> None:
-        """置停并收尸；可在任意线程调用（不持 ``_lock`` 做 join）。"""
-        runtime.stop_event.set()
+        """置停并收尸；可在任意线程调用（不持 ``_lock`` 做 join）。
+
+        旧代线程卡在收尸里超过 join 超时时**不**清 ``runtime.thread``：还活着就保留
+        引用、状态停在 ``stopping``，让 reload 的 ``_ensure_running`` 拒绝再起新代。
+        """
+        stop_event = runtime.stop_event
+        stop_event.set()
         self._set_state(runtime, STATE_STOPPING)
         uptime = self._uptime(runtime)
         self._teardown_process(runtime, reason="killed", uptime=uptime)
@@ -508,21 +556,27 @@ class StdioSupervisor:
             and thread is not threading.current_thread()
         ):
             thread.join(timeout=STOP_JOIN_TIMEOUT)
-        runtime.thread = None
+        with self._lock:
+            thread = runtime.thread
+            if thread is not None and thread.is_alive():
+                runtime.state = STATE_STOPPING
+                return
+            runtime.thread = None
         self._set_state(runtime, STATE_DISABLED)
 
     # ------------------------------------------------------------------ worker
 
-    def _worker(self, runtime: _Runtime) -> None:
+    def _worker(self, runtime: _Runtime, stop_event: threading.Event) -> None:
+        """一代 worker：``stop_event`` 是**本代**的停机信号（不从 runtime 动态读）。"""
         try:
-            while not self._shutdown.is_set() and not runtime.stop_event.is_set():
+            while not self._shutdown.is_set() and not stop_event.is_set():
                 if not self._active(runtime):
                     self._set_state(runtime, STATE_DISABLED)
-                    self._wait(runtime, self._monitor_interval)
+                    self._wait(runtime, self._monitor_interval, stop_event)
                     continue
                 if runtime.state == STATE_CONFIG_ERROR:
                     # 终态：只等 reload 换掉 entry / 停线程。
-                    self._wait(runtime, self._monitor_interval)
+                    self._wait(runtime, self._monitor_interval, stop_event)
                     continue
 
                 now = self._clock()
@@ -531,6 +585,7 @@ class StdioSupervisor:
                     self._wait(
                         runtime,
                         min(self._monitor_interval, runtime.circuit_until - now),
+                        stop_event,
                     )
                     continue
                 try:
@@ -540,12 +595,13 @@ class StdioSupervisor:
                     self._open_circuit(runtime, failures=max(runtime.failures, 1))
                     continue
                 if runtime.circuit_audited:
-                    # 刚从 circuit_open 出来：这一次 spawn 是探活，成功才清零。
+                    # 刚从 circuit_open 出来：这一次 spawn 是探活，稳定满
+                    # stable_seconds 才清零（见 ``_mark_stable``）。
                     runtime.circuit_audited = False
                     runtime.probe_mode = True
                     self._set_state(runtime, STATE_STARTING)
 
-                self._run_session(runtime)
+                self._run_session(runtime, stop_event)
         except Exception as exc:                             # noqa: BLE001 - worker 不许炸穿
             logger.warning(
                 "MCP stdio supervisor worker 异常退出: %s %s",
@@ -556,7 +612,7 @@ class StdioSupervisor:
                 runtime.last_error = "worker_error:" + type(exc).__name__
             self._stop_runtime(runtime)
         finally:
-            if runtime.stop_event.is_set() or self._shutdown.is_set():
+            if stop_event.is_set() or self._shutdown.is_set():
                 with self._lock:
                     if runtime.state in (STATE_STARTING, STATE_READY, STATE_BACKOFF,
                                          STATE_CRASHED, STATE_CIRCUIT_OPEN):
@@ -565,10 +621,12 @@ class StdioSupervisor:
     def _active(self, runtime: _Runtime) -> bool:
         return bool(self._global_enabled and runtime.entry.get("enabled"))
 
-    def _run_session(self, runtime: _Runtime) -> None:
+    def _run_session(self, runtime: _Runtime, stop_event: threading.Event) -> None:
         """一次完整生命周期：spawn → 握手 → list → 监控；返回即代表这一代已死。"""
-        runtime.spawns += 1
-        runtime.spawned_at = self._clock()
+        with self._lock:
+            runtime.spawns += 1
+            runtime.spawned_at = self._clock()
+            runtime.stable_marked = False
         self._set_state(runtime, STATE_STARTING)
 
         try:
@@ -589,20 +647,20 @@ class StdioSupervisor:
             with self._lock:
                 runtime.spawned_at = None
                 runtime.last_error = "spawn_failed:" + type(exc).__name__
-            self._transport_failure(runtime, failures_delta=1)
+            self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
             return
         except Exception as exc:                             # noqa: BLE001 - 类型名足够
             with self._lock:
                 runtime.spawned_at = None
                 runtime.last_error = "spawn_failed:" + type(exc).__name__
-            self._transport_failure(runtime, failures_delta=1)
+            self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
             return
 
         with self._lock:
             runtime.wrapper = wrapper
             runtime.pid = getattr(wrapper, "pid", None)
 
-        if runtime.stop_event.is_set() or self._shutdown.is_set():
+        if stop_event.is_set() or self._shutdown.is_set():
             self._teardown_process(runtime, reason="killed", uptime=self._uptime(runtime))
             return
 
@@ -622,7 +680,7 @@ class StdioSupervisor:
             phase = "list_tools"
             tools = client.list_tools()
         except MCPError as exc:
-            self._failed_start(runtime, client, exc, phase)
+            self._failed_start(runtime, client, exc, phase, stop_event)
             return
         except Exception as exc:                             # noqa: BLE001 - 类型名足够
             with self._lock:
@@ -630,10 +688,10 @@ class StdioSupervisor:
             self._teardown_process(
                 runtime, reason="error", uptime=self._uptime(runtime)
             )
-            self._transport_failure(runtime, failures_delta=1)
+            self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
             return
 
-        if runtime.stop_event.is_set() or self._shutdown.is_set():
+        if stop_event.is_set() or self._shutdown.is_set():
             self._teardown_process(runtime, reason="killed", uptime=self._uptime(runtime))
             return
 
@@ -641,11 +699,9 @@ class StdioSupervisor:
             runtime.tools = list(tools)
             runtime.state = STATE_READY
             runtime.last_error = ""
-            runtime.failures = 0
-            runtime.probe_mode = False
-            runtime.circuit_audited = False
             pid = runtime.pid
-        self._safely(self._budget.record_success, runtime.server_id)
+        # B1：ready 只是"握手成功"，不算稳定成功——这里**不**清失败计数、不
+        # record_success。清零只发生在 ``_mark_stable``（稳定满 stable_seconds）。
         self._audit(
             "mcp.stdio.start",
             runtime,
@@ -656,10 +712,12 @@ class StdioSupervisor:
                     runtime.entry.get("command", ""), runtime.entry.get("args") or []
                 ),
                 "command_basename": command_basename(runtime.entry.get("command", "")),
+                # N6：只报个数，绝不落 args 的值。
+                "args_count": len(runtime.entry.get("args") or []),
                 "restarts": max(0, runtime.spawns - 1),
             },
         )
-        self._monitor_ready(runtime, client, wrapper)
+        self._monitor_ready(runtime, client, wrapper, stop_event)
 
     def _failed_start(
         self,
@@ -667,6 +725,7 @@ class StdioSupervisor:
         client: MCPStdioClient,
         exc: MCPError,
         phase: str,
+        stop_event: threading.Event,
     ) -> None:
         """握手 / list 阶段失败：传输类走退避，配置类进终态。"""
         uptime = self._uptime(runtime)
@@ -679,7 +738,7 @@ class StdioSupervisor:
                 reason="timeout" if timed_out else "error",
                 uptime=uptime,
             )
-            self._transport_failure(runtime, failures_delta=1)
+            self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
             return
 
         reason = "protocol_version" if phase == "initialize" else "protocol_error"
@@ -698,20 +757,23 @@ class StdioSupervisor:
         runtime: _Runtime,
         client: MCPStdioClient,
         wrapper: Any,
+        stop_event: threading.Event,
     ) -> None:
-        """ready 期间：收敛崩溃、EOF 与 max_life。返回即代表这一代已收尸。"""
-        while not self._shutdown.is_set() and not runtime.stop_event.is_set():
+        """ready 期间：收敛崩溃、EOF、稳定清零与 max_life。返回即代表这一代已收尸。"""
+        while not self._shutdown.is_set() and not stop_event.is_set():
             uptime = self._uptime(runtime)
             exit_code = self._poll(wrapper)
             if exit_code is not None:
                 with self._lock:
                     runtime.last_error = "crashed:%s" % exit_code
+                    # N1 / N7：收尸前先离开 ready，避免 status 出现 ready + pid=None。
+                    runtime.state = STATE_CRASHED
                 self._teardown_process(
                     runtime,
                     reason="error" if exit_code else "eof",
                     uptime=uptime,
                 )
-                self._transport_failure(runtime, failures_delta=1)
+                self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
                 return
             if not client.alive:
                 with self._lock:
@@ -720,24 +782,57 @@ class StdioSupervisor:
                         if client.stats.get("exit_code") is not None
                         else "unknown"
                     )
+                    runtime.state = STATE_CRASHED
                 self._teardown_process(runtime, reason="error", uptime=uptime)
-                self._transport_failure(runtime, failures_delta=1)
+                self._transport_failure(runtime, stop_event=stop_event, failures_delta=1)
                 return
+            if self._stable_seconds > 0 and uptime >= self._stable_seconds:
+                self._mark_stable(runtime)
             if self._max_life and uptime >= self._max_life:
                 with self._lock:
                     runtime.last_error = "max_life"
-                # 到点回收：先审计 exit（reason=killed），再按传输失败退避重启。
-                # 刚 ready 过已 record_success，所以寿命回收不会累积熔断。
+                    runtime.state = STATE_STOPPING
+                # 到点回收：先审计 exit（reason=killed），但这**不是**传输失败——
+                # 不 record_failure、不累计熔断，固定短延迟后重启（N2）。
                 self._teardown_process(runtime, reason="killed", uptime=uptime)
-                self._transport_failure(runtime, failures_delta=1)
+                if self._shutdown.is_set() or stop_event.is_set():
+                    self._set_state(runtime, STATE_STOPPING)
+                    return
+                self._set_state(runtime, STATE_BACKOFF)
+                self._wait(runtime, MAX_LIFE_RESTART_DELAY, stop_event)
+                if self._shutdown.is_set() or stop_event.is_set():
+                    self._set_state(runtime, STATE_STOPPING)
+                else:
+                    self._set_state(runtime, STATE_STARTING)
                 return
-            self._wait(runtime, self._monitor_interval)
+            self._wait(runtime, self._monitor_interval, stop_event)
+
+    def _mark_stable(self, runtime: _Runtime) -> None:
+        """同一代稳定满 ``stable_seconds`` 才清零失败计数 / 预算，每代只做一次。
+
+        ready 瞬间不算成功：``ready_then_die`` 这类"握手成功就退出"必须继续按
+        失败累计，否则熔断永远打不开、退避永远停在第一档。
+        """
+        with self._lock:
+            if runtime.stable_marked:
+                return
+            runtime.stable_marked = True
+            runtime.failures = 0
+            runtime.probe_mode = False
+            runtime.circuit_audited = False
+        self._safely(self._budget.record_success, runtime.server_id)
 
     # ------------------------------------------------------------------ 失败 / 熔断
 
-    def _transport_failure(self, runtime: _Runtime, *, failures_delta: int = 1) -> None:
+    def _transport_failure(
+        self,
+        runtime: _Runtime,
+        *,
+        stop_event: threading.Event,
+        failures_delta: int = 1,
+    ) -> None:
         """传输失败：计数 → 熔断或退避。停线程期间不再改状态。"""
-        if self._shutdown.is_set() or runtime.stop_event.is_set():
+        if self._shutdown.is_set() or stop_event.is_set():
             self._set_state(runtime, STATE_STOPPING)
             return
         with self._lock:
@@ -748,7 +843,8 @@ class StdioSupervisor:
         self._safely(self._budget.record_failure, runtime.server_id)
 
         if probe:
-            # 熔断到期后的唯一一次探活失败：立刻重新压 cooldown，不放开热循环。
+            # 熔断到期后的唯一一次探活失败（含"ready 了但没稳定就死"）：立刻
+            # 重新压 cooldown，不放开热循环。
             self._open_circuit(runtime, failures=failures)
             return
 
@@ -760,8 +856,8 @@ class StdioSupervisor:
 
         delay = self._backoff_delay(failures)
         self._set_state(runtime, STATE_BACKOFF)
-        self._wait(runtime, delay)
-        if self._shutdown.is_set() or runtime.stop_event.is_set():
+        self._wait(runtime, delay, stop_event)
+        if self._shutdown.is_set() or stop_event.is_set():
             self._set_state(runtime, STATE_STOPPING)
         else:
             self._set_state(runtime, STATE_STARTING)
@@ -887,12 +983,12 @@ class StdioSupervisor:
         except Exception:                                    # noqa: BLE001
             return None
 
-    def _wait(self, runtime: _Runtime, seconds: float) -> bool:
+    def _wait(self, runtime: _Runtime, seconds: float, stop_event: threading.Event) -> bool:
         """可中断等待：返回 True 表示收到停止信号。按 monitor_interval 切片，
-        这样 shutdown 不必等完整个 16s 退避。"""
+        这样 shutdown 不必等完整个 16s 退避。``stop_event`` 绑定调用方那一代。"""
         end = self._clock() + max(0.0, float(seconds))
         while True:
-            if self._shutdown.is_set() or runtime.stop_event.is_set():
+            if self._shutdown.is_set() or stop_event.is_set():
                 return True
             remaining = end - self._clock()
             if remaining <= 0:

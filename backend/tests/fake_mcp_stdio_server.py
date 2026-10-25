@@ -56,6 +56,9 @@
                       第二次走正常 ``ok`` 协议。``spawn.count`` 记每次启动。
 - ``crash_always``     每次启动写 ``spawn.count`` 后 ``os._exit(3)``，并往 stderr 写一行
                       诱饵（审计测试用：正文绝不允许进审计）。
+- ``ready_then_die``   正常 initialize + tools/list 成功（两页都回完），再写
+                      ``spawn.count``、sleep 0.05 后 ``os._exit(3)``：模拟"握手成功但
+                      没稳定就死"，用来钉住"ready 不等于成功清零"。
 - ``hang``             正常 initialize 后不再响应任何请求（用于超时/寿命场景）。
 """
 import json
@@ -146,6 +149,7 @@ NORMAL_MODES = {
     "hog",
     "record_argv",
     "crash_once",
+    "ready_then_die",
 }
 
 _HOG_REF = []
@@ -248,6 +252,9 @@ def _startup() -> None:
         _bump_count("spawn.count")
         if _bump_count("crash-once.count") == 1:
             os._exit(3)
+    if MODE == "ready_then_die":
+        # 真正退出在第二页 tools/list 回完之后（见 ``_handle_list``）。
+        _bump_count("spawn.count")
     if MODE == "eof":
         sys.exit(0)
     if MODE == "sleep":
@@ -448,6 +455,11 @@ def _handle_list(message: dict) -> None:
     if next_cursor:
         result["nextCursor"] = next_cursor
     send({"jsonrpc": "2.0", "id": message.get("id"), "result": result})
+    if MODE == "ready_then_die" and params.get("cursor") is not None:
+        # 第二页（最后一页）也回完了 ⇒ 客户端 tools/list 一定成功；稍等再死，
+        # 让 supervisor 先进入 ready，再以非零码退出。
+        time.sleep(0.05)
+        os._exit(3)
 
 
 def _handle_call(message: dict) -> None:

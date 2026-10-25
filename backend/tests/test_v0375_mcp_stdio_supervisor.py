@@ -8,13 +8,18 @@ T4 验收段：
 3. ``crash_once`` → 第二次成功，``restarts==1``；
 4. ``crash_always`` → 5 次失败后 ``circuit_open``，第 6 次在 cooldown 内不 spawn；
    cooldown 到期只探一次（第 6 次），探活失败重新熔断；
-5. 配置错误（命令不存在 / 协议版本不符）→ ``config_error`` 终态，不重启；
+5. ``ready_then_die``（握手成功 50ms 后退出）→ 每次 spawn 都按失败累计，
+   5 次后 ``circuit_open``，spawn 次数停在 5；探活同样只探一次；
+   ``stable_seconds`` 未到之前绝不 ``record_success``；
+6. 配置错误（命令不存在 / 协议版本不符）→ ``config_error`` 终态，不重启；
    reload 同一份配置也不重启；
-6. ``max_life`` 注入 0.3s → 到点回收重启，无孤儿；
-7. 审计：start / exit / refused / circuit_open 各出现，且不含 args/env 诱饵、
-   stderr 正文、完整命令行；
-8. ``shutdown()`` 幂等、无线程残留、status 无 running server；
-9. ``reload()``：enabled→disabled 停进程，disabled→enabled 起进程。
+7. ``max_life`` 注入 0.3s → 到点回收重启，无孤儿；寿命回收不记传输失败；
+8. 审计：start / exit / refused / circuit_open 各出现，且不含 args/env 诱饵、
+   stderr 正文、完整命令行；start 只带 ``args_count``；
+9. ``shutdown()`` 幂等、无线程残留、status 无 running server；
+10. ``reload()``：enabled→disabled 停进程，disabled→enabled 起进程；旧代卡在
+    ``client.close`` 时不得复活再 spawn；
+11. supervisor 再判 ``MAX_SERVERS=3``；坏条目 status 保留原始 ``enabled``。
 
 所有用例 ``finally`` 调 ``shutdown()``；Windows 上用 T3 的 ``is_pid_alive`` 断言无孤儿。
 """
@@ -33,6 +38,7 @@ from app.core.mcp_stdio import (
     STATE_BACKOFF,
     STATE_CIRCUIT_OPEN,
     STATE_CONFIG_ERROR,
+    STATE_CRASHED,
     STATE_DISABLED,
     STATE_READY,
     STATE_STARTING,
@@ -40,6 +46,7 @@ from app.core.mcp_stdio import (
     StdioSupervisor,
     get_supervisor,
 )
+from app.core.mcp_stdio_client import MCPStdioClient
 from app.core.mcp_stdio_process import command_basename, is_pid_alive
 
 SERVER = Path(__file__).with_name("fake_mcp_stdio_server.py")
@@ -247,6 +254,54 @@ def test_crash_always_opens_circuit_and_probes_once(tmp_path):
         supervisor.shutdown()
 
 
+def test_ready_then_die_opens_circuit_after_five_spawns(tmp_path):
+    """B1：ready 不等于稳定成功。握手成功 50ms 就退出必须按失败累计到熔断。"""
+    config = _Config(True, [_entry("s_flap", "ready_then_die")])
+    # stable_seconds=60：本用例全程远小于 60s，任何"ready 即清零"都会让熔断永不打开。
+    supervisor = _make(config, tmp_path, stable_seconds=60.0)
+    try:
+        supervisor.start()
+        assert _wait_state(supervisor, "s_flap", STATE_CIRCUIT_OPEN, timeout=10.0), (
+            supervisor.status()
+        )
+        # 计的是假 server 自己写的 spawn.count，不看 status 自报的 restarts。
+        assert _read_count(tmp_path, "s_flap") == 5, supervisor.status()
+        # cooldown 内绝不 spawn 第 6 次。
+        time.sleep(COOLDOWN / 2)
+        assert _read_count(tmp_path, "s_flap") == 5
+        # cooldown 到期只探一次；探活同样 ready 后秒死，重新熔断。
+        assert _wait_until(lambda: _read_count(tmp_path, "s_flap") >= 6, 3.0)
+        assert _wait_state(supervisor, "s_flap", STATE_CIRCUIT_OPEN, timeout=2.0)
+        time.sleep(COOLDOWN / 2)
+        assert _read_count(tmp_path, "s_flap") == 6
+    finally:
+        supervisor.shutdown()
+
+
+def test_crash_marks_crashed_before_teardown(tmp_path):
+    """N1 / N7：收尸前状态必须离开 ready（crashed），status 不会出现 ready + pid=None。"""
+    config = _Config(True, [_entry("s_mark", "ready_then_die")])
+    supervisor = _make(config, tmp_path, stable_seconds=60.0)
+    states = []
+    original = supervisor._teardown_process
+
+    def spy(runtime, *, reason, uptime):
+        states.append(runtime.state)
+        return original(runtime, reason=reason, uptime=uptime)
+
+    supervisor._teardown_process = spy
+    try:
+        supervisor.start()
+        assert _wait_state(supervisor, "s_mark", STATE_CIRCUIT_OPEN, timeout=10.0), (
+            supervisor.status()
+        )
+    finally:
+        supervisor.shutdown()
+
+    assert STATE_CRASHED in states, states
+    assert STATE_READY not in states, states
+
+
 # --------------------------------------------------------------------------- 5. config_error
 
 
@@ -295,6 +350,63 @@ def test_version_mismatch_is_terminal_config_error(tmp_path):
         supervisor.shutdown()
 
 
+def test_max_servers_caps_fourth_entry(tmp_path):
+    """N5：supervisor 再判 MAX_SERVERS=3，第 4 条不 spawn 且 reason=max_servers。"""
+    records = []
+
+    def audit(actor, action, *, target=None, after=None):
+        records.append({"action": action, "target": target, "after": after})
+
+    config = _Config(
+        True,
+        [
+            _entry("s_one", "ok"),
+            _entry("s_two", "ok"),
+            _entry("s_three", "ok"),
+            # 用会写 spawn.count 的模式：只要第 4 条被起过，计数就会 > 0。
+            _entry("s_four", "crash_always"),
+        ],
+    )
+    supervisor = _make(config, tmp_path, audit_fn=audit)
+    try:
+        supervisor.start()
+        for server_id in ("s_one", "s_two", "s_three"):
+            assert _wait_state(supervisor, server_id, STATE_READY, timeout=5.0), (
+                supervisor.status()
+            )
+        row = _row(supervisor, "s_four")
+        assert row["state"] == STATE_CONFIG_ERROR
+        assert row["last_error"] == "max_servers"
+        assert row["pid"] is None
+        assert _read_count(tmp_path, "s_four") == 0
+        assert any(
+            item["action"] == "mcp.stdio.refused"
+            and item["target"] == "s_four"
+            and item["after"]["reason"] == "max_servers"
+            for item in records
+        ), records
+    finally:
+        supervisor.shutdown()
+
+
+def test_bad_entry_keeps_original_enabled_flag(tmp_path):
+    """N10：坏条目 status 保留配置里的 enabled bool，不硬写成 False。"""
+    bad = _entry("s_bad", "crash_always", enabled=True)
+    bad["args"] = "not-a-list"  # normalize_entry → args_not_a_list
+    config = _Config(True, [bad])
+    supervisor = _make(config, tmp_path)
+    try:
+        supervisor.start()
+        row = _row(supervisor, "s_bad")
+        assert row["state"] == STATE_CONFIG_ERROR
+        assert row["enabled"] is True
+        assert row["last_error"].startswith("config_error")
+        time.sleep(0.2)
+        assert _read_count(tmp_path, "s_bad") == 0
+    finally:
+        supervisor.shutdown()
+
+
 # --------------------------------------------------------------------------- 6. max_life
 
 
@@ -322,6 +434,61 @@ def test_max_life_recycles_without_orphans(tmp_path):
 
     assert _wait_until(lambda: not any(is_pid_alive(pid) for pid in pids), 5.0)
     assert _row(supervisor, "s_life")["state"] not in (STATE_READY, STATE_STARTING)
+
+
+class _SpyBudget(MCPConnectionBudget):
+    """记调用次数的预算：用来证明 max_life 回收不写传输失败。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.failures_recorded = 0
+        self.successes_recorded = 0
+
+    def record_failure(self, server_id):
+        self.failures_recorded += 1
+        super().record_failure(server_id)
+
+    def record_success(self, server_id):
+        self.successes_recorded += 1
+        super().record_success(server_id)
+
+
+def test_max_life_recycle_does_not_record_transport_failure(tmp_path):
+    """N2：寿命到点回收走"teardown + 固定短延迟重启"，不计失败、exit reason 仍是 killed。"""
+    records = []
+
+    def audit(actor, action, *, target=None, after=None):
+        records.append({"action": action, "target": target, "after": after})
+
+    budget = _SpyBudget(
+        failure_threshold=5, failure_window=60.0, breaker_cooldown=COOLDOWN
+    )
+    config = _Config(True, [_entry("s_cycle", "ok")])
+    supervisor = _make(
+        config,
+        tmp_path,
+        max_life=0.5,
+        stable_seconds=60.0,
+        budget=budget,
+        audit_fn=audit,
+    )
+    try:
+        supervisor.start()
+        assert _wait_state(supervisor, "s_cycle", STATE_READY, timeout=5.0), supervisor.status()
+        assert _wait_until(
+            lambda: _row(supervisor, "s_cycle")["restarts"] >= 1, 6.0
+        ), supervisor.status()
+        assert budget.failures_recorded == 0
+        exit_records = [
+            item["after"]
+            for item in records
+            if item["action"] == "mcp.stdio.exit" and item["target"] == "s_cycle"
+        ]
+        assert exit_records, records
+        assert exit_records[0]["reason"] == "killed", exit_records
+        assert _row(supervisor, "s_cycle")["state"] != STATE_CIRCUIT_OPEN
+    finally:
+        supervisor.shutdown()
 
 
 # --------------------------------------------------------------------------- 7. audit
@@ -389,6 +556,8 @@ def test_audit_events_are_sanitized(tmp_path, monkeypatch):
     assert len(start_after["argv_fingerprint"]) == 64
     assert start_after["command_basename"]
     assert "args" not in start_after
+    # N6：start 审计只带 args 的个数（argv = server 路径 + mode + 记录目录 + 诱饵）。
+    assert start_after["args_count"] == 4
 
     # 诱饵：args 的值、env 的值、stderr 正文、完整命令行都不许出现。
     assert DECOY_ARG not in text
@@ -463,6 +632,47 @@ def test_reload_stops_and_starts_by_enabled_flag(tmp_path):
         assert _wait_state(supervisor, "s_reload", STATE_READY, timeout=5.0)
         pid_two = _row(supervisor, "s_reload")["pid"]
         assert pid_two and pid_two != pid_one
+    finally:
+        supervisor.shutdown()
+
+
+def test_zombie_generation_does_not_respawn_after_reload(tmp_path, monkeypatch):
+    """N3：旧代卡在 client.close 超过 join 超时时，reload 不得再起一代、旧代也不许复活。
+
+    形状：``crash_once`` 起两代（第 2 代 ready），再用很短的 max_life 让第 2 代在
+    worker 线程里进入 teardown；monkeypatch 的 close 把 worker 卡在 join 超时之外，
+    此时 reload 改条目 → 新实现保留活线程（stopping）拒绝 spawn；旧实现会
+    先起第 3 代、旧代醒来后又 spawn 一次。
+    """
+    monkeypatch.setattr("app.core.mcp_stdio.STOP_JOIN_TIMEOUT", 0.1)
+    armed = threading.Event()
+    closing = threading.Event()
+
+    def slow_close(self):
+        if armed.is_set():
+            closing.set()
+            time.sleep(0.4)
+
+    monkeypatch.setattr(MCPStdioClient, "close", slow_close)
+
+    config = _Config(True, [_entry("s_zombie", "crash_once")])
+    supervisor = _make(config, tmp_path, max_life=0.25, stable_seconds=60.0)
+    try:
+        supervisor.start()
+        assert _wait_until(
+            lambda: _read_count(tmp_path, "s_zombie") >= 2, 5.0
+        ), supervisor.status()
+        armed.set()
+        assert closing.wait(5.0), "worker 没有进入 client.close"
+        config.servers = [_entry("s_zombie", "crash_once", extra_args=["changed"])]
+        supervisor.reload()
+        # 旧代走完 close 与收尾后，spawn 计数必须仍停在 2。
+        time.sleep(0.8)
+        assert _read_count(tmp_path, "s_zombie") == 2, supervisor.status()
+        assert _row(supervisor, "s_zombie")["state"] in (
+            STATE_STOPPING,
+            STATE_DISABLED,
+        )
     finally:
         supervisor.shutdown()
 
