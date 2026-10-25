@@ -85,12 +85,17 @@ def test_tag_budget_exhaustion_does_not_leak_script_content():
     assert "SECRET_LEAK_XYZ" not in text, "标签预算耗尽后脚本内容进了正文"
 
 
-@pytest.mark.parametrize("tag", ["script", "style", "svg", "nav"])
+@pytest.mark.parametrize("tag", ["script", "style", "nav"])
 def test_self_closing_drop_tag_does_not_leak(tag):
     page = f"<{tag}/>SECRET_SELF_CLOSE</{tag}><p>ok</p>"
     text = extract_text("text/html", page)
     assert "SECRET_SELF_CLOSE" not in text, f"<{tag}/> 绕过了丢弃容器"
     assert "ok" in text
+
+
+def test_self_closing_svg_does_not_swallow_following_text():
+    text = extract_text("text/html", '<svg class="i"/><p>Hello</p>')
+    assert text == "Hello"
 
 
 # ---------- 3. auth.blocked 洪水不能挤掉正常事件 ----------
@@ -134,7 +139,7 @@ def test_rate_limited_flood_with_rotating_accounts_keeps_normal_events():
 def test_abuse_ring_cap_leaves_room_for_normal_events(monkeypatch):
     monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS", 10**9)
     monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS_PER_SOURCE", 10**9)
-    for i in range(security_log.MAX_ABUSE_IN_EVENTS + 5):
+    for i in range(600):
         security_log.record("auth.blocked", ip=f"10.{i // 256}.{i % 256}.1",
                             status=401, route=f"/v1/x/{i}", detail="token.unknown")
 

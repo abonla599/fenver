@@ -113,6 +113,10 @@ class _RegionCollector(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         if self._over_budget():
             return
+        # SVG 是外来内容，`<svg/>` 在浏览器里真的自闭合；下面的 `<p>` 不该被吞。
+        # script/style/nav 等 HTML 元素的自闭合写法则按开始标签处理（见下）。
+        if tag == "svg":
+            return
         # HTMLParser 把 `<script/>` 当自闭合调到这里；浏览器实际会把它当开始标签，
         # 内容一直延续到 `</script>`。不在这里进丢弃模式，26 字符就能让脚本进正文。
         if tag in _DROP_TAGS:
