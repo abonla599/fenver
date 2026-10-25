@@ -43,9 +43,18 @@
 - ``empty_cursor``    ``tools/list`` 回 ``nextCursor: ""``。
 - ``bigreqid``        server 请求的 id 是 300KB 字符串（回 -32601 会超过请求上限）。
 - ``eof_alive``       stdout 指到空文件（读端立刻 EOF）+ sleep 60（进程仍活）。
+- ``envdump``         把 ``os.environ`` 按键排序写 ``<argv[2]>/env.json``，再走正常协议。
+- ``tree``            spawn 一个 ``time.sleep(60)`` 的孙进程，父/孙 PID 写
+                      ``<argv[2]>/tree.json``，并每 0.2s 追加心跳到
+                      ``<argv[2]>/heartbeat.txt``；再走正常协议。
+- ``hog``             先正常回 initialize，再分块分配约 128MB（保持引用）后 sleep 60。
+- ``record_argv``     把 ``sys.argv`` 写 ``<argv[2]>/argv.json``，再走正常协议。
+- ``sleep``           只 sleep 60（``tree`` 在 PyInstaller 冻结包里用它当孙进程，
+                      frozen 解释器没有 ``-c``）。
 """
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -124,12 +133,90 @@ NORMAL_MODES = {
     "slow_call",
     "flood",
     "int_iserror",
+    "envdump",
+    "tree",
+    "hog",
+    "record_argv",
 }
+
+_HOG_REF = []
+
+
+def _write_json(name: str, obj) -> None:
+    """把调试产物写到 argv 传入的临时目录（没有目录就什么都不做）。"""
+    directory = _record_dir()
+    if not directory:
+        return
+    try:
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, ensure_ascii=False, sort_keys=True)
+    except OSError:
+        pass
+
+
+def _heartbeat_loop(path: str) -> None:
+    while True:
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("%.6f\n" % time.time())
+        except OSError:
+            return
+        time.sleep(0.2)
+
+
+def _start_tree() -> None:
+    """拉一个孙进程并留痕；孙进程留在同一进程组/Job 里，供杀树测试。"""
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        if getattr(sys, "frozen", False):
+            # PyInstaller 冻结包没有 ``-c``：用本 exe 的 ``sleep`` 模式当孙进程。
+            child_argv = [sys.executable, "sleep", RECORD_DIR or ""]
+        else:
+            child_argv = [sys.executable, "-c", "import time; time.sleep(60)"]
+        grandchild = subprocess.Popen(child_argv, **kwargs)
+    except OSError:
+        return
+    _write_json("tree.json", {"parent": os.getpid(), "grandchild": grandchild.pid})
+    directory = _record_dir()
+    if directory:
+        threading.Thread(
+            target=_heartbeat_loop,
+            args=(os.path.join(directory, "heartbeat.txt"),),
+            daemon=True,
+        ).start()
+
+
+def _hog() -> None:
+    """先让 initialize 的响应出去，再吃约 128MB，给测试留观察窗口。"""
+    try:
+        for _index in range(128):
+            _HOG_REF.append(bytearray(1024 * 1024))
+    except MemoryError:
+        sys.stderr.write("hog: MemoryError\n")
+        sys.stderr.flush()
+        sys.exit(1)
+    time.sleep(60)
 
 
 def _startup() -> None:
     if MODE == "eof":
         sys.exit(0)
+    if MODE == "sleep":
+        time.sleep(60)
+        sys.exit(0)
+    if MODE == "envdump":
+        _write_json("env.json", dict(os.environ))
+    elif MODE == "record_argv":
+        _write_json("argv.json", list(sys.argv))
+    elif MODE == "tree":
+        _start_tree()
     if MODE == "eof_alive":
         # stdout 由测试 spawner 指到空文件：读端一到文件尾就是 EOF，而进程继续 sleep。
         # （Windows 上子进程关管道句柄不一定产生可观测 EOF，句柄有内部副本。）
@@ -267,6 +354,8 @@ def _handle_initialize(message: dict) -> None:
         send(response, bom=True)
     else:
         _send_response(response)
+    if MODE == "hog":
+        _hog()
     if MODE == "dup":
         duplicate = {
             "jsonrpc": "2.0",
