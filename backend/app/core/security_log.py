@@ -68,6 +68,8 @@ ACCOUNT_SCAN_LIMIT = 256
 # 匿名拒绝/限流埋点的限额：攻击者能用不同路径或不同用户名刷满 2000 条内存环，
 # 把正常事件挤出去。三条上限分别管"全局速率""单来源速率""环内占比"，任一触顶就
 # 丢弃这条埋点本身，不丢别的账；环满时先保证非这一类事件有位置。
+# 除下面两类外，注册/找回在参数形状不合格时写的 `auth.fail(status=422)` 也算：
+# 那是未鉴权、可轮换用户名/路径的匿名埋点，不占预算就能挤掉真实登录失败。
 ABUSE_TYPES = frozenset({"auth.blocked", "auth.rate_limited"})
 ABUSE_WINDOW_SECONDS = 60.0
 MAX_ABUSE_EVENTS = 120
@@ -130,10 +132,22 @@ def _clean_account(value) -> str:
     return text or "anonymous"
 
 
-def _abuse_budget_locked(source: str, now: float) -> bool:
-    """auth.blocked / auth.rate_limited 的埋点预算；调用方已持有 _LOCK。
+def _is_abuse_record(event_type: str, status: int) -> bool:
+    """哪些事件占用匿名埋点预算（环内计数与速率预算共用的唯一判据）。
 
-    只限制这两类匿名洪水事件，正常登录失败/管理员动作不经过这里。
+    覆盖 `auth.blocked`、`auth.rate_limited`，以及注册/找回在参数形状不合格时写的
+    `auth.fail(status=422)`。正常登录失败（401/409）由路由层各自的 `_note_failure`
+    计费，不在这里重复收费。
+    """
+    return event_type in ABUSE_TYPES or (event_type == "auth.fail" and status == 422)
+
+
+def _abuse_budget_locked(source: str, now: float) -> bool:
+    """匿名埋点预算；调用方已持有 _LOCK。
+
+    覆盖 `auth.blocked`、`auth.rate_limited` 与 `auth.fail(status=422)`——这是
+    "匿名形状错误/拒绝"的记账额度，不是登录失败计费：401/409 的 `auth.fail` 走
+    路由层自己的失败限流，不经这里。
     """
     start, count = _ABUSE_WINDOW
     if now - start >= ABUSE_WINDOW_SECONDS:
@@ -309,9 +323,10 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
 
         with _LOCK:
             _ensure_loaded_locked()
-            if event_type in ABUSE_TYPES:
+            if _is_abuse_record(event_type, clean_status):
                 abuse_in_ring = sum(
-                    1 for existing in _EVENTS if existing["type"] in ABUSE_TYPES)
+                    1 for existing in _EVENTS
+                    if _is_abuse_record(existing["type"], existing["status"]))
                 if abuse_in_ring >= MAX_ABUSE_IN_EVENTS:
                     return None
                 if not _abuse_budget_locked(source, moment):

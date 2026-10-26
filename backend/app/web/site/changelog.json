@@ -8,6 +8,12 @@
       "intro": "本版只换服务端，**没有新的安卓包**：安卓 `versionName` 保持 `0.36.4`，官网与 App 的检查更新仍按现有清单报最新可安装版本（以 `data/version.json` 与 `/site/version.json` 为准，本说明不写死）。这一版新增 **MCP stdio 外部工具**：管理员可以在本机配置最多 3 个通过标准输入输出说话的 MCP server，把它们的工具接进助手；默认关闭、只允许管理员执行、每次执行都要单独确认。",
       "sections": [
         {
+          "heading": "修复了什么",
+          "items": [
+            "注册/找回的 422 形状错误原先不占 abuse 预算；现在 `auth.fail(status=422)` 与 `auth.blocked`/`auth.rate_limited` 共用 120 条/分钟、12 条/来源、环内 500 条上限，正常登录失败不再被这类匿名洪水挤掉。"
+          ]
+        },
+        {
           "heading": "新增了什么",
           "items": [
             "**传输**：换行分帧的 JSON-RPC（一行一个 JSON 对象），支持 `initialize` / `tools/list` / `tools/call`。同一个 server 同一时刻只允许一个在途请求，忙时直接回\"该 MCP server 正忙\"，不排队。握手 20 秒、单次调用 30 秒、进程最长存活 8 小时；单行最大 512KB、请求体最大 256KB；`tools/list` 最多 5 页、最多 64 条，cursor 重复或超页超条判协议错误。",

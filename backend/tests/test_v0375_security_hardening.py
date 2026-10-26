@@ -1,4 +1,4 @@
-"""2026-10-25 安全复核：三条低成本、可实测的放大面。
+"""2026-10-25 安全复核：四条低成本、可实测的放大面。
 
 每一条都先在**未修**的树上证明会红（见提交说明里的红/绿日志），再收口：
 
@@ -8,6 +8,9 @@
    是二次复杂度；`http_fetch` 的墙钟总时限不覆盖解析阶段。
 3. 未鉴权 401/403 每个请求都写一条 `auth.blocked`，2000 条的内存环会被洪水挤满，
    正常事件随后被压缩一起丢掉。
+4. 注册/找回的 422 形状错误原先不占 abuse 预算：匿名客户端轮换用户名就能写满
+   2000 条内存环，把真实登录失败挤出去；现在它们与 `auth.blocked` /
+   `auth.rate_limited` 共用同一份预算。
 """
 import time
 import unicodedata
@@ -134,6 +137,44 @@ def test_rate_limited_flood_with_rotating_accounts_keeps_normal_events():
     fails, _ = security_log.events(type="auth.fail", limit=500)
     assert len(limited) <= 20, f"轮换用户名写了 {len(limited)} 条限流事件"
     assert len(fails) == 1, "正常登录失败事件被限流洪水挤出了内存环"
+
+
+def test_register_422_shape_errors_share_the_abuse_budget():
+    """注册/找回的 422 形状错误是匿名埋点：同一来源轮换账号也必须被预算截住。"""
+    security_log.record("auth.fail", ip="203.0.113.9", account="alice",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+    for i in range(3000):
+        security_log.record("auth.fail", ip="203.0.113.9", account=f"u{i}",
+                            route="/v1/auth/register", status=422,
+                            detail="register.rejected")
+
+    fails, _ = security_log.events(type="auth.fail", limit=500)
+    shape_errors = [e for e in fails if e["status"] == 422]
+    normal = [e for e in fails if e["status"] == 401]
+    assert len(shape_errors) <= 20, (
+        f"同一来源写了 {len(shape_errors)} 条 422 形状错误，没占 abuse 预算")
+    assert len(normal) == 1, "正常登录失败被匿名 422 洪水挤出了内存环"
+    total = [e for e in security_log.snapshot(3600) if e["type"] == "auth.fail"]
+    assert len(total) <= 30, f"auth.fail 总数 {len(total)}，没有上限"
+
+
+def test_register_422_shape_errors_across_sources_have_a_global_cap():
+    """跨来源轮换 IP 也要受全局 120 条/分钟预算约束。"""
+    security_log.record("auth.fail", ip="203.0.113.9", account="alice",
+                        route="/v1/auth/login", status=401, detail="login.failed")
+    for i in range(600):
+        security_log.record("auth.fail", ip=f"10.{i // 256}.{i % 256}.1",
+                            account=f"u{i}", route="/v1/auth/register",
+                            status=422, detail="register.rejected")
+
+    rows = security_log.snapshot(3600)
+    shape_errors = [e for e in rows
+                    if e["type"] == "auth.fail" and e["status"] == 422]
+    normal = [e for e in rows
+              if e["type"] == "auth.fail" and e["status"] == 401]
+    assert len(shape_errors) <= 150, (
+        f"跨来源写了 {len(shape_errors)} 条 422 形状错误，没有全局预算")
+    assert len(normal) == 1, "正常登录失败被跨来源 422 洪水挤出了内存环"
 
 
 def test_abuse_ring_cap_leaves_room_for_normal_events(monkeypatch):
