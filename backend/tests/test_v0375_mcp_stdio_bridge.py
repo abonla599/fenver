@@ -1176,3 +1176,101 @@ def test_real_safe_copy_placeholders_and_warnings_use_safe_names(caplog):
     assert any("无法复制" in message for message in bridge_warnings), bridge_warnings
     assert all(_BAD_REPORT_NAMES[2] not in message for message in bridge_warnings)
     _assert_report_name_safe(bridge.rejection_report()["srvcopywarn"][0]["name"])
+
+
+# --------------------------------------------------------------------------- §2.7 审计
+# 计划 §2.7：桥每次整源刷新后，为每个 server 记一条 mcp.stdio.tools；after 只放
+# id / 真实注册数 / 拒绝计数 / 清洗后的拒绝名，绝不放第三方 schema 原文。
+
+
+def _capture_audit():
+    """按 audit.log 的签名收账，便于断言调用参数。"""
+    calls = []
+
+    def _audit(actor, action, target=None, before=None, after=None, detail=""):
+        calls.append({
+            "actor": actor,
+            "action": action,
+            "target": target,
+            "before": before,
+            "after": after,
+            "detail": detail,
+        })
+
+    return calls, _audit
+
+
+def test_tools_audit_has_counts_safe_names_and_no_schema():
+    """§2.7：action/target 同口径；accepted 是注册表真实条数；名字安全化、无 schema。"""
+    sid = "srv"
+    bad_raw_name = "bad\u202e\u0000tool"
+    schema_marker = "SCHEMA-RAW-MARKER-7f31"
+    raw = [
+        _tool("good"),
+        _tool(bad_raw_name, schema={
+            "type": "array",
+            "title": schema_marker,
+            "items": {"type": "string"},
+        }),
+    ]
+    supervisor = FakeSupervisor({sid: raw}, ready=set())
+    calls, audit_fn = _capture_audit()
+    bridge = StdioToolBridge(supervisor, audit_fn=audit_fn)
+    bridge.attach()
+    supervisor.fire_ready(sid)             # 只触发一次 refresh
+
+    assert len(calls) == 1, calls
+    record = calls[0]
+    assert record["action"] == "mcp.stdio.tools"
+    assert record["target"] == sid
+    after = record["after"]
+    assert set(after) == {"id", "accepted", "rejected", "rejected_names"}
+    assert after["id"] == sid
+
+    registered = [name for name, info in tools_registry.items()
+                  if isinstance(info, dict)
+                  and info.get("source") == SOURCE_PREFIX + sid]
+    assert after["accepted"] == len(registered) == 1, \
+        "accepted 必须是注册表里的真实条数"
+    assert after["rejected"] == 1
+
+    safe_bad = stdio_mod.safe_report_name(bad_raw_name)
+    assert after["rejected_names"] == [safe_bad]
+    assert bad_raw_name not in after["rejected_names"], "原始坏名（含控制字符）进了审计"
+    for name in after["rejected_names"]:
+        _assert_report_name_safe(name)
+
+    encoded = json.dumps(after, ensure_ascii=False).encode("utf-8")   # 不抛
+    text = encoded.decode("utf-8")
+    assert schema_marker not in text, "第三方 schema 原文进了审计"
+    assert "inputSchema" not in text
+    assert "\x00" not in text and "\u202e" not in text
+
+
+def test_tools_audit_failure_does_not_break_registration(caplog):
+    """§2.7：审计写失败只留 warning，好工具仍注册、拒绝账本照常。"""
+    sid = "srvauditfail"
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("audit backend down")
+
+    supervisor = FakeSupervisor(
+        {sid: [_tool("good"), _tool("bad", schema=_MISSING)]}, ready=set())
+    bridge = StdioToolBridge(supervisor, audit_fn=_boom)
+    bridge.attach()
+    with caplog.at_level(logging.WARNING, logger="app.core.mcp_stdio_bridge"):
+        supervisor.fire_ready(sid)         # 不抛
+
+    assert bridge_mod._mapped_tool_name(sid, "good") in tools_registry
+    assert bridge_mod._mapped_tool_name(sid, "bad") not in tools_registry
+    assert supervisor.exposed[sid] == 1
+    report = bridge.rejection_report()[sid]
+    assert [item["name"] for item in report] == ["bad"]
+    assert report[0]["reason"]
+
+    messages = [record.getMessage() for record in caplog.records
+                if record.name == "app.core.mcp_stdio_bridge"]
+    assert any("审计写入失败" in message and "RuntimeError" in message
+               for message in messages), messages
+    assert all("audit backend down" not in message for message in messages), \
+        "审计异常正文不该进日志"

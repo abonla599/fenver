@@ -37,6 +37,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unicodedata import category
 
+from app.core import audit as audit_module
 from app.core.mcp_stdio import COPY_FAILED_KEY, safe_report_name
 from app.tools.registry import register_external_tools, tools_registry, unregister_source
 from app.tools.response import ToolResponse
@@ -44,7 +45,7 @@ from app.tools.response import ToolResponse
 logger = logging.getLogger("app.core.mcp_stdio_bridge")
 
 __all__ = ["StdioToolBridge", "SOURCE_PREFIX", "MAX_TOOLS_PER_SERVER",
-           "MAX_TOOLS_TOTAL", "MAX_RESULT_TEXT_LEN"]
+           "MAX_TOOLS_TOTAL", "MAX_RESULT_TEXT_LEN", "MAX_AUDIT_REJECTED_NAMES"]
 
 # source 形状：``mcp-stdio:<server_id>``（匹配 registry._SOURCE_RE；server_id 最大
 # 16 字符，整串最大 27）。
@@ -62,6 +63,10 @@ MAX_DESCRIPTION_LEN = 1024
 # N1：结果正文上限。超限截断并显式告知模型，而不是把半截正文伪装成完整结果。
 MAX_RESULT_TEXT_LEN = 32_000
 _RESULT_TRUNCATED_MARK = "（正文超长已截断）"
+
+# 审计 ``mcp.stdio.tools`` 里的拒绝名单上限：足够定位坏工具，又不会让一条审计
+# 随第三方工具数膨胀。
+MAX_AUDIT_REJECTED_NAMES = 16
 
 # 复制失败时缓存里的占位标记（字面量由生产者 ``mcp_stdio.COPY_FAILED_KEY`` 单源
 # 定义）：坏条目不能因为"拷不动"就从拒绝账本里消失。值只有 "nested" / "copy"
@@ -298,12 +303,42 @@ def _count_registered_source(source: str) -> int:
         if isinstance(info, dict) and info.get("source") == source)
 
 
+def _tools_audit_after(server_id: str, accepted: int,
+                       rejected: List[Dict[str, str]]) -> Dict[str, Any]:
+    """拼 ``mcp.stdio.tools`` 的 after：只放计数与清洗后的名字。
+
+    计划 §2.7：``accepted`` 必须是注册表里的真实条数（调用方传
+    :func:`_count_registered_source` 的结果），不是 ``register_external_tools``
+    返回的 accepted；``rejected`` 是本轮拒绝条数；``rejected_names`` 来自本轮
+    rejection_report，已由 ``safe_report_name`` 清洗，这里再去重、保序、截到
+    :data:`MAX_AUDIT_REJECTED_NAMES` 个。
+
+    **绝不**放第三方 schema 原文、args/env 的值、完整命令行或 stderr 正文。
+    """
+    names: List[str] = []
+    for item in rejected:
+        name = safe_report_name(item.get("name") if isinstance(item, dict) else None)
+        if name not in names:
+            names.append(name)
+            if len(names) >= MAX_AUDIT_REJECTED_NAMES:
+                break
+    return {
+        "id": server_id,
+        "accepted": accepted,
+        "rejected": len(rejected),
+        "rejected_names": names,
+    }
+
+
 class StdioToolBridge:
     """supervisor → 全局工具注册表的单向桥（线程安全，可重复 attach）。"""
 
-    def __init__(self, supervisor: Any, *, on_registered: Optional[Callable[[], Any]] = None) -> None:
+    def __init__(self, supervisor: Any, *, on_registered: Optional[Callable[[], Any]] = None,
+                 audit_fn: Optional[Callable[..., Any]] = None) -> None:
         self._supervisor = supervisor
         self._on_registered = on_registered
+        # 默认写真实审计账；测试注入 fake 捕获，不碰磁盘。
+        self._audit_fn = audit_fn if audit_fn is not None else audit_module.log
         self._lock = threading.RLock()
         # server_id -> 原始工具列表（supervisor 给的 tools/list 结果）。crashed /
         # backoff 时保留，disabled / remove 时删除。
@@ -398,6 +433,10 @@ class StdioToolBridge:
                 remaining -= len(selected[server_id])
 
             rejected_report: Dict[str, List[Dict[str, str]]] = {}
+            # 计划 §2.7：每次整源刷新后每 server 一条 ``mcp.stdio.tools``。锁内只
+            # 收集摘要，落账放到锁外——与 _on_registered 同一纪律，审计的磁盘 I/O
+            # 不占桥锁。
+            audit_rows: List[Tuple[str, Dict[str, Any]]] = []
             for server_id in sorted(selected):
                 source = SOURCE_PREFIX + server_id
                 # 单 server 的构建失败只记该 server，继续下一个——一份坏 schema
@@ -438,12 +477,17 @@ class StdioToolBridge:
                 # 同名坏刷新被 registry 拒时旧版本保留、整批注册抛错时旧 source
                 # 原样不动——两种情况下 accepted 都是 0，而模型仍看得见旧工具。
                 actual = _count_registered_source(source)
+                audit_rows.append((server_id, _tools_audit_after(
+                    server_id, actual, rejected_report.get(server_id, []))))
                 try:
                     self._supervisor.set_tools_exposed(server_id, actual)
                 except Exception as exc:                     # noqa: BLE001 - 状态不连累
                     logger.warning("MCP stdio 桥上报 %s exposed=%s 失败: %s",
                                    server_id, actual, type(exc).__name__)
             self._rejected = rejected_report
+
+        for server_id, after in audit_rows:
+            self._audit_tools(server_id, after)
 
         callback = self._on_registered
         if callback is not None:
@@ -452,6 +496,18 @@ class StdioToolBridge:
             except Exception as exc:                         # noqa: BLE001 - 通知不连累
                 logger.warning("MCP stdio 桥 on_registered 回调失败: %s",
                                type(exc).__name__)
+
+    def _audit_tools(self, server_id: str, after: Dict[str, Any]) -> None:
+        """写一条 ``mcp.stdio.tools``（计划 §2.7）；失败只记类型名。
+
+        target 与 supervisor 的其它 MCP 审计同口径（就是 server id）。审计写失败
+        不许连累注册：异常在这里收口，只留一条 warning。
+        """
+        try:
+            self._audit_fn(
+                "stdio-bridge", "mcp.stdio.tools", target=server_id, after=after)
+        except Exception as exc:                             # noqa: BLE001 - 审计不连累
+            logger.warning("MCP stdio 桥审计写入失败: %s", type(exc).__name__)
 
     def _build_entries(self, server_id: str,
                        tools: List[Dict[str, Any]]) -> Tuple[List[dict], List[Dict[str, str]]]:
