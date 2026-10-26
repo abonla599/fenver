@@ -899,7 +899,8 @@ def test_same_name_bad_refresh_keeps_old_tool_and_reports_real_count():
     """
     sid = "srvrepl"
     supervisor = FakeSupervisor({sid: [_tool("x")]}, ready=set())
-    bridge = _bridge(supervisor)
+    calls, audit_fn = _capture_audit()
+    bridge = _bridge(supervisor, audit_fn=audit_fn)
     bridge.attach()
     supervisor.fire_ready(sid)
     mapped = bridge_mod._mapped_tool_name(sid, "x")
@@ -918,6 +919,15 @@ def test_same_name_bad_refresh_keeps_old_tool_and_reports_real_count():
     report = bridge.rejection_report()[sid]
     assert any(item["name"] == mapped and "嵌套" in item["reason"]
                for item in report), report
+
+    # §2.7 审计锁：最后一次刷新的 accepted 必须是注册表真实条数（旧版仍在 ⇒ 1），
+    # 不是 register 返回的 accepted（同名坏刷新被拒时为 0）。
+    tools_audits = [call for call in calls if call["action"] == "mcp.stdio.tools"]
+    assert len(tools_audits) == 2, calls
+    last_after = tools_audits[-1]["after"]
+    assert last_after["accepted"] == 1, \
+        "审计 accepted 必须是注册表里的真实条数，不是 register 的 accepted"
+    assert last_after["rejected"] >= 1, last_after
 
 
 def test_register_exception_keeps_old_source_and_reports_real_count(monkeypatch):
