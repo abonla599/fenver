@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.37.6：本版只换服务端（管理台 MCP 外部工具分区 + 桌面 mobile-only 卡片回归锁）；APK 仍 0.36.4。 */
 /* swap-marker-v0375-rebuild-20261026：历史改写后重建包与旧线上包的判别串，不参与版本推导。 */
 /* release-marker-v0.37.5：本版只换服务端（MCP stdio 外部工具，管理员配置、默认关闭、逐次审批、进程树回收）；APK 仍 0.36.4。 */
 /* release-marker-v0.37.4：本版只换服务端（搜索结果正文读取 web_read + fetch_core 单源出站判据 + local-use NAT64 拒绝）；APK 仍 0.36.4。 */
