@@ -124,6 +124,11 @@ class MCPConnectionBudget:
         self._breaker_until: Dict[str, float] = {}
         self._lock = threading.Lock()
 
+    @property
+    def breaker_cooldown(self) -> float:
+        """熔断 cooldown（秒）。只读：supervisor 用它压本地 circuit_until。"""
+        return self._breaker_cooldown
+
     def check(self, server_id: str) -> None:
         with self._lock:
             until = self._breaker_until.get(server_id, 0.0)

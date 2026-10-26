@@ -10,7 +10,7 @@
         {
           "heading": "修复了什么",
           "items": [
-            "注册/找回的 422 形状错误原先不占 abuse 预算；现在 `auth.fail(status=422)` 与 `auth.blocked`/`auth.rate_limited` 共用 120 条/分钟、12 条/来源、环内 500 条上限，正常登录失败不再被这类匿名洪水挤掉。"
+            "注册/找回的 422 形状错误原先不占 abuse 预算；现在 `auth.fail(status=422)` 与 `auth.blocked`/`auth.rate_limited` 共用 120 条/分钟、12 条/来源、环内 60 秒窗口 500 条上限，正常登录失败不再被这类匿名洪水挤掉。"
           ]
         },
         {

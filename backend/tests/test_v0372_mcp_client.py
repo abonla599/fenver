@@ -1282,6 +1282,11 @@ def test_legacy_get_timeout_wrapped_and_counted():
 # P1：熔断与并发上限
 
 
+def test_connection_budget_exposes_breaker_cooldown():
+    """C2：supervisor 只从公开 property 读 cooldown，不再摸私有属性。"""
+    assert MCPConnectionBudget(breaker_cooldown=0.37).breaker_cooldown == 0.37
+
+
 def test_circuit_breaker_opens_after_three_failures(fake_server):
     fake = fake_server(override_status={"*": 500})
     budget = MCPConnectionBudget()

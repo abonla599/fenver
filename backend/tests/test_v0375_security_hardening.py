@@ -192,3 +192,31 @@ def test_abuse_ring_cap_leaves_room_for_normal_events(monkeypatch):
                         route="/v1/auth/login", status=401, detail="login.failed")
     fails, _ = security_log.events(type="auth.fail", limit=500)
     assert len(fails) == 1, "环内滥用事件占满后，正常事件仍应能写入"
+
+
+def test_abuse_ring_cap_uses_a_60_second_window(monkeypatch):
+    """B3：环内占比只数最近 60 秒；窗口外的 422 洪水不许永久压掉 auth.blocked。"""
+    monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS", 10**9)
+    monkeypatch.setattr(security_log, "MAX_ABUSE_EVENTS_PER_SOURCE", 10**9)
+    for i in range(600):
+        security_log.record("auth.fail", ip=f"10.{i // 256}.{i % 256}.1",
+                            account=f"u{i}", route="/v1/auth/register",
+                            status=422, detail="register.rejected", now=1000)
+
+    shape_errors = [e for e in security_log._EVENTS if e["status"] == 422]
+    assert len(shape_errors) == security_log.MAX_ABUSE_IN_EVENTS, \
+        "now=1000 的 422 洪水没有填满 500 条 ring 占比"
+
+    rejected = security_log.record("auth.blocked", ip="203.0.113.9", status=401,
+                                   route="/v1/x", detail="token.unknown", now=1030)
+    assert rejected is None, "60 秒窗口内 ring 已满，auth.blocked 仍应被拒"
+
+    accepted = security_log.record("auth.blocked", ip="203.0.113.9", status=401,
+                                   route="/v1/x", detail="token.unknown", now=1061)
+    assert accepted is not None, \
+        "now=1061 时 422 洪水已出 60 秒窗口，auth.blocked 必须能记录（时间窗被忽略）"
+
+    normal = security_log.record("auth.fail", ip="203.0.113.9", account="alice",
+                                 route="/v1/auth/login", status=401,
+                                 detail="login.failed", now=1062)
+    assert normal is not None, "正常 401 登录失败仍要能写入"

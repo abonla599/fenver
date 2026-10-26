@@ -75,6 +75,9 @@ ABUSE_WINDOW_SECONDS = 60.0
 MAX_ABUSE_EVENTS = 120
 MAX_ABUSE_EVENTS_PER_SOURCE = 12
 MAX_ABUSE_IN_EVENTS = 500
+# 环内占比只数最近 60 秒的 abuse 事件：把"环里已经有 500 条"当永久状态，会让
+# 一次 422 洪水在之后永远压掉同类 auth.blocked（窗口内 500 条才是真占比）。
+ABUSE_RING_WINDOW_SECONDS = 60.0
 _ABUSE_WINDOW = [0.0, 0]
 _ABUSE_SOURCES = {}
 
@@ -326,7 +329,8 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
             if _is_abuse_record(event_type, clean_status):
                 abuse_in_ring = sum(
                     1 for existing in _EVENTS
-                    if _is_abuse_record(existing["type"], existing["status"]))
+                    if moment - existing["ts"] < ABUSE_RING_WINDOW_SECONDS
+                    and _is_abuse_record(existing["type"], existing["status"]))
                 if abuse_in_ring >= MAX_ABUSE_IN_EVENTS:
                     return None
                 if not _abuse_budget_locked(source, moment):

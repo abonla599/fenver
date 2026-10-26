@@ -390,6 +390,22 @@ def test_env_allowlist_accepts_plain_names():
     assert entry is None, "被硬拒的 env 名必须让整条配置失效"
 
 
+@pytest.mark.parametrize("name", ["MCP_LOG_LEVEL\n", "MCP_LOG_LEVEL\r\n"])
+def test_env_allowlist_rejects_trailing_newline(name):
+    """C6：`$` 会放过末尾换行；env 名必须 fullmatch，否则换行会拼进子进程环境。"""
+    entry, reason = normalize_entry(
+        _entry("files", env_allowlist=[name]), verify_command=False)
+    assert entry is None and reason == "env_name_invalid", \
+        f"env_allowlist={name!r} 被当成合法名"
+
+
+def test_env_allowlist_plain_name_still_passes():
+    entry, reason = normalize_entry(
+        _entry("files", env_allowlist=["MCP_LOG_LEVEL"]), verify_command=False)
+    assert entry is not None, reason
+    assert entry["env_allowlist"] == ["MCP_LOG_LEVEL"]
+
+
 @pytest.mark.parametrize("name", [
     "PATH", "Path", "path", "TEMP", "Tmp", "HOME", "home", "USERPROFILE",
     "APPDATA", "LOCALAPPDATA", "COMSPEC", "SystemRoot", "SYSTEMDRIVE",

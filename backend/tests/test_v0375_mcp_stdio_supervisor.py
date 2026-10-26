@@ -23,6 +23,7 @@ T4 验收段：
 
 所有用例 ``finally`` 调 ``shutdown()``；Windows 上用 T3 的 ``is_pid_alive`` 断言无孤儿。
 """
+import inspect
 import json
 import os
 import sys
@@ -44,6 +45,7 @@ from app.core.mcp_stdio import (
     STATE_STARTING,
     STATE_STOPPING,
     StdioSupervisor,
+    _Runtime,
     get_supervisor,
 )
 from app.core.mcp_stdio_client import MCPStdioClient
@@ -231,6 +233,20 @@ def test_crash_once_restarts_and_recovers(tmp_path):
 
 
 # --------------------------------------------------------------------------- 4. circuit
+
+
+def test_supervisor_reads_public_breaker_cooldown_only(tmp_path):
+    """C2：预算不暴露私有属性时，supervisor 也必须从公开 property 读出 cooldown。"""
+
+    class _PublicBudget:
+        breaker_cooldown = COOLDOWN
+
+    supervisor = _make(_Config(True, []), tmp_path, budget=_PublicBudget())
+    try:
+        assert supervisor._cooldown == COOLDOWN, \
+            "supervisor 还在走私有 _breaker_cooldown 的兜底读法"
+    finally:
+        supervisor.shutdown()
 
 
 def test_crash_always_opens_circuit_and_probes_once(tmp_path):
@@ -673,6 +689,85 @@ def test_zombie_generation_does_not_respawn_after_reload(tmp_path, monkeypatch):
             STATE_STOPPING,
             STATE_DISABLED,
         )
+    finally:
+        supervisor.shutdown()
+
+
+def test_reload_demoted_fourth_server_stops_its_old_runtime(tmp_path):
+    """C3：第 4 条降级为 max_servers 时，旧的第 3 条 runtime 必须被停掉。
+
+    形状：3 个 ready 的 ok server → reload 成 4 个都合法的条目、新条目排最前，
+    于是原来的第 3 个变成名额外的 config_error。只比 entry 的旧实现会把它继续
+    跑着（status 还报 ready/pid），与"最多 3 条"的上限自相矛盾。
+    """
+    config = _Config(True, [_entry("s_one", "ok"), _entry("s_two", "ok"),
+                            _entry("s_three", "ok")])
+    supervisor = _make(config, tmp_path)
+    old_pid = None
+    try:
+        supervisor.start()
+        for server_id in ("s_one", "s_two", "s_three"):
+            assert _wait_state(supervisor, server_id, STATE_READY, timeout=5.0), (
+                supervisor.status()
+            )
+        old_pid = _row(supervisor, "s_three")["pid"]
+        assert old_pid
+
+        config.servers = [
+            _entry("s_four", "ok"),
+            _entry("s_one", "ok"),
+            _entry("s_two", "ok"),
+            _entry("s_three", "ok"),
+        ]
+        supervisor.reload()
+
+        assert _wait_state(supervisor, "s_four", STATE_READY, timeout=5.0), (
+            supervisor.status()
+        )
+        assert _wait_state(supervisor, "s_three", STATE_CONFIG_ERROR, timeout=5.0), (
+            supervisor.status()
+        )
+        row = _row(supervisor, "s_three")
+        assert row["last_error"] == "max_servers"
+        assert row["pid"] is None
+        assert _wait_until(lambda: not is_pid_alive(old_pid), 5.0), (
+            "被降级的旧 runtime 进程仍在运行: pid=%s" % old_pid
+        )
+        assert len(supervisor.ready_servers()) == 3, supervisor.status()
+        assert _row(supervisor, "s_four")["state"] == STATE_READY
+    finally:
+        supervisor.shutdown()
+
+
+def test_worker_binds_the_generation_stop_event_not_runtime_stop_event(tmp_path):
+    """C4：``_worker`` 用入参 event；改 ``runtime.stop_event`` 不该影响这一代。"""
+    params = list(inspect.signature(StdioSupervisor._worker).parameters)
+    assert params == ["self", "runtime", "stop_event"], params
+
+    supervisor = _make(_Config(True, [_entry("s_evt", "ok")]), tmp_path)
+    seen = []
+
+    def fake_run_session(runtime, stop_event):
+        seen.append(stop_event)
+        stop_event.set()                 # 这一代立即结束，别让用例挂住
+
+    supervisor._run_session = fake_run_session
+    runtime = _Runtime("s_evt", _entry("s_evt", "ok"))
+    # 这一代运行态里的事件保持未置位：如果 _worker 读它，会多跑一轮甚至不退出。
+    runtime.stop_event = threading.Event()
+    supervisor._global_enabled = True
+    supervisor._runtimes["s_evt"] = runtime
+    custom_event = threading.Event()
+    worker = threading.Thread(
+        target=supervisor._worker, args=(runtime, custom_event), daemon=True
+    )
+    try:
+        worker.start()
+        worker.join(5.0)
+        assert not worker.is_alive(), "_worker 没有按传入的 stop_event 退出"
+        assert seen and seen[0] is custom_event, "worker 没有使用入参 event"
+        assert runtime.stop_event.is_set() is False, \
+            "worker 动了 runtime.stop_event（按代绑定的口径被破坏）"
     finally:
         supervisor.shutdown()
 

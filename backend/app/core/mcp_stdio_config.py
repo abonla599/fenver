@@ -174,7 +174,7 @@ def normalize_entry(raw, *, verify_command: bool):
     if len(env_allowlist) > MAX_ENV_ALLOWLIST:
         return None, "env_allowlist_too_many"
     for env_name in env_allowlist:
-        if not isinstance(env_name, str) or not ENV_NAME_RE.match(env_name):
+        if not isinstance(env_name, str) or not ENV_NAME_RE.fullmatch(env_name):
             return None, "env_name_invalid"
         if env_name_denied(env_name):
             return None, "env_name_denied"

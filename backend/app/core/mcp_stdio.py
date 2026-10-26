@@ -379,15 +379,9 @@ class StdioSupervisor:
         self._audit_fn = audit_fn if audit_fn is not None else audit_module.log
         self._clock = clock
         self._sleep = sleep
-        # 预算的 cooldown 是熔断语义的一部分；预算类没有公开 getter，按属性读并给
-        # 一个与默认值一致的兜底（测试注入的小 cooldown 因此自动生效）。
-        self._cooldown = float(
-            getattr(
-                self._budget,
-                "breaker_cooldown",
-                getattr(self._budget, "_breaker_cooldown", DEFAULT_COOLDOWN),
-            )
-        )
+        # 预算的 cooldown 是熔断语义的一部分：只读公开 property，不再摸私有属性
+        # （测试注入的小 cooldown 因此自动生效，也不给"私有兜底"留第二条读法）。
+        self._cooldown = float(self._budget.breaker_cooldown)
 
         self._lock = threading.RLock()
         self._reload_lock = threading.Lock()
@@ -617,8 +611,10 @@ class StdioSupervisor:
             if not global_enabled or server_id not in desired:
                 to_stop.append(runtime)
                 continue
-            entry, _reason = desired[server_id]
-            if runtime.entry != entry:
+            entry, reason = desired[server_id]
+            # 降级为 config_error（含第 4 条起的 max_servers）时也要停旧 runtime：
+            # 只比 entry 会让一条原本 ready 的 server 在配置降到名额之外后继续跑。
+            if reason or runtime.entry != entry:
                 to_stop.append(runtime)
         for runtime in to_stop:
             self._stop_runtime(runtime)
