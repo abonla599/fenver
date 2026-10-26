@@ -236,7 +236,7 @@
     <section class="sec hidden" id="secMcp" role="tabpanel" aria-labelledby="tab-mcp">
       <div class="sec-head">
         <h2>MCP 外部工具</h2>
-        <p class="pane-note">接入本机的 stdio MCP server，把它们的工具交给模型。<b>默认关闭</b>；<b>仅管理员</b>能读写这一页。子进程以服务账号权限运行，<b>不是沙箱</b>；每次调用仍需审批。列表只显示状态与 env 变量名：服务端不回 args，也不回 env 的值。</p>
+        <p class="pane-note">接入本机的 stdio MCP server，把它们的工具交给模型。<b>默认关闭</b>；<b>仅管理员</b>能读写这一页。子进程以服务账号权限运行，<b>不是沙箱</b>；每次调用仍需审批。列表只显示 id、状态、pid、工具数、重启次数、最后错误、命令文件名与 env 变量名：服务端不回 args，也不回 env 的值。</p>
       </div>
       <div class="toolbar">
         <button id="btnMcpReload" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读取"></button>
@@ -266,6 +266,7 @@
       <div class="card panel">
         <h3>新增 / 整条替换</h3>
         <p class="pane-note warn">整条替换，原 args 不会回显，保存前请重新填写。编辑已有条目时 args 框是空的；保存会用当前表单整条覆盖那一条（包括把它清空）。</p>
+        <p class="pane-note">command 仅用于编辑预填，GET 不回显 args/env 值；列表里的「命令」只是文件名。</p>
         <div class="mcp-form">
           <label class="field wide" for="mcpId"><span>条目 id（小写字母 / 数字 / _-，≤16）</span><input id="mcpId" type="text" autocomplete="off" maxlength="16" placeholder="例如 weather"></label>
           <label class="field wide" for="mcpCommand"><span>command（绝对路径）</span><input id="mcpCommand" type="text" autocomplete="off" placeholder="C:\path\to\server.exe"></label>

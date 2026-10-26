@@ -217,7 +217,11 @@
         flash(e.message, true, retry);
       }
     }
-    finally { if (el) el.disabled = false; }
+    finally {
+      if (el) el.disabled = false;
+      // 不能跟着 busy 无条件解锁：MCP 状态没读到时，这颗开关必须保持禁用。
+      syncMcpToggleLock();
+    }
   }
 
   /* ---------- 提示与弹层 ---------- */
@@ -1673,6 +1677,12 @@
   let mcpEditingId = null;
   // 状态没读到就不允许写：否则既看不到替换的是哪一条，也无从判断 id 是否已存在。
   let mcpLoaded = false;
+  // 请求代际：每次读都递增，响应只认最新一代；写动作开始也递增，作废在途的旧 GET。
+  let mcpGeneration = 0;
+
+  function syncMcpToggleLock() {
+    $("mcpEnabled").disabled = !mcpLoaded;
+  }
 
   function mcpStateTag(state) {
     const key = String(state || "unknown");
@@ -1771,6 +1781,11 @@
   }
 
   async function loadMcp() {
+    const generation = ++mcpGeneration;
+    // 从发起 GET 的那一刻起就不许写：还没读到状态，开关既没有可信的当前值，
+    // 也不知道这次 PUT 会作用在哪份配置上。
+    mcpLoaded = false;
+    syncMcpToggleLock();
     paintTableLoading($("mcpRows"), 9);
     $("mcpCards").textContent = "";
     $("mcpCards").appendChild(emptyBox("读取中…"));
@@ -1778,21 +1793,24 @@
     $("mcpState").textContent = "";
     try {
       const data = await req("/v1/admin/mcp/stdio");
+      // 旧代 GET 晚到：不许覆盖新一轮（可能已经由保存/删除/切换触发）的结果。
+      if (generation !== mcpGeneration) return false;
       mcpEnabled = !!data.enabled;
       mcpServers = Array.isArray(data.servers) ? data.servers : [];
       $("mcpEnabled").checked = mcpEnabled;
-      $("mcpEnabled").disabled = false;
       syncMcpEnabledNote();
       renderMcpServers();
       mcpLoaded = true;
+      syncMcpToggleLock();
       return true;
     } catch (e) {
       if (e.message === "401") throw e;
+      if (generation !== mcpGeneration) return false;
       // 状态没读到就不许让开关看起来像“已关闭”：锁住复选并说明原因。
       mcpLoaded = false;
       mcpEnabled = false;
       $("mcpEnabled").checked = false;
-      $("mcpEnabled").disabled = true;
+      syncMcpToggleLock();
       $("mcpEnabledNote").textContent = "读不到全局开关：开关未同步，别把它当成已关闭。";
       paintTableError($("mcpRows"), 9, "MCP 状态读取失败：" + e.message, () => busy(null, loadMcp));
       paintRetry($("mcpCards"), "MCP 状态读取失败：" + e.message, () => busy(null, loadMcp));
@@ -1875,6 +1893,8 @@
         "整条替换", "check", true);
       if (!ok) return;
     }
+    // 写动作一开始就作废在途的旧 GET：它的响应描述的是写入前的状态。
+    mcpGeneration += 1;
     await req("/v1/admin/mcp/stdio/servers/" + encodeURIComponent(id),
       { method: "PUT", body: body });
     flash("已提交「" + id + "」；reload 是异步的，稍后点「重新读取」看状态");
@@ -1891,16 +1911,32 @@
       + "聊天里已经发生的调用记录不删；要恢复只能整条重填。",
       "删除", "trash", true);
     if (!ok) return;
-    await req("/v1/admin/mcp/stdio/servers/" + encodeURIComponent(s.id),
-      { method: "DELETE" });
+    // 同 saveMcp：DELETE 期间回来的旧 GET 不能把刚删掉的那行又画回去。
+    mcpGeneration += 1;
+    try {
+      await req("/v1/admin/mcp/stdio/servers/" + encodeURIComponent(s.id),
+        { method: "DELETE" });
+    } catch (e) {
+      if (e.status === 404) {
+        // 别的会话已经删掉了：这行是过期视图，刷新而不是把它留在表里。
+        flash("条目「" + s.id + "」已经不存在，正在刷新列表");
+        if (mcpEditingId === s.id) resetMcpForm();
+        await loadMcp();
+        return;
+      }
+      throw e;
+    }
     flash("已删除「" + s.id + "」");
     if (mcpEditingId === s.id) resetMcpForm();
     await loadMcp();
   }
 
   async function toggleMcpEnabled() {
+    if (!mcpLoaded) return;
     const box = $("mcpEnabled");
     const next = !!box.checked;
+    // 切换开始就作废旧 GET：不能让一份写前快照把开关改回去。
+    mcpGeneration += 1;
     try {
       const r = await req("/v1/admin/mcp/stdio/settings", { method: "PUT", body: { enabled: next } });
       mcpEnabled = r && typeof r.enabled === "boolean" ? r.enabled : next;
@@ -1911,7 +1947,7 @@
     } catch (e) {
       // 没写成就把 UI 退回读到的值：别让管理员对着一颗“已打开”的假开关。
       box.checked = mcpEnabled;
-      box.disabled = false;
+      syncMcpToggleLock();
       if (e.message !== "401") flash("开关没保存：" + e.message + "（已回滚为原值）", true);
     }
   }
@@ -2496,9 +2532,10 @@
     mcpEnabled = false;
     mcpServers = [];
     mcpLoaded = false;
+    mcpGeneration += 1;
     resetMcpForm();
     $("mcpEnabled").checked = false;
-    $("mcpEnabled").disabled = false;
+    $("mcpEnabled").disabled = true;
     $("mcpEnabledNote").textContent = "读取中…";
     $("mcpRows").textContent = "";
     $("mcpCards").textContent = "";

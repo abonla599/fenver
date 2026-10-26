@@ -16,8 +16,13 @@
 
 判语料之前一律先剥注释：解释性注释里完全可能出现被禁字样。
 """
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from app.core.mcp_stdio_config import ID_RE
 from app.web.web_router import ADMIN_DIR
@@ -50,13 +55,24 @@ def _css_clean() -> str:
     return re.sub(r"/\*[\s\S]*?\*/", "", _css())
 
 
-def _css_rule(selector: str) -> str:
-    """取某条选择器（逗号分隔的组里精确匹配一项）的第一段声明块。"""
+def _css_decls(selector: str):
+    """所有命中该选择器的 (起始位置, 声明块)，按文件顺序。
+
+    #181 的判据不能只取第一段：``.mobile-only`` 在基础态和手机媒体查询里各出现
+    一次，前者收成 none、后者放成 block/flex；只看第一段无法证明"手机那条写在
+    桌面隐藏之后"，也看不出有没有第三条把它又打开了。
+    """
+    found = []
     for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", _css_clean()):
         selectors = [s.strip() for s in match.group(1).split(",")]
         if selector in selectors:
-            return match.group(2)
-    return ""
+            found.append((match.start(), match.group(2)))
+    return found
+
+
+def _display_at(decl: str):
+    hit = re.search(r"(?:^|;)\s*display:\s*([A-Za-z-]+)\s*(?:;|$)", decl)
+    return hit.group(1) if hit else ""
 
 
 def _mobile_css() -> str:
@@ -236,6 +252,267 @@ def test_mcp_global_toggle_rolls_back_on_failure():
     assert "已回滚为原值" in toggle, "回滚没有告诉管理员"
 
 
+# ---------- 4b. BLOCK-1：GET 没成功之前，全局开关不许可写 ----------
+
+def test_load_mcp_locks_before_fetch_and_generation_guards_stale_responses():
+    load = _function_body("loadMcp")
+    assert load, "loadMcp 不见了"
+    fetch_at = load.index('req("/v1/admin/mcp/stdio")')
+    assert load.index("mcpLoaded = false") < fetch_at, \
+        "loadMcp 不是一开始就置 mcpLoaded=false：首屏 GET 未回来时开关仍可点"
+    assert "syncMcpToggleLock()" in load[:fetch_at], \
+        "loadMcp 在发 GET 之前没有禁用全局开关"
+    assert "mcpGeneration" in load and "generation !== mcpGeneration" in load, \
+        "loadMcp 没有代际校验：旧 GET 的响应可以覆盖新状态"
+    assert "mcpLoaded = true" in load and "syncMcpToggleLock()" in load, \
+        "GET 成功后没有恢复 mcpLoaded/解锁开关"
+    assert "mcpLoaded = false" in load[load.index("catch (e)"):], \
+        "GET 失败分支没有保持 mcpLoaded=false"
+
+
+def test_toggle_and_busy_respect_the_loaded_lock():
+    toggle = _function_body("toggleMcpEnabled")
+    assert toggle.lstrip().startswith("if (!mcpLoaded) return;"), \
+        "toggleMcpEnabled 开头没有 !mcpLoaded 早退：读失败后仍会发 PUT settings"
+    assert toggle.index("if (!mcpLoaded) return;") < toggle.index("req("), \
+        "!mcpLoaded 检查排在 PUT 之后"
+
+    busy_body = _function_body("busy")
+    assert "syncMcpToggleLock()" in busy_body, \
+        "busy 的 finally 仍无条件恢复控件，没按 mcpLoaded 重置 MCP 开关"
+    lock = _function_body("syncMcpToggleLock")
+    assert lock, "syncMcpToggleLock 不见了"
+    assert '$("mcpEnabled").disabled = !mcpLoaded' in lock, \
+        "syncMcpToggleLock 没有把开关状态绑定到 mcpLoaded"
+    invalidate = _function_body("invalidateData")
+    assert 'mcpLoaded = false' in invalidate and 'mcpGeneration += 1' in invalidate, \
+        "invalidateData 没有作废在途 GET，且把加载态留成可写"
+    assert '$("mcpEnabled").disabled = true' in invalidate, \
+        "invalidateData 仍把全局开关设成 enabled：首屏 GET 没完成就能点"
+
+
+_MCP_PROBE_JS = r'''
+"use strict";
+const fs = require("fs");
+const vm = require("vm");
+
+class El {
+  constructor(id) {
+    this.id = id || "";
+    this.children = [];
+    this._text = "";
+    this._listeners = {};
+    const classes = new Set();
+    this.classList = {
+      add: (...names) => names.forEach((n) => classes.add(n)),
+      remove: (...names) => names.forEach((n) => classes.delete(n)),
+      toggle: (name, on) => {
+        const want = on === undefined ? !classes.has(name) : !!on;
+        if (want) classes.add(name); else classes.delete(name);
+      },
+      contains: (name) => classes.has(name),
+    };
+    this.style = {};
+    this.dataset = {};
+    this.disabled = false;
+    this.checked = false;
+    this.value = "";
+    this.readOnly = false;
+    this.colSpan = 1;
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  append(child) { this.children.push(child); }
+  addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); }
+  removeEventListener() {}
+  click() { (this._listeners.click || []).forEach((fn) => fn({ currentTarget: this, target: this })); }
+  setAttribute(name, value) { this["attr_" + name] = String(value); }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this, "attr_" + name) ? this["attr_" + name] : null; }
+  removeAttribute(name) { delete this["attr_" + name]; }
+  querySelector() { return new El(); }
+  querySelectorAll() { return []; }
+  closest() { return null; }
+  focus() {}
+  contains() { return false; }
+  get textContent() {
+    return this.children.length
+      ? this.children.map((child) => child.textContent || "").join("")
+      : this._text;
+  }
+  set textContent(value) { this.children = []; this._text = String(value); }
+  get firstElementChild() { return this.children[0] || null; }
+}
+
+const byId = new Map();
+const el = (id) => {
+  if (!byId.has(id)) byId.set(id, new El(id));
+  return byId.get(id);
+};
+
+const document = {
+  title: "",
+  visibilityState: "visible",
+  activeElement: null,
+  body: new El("body"),
+  getElementById: el,
+  createElement: (tag) => new El(tag),
+  createElementNS: (_ns, tag) => new El(tag),
+  createTextNode: (text) => { const node = new El("#text"); node.textContent = text; return node; },
+  querySelector: () => new El(),
+  querySelectorAll: () => [],
+  addEventListener() {},
+  contains: () => false,
+};
+const location = { hash: "#/overview" };
+const history = { replaceState() {} };
+const window = { addEventListener() {}, location };
+
+let calls = [];
+let handler = () => new Promise(() => {});
+const fetch = (path, opts) => {
+  calls.push({ path: String(path), opts: opts || {} });
+  return handler(String(path), opts || {});
+};
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+const probeCode = "\n  globalThis.__mcpProbe = {\n"
+  + "    loadMcp, toggleMcpEnabled, deleteMcp, busy,\n"
+  + "    get loaded() { return mcpLoaded; },\n"
+  + "    get enabled() { return mcpEnabled; },\n"
+  + "    get servers() { return mcpServers; },\n"
+  + "    get generation() { return mcpGeneration; },\n"
+  + "    box: $(\"mcpEnabled\"),\n"
+  + "  };\n";
+if (!/\}\)\(\);\s*$/.test(source)) {
+  throw new Error("admin.js 的 IIFE 收尾不是预期的 });");
+}
+const instrumented = source.replace(/\}\)\(\);\s*$/, probeCode + "})();");
+
+const sandbox = {
+  document, location, history, window, fetch,
+  localStorage: { removeItem() {} },
+  console, setTimeout, clearTimeout,
+};
+vm.createContext(sandbox);
+vm.runInContext(instrumented, sandbox, { filename: "admin.js" });
+
+const probe = sandbox.__mcpProbe;
+const expect = (cond, message) => { if (!cond) throw new Error(message); };
+
+(async () => {
+  // 1) GET 失败：开关必须保持禁用，mcpLoaded 必须为 false。
+  handler = () => Promise.resolve({ status: 500, ok: false, json: async () => ({ detail: "boom" }) });
+  await probe.loadMcp();
+  expect(probe.loaded === false, "GET 失败后 mcpLoaded 仍为 true");
+  expect(probe.box.disabled === true, "GET 失败后开关没有保持禁用");
+
+  // 2) 用户点这颗开关本身：busy(box, toggle) 的 finally 不许把它无条件解锁。
+  await probe.busy(probe.box, probe.toggleMcpEnabled);
+  expect(probe.box.disabled === true, "busy 之后开关被无条件解锁（旧 bug 复现）");
+  expect(probe.loaded === false, "busy 之后 mcpLoaded 被改写");
+
+  // 3) 没加载成功时直接调用 toggle 也不许发 PUT。
+  calls = [];
+  handler = () => Promise.resolve({ status: 200, ok: true, json: async () => ({ enabled: true }) });
+  probe.box.checked = true;
+  await probe.toggleMcpEnabled();
+  expect(!calls.some((call) => call.path.indexOf("/mcp/stdio/settings") >= 0),
+    "mcpLoaded=false 时仍发出了 PUT settings");
+
+  // 4) 成功的 GET 才解锁。
+  handler = () => Promise.resolve({ status: 200, ok: true, json: async () => ({ enabled: false, servers: [] }) });
+  await probe.loadMcp();
+  expect(probe.loaded === true, "GET 成功后 mcpLoaded 不是 true");
+  expect(probe.box.disabled === false, "GET 成功后开关仍被禁用");
+
+  // 5) 并发刷新：新代先到、旧代后到，旧响应不许覆盖新状态。
+  const pending = [];
+  handler = () => new Promise((resolve) => pending.push(resolve));
+  const first = probe.loadMcp();
+  const second = probe.loadMcp();
+  expect(pending.length === 2, "两次 loadMcp 没有各自发一个 GET，pending=" + pending.length);
+  pending[1]({ status: 200, ok: true, json: async () => ({ enabled: true, servers: [{ id: "new" }] }) });
+  await second;
+  pending[0]({ status: 200, ok: true, json: async () => ({ enabled: false, servers: [{ id: "old" }] }) });
+  await first;
+  expect(probe.servers.map((server) => server.id).join(",") === "new",
+    "旧代 GET 覆盖了新状态：" + JSON.stringify(probe.servers));
+
+  // 6) DELETE 404 也要重读，不许把过期行留在表里。
+  calls = [];
+  handler = (path, opts) => {
+    if ((opts.method || "GET") === "DELETE") {
+      return Promise.resolve({ status: 404, ok: false, json: async () => ({ detail: "server_not_found" }) });
+    }
+    return Promise.resolve({ status: 200, ok: true, json: async () => ({ enabled: true, servers: [] }) });
+  };
+  const deleting = probe.deleteMcp({ id: "gone" });
+  byId.get("askOk").click();
+  await deleting;
+  const methods = calls.map((call) => (call.opts.method || "GET") + " " + call.path);
+  expect(methods[0] === "DELETE /v1/admin/mcp/stdio/servers/gone",
+    "deleteMcp 没有先确认再 DELETE：" + JSON.stringify(methods));
+  expect(methods.indexOf("GET /v1/admin/mcp/stdio") > 0,
+    "DELETE 404 后没有重新 GET：" + JSON.stringify(methods));
+  expect(probe.servers.length === 0, "DELETE 404 后还留着旧行");
+
+  console.log(JSON.stringify({ ok: true, calls: methods }));
+})().catch((err) => {
+  console.error("PROBE FAIL: " + (err && err.stack ? err.stack : err));
+  process.exit(1);
+});
+'''
+
+
+def test_mcp_toggle_stays_locked_after_failed_load_behaviour(tmp_path):
+    """真跑一遍 admin.js：GET 失败 + busy 收尾 + 直接调用 toggle，都不许解锁/发 PUT。"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了行为探针；静态判据照跑")
+    harness = tmp_path / "mcp_probe.cjs"
+    harness.write_text(_MCP_PROBE_JS, encoding="utf-8")
+    proc = subprocess.run(
+        [node, str(harness), str(ADMIN / "admin.js")],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, \
+        "MCP 行为探针失败：\nstdout=%s\nstderr=%s" % (proc.stdout, proc.stderr)
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert payload["ok"] is True
+
+
+# ---------- 4c. 射程：确认顺序、404 重读、禁 HTML 注入 ----------
+
+def test_delete_asks_first_and_mutations_reload():
+    delete = _function_body("deleteMcp")
+    assert delete, "deleteMcp 不见了"
+    assert delete.index("ask(") < delete.index("req("), "删除没有先确认再 DELETE"
+    assert "e.status === 404" in delete, "DELETE 404 没有单独处理"
+    assert delete.count("await loadMcp()") >= 2, \
+        "DELETE 成功和 404 两条路都要重新读一次，别留旧行"
+
+    for name in ("saveMcp", "toggleMcpEnabled"):
+        body = _function_body(name)
+        assert "await loadMcp()" in body, f"{name} 写成功后没有重新读状态"
+
+
+def test_v0376_code_never_writes_html_strings():
+    js, html = _js(), _html()
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML"):
+        assert sink not in js, f"admin.js 出现 {sink}：本版只允许 textContent 建树"
+        assert sink not in html, f"index.html 出现 {sink}"
+
+
+def test_mcp_copy_describes_the_real_projection_and_command_prefill():
+    html = _html()
+    assert "列表只显示 id、状态、pid、工具数、重启次数、最后错误、命令文件名与 env 变量名" in html, \
+        "分区说明没有如实列出 GET 投影里会显示的那些字段"
+    assert "列表只显示状态与 env 变量名" not in html, \
+        "旧文案还在：列表明明也显示 id/pid/工具/重启/最后错误/命令"
+    assert "command 仅用于编辑预填，GET 不回显 args/env 值" in html, \
+        "表单旁没有说明 command 只用于预填、args/env 值不回显"
+
+
+
 # ---------- 5. 文案里的安全边界 ----------
 
 def test_mcp_copy_states_the_boundaries_without_promising_isolation():
@@ -250,21 +527,38 @@ def test_mcp_copy_states_the_boundaries_without_promising_isolation():
 def test_mobile_only_cards_are_hidden_on_desktop_and_shown_on_mobile():
     """#181 的泄漏面是"手机专属卡片在桌面又渲染一份"。
 
-    真机视觉复测仍需用户设备；这里只钉住样式表里的三条规则与它们的出场顺序：
-    基础态 ``.mobile-only`` / ``.card-list.mobile-only`` 收成 none，899px 断点里
-    再分别放成 block / flex。``.card-list { display:flex }`` 写在 ``.mobile-only``
-    之后，所以那条更具体的 ``.card-list.mobile-only`` 不能少。
+    真机视觉复测仍需用户设备；这里钉住的是声明顺序，而不是"第一条命中"：
+    ``.mobile-only`` / ``.card-list.mobile-only`` 的基础态收成 none，899px 断点里
+    再分别放成 block / flex，且手机断点那条必须排在桌面隐藏之后。``.card-list
+    { display:flex }`` 写在 ``.mobile-only`` 之后，所以更具体的
+    ``.card-list.mobile-only`` 不能少。
     """
-    assert re.search(r"(?:^|;)\s*display:\s*none\s*(?:;|$)", _css_rule(".mobile-only")), \
-        "桌面端 .mobile-only 又显示出来了"
-    assert re.search(r"(?:^|;)\s*display:\s*none\s*(?:;|$)", _css_rule(".card-list.mobile-only")), \
-        "桌面端的“手机专属”卡片列表没收起：表格下面会多一份重复内容"
+    css = _css_clean()
     mobile = _mobile_css()
-    assert re.search(r"\.mobile-only\s*\{\s*display:\s*block\s*;", mobile), \
-        "手机断点没有把 .mobile-only 放成 block"
-    assert re.search(r"\.card-list\.mobile-only\s*\{\s*display:\s*flex\s*;", mobile), \
-        "手机断点没有把 .card-list.mobile-only 放成 flex"
-    assert re.search(r"\.desktop-only\s*\{\s*display:\s*none\s*;", mobile), \
+    mobile_start = css.index(mobile)
+    assert mobile_start > 0
+
+    for selector, mobile_display in (
+        (".mobile-only", "block"),
+        (".card-list.mobile-only", "flex"),
+    ):
+        decls = _css_decls(selector)
+        assert decls, f"{selector} 一条规则都没有"
+        desktop = [(pos, _display_at(decl))
+                   for pos, decl in decls
+                   if pos < mobile_start and _display_at(decl) == "none"]
+        mobile_rule = [(pos, _display_at(decl))
+                       for pos, decl in decls
+                       if pos > mobile_start and _display_at(decl) == mobile_display]
+        assert desktop, f"桌面端 {selector} 没有 display:none"
+        assert mobile_rule, f"手机断点没有把 {selector} 放成 {mobile_display}"
+        assert min(pos for pos, _ in mobile_rule) > max(pos for pos, _ in desktop), \
+            f"手机断点的 {selector} 显示规则排在桌面隐藏规则之前，可能被覆盖"
+        assert _display_at(decls[-1][1]) == mobile_display, \
+            f"{selector} 最后一条 display 不是手机断点的 {mobile_display}（有更晚的覆盖）"
+
+    assert any(_display_at(decl) == "none"
+               for pos, decl in _css_decls(".desktop-only") if pos > mobile_start), \
         "手机断点没有收起 .desktop-only 列表"
 
 
