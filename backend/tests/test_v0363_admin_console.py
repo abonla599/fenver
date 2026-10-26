@@ -4,7 +4,7 @@
 第二批的 security 端点一起验收，但下面这些“编译器与运行时都不管”的约束必须
 现在就钉住：
 
-- 信息架构：五个一级分区（概览/账号/安全/反馈/运行）与五个导航按钮必须一一对应，
+- 信息架构：六个一级分区（概览/账号/安全/MCP/反馈/运行）与六个导航按钮必须一一对应，
   runtime 的六个子页也必须有稳定的 hash 键；
 - 安全底线：不拼 HTML、不碰任何本机存储、不引任何外站资源（这一页的全部数据都
   经同源接口，离线/断网时也不能去拉 CDN）；
@@ -31,6 +31,7 @@ NAV = (
     ("overview", "secOverview"),
     ("accounts", "secAccounts"),
     ("security", "secSecurity"),
+    ("mcp", "secMcp"),
     ("feedback", "secFeedback"),
     ("runtime", "secRuntime"),
 )
@@ -76,18 +77,18 @@ def _css_rule(selector: str) -> str:
     return ""
 
 
-# ---------- 1. 五个一级分区与导航 ----------
+# ---------- 1. 六个一级分区与导航 ----------
 
-def test_five_primary_sections_have_matching_tabs():
+def test_primary_sections_have_matching_tabs():
     html = _html()
     sections = re.findall(r'<section class="sec[^"]*" id="([^"]+)"', html)
-    assert sections == [sid for _, sid in NAV], f"五个一级分区不对：{sections}"
+    assert sections == [sid for _, sid in NAV], f"一级分区不对：{sections}"
 
     for key, sid in NAV:
         assert f'id="tab-{key}"' in html, f"导航按钮 tab-{key} 不见了"
         assert f'aria-controls="{sid}"' in html, f"tab-{key} 没指向 {sid}"
         assert f'data-goto="{sid}"' in html, f"tab-{key} 没挂到 {sid}"
-    assert len(re.findall(r'data-goto="', html)) == 5, "一级导航多一个少一个都会有一栏看不见"
+    assert len(re.findall(r'data-goto="', html)) == len(NAV), "一级导航多一个少一个都会有一栏看不见"
     assert 'role="tablist"' in html
     assert 'aria-selected="true"' in html
     assert 'role="tabpanel"' in html
@@ -97,7 +98,7 @@ def test_five_primary_sections_have_matching_tabs():
     for sid, owner in re.findall(
             r'<section class="sec[^"]*" id="([^"]+)" role="tabpanel" aria-labelledby="([^"]+)"', html):
         assert any(owner == "tab-" + key for key, _ in NAV), f"{sid} 的 aria-labelledby 指错"
-    assert len(re.findall(r'<section class="sec[^"]*" id="', html)) == 5
+    assert len(re.findall(r'<section class="sec[^"]*" id="', html)) == len(NAV)
 
 
 def test_primary_nav_buttons_carry_the_route_key_they_navigate_to():
@@ -446,9 +447,9 @@ def test_admin_js_parses_with_node_when_available():
 
 # ---------- 7. hash 路由 ----------
 
-def test_hash_routes_cover_five_sections_and_six_runtime_pages():
+def test_hash_routes_cover_all_sections_and_six_runtime_pages():
     js = _js()
-    for key in ("overview", "accounts", "security", "feedback", "runtime"):
+    for key in ("overview", "accounts", "security", "mcp", "feedback", "runtime"):
         assert '"' + key + '"' in js, f"一级路由键 {key} 不见了"
     for key in RUNTIME_KEYS:
         assert '"runtime/' + key + '"' in js, f"运行子页路由键 {key} 不见了"

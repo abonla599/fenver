@@ -4,7 +4,7 @@
  * 不在这里复制第二套色板。本文件只补布局、组件骨架，以及键盘焦点、触控热区、
  * 动画退路这些页面级约束。
  *
- * 布局：桌面左侧 232px 导航 + 右侧内容；手机顶部条 + 底部 5 项导航。
+ * 布局：桌面左侧 232px 导航 + 右侧内容；手机顶部条 + 底部 6 项导航。
  * 360px 宽不得出现整页横向滚动：表格只在 .table-wrap 内部滚，账号与安全事件在
  * 窄屏改成卡片列表。
  */
@@ -679,6 +679,39 @@ td.acts button { margin: 0 2px 2px 0; }
 }
 .subpanel { min-width: 0; }
 
+/* ---------- MCP 外部工具 ---------- */
+
+#mcpState { margin-bottom: 12px; }
+.mcp-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+  min-width: 0;
+}
+.mcp-form .wide { grid-column: 1 / -1; }
+.mcp-form .field { margin-bottom: 10px; }
+.mcp-form textarea { width: 100%; resize: vertical; }
+.mcp-form .row { margin-bottom: 4px; }
+.mcp-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--fv-tap);
+  font-size: 13.5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+/* #panel input 的 44px 下限是给文字输入的；复选框按原生尺寸画，热区由外层 label 撑。 */
+#panel .mcp-toggle input[type="checkbox"],
+#panel .mcp-form input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  flex: none;
+  accent-color: var(--accent);
+}
+.mcp-error { color: var(--danger); overflow-wrap: anywhere; }
+
 /* ---------- 任务与智能体 ---------- */
 
 .task-list { display: flex; flex-direction: column; gap: 8px; }
@@ -809,7 +842,7 @@ td.acts button { margin: 0 2px 2px 0; }
     bottom: 0;
     z-index: 40;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 0;
     background: var(--glass-strong);
     border-top: 1px solid var(--line);
@@ -832,7 +865,7 @@ td.acts button { margin: 0 2px 2px 0; }
   .mobile-only { display: block; }
   .card-list.mobile-only { display: flex; }
   .cards { grid-template-columns: 1fr; }
-  .user-meta, .event-grid { grid-template-columns: 1fr; }
+  .user-meta, .event-grid, .mcp-form { grid-template-columns: 1fr; }
   .sheet { padding: 8px; align-items: flex-end; }
   .sheet .card { border-radius: 18px 18px 0 0; max-height: 92vh; }
   .nav-btn { position: relative; }

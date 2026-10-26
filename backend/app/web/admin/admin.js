@@ -31,6 +31,7 @@
               "M17 14.2a4.6 4.6 0 0 1 3 4.4V20"],
     shield:  ["M12 3.5l7 2.6v5.2c0 4.1-2.9 7.3-7 9.2-4.1-1.9-7-5.1-7-9.2V6.1l7-2.6Z",
               "M8.8 12l2.2 2.2 4.2-4.2"],
+    mcp:     ["M9 3v3", "M15 3v3", "M6 6h12v5a6 6 0 0 1-12 0V6Z", "M12 17v4"],
     alert:   ["M12 3.2l9 16.3H3l9-16.3Z", "M12 9v4.2", "M12 16.8h.01"],
     chart:   ["M4 20V10", "M10 20V4.5", "M16 20v-7", "M2 20h20"],
     inbox:   ["M4 5h16v14H4z", "M4 13h4l2 2h4l2-2h4"],
@@ -410,6 +411,7 @@
     "overview": "secOverview",
     "accounts": "secAccounts",
     "security": "secSecurity",
+    "mcp": "secMcp",
     "feedback": "secFeedback",
     "runtime/usage": "secRuntime",
     "runtime/search": "secRuntime",
@@ -432,6 +434,7 @@
     overview: "概览",
     accounts: "账号",
     security: "安全",
+    mcp: "MCP 外部工具",
     feedback: "反馈",
     "runtime/usage": "运行 · 用量",
     "runtime/search": "运行 · 搜索",
@@ -453,7 +456,8 @@
       if (RUNTIME_KEYS.indexOf(key) >= 0) return "runtime/" + key;
       return null;
     }
-    if (raw === "overview" || raw === "accounts" || raw === "security" || raw === "feedback") {
+    if (raw === "overview" || raw === "accounts" || raw === "security"
+        || raw === "mcp" || raw === "feedback") {
       return raw;
     }
     return null;
@@ -1648,6 +1652,270 @@
     return tr;
   }
 
+  /* ---------- MCP 外部工具 ---------- */
+
+  // GET 的投影只有状态与 env 变量名：这一节绝不渲染 args，也不渲染 env 的值。
+  const MCP_STATE = {
+    disabled: "已停用",
+    starting: "启动中",
+    ready: "就绪",
+    crashed: "已崩溃",
+    backoff: "退避重试",
+    stopping: "停止中",
+    circuit_open: "熔断中",
+    config_error: "配置错误",
+  };
+  // 与 mcp_stdio_config.ID_RE 同形；后端仍权威，这里只挡住明显写错的 id。
+  const MCP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+
+  let mcpEnabled = false;
+  let mcpServers = [];
+  let mcpEditingId = null;
+  // 状态没读到就不允许写：否则既看不到替换的是哪一条，也无从判断 id 是否已存在。
+  let mcpLoaded = false;
+
+  function mcpStateTag(state) {
+    const key = String(state || "unknown");
+    const bad = key === "crashed" || key === "circuit_open" || key === "config_error";
+    return cell("span", MCP_STATE[key] || key, bad ? "tag warn" : "tag");
+  }
+
+  function mcpToolsText(s) {
+    const exposed = s.tools_exposed === null || s.tools_exposed === undefined
+      ? "—" : String(s.tools_exposed);
+    const total = s.tools_total === null || s.tools_total === undefined
+      ? "—" : String(s.tools_total);
+    return exposed + " / " + total;
+  }
+
+  function mcpEnvText(s) {
+    const names = Array.isArray(s.env_names) ? s.env_names : [];
+    return names.length ? names.join(", ") : "—";
+  }
+
+  function syncMcpEnabledNote() {
+    $("mcpEnabledNote").textContent = mcpEnabled
+      ? "全局已启用：启用的条目会按各自状态启动子进程。"
+      : "全局已关闭：条目配置保留，但不会启动子进程，也不会暴露工具。";
+  }
+
+  function renderMcpServers() {
+    const tbody = $("mcpRows");
+    const cards = $("mcpCards");
+    tbody.textContent = "";
+    cards.textContent = "";
+    if (!mcpServers.length) {
+      const note = "默认关闭，尚未配置。在下面的表单里新增一条；启用前不会启动任何子进程。";
+      tbody.appendChild(emptyRow(note, 9));
+      cards.appendChild(emptyBox(note));
+      return;
+    }
+    mcpServers.forEach((s) => {
+      tbody.appendChild(mcpServerRow(s));
+      cards.appendChild(mcpServerCard(s));
+    });
+  }
+
+  function mcpServerRow(s) {
+    const tr = document.createElement("tr");
+    tr.appendChild(cell("td", s.id || "—", "code"));
+    const st = cell("td");
+    st.appendChild(mcpStateTag(s.state));
+    tr.appendChild(st);
+    tr.appendChild(cell("td", s.pid === null || s.pid === undefined ? "—" : String(s.pid)));
+    tr.appendChild(cell("td", mcpToolsText(s)));
+    tr.appendChild(cell("td", s.restarts === null || s.restarts === undefined
+      ? "—" : String(s.restarts)));
+    tr.appendChild(cell("td", s.last_error ? String(s.last_error) : "—",
+      s.last_error ? "mcp-error" : "dim"));
+    tr.appendChild(cell("td", mcpEnvText(s), "code"));
+    tr.appendChild(cell("td", s.command_basename || "—", "code"));
+    tr.appendChild(mcpActions(s));
+    return tr;
+  }
+
+  function mcpServerCard(s) {
+    const card = cell("article", undefined, "user-card");
+    const head = cell("div", undefined, "user-card-head");
+    head.appendChild(cell("b", s.id || "—", "code"));
+    head.appendChild(mcpStateTag(s.state));
+    card.appendChild(head);
+    const meta = cell("div", undefined, "user-meta");
+    const line = (label, value, cls) => {
+      const item = cell("span");
+      item.appendChild(cell("b", label));
+      item.appendChild(cell("span", value, cls));
+      meta.appendChild(item);
+    };
+    line("pid", s.pid === null || s.pid === undefined ? "—" : String(s.pid));
+    line("工具（暴露 / 总）", mcpToolsText(s));
+    line("重启", s.restarts === null || s.restarts === undefined ? "—" : String(s.restarts));
+    line("env 变量名", mcpEnvText(s), "code");
+    line("命令", s.command_basename || "—", "code");
+    line("最后错误", s.last_error ? String(s.last_error) : "—", s.last_error ? "mcp-error" : "dim");
+    card.appendChild(meta);
+    const acts = cell("div", undefined, "user-actions");
+    acts.appendChild(btn("gear", "编辑", "btn btn-small btn-ghost", () => pickMcp(s)));
+    acts.appendChild(btn("trash", "删除", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => deleteMcp(s))));
+    card.appendChild(acts);
+    return card;
+  }
+
+  function mcpActions(s) {
+    const acts = cell("td", undefined, "acts");
+    acts.appendChild(btn("gear", "编辑", "btn btn-small btn-ghost", () => pickMcp(s)));
+    acts.appendChild(btn("trash", "删除", "btn btn-small btn-ghost",
+      (e) => busy(e.currentTarget, () => deleteMcp(s))));
+    return acts;
+  }
+
+  async function loadMcp() {
+    paintTableLoading($("mcpRows"), 9);
+    $("mcpCards").textContent = "";
+    $("mcpCards").appendChild(emptyBox("读取中…"));
+    $("mcpState").classList.add("hidden");
+    $("mcpState").textContent = "";
+    try {
+      const data = await req("/v1/admin/mcp/stdio");
+      mcpEnabled = !!data.enabled;
+      mcpServers = Array.isArray(data.servers) ? data.servers : [];
+      $("mcpEnabled").checked = mcpEnabled;
+      $("mcpEnabled").disabled = false;
+      syncMcpEnabledNote();
+      renderMcpServers();
+      mcpLoaded = true;
+      return true;
+    } catch (e) {
+      if (e.message === "401") throw e;
+      // 状态没读到就不许让开关看起来像“已关闭”：锁住复选并说明原因。
+      mcpLoaded = false;
+      mcpEnabled = false;
+      $("mcpEnabled").checked = false;
+      $("mcpEnabled").disabled = true;
+      $("mcpEnabledNote").textContent = "读不到全局开关：开关未同步，别把它当成已关闭。";
+      paintTableError($("mcpRows"), 9, "MCP 状态读取失败：" + e.message, () => busy(null, loadMcp));
+      paintRetry($("mcpCards"), "MCP 状态读取失败：" + e.message, () => busy(null, loadMcp));
+      const box = $("mcpState");
+      box.textContent = "";
+      box.classList.remove("hidden");
+      box.appendChild(document.createTextNode("MCP 状态读取失败：" + e.message + " "));
+      box.appendChild(btn("refresh", "重试", "btn btn-small btn-ghost",
+        (ev) => busy(ev.currentTarget, loadMcp)));
+      return false;
+    }
+  }
+
+  function pickMcp(s) {
+    mcpEditingId = s.id;
+    $("mcpId").value = s.id;
+    $("mcpId").readOnly = true;
+    $("mcpCommand").value = s.command || "";
+    // 服务端不回 args：编辑时这里必须留空，保存就是拿当前表单整条覆盖。
+    $("mcpArgs").value = "";
+    $("mcpEnv").value = Array.isArray(s.env_names) ? s.env_names.join(", ") : "";
+    $("mcpEntryEnabled").checked = !!s.enabled;
+    $("mcpFormNote").textContent = "正在整条替换「" + s.id + "」：原 args 不回显，保存前请重新填写";
+    $("mcpId").focus();
+  }
+
+  function resetMcpForm() {
+    mcpEditingId = null;
+    $("mcpId").value = "";
+    $("mcpId").readOnly = false;
+    $("mcpCommand").value = "";
+    $("mcpArgs").value = "";
+    $("mcpEnv").value = "";
+    $("mcpEntryEnabled").checked = false;
+    $("mcpFormNote").textContent = "新增条目";
+  }
+
+  function mcpArgsFromForm() {
+    return $("mcpArgs").value.split("\n")
+      .map((line) => String(line).trim())
+      .filter((line) => line.length > 0);
+  }
+
+  function mcpEnvFromForm() {
+    return $("mcpEnv").value.split(",")
+      .map((name) => String(name).trim())
+      .filter((name) => name.length > 0);
+  }
+
+  async function saveMcp() {
+    if (!mcpLoaded) {
+      flash("MCP 状态还没读出来，先点「重新读取」再保存", true);
+      return;
+    }
+    const id = $("mcpId").value.trim();
+    const command = $("mcpCommand").value.trim();
+    if (!MCP_ID_RE.test(id)) {
+      flash("条目 id 只能用小写字母 / 数字 / _-，最多 16 个字符", true);
+      $("mcpId").focus();
+      return;
+    }
+    if (!command) {
+      flash("command 必须填绝对路径", true);
+      $("mcpCommand").focus();
+      return;
+    }
+    const body = {
+      command: command,
+      args: mcpArgsFromForm(),
+      env_allowlist: mcpEnvFromForm(),
+      enabled: $("mcpEntryEnabled").checked,
+    };
+    // 手输一个已存在的 id 也是整条替换：和点「编辑」走同一道确认，不允许静默清空。
+    const existing = mcpEditingId || mcpServers.some((s) => s.id === id);
+    if (existing) {
+      const ok = await ask(
+        "整条替换 MCP 条目「" + id + "」？",
+        "服务端不回显原 args，保存后这一条以当前表单为准：没重新填的 args 会被清空。"
+        + "子进程会按新配置重启，期间它暴露的工具暂时不可用。",
+        "整条替换", "check", true);
+      if (!ok) return;
+    }
+    await req("/v1/admin/mcp/stdio/servers/" + encodeURIComponent(id),
+      { method: "PUT", body: body });
+    flash("已提交「" + id + "」；reload 是异步的，稍后点「重新读取」看状态");
+    mcpEditingId = id;
+    $("mcpId").readOnly = true;
+    $("mcpFormNote").textContent = "正在整条替换「" + id + "」：原 args 不回显，保存前请重新填写";
+    await loadMcp();
+  }
+
+  async function deleteMcp(s) {
+    const ok = await ask(
+      "删除 MCP 条目「" + s.id + "」？",
+      "删的是配置里的这一条：子进程会停，它暴露的工具立即从注册表撤下。"
+      + "聊天里已经发生的调用记录不删；要恢复只能整条重填。",
+      "删除", "trash", true);
+    if (!ok) return;
+    await req("/v1/admin/mcp/stdio/servers/" + encodeURIComponent(s.id),
+      { method: "DELETE" });
+    flash("已删除「" + s.id + "」");
+    if (mcpEditingId === s.id) resetMcpForm();
+    await loadMcp();
+  }
+
+  async function toggleMcpEnabled() {
+    const box = $("mcpEnabled");
+    const next = !!box.checked;
+    try {
+      const r = await req("/v1/admin/mcp/stdio/settings", { method: "PUT", body: { enabled: next } });
+      mcpEnabled = r && typeof r.enabled === "boolean" ? r.enabled : next;
+      box.checked = mcpEnabled;
+      syncMcpEnabledNote();
+      flash(mcpEnabled ? "MCP 外部工具已启用" : "MCP 外部工具已关闭");
+      await loadMcp();
+    } catch (e) {
+      // 没写成就把 UI 退回读到的值：别让管理员对着一颗“已打开”的假开关。
+      box.checked = mcpEnabled;
+      box.disabled = false;
+      if (e.message !== "401") flash("开关没保存：" + e.message + "（已回滚为原值）", true);
+    }
+  }
+
   /* ---------- 用量 ---------- */
 
   // 账本上 paid_by 只有这两个取值（providers.py 的白名单硬校验）。
@@ -2184,6 +2452,7 @@
     if (sectionId === "secOverview") { await loadOverview(); return; }
     if (sectionId === "secAccounts") { await enterAccounts(); return; }
     if (sectionId === "secSecurity") { await loadSecurity(); return; }
+    if (sectionId === "secMcp") { await loadMcp(); return; }
     if (sectionId === "secFeedback") {
       if (!feedbackLoaded) {
         $("feedbackRows").textContent = "";
@@ -2206,6 +2475,7 @@
     if (route === "overview") { await loadOverview(); return; }
     if (route === "accounts") { await loadUsers(); return; }
     if (route === "security") { await loadSecurity(); return; }
+    if (route === "mcp") { await loadMcp(); return; }
     if (route === "feedback") { await loadFeedback(true); return; }
     if (route.indexOf("runtime/") === 0) { await loadRuntimeSub(runtimeSub, true); }
   }
@@ -2223,6 +2493,16 @@
     secEventIds = {};
     secNextBefore = null;
     secEndpointsMissing = false;
+    mcpEnabled = false;
+    mcpServers = [];
+    mcpLoaded = false;
+    resetMcpForm();
+    $("mcpEnabled").checked = false;
+    $("mcpEnabled").disabled = false;
+    $("mcpEnabledNote").textContent = "读取中…";
+    $("mcpRows").textContent = "";
+    $("mcpCards").textContent = "";
+    $("mcpState").classList.add("hidden");
     regOpen = null;
     Object.keys(runtimeLoaded).forEach((key) => { delete runtimeLoaded[key]; });
     Object.keys(runtimeLoading).forEach((key) => { delete runtimeLoading[key]; });
@@ -2324,6 +2604,10 @@
   $("fbSearch").addEventListener("input", renderFeedback);
   $("btnRunAgent").addEventListener("click", (e) => busy(e.currentTarget, runAgent));
   $("btnOrchestrate").addEventListener("click", (e) => busy(e.currentTarget, orchestrate));
+  $("btnMcpReload").addEventListener("click", (e) => busy(e.currentTarget, loadMcp));
+  $("mcpEnabled").addEventListener("change", (e) => busy(e.currentTarget, toggleMcpEnabled));
+  $("btnMcpSave").addEventListener("click", (e) => busy(e.currentTarget, saveMcp));
+  $("btnMcpReset").addEventListener("click", resetMcpForm);
 
   $("secWindow").addEventListener("change", (e) => {
     secWindow = e.target.value || "24h";

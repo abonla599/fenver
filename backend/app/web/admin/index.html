@@ -44,6 +44,7 @@
       <button id="tab-overview" class="nav-btn active" type="button" role="tab" aria-selected="true" aria-controls="secOverview" data-goto="secOverview" data-route="overview" data-icon="overview" data-label="概览"></button>
       <button id="tab-accounts" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secAccounts" data-goto="secAccounts" data-route="accounts" data-icon="users" data-label="账号"></button>
       <button id="tab-security" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secSecurity" data-goto="secSecurity" data-route="security" data-icon="shield" data-label="安全"></button>
+      <button id="tab-mcp" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secMcp" data-goto="secMcp" data-route="mcp" data-icon="mcp" data-label="MCP"></button>
       <button id="tab-feedback" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secFeedback" data-goto="secFeedback" data-route="feedback" data-icon="inbox" data-label="反馈"></button>
       <button id="tab-runtime" class="nav-btn" type="button" role="tab" aria-selected="false" aria-controls="secRuntime" data-goto="secRuntime" data-route="runtime" data-icon="pulse" data-label="运行"></button>
     </nav>
@@ -228,6 +229,55 @@
             </table>
           </div>
         </details>
+      </div>
+    </section>
+
+    <!-- ---------------- MCP 外部工具 ---------------- -->
+    <section class="sec hidden" id="secMcp" role="tabpanel" aria-labelledby="tab-mcp">
+      <div class="sec-head">
+        <h2>MCP 外部工具</h2>
+        <p class="pane-note">接入本机的 stdio MCP server，把它们的工具交给模型。<b>默认关闭</b>；<b>仅管理员</b>能读写这一页。子进程以服务账号权限运行，<b>不是沙箱</b>；每次调用仍需审批。列表只显示状态与 env 变量名：服务端不回 args，也不回 env 的值。</p>
+      </div>
+      <div class="toolbar">
+        <button id="btnMcpReload" class="btn btn-ghost btn-small" type="button" data-icon="refresh" data-label="重新读取"></button>
+        <span class="dim">只在本分区手动刷新，不做自动轮询</span>
+      </div>
+      <div class="card panel">
+        <h3>全局开关</h3>
+        <label class="mcp-toggle" for="mcpEnabled">
+          <input id="mcpEnabled" type="checkbox">
+          <span>启用 MCP 外部工具（关闭时所有条目都不启动）</span>
+        </label>
+        <p class="pane-note note-tight" id="mcpEnabledNote">读取中…</p>
+      </div>
+      <div class="empty hidden" id="mcpState" aria-live="polite"></div>
+      <div class="card panel">
+        <h3>已配置条目</h3>
+        <div class="table-wrap desktop-only">
+          <table>
+            <thead><tr>
+              <th>条目</th><th>状态</th><th>pid</th><th>工具（暴露 / 总）</th><th>重启</th><th>最后错误</th><th>env 变量名</th><th>命令</th><th class="acts">操作</th>
+            </tr></thead>
+            <tbody id="mcpRows"></tbody>
+          </table>
+        </div>
+        <div class="card-list mobile-only" id="mcpCards"></div>
+      </div>
+      <div class="card panel">
+        <h3>新增 / 整条替换</h3>
+        <p class="pane-note warn">整条替换，原 args 不会回显，保存前请重新填写。编辑已有条目时 args 框是空的；保存会用当前表单整条覆盖那一条（包括把它清空）。</p>
+        <div class="mcp-form">
+          <label class="field wide" for="mcpId"><span>条目 id（小写字母 / 数字 / _-，≤16）</span><input id="mcpId" type="text" autocomplete="off" maxlength="16" placeholder="例如 weather"></label>
+          <label class="field wide" for="mcpCommand"><span>command（绝对路径）</span><input id="mcpCommand" type="text" autocomplete="off" placeholder="C:\path\to\server.exe"></label>
+          <label class="field wide" for="mcpArgs"><span>args（一行一个参数，可为空）</span><textarea id="mcpArgs" rows="3" placeholder="一行一个参数"></textarea></label>
+          <label class="field" for="mcpEnv"><span>env_allowlist（逗号分隔的变量名）</span><input id="mcpEnv" type="text" autocomplete="off" placeholder="LOG_LEVEL, LANG"></label>
+          <label class="field inline" for="mcpEntryEnabled"><input id="mcpEntryEnabled" type="checkbox"><span>条目 enabled</span></label>
+          <div class="row wide">
+            <button id="btnMcpSave" class="btn btn-primary" type="button" data-icon="check" data-label="保存（整条替换）"></button>
+            <button id="btnMcpReset" class="btn btn-ghost" type="button" data-icon="refresh" data-label="清空表单"></button>
+            <span class="dim" id="mcpFormNote">新增条目</span>
+          </div>
+        </div>
       </div>
     </section>
 
