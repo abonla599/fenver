@@ -635,6 +635,17 @@ class StdioSupervisor:
                 if not reason:
                     # 条目重新变合法后，下次再撞上限仍要留一条 refused 审计。
                     runtime.refused_audited = False
+                    # ``max_servers`` 只是"名额"降级，不是条目自身的终态：第 4 条
+                    # 被删掉后名额恢复，这里必须把它放回可启动态，否则 reload 只
+                    # 清审计标记，``_ensure_running`` 见 config_error 直接返回，
+                    # 条目永久卡在 config_error/pid=None。命令不存在/版本不符/
+                    # 坏条目等条目级 config_error 仍保持终态，不许被 reload 复活。
+                    if (
+                        runtime.state == STATE_CONFIG_ERROR
+                        and runtime.last_error == MAX_SERVERS_REASON
+                    ):
+                        runtime.state = STATE_DISABLED
+                        runtime.last_error = ""
                 if not global_enabled:
                     runtime.state = STATE_DISABLED
                     runtime.last_error = ""

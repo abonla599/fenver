@@ -241,6 +241,15 @@ def test_supervisor_reads_public_breaker_cooldown_only(tmp_path):
     class _PublicBudget:
         breaker_cooldown = COOLDOWN
 
+        def __getattr__(self, name):
+            # 旧实现把私有属性放在 getattr 的 default 位置；Python 会先求 default，
+            # 即使公开属性存在也会摸一次 ``_breaker_cooldown``。这里让它响亮地红。
+            if name == "_breaker_cooldown":
+                raise AssertionError(
+                    "supervisor 又去读私有 _breaker_cooldown 兜底了"
+                )
+            raise AttributeError(name)
+
     supervisor = _make(_Config(True, []), tmp_path, budget=_PublicBudget())
     try:
         assert supervisor._cooldown == COOLDOWN, \
@@ -735,6 +744,21 @@ def test_reload_demoted_fourth_server_stops_its_old_runtime(tmp_path):
         )
         assert len(supervisor.ready_servers()) == 3, supervisor.status()
         assert _row(supervisor, "s_four")["state"] == STATE_READY
+
+        # 恢复回归：删掉第 4 条后名额回到 3，s_three 自身条目没变，也必须从
+        # max_servers 降级里回到 ready——否则它永久停在 config_error/pid=None，
+        # ready 只剩 2 条。C3 修之前这里必红。
+        config.servers = [
+            _entry("s_one", "ok"),
+            _entry("s_two", "ok"),
+            _entry("s_three", "ok"),
+        ]
+        supervisor.reload()
+        assert _wait_state(supervisor, "s_three", STATE_READY, timeout=5.0), (
+            supervisor.status()
+        )
+        assert len(supervisor.ready_servers()) == 3, supervisor.status()
+        assert _row(supervisor, "s_three")["pid"] is not None
     finally:
         supervisor.shutdown()
 
@@ -768,6 +792,35 @@ def test_worker_binds_the_generation_stop_event_not_runtime_stop_event(tmp_path)
         assert seen and seen[0] is custom_event, "worker 没有使用入参 event"
         assert runtime.stop_event.is_set() is False, \
             "worker 动了 runtime.stop_event（按代绑定的口径被破坏）"
+
+        # C4 射程：不经过 _run_session 的两处 _wait 入口（inactive / config_error）
+        # 同样必须把**这一代的** stop_event 递下去，而不是 runtime.stop_event。
+        wait_events = []
+
+        def spy_wait(rt, seconds, stop_event):
+            wait_events.append(stop_event)
+            stop_event.set()
+            return True
+
+        supervisor._wait = spy_wait
+        for state, enabled in ((STATE_CONFIG_ERROR, True), (STATE_DISABLED, False)):
+            sid = "s_wait_%s" % state
+            rt = _Runtime(sid, _entry(sid, "ok", enabled=enabled))
+            rt.state = state
+            rt.stop_event = threading.Event()
+            supervisor._global_enabled = True
+            supervisor._runtimes[sid] = rt
+            generation_event = threading.Event()
+            gen_worker = threading.Thread(
+                target=supervisor._worker, args=(rt, generation_event), daemon=True
+            )
+            gen_worker.start()
+            gen_worker.join(5.0)
+            assert not gen_worker.is_alive(), "_worker 在 %s 分支没有按入参退出" % state
+            assert wait_events and wait_events[-1] is generation_event, (
+                "worker 在 %s 分支给 _wait 递了 runtime.stop_event" % state
+            )
+            assert rt.stop_event.is_set() is False
     finally:
         supervisor.shutdown()
 
