@@ -1681,7 +1681,10 @@
   let mcpGeneration = 0;
 
   function syncMcpToggleLock() {
-    $("mcpEnabled").disabled = !mcpLoaded;
+    // 旧 HTML 缓存仍可能没有这颗复选：新 JS 不许在收尾时因取空而整页炸掉。
+    const box = $("mcpEnabled");
+    if (!box) return;
+    box.disabled = !mcpLoaded;
   }
 
   function mcpStateTag(state) {

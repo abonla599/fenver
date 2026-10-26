@@ -245,6 +245,31 @@ def test_mcp_form_body_has_only_the_four_writable_fields():
         "env_allowlist 没有按逗号拆分、去空白、去空项"
 
 
+def test_write_paths_bump_generation_before_their_request():
+    """save/delete/toggle 一开始写就必须作废在途 GET。
+
+    toggle 的代际递增在公开流程里没有行为可达路径（loadMcp 发 GET 时同步把
+    mcpLoaded 置 false，toggle 会早退），所以这一处只能由静态锁钉住；save/delete
+    的在途 GET 竞态由下面的 Node 行为探针实跑。
+    """
+    for name in ("saveMcp", "deleteMcp", "toggleMcpEnabled"):
+        body = _function_body(name)
+        assert body, f"{name} 不见了，这条锁要跟着改而不是删"
+        assert "mcpGeneration += 1" in body, \
+            f"{name} 没有递增 mcpGeneration：写请求不会作废在途的旧 GET"
+        assert body.index("mcpGeneration += 1") < body.index("req("), \
+            f"{name} 先发请求后递增代际，旧 GET 仍可能在窗口内落地"
+
+
+def test_global_toggle_listener_is_bound_to_change_and_busy():
+    js = _js()
+    hit = re.search(r'\$\("mcpEnabled"\)\.addEventListener\("change",\s*([^\n]+)', js)
+    assert hit, "全局开关没有绑定 change 监听"
+    line = hit.group(1)
+    assert "busy(" in line and "toggleMcpEnabled" in line, \
+        "change 监听没有经过 busy/toggleMcpEnabled：" + line
+
+
 def test_mcp_global_toggle_rolls_back_on_failure():
     toggle = _function_body("toggleMcpEnabled")
     assert "catch (e)" in toggle
@@ -282,7 +307,9 @@ def test_toggle_and_busy_respect_the_loaded_lock():
         "busy 的 finally 仍无条件恢复控件，没按 mcpLoaded 重置 MCP 开关"
     lock = _function_body("syncMcpToggleLock")
     assert lock, "syncMcpToggleLock 不见了"
-    assert '$("mcpEnabled").disabled = !mcpLoaded' in lock, \
+    assert 'const box = $("mcpEnabled");' in lock and "if (!box) return;" in lock, \
+        "syncMcpToggleLock 对 #mcpEnabled 缺失没有空值保护（旧 HTML 缓存 + 新 JS 会 TypeError）"
+    assert 'box.disabled = !mcpLoaded' in lock, \
         "syncMcpToggleLock 没有把开关状态绑定到 mcpLoaded"
     invalidate = _function_body("invalidateData")
     assert 'mcpLoaded = false' in invalidate and 'mcpGeneration += 1' in invalidate, \
@@ -325,6 +352,11 @@ class El {
   addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); }
   removeEventListener() {}
   click() { (this._listeners.click || []).forEach((fn) => fn({ currentTarget: this, target: this })); }
+  dispatchEvent(event) {
+    const type = event && event.type;
+    (this._listeners[type] || []).forEach((fn) => fn({ type, target: this, currentTarget: this }));
+    return true;
+  }
   setAttribute(name, value) { this["attr_" + name] = String(value); }
   getAttribute(name) { return Object.prototype.hasOwnProperty.call(this, "attr_" + name) ? this["attr_" + name] : null; }
   removeAttribute(name) { delete this["attr_" + name]; }
@@ -375,7 +407,7 @@ const fetch = (path, opts) => {
 
 const source = fs.readFileSync(process.argv[2], "utf8");
 const probeCode = "\n  globalThis.__mcpProbe = {\n"
-  + "    loadMcp, toggleMcpEnabled, deleteMcp, busy,\n"
+  + "    loadMcp, toggleMcpEnabled, saveMcp, deleteMcp, busy, pickMcp, syncMcpToggleLock,\n"
   + "    get loaded() { return mcpLoaded; },\n"
   + "    get enabled() { return mcpEnabled; },\n"
   + "    get servers() { return mcpServers; },\n"
@@ -397,6 +429,14 @@ vm.runInContext(instrumented, sandbox, { filename: "admin.js" });
 
 const probe = sandbox.__mcpProbe;
 const expect = (cond, message) => { if (!cond) throw new Error(message); };
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const waitFor = async (pred, message) => {
+  for (let i = 0; i < 400; i += 1) {
+    if (pred()) return;
+    await tick();
+  }
+  throw new Error(message || "等待条件超时");
+};
 
 (async () => {
   // 1) GET 失败：开关必须保持禁用，mcpLoaded 必须为 false。
@@ -455,6 +495,108 @@ const expect = (cond, message) => { if (!cond) throw new Error(message); };
     "DELETE 404 后没有重新 GET：" + JSON.stringify(methods));
   expect(probe.servers.length === 0, "DELETE 404 后还留着旧行");
 
+  // 7) 真实 change 事件必须驱动全局开关，且监听链经过 busy：
+  //    PUT 在途时开关应被禁用；绕开 busy 直调 toggle 时它一直可点。
+  calls = [];
+  const put7 = [];
+  const get7 = [];
+  handler = (path, opts) => {
+    const method = (opts && opts.method) || "GET";
+    if (method === "PUT") return new Promise((resolve) => put7.push(resolve));
+    return new Promise((resolve) => get7.push(resolve));
+  };
+  probe.box.checked = false;
+  const changeEvent = typeof Event === "function" ? new Event("change") : { type: "change" };
+  probe.box.dispatchEvent(changeEvent);
+  expect(probe.box.disabled === true,
+    "change 监听没有经过 busy：PUT 在途时全局开关仍可点");
+  expect(put7.length === 1, "真实 change 事件没有触发 PUT settings");
+  const put7Call = calls.find((call) => call.path.indexOf("/mcp/stdio/settings") >= 0);
+  expect(put7Call && JSON.parse(put7Call.opts.body).enabled === false,
+    "change 监听没有把勾选后的新值发给 settings");
+  put7[0]({ status: 200, ok: true, json: async () => ({ enabled: false }) });
+  await waitFor(() => get7.length === 1, "开关 PUT 成功后没有再 GET 一次状态");
+  get7[0]({ status: 200, ok: true, json: async () => ({ enabled: false, servers: [] }) });
+  await waitFor(() => probe.loaded === true && probe.box.disabled === false,
+    "开关切换后没有回到已加载/可点状态");
+  expect(probe.enabled === false, "开关切换后 mcpEnabled 不是新值");
+
+  // 8) 确认弹层打开期间来了新一轮 GET：确认保存必须作废那份写前快照。
+  handler = () => Promise.resolve({
+    status: 200, ok: true, json: async () => ({ enabled: true, servers: [{ id: "srv" }] }) });
+  await probe.loadMcp();
+  expect(probe.loaded === true && probe.servers.length === 1, "保存前装载基线失败");
+  probe.pickMcp({ id: "srv", command: "/usr/bin/srv", env_names: [] });
+  calls = [];
+  const get8 = [];
+  const put8 = [];
+  handler = (path, opts) => {
+    const method = (opts && opts.method) || "GET";
+    if (method === "PUT") return new Promise((resolve) => put8.push(resolve));
+    return new Promise((resolve) => get8.push(resolve));
+  };
+  const saving = probe.saveMcp();
+  await tick();
+  expect(put8.length === 0, "saveMcp 没有先等确认就发 PUT");
+  const staleLoad8 = probe.loadMcp();
+  expect(get8.length === 1, "确认弹层期间的 loadMcp 没有发 GET");
+  byId.get("askOk").click();
+  await tick();
+  expect(put8.length === 1, "确认后没有发 PUT");
+  get8[0]({ status: 200, ok: true, json: async () => ({ enabled: false, servers: [{ id: "stale" }] }) });
+  await staleLoad8;
+  expect(probe.loaded === false,
+    "保存期间的旧 GET 把 mcpLoaded 解锁了：写路径没有作废在途 GET");
+  expect(probe.enabled === true && probe.servers.map((server) => server.id).join(",") === "srv",
+    "旧 GET 的写前快照覆盖了当前状态：" + JSON.stringify(probe.servers));
+  expect(byId.get("mcpRows").textContent.indexOf("stale") < 0,
+    "旧 GET 把旧行又渲染回表里了");
+  put8[0]({ status: 200, ok: true, json: async () => ({}) });
+  await waitFor(() => get8.length === 2, "保存成功后没有重新 GET 状态");
+  get8[1]({ status: 200, ok: true, json: async () => ({ enabled: true, servers: [{ id: "srv" }] }) });
+  await saving;
+  expect(probe.loaded === true && probe.servers.map((server) => server.id).join(",") === "srv",
+    "保存结束后状态没有回到最新一次 GET");
+
+  // 9) DELETE 在途时回来的旧 GET 也不能把刚删掉的那行画回去。
+  handler = () => Promise.resolve({
+    status: 200, ok: true, json: async () => ({ enabled: true, servers: [{ id: "keep" }] }) });
+  await probe.loadMcp();
+  calls = [];
+  const get9 = [];
+  const del9 = [];
+  handler = (path, opts) => {
+    const method = (opts && opts.method) || "GET";
+    if (method === "DELETE") return new Promise((resolve) => del9.push(resolve));
+    return new Promise((resolve) => get9.push(resolve));
+  };
+  const staleLoad9 = probe.loadMcp();
+  const deleting9 = probe.deleteMcp({ id: "keep" });
+  byId.get("askOk").click();
+  await tick();
+  expect(del9.length === 1, "deleteMcp 没有先确认再 DELETE");
+  get9[0]({ status: 200, ok: true, json: async () => ({ enabled: false, servers: [{ id: "stale" }] }) });
+  await staleLoad9;
+  expect(probe.loaded === false,
+    "删除期间的旧 GET 把 mcpLoaded 解锁了：deleteMcp 没有作废在途 GET");
+  expect(probe.enabled === true && probe.servers.map((server) => server.id).join(",") === "keep",
+    "DELETE 期间旧 GET 的写前快照覆盖了当前状态：" + JSON.stringify(probe.servers));
+  expect(byId.get("mcpRows").textContent.indexOf("stale") < 0,
+    "DELETE 期间旧 GET 把已删的行又渲染回表里了");
+  del9[0]({ status: 200, ok: true, json: async () => ({}) });
+  await waitFor(() => get9.length === 2, "删除成功后没有重新 GET 状态");
+  get9[1]({ status: 200, ok: true, json: async () => ({ enabled: true, servers: [] }) });
+  await deleting9;
+  expect(probe.servers.length === 0, "删除结束后还留着旧行");
+
+  // 10) 旧 HTML 缓存 + 新 JS：#mcpEnabled 缺失时，收尾同步不许 TypeError。
+  const realGetElementById = document.getElementById;
+  document.getElementById = (id) => (id === "mcpEnabled" ? null : realGetElementById(id));
+  let guardError = null;
+  try { probe.syncMcpToggleLock(); } catch (err) { guardError = err; }
+  document.getElementById = realGetElementById;
+  expect(!guardError, "#mcpEnabled 缺失时 syncMcpToggleLock 抛了 TypeError：" + guardError);
+
   console.log(JSON.stringify({ ok: true, calls: methods }));
 })().catch((err) => {
   console.error("PROBE FAIL: " + (err && err.stack ? err.stack : err));
@@ -464,7 +606,14 @@ const expect = (cond, message) => { if (!cond) throw new Error(message); };
 
 
 def test_mcp_toggle_stays_locked_after_failed_load_behaviour(tmp_path):
-    """真跑一遍 admin.js：GET 失败 + busy 收尾 + 直接调用 toggle，都不许解锁/发 PUT。"""
+    """真跑一遍 admin.js：读失败锁开关、真实 change 走 busy、写路径作废在途 GET。
+
+    7) 用 ``dispatchEvent(new Event("change"))`` 触发全局开关，PUT 在途时开关必须
+    处于 disabled——监听绕开 busy 时这条会红；8/9) 在 save 的确认弹层与 DELETE
+    在途时放行一份旧 GET，旧响应不许解锁、覆盖状态或把旧行画回来——删掉写路径的
+    ``mcpGeneration += 1`` 时这两条会红；10) 旧 HTML 缓存缺 ``#mcpEnabled`` 时
+    ``syncMcpToggleLock`` 不许抛 TypeError。
+    """
     node = shutil.which("node")
     if not node:
         pytest.skip("这台机器上没有 node，跑不了行为探针；静态判据照跑")
