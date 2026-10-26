@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* swap-marker-v0375-rebuild-20261026：历史改写后重建包与旧线上包的判别串，不参与版本推导。 */
 /* release-marker-v0.37.5：本版只换服务端（MCP stdio 外部工具，管理员配置、默认关闭、逐次审批、进程树回收）；APK 仍 0.36.4。 */
 /* release-marker-v0.37.4：本版只换服务端（搜索结果正文读取 web_read + fetch_core 单源出站判据 + local-use NAT64 拒绝）；APK 仍 0.36.4。 */
 /* release-marker-v0.36.4：本版有安卓包（管理台安全页攻击可视化；APK 0.36.4，native 与 0.36.1 相同）；服务端与壳同版。 */
