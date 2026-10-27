@@ -76,7 +76,8 @@ def _stub_side_checks(gate, monkeypatch):
     也照同一手法接掉，理由比第 5 格更硬：本文件的 `root` 是**真仓库**，而这一格判的
     恰恰是真仓库的 ref 状态——留着它，这些用例测到的就不是自己名义上那件事，而是
     "本机此刻有没有脏 ref"。它自己的牙在 test_v0350_leak_quarantine_gate.py，那里用
-    pytest `tmp_path` 现造一次性仓库，红／绿／判不出来三档都真跑，不借本文件的地盘。
+    pytest `tmp_path` 现造一次性仓库，红／绿／对象缺失的正面证明／判不出来几档都真跑，
+    不借本文件的地盘。
     这里接掉的同样是本文件的噪声，不是那条判据。
     """
     monkeypatch.setattr(gate, "release_note_exists", lambda root, tag: True)

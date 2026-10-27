@@ -7,28 +7,32 @@
 就把那个提交重新带回公开仓库。而 `.git/hooks/` 里没有 pre-push，今天唯一的屏障是
 「发版那个人记得」。这一格把那句「记得」换成机器判据。
 
-## 为什么这个文件必须有三份夹具，而不是一份
+## 为什么这个文件必须有好几份夹具，而不是一份
 
-只会红的锁和只会绿的锁都不算锁。所以同一格在这里跑出**三种可见的结论**，每种都在 pytest 的
+只会红的锁和只会绿的锁都不算锁。所以同一格在这里跑出**四类可见的结论**，每类都在 pytest 的
 `tmp_path` 里现造一次性 git 仓库（**绝不在真仓库目录里 `git init`，绝不碰真仓库的 ref**——
 那台机器同时是生产机）：
 
 1. **红**：临时仓库里有一个可推送 ref 能走到被隔离的提交 ⇒ 拒绝，并且报出的名单点名那个 ref；
-2. **绿的反例**：tag 与分支头**都**走不到被隔离的提交——那个提交仍然是库里的对象，只是没有
-   ref 能到它，这正是把脏 ref 删干净之后仓库的形状。缺了这一条，第 1 条可能只是一把恒红的锁，
-   作为证据等于零；
-3. **fail-closed**：被隔离的 SHA 在这份库里根本没有对象 ⇒ `merge-base` 退 128 ⇒ **也拒绝**。
-   第 2 与第 3 之间只差「对象在不在库里」，两条一起在场才证明分类读的是**退出码**，
-   不是「看起来像不像出错了」（#74 咬的就是把 128 当成 1 那一口）。
+2. **绿的反例（对象还在）**：tag 与分支头**都**走不到被隔离的提交——那个提交仍然是库里的对象，
+   只是没有 ref 能到它，这正是把脏 ref 删干净之后仓库的形状。缺了这一条，第 1 条可能只是一把
+   恒红的锁，作为证据等于零；
+3. **绿的反例（对象已被清掉）**：`filter-repo`/`gc` 之后被隔离的 SHA 在库里**没有对象**；只要
+   每个可推送 ref 都能解析成提交，"没有 ref 能到达它"就是**正面证明** ⇒ 放行。这正是本机
+   生产仓库今天的形状；
+4. **fail-closed**：对象还在、但某个可推送 ref 解析不成提交（指向 blob 的 tag），或对象不存在
+   却有 ref 解析不成提交 ⇒ merge-base 128 / ref 预检失败 ⇒ **拒绝**。第 3 与第 4 之间只差
+   "每个 ref 能不能解析成提交"，两条一起在场才证明放行读的是两个世界事实，而不是"看起来没
+   报错"（#74 咬的就是把 128 当成 1 那一口）。
 
 后面还有一组「没有开关」的钉子：候选的 opt-out 旗名一律被 argparse 拒、`--help` 里不多一面旗、
 环境变量改不出绿灯、三面既有降级旗一起带上也照样红。
 
 ## 诚实交代：哪几处是文本、哪几处是行为
 
-- 行为：三档退出码（先让 git 当场把三个数退出来，再核闸门的分类）、红／绿／fail-closed 三种
-  结论、候选旗名被拒（`SystemExit(2)`）、`--help` 的旗集合（问正在运行的解析器，不扫源码）、
-  环境变量降级、`main()` 的返回值与输出行。
+- 行为：三档退出码（先让 git 当场把三个数退出来，再核闸门的分类）、红／绿（对象还在与对象已
+  被清掉两种）／fail-closed 几类结论、ref 解析不成提交的反例、候选旗名被拒（`SystemExit(2)`）、
+  `--help` 的旗集合（问正在运行的解析器，不扫源码）、环境变量降级、`main()` 的返回值与输出行。
 - 文本，而且只能这样（理由写在各条 docstring 里）：`QUARANTINED` 是 40 位十六进制的元组、
   这一格的调用点排在 `verdict=PASS` 之前、闸门读的环境变量名里没有提到这一格的。
 - 断言一律落在 `returncode` 与输出行上，不落在「没抛异常」上（本仓库的老规矩）。
@@ -199,8 +203,9 @@ def gate():
 def test_git_answers_the_three_classes_with_three_different_exit_codes(repo):
     """`merge-base --is-ancestor` 在这份仓库里当场退出 0 / 1 / 128 三个不同的数。
 
-    这条是整个文件的前提：如果 git 把「查无此对象」也退成 1，那「128 必须红」就只是一句
-    空话；先让它把三个数退出来，下面的分类才有可核的对象。
+    这条钉的是**对象存在时**的分类前提：如果 git 把「对象查不到」也退成 1，那
+    `_ref_reaches_quarantined` 的 128 档就只是一句空话。对象缺失那一档不走 merge-base，
+    由 `cat-file -e` + ref 可解析预检证明（见第 3 节），两种证据互不替代。
     """
     quarantined = _quarantined_commit(repo)
     _must(repo, "tag", "v9.9.9", quarantined)
@@ -309,28 +314,100 @@ def test_green_the_gate_reaches_verdict_pass_afterwards(repo, gate, monkeypatch,
 
 
 # --------------------------------------------------------------------------
-# 3) fail-closed：判不出来不是「没问题」
+# 3) 对象不存在：全 ref 可解析时是正面证明；坏 ref / merge-base 128 仍 fail-closed
 # --------------------------------------------------------------------------
 
-def test_fail_closed_an_undecidable_probe_blocks_not_passes(repo, gate, monkeypatch, capsys):
-    """被隔离的 SHA 在这份库里没有对象 ⇒ `merge-base` 退 128 ⇒ 必须 BLOCK。
+def test_object_absent_with_every_ref_resolvable_is_a_positive_proof_of_clean(repo, gate,
+                                                                             monkeypatch, capsys):
+    """对象被 `filter-repo`/`gc` 清掉 + 每个可推送 ref 都能解析成提交 ⇒ PASS，不是 fail-closed。
 
-    最常写错的正是这一档：把「查无此对象」读成「没找到问题」。它与上面那条绿灯用例的
-    区别只有「对象在不在库里」，两条都在才说明分类读的是退出码。
+    "对象不存在"本身是正面证明：一个 ref 若真能走到那个提交，提交对象就必须存在。只要每个
+    ref 都能解析成提交，就没有任何 ref 能把它推出去——这正是生产仓库今天的形状，也是
+    `filter-repo` + `gc` 之后这一格不再假 BLOCK 的理由。
     """
-    _quarantined_commit(repo)
     _must(repo, "tag", "v9.9.9", "HEAD")
     absent = _absent_sha(repo)
     monkeypatch.setattr(gate, "QUARANTINED", (absent,))
+    refs, why = gate.pushable_refs(str(repo))
+    assert refs and why == "ok", "夹具没有可推送 ref：下面的证明是空转"
+    for ref in refs:
+        assert _git(repo, "rev-parse", "--verify", "--quiet",
+                    ref + "^{commit}").returncode == 0, (
+            "夹具里 %s 解析不成提交，下面测的就不是「全 ref 可解析」这一档" % ref)
+    assert _git(repo, "cat-file", "-e", absent + "^{commit}").returncode != 0, (
+        "夹具 SHA 居然有对象，测到的就不是「对象不存在」这一档")
 
     ok, token, detail = gate.check_leak_quarantine(str(repo))
-    assert ok is False, "查无此对象被当成了「干净」：这就是 fail-open：%s" % detail
-    assert token == "probe-undecidable", "记号应当是判不出来那一档，读到 %r" % token
-    assert "rc=128" in detail, "说明里要带上退出码，否则下次没人知道是 128：%s" % detail
+    assert ok is True and token == "ok", (
+        "对象不存在且 %d 个 ref 全部可解析，却仍然被判成不干净：%s" % (len(refs), detail))
+    assert "object-absent" in detail and "对象不存在" in detail, (
+        "绿灯的说明里要写清依据（对象不存在 + 全 ref 可解析）：%s" % detail)
+    assert absent[:12] in detail, "说明里要带上 absent SHA 的前 12 位：%s" % detail
+    assert str(len(refs)) in detail, "说明里要带上 ref 数：%s" % detail
 
     code = _main_at(gate, repo, monkeypatch)
     out = capsys.readouterr().out
-    assert code == 2, "判不出来走的是「判据拿不到」那一档（2），不是已证相反（1）：%s" % out
+    assert code == 0, "对象不存在 + 全 ref 可解析是干净证明，闸门却封了版：%s" % out
+    assert "leak-quarantine=ok" in out and "verdict=PASS" in out
+    assert "REFUSED" not in out
+
+
+def test_fail_closed_a_ref_that_resolves_to_a_blob_is_undecidable(repo, gate, monkeypatch,
+                                                                  capsys):
+    """被隔离的提交还在库里，但 `refs/tags/broken` 指向 blob（解析不成提交）⇒ 判不出来。
+
+    `merge-base --is-ancestor` 对这种 ref 退 128；把它读成 1（"没找到"）就是 fail-open。
+    夹具先让 `rev-parse <ref>^{commit}` 自己退 1，证明这一条测的是"ref 解不成提交"。
+    """
+    quarantined = _quarantined_commit(repo)
+    _must(repo, "reset", "--hard", "HEAD~1")   # 分支头退回干净那一笔，对象仍留在库里
+    (repo / "a-blob.txt").write_text("blob, not a commit\n", encoding="utf-8")
+    blob = _must(repo, "hash-object", "-w", "a-blob.txt")
+    _must(repo, "tag", "broken", blob)
+    probe = _git(repo, "rev-parse", "--verify", "--quiet", "refs/tags/broken^{commit}")
+    assert probe.returncode == 1, (
+        "夹具没造出「ref 解析不成提交」：rev-parse 退的是 %d（stderr=%r）"
+        % (probe.returncode, probe.stderr))
+    assert _git(repo, "cat-file", "-t", quarantined).returncode == 0, (
+        "夹具自己坏了：这一条要的是「对象还在、只是 ref 解不成提交」")
+    monkeypatch.setattr(gate, "QUARANTINED", (quarantined,))
+
+    ok, token, detail = gate.check_leak_quarantine(str(repo))
+    assert ok is False and token == "probe-undecidable", (
+        "指向 blob 的 ref 被当成了干净：%r / %r" % (token, detail))
+    assert "refs/tags/broken" in detail, "说明里要点名解析不了的 ref：%s" % detail
+
+    code = _main_at(gate, repo, monkeypatch)
+    out = capsys.readouterr().out
+    assert code == 2, "判不出来走「判据拿不到」那档（2），不是已证相反（1）：%s" % out
+    assert "leak-quarantine=REFUSED token=probe-undecidable" in out
+    assert "verdict=PASS" not in out
+
+
+def test_fail_closed_object_absent_but_a_ref_does_not_resolve_is_still_undecidable(
+        repo, gate, monkeypatch, capsys):
+    """对象不存在也**不是**无条件放行：只要有一个 ref 解析不成提交，"无法到达"就失去依据。
+
+    这条是 ref 可解析预检的牙：删掉预检，absent 会被直接记成干净，这里必须变红。
+    """
+    (repo / "a-blob.txt").write_text("blob, not a commit\n", encoding="utf-8")
+    blob = _must(repo, "hash-object", "-w", "a-blob.txt")
+    _must(repo, "tag", "broken", blob)
+    absent = _absent_sha(repo)
+    monkeypatch.setattr(gate, "QUARANTINED", (absent,))
+    refs, why = gate.pushable_refs(str(repo))
+    assert "refs/tags/broken" in refs and why == "ok", "夹具里没有那枚坏 ref"
+    assert _git(repo, "rev-parse", "--verify", "--quiet",
+                "refs/tags/broken^{commit}").returncode == 1
+
+    ok, token, detail = gate.check_leak_quarantine(str(repo))
+    assert ok is False and token == "probe-undecidable", (
+        "对象不存在但有一个 ref 解析不了，却被当成了干净：%r / %r" % (token, detail))
+    assert "refs/tags/broken" in detail, "说明里要点名解析不了的 ref：%s" % detail
+
+    code = _main_at(gate, repo, monkeypatch)
+    out = capsys.readouterr().out
+    assert code == 2, "判不出来走那档（2）：%s" % out
     assert "leak-quarantine=REFUSED token=probe-undecidable" in out
     assert "verdict=PASS" not in out
 

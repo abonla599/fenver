@@ -88,21 +88,24 @@ scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 
 重新带回公开仓库，而那一刻没有任何东西变红。判据因此问一个世界事实：本地 tag 与分支头
 这个集合里，有没有谁的祖先链上躺着 `QUARANTINED` 中的哪一个。
 
-三档按 `git merge-base --is-ancestor` 的**退出码**分，逐档的理由见 `_ref_reaches_quarantined`：
-0 = 确实到了 → 拒绝，并把 offending 的 ref 名单原样打出来（那份名单就是"该删哪些"）；
-1 = 证明没到 → 这一格放行；**其余一律（含 128：对象不在库里、目录不是仓库、ref 解析不了）
+对一个**还在库里**的对象，三档按 `git merge-base --is-ancestor` 的**退出码**分，逐档的理由见
+`_ref_reaches_quarantined`：0 = 确实到了 → 拒绝，并把 offending 的 ref 名单原样打出来（那份
+名单就是"该删哪些"）；1 = 证明没到 → 这一格放行；**其余（128：ref 解析不了、目录不是仓库）
 = 判不出来 → 也拒绝**。"验不出问题"在这把锁里从来不是"没问题"——#74 咬的就是把 128 当 1。
+
+**对象不存在本身是正面证明，不是判不出来**：一个 ref 若真能走到那个提交，提交对象就必须在
+库里。于是"这个提交对象不存在"与"每一个可推送 ref 都能解析成提交"两条同时成立时，没有任何
+ref 能把它推出去——这正是 `git filter-repo` + `git gc` 把泄露对象清掉之后的形状，也是
+`absent` 那一档放行的依据（`_commit_object_exists` + ref 可解析预检）。反过来，只要有一个
+ref 解析不成提交（悬空 ref、指向 blob 的 tag、目录不是仓库），"到不了"就失去依据，仍按
+`probe-undecidable` 拒绝：坏 ref 与 merge-base 的 128 都还是 fail-closed。
 
 这一格**没有旗子、没有环境变量、没有 warn-only 模式**，是有意的：本文件另外三面旗能做的
 都只是把"取不到"降级，而"要不要放过一个含泄露的 ref"不属于任何操作者当场能授权的事。
-让它变绿只有一个办法：把名单里那些 ref 删掉。删干净之后 `QUARANTINED` 里那一项**继续留着**
+让它变绿有两个办法：把名单里那些 ref 删掉，或者让那个对象真的从库里消失（`filter-repo` /
+`gc`）并确认每个可推送 ref 都还解析得成提交。删干净之后 `QUARANTINED` 里那一项**继续留着**
 （这一格要的是"没有任何 ref 能到它"，不是"那个提交还躺在库里"）；真要把它从隔离清单里摘掉，
 那是改代码、过一次 review 的事，不是手边一面旗的事。
-
-一个后续状态要说在前面：那份对象一旦被 `git gc` 或历史重写清掉，这一格会从"绿"变回
-`probe-undecidable` 的红（128 那一档不认识"查无此对象"这种好消息）。那不是故障，是这条
-判据的定义本身——届时唯一的出路是把那一项从清单里显式删掉（一次代码改动、一次 review），
-而不是给闸门补一面旗。
 
 ## 构建前的产源预检（`--pre-build`，#113）
 
@@ -516,6 +519,43 @@ def _ref_reaches_quarantined(repo_root: str, commit: str, ref: str):
     return "undecidable", "rc=%d%s" % (out.returncode, (" %s" % err[:180] if err else ""))
 
 
+def _commit_object_exists(repo_root: str, commit: str):
+    """这个提交对象在不在库里？回 `present` / `absent` / `undecidable` 三档 + 说明。
+
+    `git cat-file -e <commit>^{commit}` 的 rc=0 是"在"；非零只是"没找到"，而 git 把
+    「对象不存在」与「目录不是仓库」都折进 128，所以这个负数**不能单独当结论**——它只是
+    "该走 ref 可解析预检"的信号，真正把"没有"变成正面证明的是
+    `_all_refs_resolve_to_commits`：每个可推送 ref 都能解析成提交时，没有 ref 能指向一个
+    不存在的对象。超时 / 起不来 git / 其它退出码 ⇒ `undecidable`，不许吞成 `absent`。
+    """
+    _out, rc, err = _git_probe(repo_root, ["cat-file", "-e", "%s^{commit}" % commit])
+    if rc == 0:
+        return "present", "ok"
+    if rc in (1, 128):
+        return "absent", "rc=%d%s" % (rc, (" %s" % err if err else ""))
+    return "undecidable", "rc=%s%s" % (
+        "?" if rc is None else rc, (" %s" % err if err else ""))
+
+
+def _all_refs_resolve_to_commits(repo_root: str, refs):
+    """每个可推送 ref 都解析得成一个提交吗？回 (可以, 说明)。
+
+    这是"对象不存在"能放行的另一半证明：一个 ref 若真能走到那个提交，这个 ref 自己就
+    必须解析得成一个提交。任何一个解析不了（悬空 ref、指向 blob/tree 的 tag、目录不是
+    仓库），"无法到达它"就失去依据——按判不出来处理，不放行。
+    """
+    broken = []
+    for ref in refs:
+        _out, rc, err = _git_probe(repo_root, ["rev-parse", "--verify", "--quiet",
+                                               "%s^{commit}" % ref])
+        if rc != 0 or not _out:
+            broken.append("%s（rc=%s%s）" % (
+                ref, "?" if rc is None else rc, (" %s" % err if err else "")))
+    if broken:
+        return False, "；".join(broken)
+    return True, ""
+
+
 def check_leak_quarantine(repo_root: str):
     """**有没有任何一个还能被推出去的 ref 能走到被隔离的提交？** 回 (可以, 记号, 说明)。
 
@@ -524,13 +564,15 @@ def check_leak_quarantine(repo_root: str):
 
     - `ref-reaches-quarantined`：名单里的 ref 一个都不许留下——说明里就是那份"该删哪些"，
       不需要人再数一遍；
-    - `probe-undecidable`：某个 ref 的祖先关系判不出来。**判不出来就不是干净**，不放行；
+    - `probe-undecidable`：某个 ref 的祖先关系判不出来，或者对象不存在却有 ref 解析不成
+      提交。**判不出来就不是干净**，不放行；
     - `refs-unenumerable`：连 ref 清单都列不出来（这个目录到底是不是仓库都答不上来），
       那就没有一条判据谈得上"通过"；清单列出来了却是**空的**（既无 tag 也无分支头）
       也在这一档——没扫过任何 ref 的绿灯同样是"通过"这两个字没有依据。
 
-    逐个 ref 一次 `merge-base` 是 O(refs) 次 git 调用——一次发版只跑一遍，慢不是问题，
-    漏才是。只读，一个字节都不写。
+    对象还在时逐个 ref 一次 `merge-base`，对象已被 `filter-repo`/`gc` 清掉时逐个 ref 一次
+    `rev-parse`——都是 O(refs) 次 git 调用，一次发版只跑一遍，慢不是问题，漏才是。只读，
+    一个字节都不写。
     """
     refs, why = pushable_refs(repo_root)
     if refs is None:
@@ -541,17 +583,38 @@ def check_leak_quarantine(repo_root: str):
         return False, "refs-unenumerable", (
             "这份仓库里既没有本地 tag 也没有分支头（%s）——没有任何可推送的 ref 被扫过，"
             "'没有一个能走到被隔离的提交'这句话就没有依据" % repo_root)
-    offenders, offender_commits, undecidable = [], [], []
+    offenders, offender_commits = [], []
+    present_clean, absent, undecidable = [], [], []
     for commit in QUARANTINED:
+        state, state_detail = _commit_object_exists(repo_root, commit)
+        if state == "undecidable":
+            undecidable.append("对象探测 %s…：%s" % (commit[:12], state_detail))
+            continue
+        if state == "absent":
+            # 对象不存在本身还不足以放行：先证明没有任何 ref 可能指向它。
+            resolvable, refs_detail = _all_refs_resolve_to_commits(repo_root, refs)
+            if not resolvable:
+                undecidable.append(
+                    "%s… 对象不存在，但有 ref 解析不成提交：%s" % (commit[:12], refs_detail))
+                continue
+            absent.append(commit)
+            continue
+        commit_clean = True
         for ref in refs:
             verdict, detail = _ref_reaches_quarantined(repo_root, commit, ref)
             if verdict == "reaches":
+                commit_clean = False
                 if ref not in offenders:
                     offenders.append(ref)
                 if commit not in offender_commits:
                     offender_commits.append(commit)
-            elif verdict == "undecidable" and not any(u[0] == ref for u in undecidable):
-                undecidable.append((ref, commit, detail))
+            elif verdict == "undecidable":
+                commit_clean = False
+                note = "%s / %s…：%s" % (ref, commit[:12], detail)
+                if note not in undecidable:
+                    undecidable.append(note)
+        if commit_clean:
+            present_clean.append(commit)
     if offenders:
         # 名单本身就是"该删哪些"，所以逐个列全、不缩写、不计数了事：看一眼就能照着删。
         return False, "ref-reaches-quarantined", (
@@ -561,13 +624,19 @@ def check_leak_quarantine(repo_root: str):
                " ".join(offenders)))
     if undecidable:
         return False, "probe-undecidable", (
-            "%d 处 ref 的祖先关系判不出来：%s —— 判不出来不等于干净，不放行"
-            % (len(undecidable), "；".join(
-                "%s / %s…：%s" % (ref, commit[:12], detail)
-                for ref, commit, detail in undecidable)))
-    return True, "ok", (
-        "%d 个可推送 ref（tag + 分支头）逐个核过，没有一个能走到被隔离的提交（%s）"
-        % (len(refs), "、".join("%s…" % c[:12] for c in QUARANTINED)))
+            "%d 处判不出来：%s —— 判不出来不等于干净，不放行"
+            % (len(undecidable), "；".join(undecidable)))
+    summary = []
+    if present_clean:
+        summary.append(
+            "%d 个可推送 ref（tag + 分支头）逐个核过，没有一个能走到仍在库里的被隔离提交（%s）"
+            % (len(refs), "、".join("%s…" % c[:12] for c in present_clean)))
+    if absent:
+        summary.append(
+            "object-absent：被隔离提交 %s… 对象不存在，且 %d 个可推送 ref（tag + 分支头）"
+            "均可解析成提交，无法到达它"
+            % ("、".join(c[:12] for c in absent), len(refs)))
+    return True, "ok", "；".join(summary)
 
 
 def _fail(msg: str, code: int = 1) -> "int":
