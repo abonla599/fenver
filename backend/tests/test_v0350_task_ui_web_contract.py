@@ -370,17 +370,23 @@ def test_the_three_task_wrappers_are_exported_and_hit_the_agreed_endpoints():
 def test_the_answer_request_shape_matches_the_endpoint_model():
     """answerTask 发的三键必须正好落在 OrchestrateRequest 的字段上，而 goal 那一格缺席不了。
 
-    这几格的权威是 main.py 里那条模型（本票禁改后端，正好逼前端只用现有键）：`goal: str`
-    没有默认值 = 必填，续跑判定认的却是 task_id。所以带出去的必须是**任务自己那条 goal**
-    ——空串也过校验，却把"这一枪在续哪件事"从服务端日志里抹掉，而那是排查重复付费时
-    唯一想看的一行。
+    这几格的权威是 main.py 里那条模型（本票禁改后端，正好逼前端只用现有键）：`goal` 是
+    必填 str（可带 max_length，`Field(..., ...)` 头一个 `...` 就是必填），续跑判定认的
+    却是 task_id。所以带出去的必须是**任务自己那条 goal**——空串也过校验，却把"这一枪
+    在续哪件事"从服务端日志里抹掉，而那是排查重复付费时唯一想看的一行。
     """
     src = _text(MAIN_PY)
     block = re.search(r"class OrchestrateRequest\(BaseModel\):\n((?:[ \t].*\n)*)", src)
     assert block, "main.py 里找不到 OrchestrateRequest——那条模型改名了，这把锁得跟着改读法"
     lines = dict(re.findall(r"^    (\w+)\s*:\s*([^\n]+)$", block.group(1), flags=re.M))
     assert set(lines) == {"goal", "task_id", "user_answer"}, sorted(lines)
-    assert lines["goal"].strip() == "str", f"goal 不再是那格必填的 str：{lines['goal']!r}"
+    goal = lines["goal"].strip()
+    # goal 的必填语义在 Field 头一个 `...` 里；上限必须一起钉住——只认 `str` 的话，
+    # 有人把 max_length 删了这条照样绿。
+    assert re.fullmatch(
+        r"str\s*=\s*Field\(\s*\.\.\.\s*,\s*max_length=MAX_MESSAGE_CHARS\s*\)", goal), (
+        "goal 必须是必填 str 且带上限，形如 "
+        f"`str = Field(..., max_length=MAX_MESSAGE_CHARS)`：{goal!r}")
     assert lines["task_id"].startswith("Optional"), lines["task_id"]
     assert lines["user_answer"].startswith("Optional"), lines["user_answer"]
 

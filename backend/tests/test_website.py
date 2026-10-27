@@ -7,6 +7,7 @@ Cloudflare 已设「尊重现有标题」,源站一不表态,改版在朋友那�
 import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.web.web_router import IMMUTABLE, asset_token
@@ -68,11 +69,30 @@ def test_site_assets_are_public_and_uncached():
 
 # ---------- 1b. 安全响应头：点击劫持 / 嗅探 / Referrer / HSTS ----------
 
-def test_the_landing_page_sends_the_clickjacking_and_sniffing_headers():
+def test_the_landing_page_csp_forbids_framing():
+    """页面那条 CSP 自己也得有 frame-ancestors：XFO 被老浏览器忽略时它兜底。"""
     res = client.get("/")
     assert res.status_code == 200
     assert "frame-ancestors 'none'" in res.headers["content-security-policy"], \
         "CSP 里没有 frame-ancestors：别的站可以把官网嵌进自己的 iframe"
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/", 200),
+    ("/admin/", 200),
+    ("/app/", 200),
+    ("/v1/sessions", 200),        # JSON 接口：没有 CSP 的那一档，三枚常驻头照旧
+    ("/no-such-page-anywhere", 404),  # 框架 404：中间件不许只认已挂载的路由
+])
+def test_every_response_shape_carries_the_three_standing_headers(path, expected):
+    """XFO / nosniff / Referrer 挂在全局中间件上，就不许按路径挑形状。
+
+    只测 `/` 时，中间件被误改窄成"只对页面生效"也一样绿——而 /v1/* 的 JSON 与框架
+    404 恰好是最容易被嵌进 iframe 拿去做界面伪装的一档。HSTS 是有条件的那枚，
+    它的正负控在下面单独判。
+    """
+    res = client.get(path)
+    assert res.status_code == expected, res.text
     assert res.headers["x-frame-options"] == "DENY"
     assert res.headers["x-content-type-options"] == "nosniff"
     assert res.headers["referrer-policy"] == "no-referrer"
