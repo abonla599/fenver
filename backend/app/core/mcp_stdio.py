@@ -184,7 +184,8 @@ def _refused_reason(text: str) -> str:
         mapped = _REFUSED_BY_COMMAND_PROBLEM.get(token)
         if mapped:
             return mapped
-    if raw.startswith("spawn_failed"):
+    if raw.startswith("spawn_failed") or raw.startswith("job_failed"):
+        # Job 建不起来 = 起进程这步失败（随后已杀树拒绝），不是命令规则问题。
         return "spawn_failed"
     if raw.startswith("env_"):
         return "env_denied"

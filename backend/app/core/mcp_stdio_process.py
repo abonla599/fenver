@@ -20,9 +20,9 @@
   之间毫秒级竞态逃逸的孙进程；
 - 错误串只放短原因，绝不回显 command/args/env 的值。
 
-Job 失败（嵌套 Job 被拒、权限不足等）**不拒绝启动**：``job_attached=False`` 记下来，
-靠 ``taskkill`` 收树。状态必须可观测，但不该因为一个观测/兜底设施起不来就让管理员
-配置的 server 全站不可用。
+Job 失败（嵌套 Job 被拒、权限不足等）**拒绝启动**：``Popen`` 已经起了子进程，但既
+没有 ``KILL_ON_JOB_CLOSE`` 也没有内存 / CPU 限额，这样的 runtime 不能交给 supervisor；
+先杀树、收尸，再以 :class:`MCPStdioConfigError` 进终态 ``config_error``。
 """
 from __future__ import annotations
 
@@ -420,7 +420,11 @@ def _apply_job_limits(
     active_processes: int,
     cpu_time_100ns: int,
 ) -> None:
-    """设置 Job 限额；失败抛 OSError（由调用方降级为 ``job_attached=False``）。"""
+    """设置 Job 限额；失败抛 OSError。
+
+    ``_create_job_for`` 把它收成 ``attach_failed:<code>``；spawn 随后杀树、收尸、
+    关管道并拒绝启动——**不降级**为 ``job_attached=False`` 的半启动 runtime。
+    """
     info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     basic = info.BasicLimitInformation
     basic.LimitFlags = (
@@ -543,7 +547,7 @@ class StdioProcess:
     - ``pid`` / ``proc``：``Popen`` 的 pid 与对象；
     - ``job``：Job 句柄（未附加/已关闭为 ``None``）；
     - ``job_attached``：spawn 时是否成功分配进 Job；
-    - ``job_error``：Job 失败时的短原因（可观测，不含路径/参数）。
+    - ``job_error``：Job 失败的短原因；spawn 在失败时拒绝启动，正常路径为 ``None``。
 
     方法：``poll`` / ``wait`` / ``terminate_tree``（幂等）/ ``kill``（= ``terminate_tree``，
     满足 T2 客户端对进程对象的形状要求）。不启动任何 reader 线程。
@@ -696,7 +700,7 @@ def spawn_stdio(
       :class:`MCPStdioConfigError`；
     - ``cwd`` 固定 ``<mcp_root>/<id>``；**不接受 cwd 参数**（T1 已整条拒该键）；
     - Windows：``CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP``，随后建 Job 并分配；
-      Job 失败只记 ``job_attached=False``，不拒绝启动；
+      Job 失败时杀掉已启动的进程树并抛 :class:`MCPStdioConfigError`（终态）；
     - POSIX：``start_new_session=True``，杀树走 ``killpg``。
     """
     normalized = _validated_entry(entry)
@@ -745,4 +749,26 @@ def spawn_stdio(
             active_processes=int(active_processes),
             cpu_time_100ns=int(cpu_time_100ns),
         )
+        if job is None:
+            # 没有 Job 就没有 KILL_ON_JOB_CLOSE 与资源限额：这半启动的进程绝不能被
+            # supervisor 当成可用 runtime。杀树、收尸、关管道之后再按终态拒绝。
+            # 杀树是承重防线：只关 stdin 靠 EOF 收子进程不算数（对方可以不理会 EOF）。
+            wrapper = StdioProcess(proc, job_error=job_error)
+            killed = wrapper.terminate_tree()
+            try:
+                wrapper.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            reason = "job_failed:" + str(job_error or "unknown")
+            if not killed:
+                # 杀树没能在超时内确认进程已死：把这一点带进终态短码，供审计区分
+                # "Job 建不起来但已收尸" 与 "Job 建不起来且可能留下孤儿"。
+                reason += ":kill_failed"
+            raise _config_error(reason)
     return StdioProcess(proc, job=job, job_error=job_error)
