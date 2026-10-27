@@ -386,8 +386,14 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
                         rejection_in_ring += 1
                         if evict_at is None:
                             evict_at = index
-                if rejection_in_ring >= MAX_REJECTION_IN_RING:
-                    if evict_at is None:     # 理论上不可达：数到了却扫不到那一条
+                if (len(_EVENTS) >= MAX_EVENTS
+                        or rejection_in_ring >= MAX_REJECTION_IN_RING):
+                    if evict_at is None:
+                        # 环已满且一条拒绝类都没有（全是 system.anomaly /
+                        # admin.action 等非拒绝事件）：丢掉这条新的拒绝事件，不入
+                        # 环、不进 pending，保住非拒绝证据。取舍是明的——登录限流
+                        # 仍在路由层照常计数，这不是无损归档；让 401 洪水把 2000 条
+                        # 异常事件按 FIFO 挤成 800 条才是真正的事故。
                         return None
                     evicted = _EVENTS[evict_at]
                     # 取舍：被淘汰且尚未落盘的拒绝事件一并从 pending 移除，不做无损

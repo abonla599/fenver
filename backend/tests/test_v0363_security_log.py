@@ -482,3 +482,76 @@ def test_the_rejection_ring_cap_actually_has_teeth(monkeypatch):
     _record_rejections(cap + 500, cap)
     with pytest.raises(AssertionError, match="非拒绝事件被拒绝类洪水挤出了内存环"):
         _assert_rejection_ring_invariants(cap, anomaly_ids, oldest_id)
+
+
+def test_a_full_ring_of_non_rejection_events_drops_new_rejections(slog):
+    """环里已经全是非拒绝事件时，401 洪水不得按 FIFO 把它们挤掉。
+
+    旧实现只在「拒绝类数触顶」时淘汰，前 1200 条 401 会走 deque 自动 FIFO，
+    把 2000 条 anomaly 挤掉 1200 条——这条锁在旧实现下必须红。
+    """
+    anomaly_ids = _record_anomalies(security_log.MAX_EVENTS)
+    dropped = 0
+    for i in range(security_log.MAX_REJECTION_IN_RING):
+        event = security_log.record(
+            "auth.fail", ip=f"10.{(i // 256) % 200}.{i % 256}.1",
+            account=f"drop{i}", route="/v1/auth/login", status=401,
+            detail="login.failed", now=1001.0)
+        dropped += event is None
+
+    rows = list(security_log._EVENTS)
+    assert len(rows) == security_log.MAX_EVENTS == 2000, "环总数不是 2000"
+    assert {event["id"] for event in rows} == set(anomaly_ids), \
+        "非拒绝事件被拒绝类洪水挤出了内存环"
+    assert not [event for event in rows
+                if security_log._is_rejection_record(event["type"], event["status"])], \
+        "环满且全是非拒绝事件时不应再收拒绝类事件"
+    assert dropped == security_log.MAX_REJECTION_IN_RING, "新拒绝事件必须整条丢弃"
+
+    assert security_log.flush() == security_log.MAX_EVENTS
+    disk = [json.loads(line) for line in _lines(slog)]
+    assert len(disk) == security_log.MAX_EVENTS, "flush 后磁盘行数不等于环里的 2000 条"
+    assert {row["id"] for row in disk} == set(anomaly_ids), \
+        "flush 后磁盘上只剩部分非拒绝事件"
+
+
+def test_eviction_keeps_pending_and_merge_books_in_step(slog, monkeypatch):
+    """淘汰拒绝类时 pending 与 _MERGE 必须同步摘除。
+
+    1200 + 700 + 500 = 1900 条，低于 MAX_PENDING=2000 与 MAX_FILE_LINES=2000；
+    这里再把压缩阈值抬走，让簿记错误直接落在行数上，而不是被 pending 上限或
+    flush 后的压缩掩盖。
+    """
+    monkeypatch.setattr(security_log, "MAX_FILE_LINES", 10 ** 9)
+    monkeypatch.setattr(security_log, "MAX_FILE_BYTES", 10 ** 9)
+    cap = security_log.MAX_REJECTION_IN_RING
+    anomaly_count = 700
+    _record_rejections(0, cap)
+    anomaly_ids = _record_anomalies(anomaly_count)
+    _record_rejections(cap, 500)
+
+    assert len(security_log._EVENTS) == 1900
+    assert {event["id"] for event in security_log._EVENTS} >= set(anomaly_ids)
+
+    pending_ids = {event["id"] for event in security_log._PENDING}
+    assert security_log._PENDING_IDS == pending_ids, "pending 的 id 簿记与队列不一致"
+    merge_ids = {event["id"] for event in security_log._MERGE.values()}
+    assert merge_ids <= security_log._PENDING_IDS, "_MERGE 指向了非 pending 的事件"
+
+    assert security_log.flush() == 1900, "flush 写出的条数不等于环内事件数"
+    assert len(_lines(slog)) == 1900, "被淘汰的拒绝事件仍被写进文件"
+    assert security_log._PENDING_IDS == set()
+    assert all(event["id"] in security_log._PENDING_IDS
+               for event in security_log._MERGE.values()), "_MERGE 留下悬空条目"
+
+
+def test_rejection_definition_covers_every_auth_failure_but_not_other_types():
+    """宽口径锁：只留 auth.fail 或只留 abuse 都会漏掉另一半拒绝事件。"""
+    for event_type, status in (("auth.blocked", 0), ("auth.blocked", 403),
+                               ("auth.rate_limited", 0), ("auth.rate_limited", 429),
+                               ("auth.fail", 401), ("auth.fail", 409),
+                               ("auth.fail", 422)):
+        assert security_log._is_rejection_record(event_type, status) is True, \
+            (event_type, status)
+    for event_type in ("system.anomaly", "admin.action"):
+        assert security_log._is_rejection_record(event_type, 0) is False, event_type
