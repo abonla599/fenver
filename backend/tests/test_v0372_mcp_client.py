@@ -331,6 +331,8 @@ def fake_server():
 
 def make_client(fake: StreamFake, *, budget=None, **kw) -> MCPClient:
     kw.setdefault("budget", budget or MCPConnectionBudget())
+    # 这里测的是传输层，不是 URL 判据；显式给宽松守卫满足"必填"约束。
+    kw.setdefault("url_guard", lambda url: None)
     return MCPClient(fake.url, **kw)
 
 
@@ -547,7 +549,7 @@ def test_url_credentials_rejected(fake_server, caplog, kind, secret):
     else:
         url = f"http://{host}:{port}/mcp#{secret}"
     with pytest.raises(MCPError) as ei:
-        MCPClient(url, budget=MCPConnectionBudget())
+        MCPClient(url, url_guard=lambda u: None, budget=MCPConnectionBudget())
     assert not ei.value.retryable
     assert secret not in caplog.text
     assert secret not in str(ei.value)
@@ -776,7 +778,9 @@ def test_gzip_bomb_rejected_after_decompression():
 
     fake = RawFake(raw_fn)
     try:
-        with MCPClient(fake.url, budget=MCPConnectionBudget()) as client:
+        with MCPClient(
+            fake.url, url_guard=lambda u: None, budget=MCPConnectionBudget()
+        ) as client:
             with pytest.raises(MCPError, match="超过字节上限"):
                 client.list_tools()
     finally:
@@ -810,7 +814,9 @@ def test_unterminated_oversize_stream_aborted_early():
 
     fake = RawFake(raw_fn)
     try:
-        with MCPClient(fake.url, budget=MCPConnectionBudget()) as client:
+        with MCPClient(
+            fake.url, url_guard=lambda u: None, budget=MCPConnectionBudget()
+        ) as client:
             with pytest.raises(MCPError, match="超过字节上限"):
                 client.list_tools()
     finally:
@@ -819,9 +825,17 @@ def test_unterminated_oversize_stream_aborted_early():
 
 def test_url_guard_blocks_before_any_request(fake_server):
     fake = fake_server()
+    seen: list[str] = []
+
+    def deny(url):
+        seen.append(url)
+        return "私网地址不在白名单"
+
     with pytest.raises(MCPError, match="私网地址") as ei:
-        MCPClient(fake.url, url_guard=lambda url: "私网地址不在白名单")
+        MCPClient(fake.url, url_guard=deny)
     assert not ei.value.retryable
+    # guard 在构造期就拿到待校验地址，且拒绝发生在任何物理请求之前
+    assert seen == [fake.url]
     assert fake.requests == []
 
     # 构造放行、请求前再问一遍：策略中途收紧也必须停
@@ -836,6 +850,34 @@ def test_url_guard_blocks_before_any_request(fake_server):
         with pytest.raises(MCPError, match="被 URL 守卫拒绝"):
             client.initialize()
     assert fake2.requests == []
+
+
+def test_missing_url_guard_rejected(fake_server):
+    """#176-E：省略 url_guard（默认 None）不得静默放行。"""
+    fake = fake_server()
+    with pytest.raises(MCPError, match="url_guard 必填") as ei:
+        MCPClient(fake.url, budget=MCPConnectionBudget())
+    assert not ei.value.retryable
+    assert fake.requests == []
+
+
+def test_explicit_none_url_guard_rejected(fake_server):
+    """显式传 None 与省略等价：构造期拒绝，不表示"关闭检查"。"""
+    fake = fake_server()
+    with pytest.raises(MCPError, match="url_guard 必填"):
+        MCPClient(fake.url, url_guard=None, budget=MCPConnectionBudget())
+    assert fake.requests == []
+
+
+def test_permissive_url_guard_still_initializes(fake_server):
+    """负控：必填校验不是"一律拒绝"——显式宽松守卫可构造并完成握手。"""
+    fake = fake_server()
+    with MCPClient(
+        fake.url, url_guard=lambda url: None, budget=MCPConnectionBudget()
+    ) as client:
+        result = client.initialize()
+    assert result["protocolVersion"] == DEFAULT_PROTOCOL_VERSION
+    assert fake.count("initialize") == 1
 
 
 def test_redirect_not_followed(fake_server):
@@ -958,7 +1000,9 @@ def test_sse_line_endings_and_frames(kind):
 
     fake = RawFake(raw_fn)
     try:
-        with MCPClient(fake.url, budget=MCPConnectionBudget()) as client:
+        with MCPClient(
+            fake.url, url_guard=lambda u: None, budget=MCPConnectionBudget()
+        ) as client:
             tools = client.list_tools()
             assert [t["name"] for t in tools] == ["tool_1"]
     finally:
@@ -1019,7 +1063,9 @@ def test_sse_event_too_large():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         url = f"http://{srv.server_address[0]}:{srv.server_address[1]}/mcp"
-        with MCPClient(url, budget=MCPConnectionBudget()) as client:
+        with MCPClient(
+            url, url_guard=lambda u: None, budget=MCPConnectionBudget()
+        ) as client:
             client.initialize()
             with pytest.raises(MCPError, match="单个 SSE 事件"):
                 client.list_tools()
@@ -1042,7 +1088,9 @@ def test_deeply_nested_json_is_mcp_error():
 
     fake = RawFake(raw_fn)
     try:
-        with MCPClient(fake.url, budget=MCPConnectionBudget()) as client:
+        with MCPClient(
+            fake.url, url_guard=lambda u: None, budget=MCPConnectionBudget()
+        ) as client:
             with pytest.raises(MCPError, match="不是合法 JSON"):
                 client.list_tools()
     finally:
@@ -1155,6 +1203,7 @@ class LegacyFake:
 
 def _legacy_client(legacy: LegacyFake, **kw) -> MCPClient:
     kw.setdefault("budget", MCPConnectionBudget())
+    kw.setdefault("url_guard", lambda url: None)
     return MCPClient(legacy.url, transport="legacy-sse", **kw)
 
 
@@ -1185,6 +1234,7 @@ def test_legacy_scheme_downgrade_rejected():
     https_client = MCPClient(
         "https://mcp.example.invalid/sse",
         transport="legacy-sse",
+        url_guard=lambda u: None,
         budget=MCPConnectionBudget(),
     )
     try:
@@ -1198,6 +1248,7 @@ def test_legacy_scheme_downgrade_rejected():
     http_client = MCPClient(
         "http://mcp.example.invalid/sse",
         transport="legacy-sse",
+        url_guard=lambda u: None,
         budget=MCPConnectionBudget(),
     )
     try:

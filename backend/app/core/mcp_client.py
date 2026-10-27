@@ -179,6 +179,10 @@ DEFAULT_BUDGET = MCPConnectionBudget()
 class MCPClient:
     """一个 MCP server 一个实例。
 
+    ``url_guard`` 是**必填安全参数**：构造时必须显式传入
+    ``url_guard(url) -> 拒绝理由 | None``；``None`` 不再表示"关闭检查"，
+    未配置守卫会在构造期直接抛 :class:`MCPError`（否则等于默认放行 SSRF）。
+
     ``client_name`` / ``client_version`` 原样进 ``clientInfo``。
     线程安全：初始化与会话状态由内部 RLock 保护；并发槽位由
     :class:`MCPConnectionBudget` 约束。
@@ -202,10 +206,13 @@ class MCPClient:
         client_name: str = "ai-assistant",
         client_version: str = "0.37.2",
     ) -> None:
+        """``url_guard`` 为必填安全参数：``None`` 在构造期直接拒绝，不表示关闭检查。"""
         if transport not in ("streamable-http", "legacy-sse"):
             raise MCPError(f"未知传输类型: {transport!r}")
         if total_timeout <= 0:
             raise MCPError("total_timeout 必须为正数秒")
+        if url_guard is None:
+            raise MCPError("url_guard 必填：URL 守卫未配置时拒绝构造 MCPClient")
         parsed = urlparse(server_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise MCPError("MCP server URL 必须是 http(s) 绝对地址")
