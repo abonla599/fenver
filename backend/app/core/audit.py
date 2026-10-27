@@ -53,17 +53,21 @@ _SECRET_KEYS = {
 
 # 自由文本里的高置信度凭据形状。刻意比 providers.scrub_secrets 窄：那一套的第一条
 # 正则会把 auth_login_failed 这类下划线事件名整段吃掉，而审计的 action/detail 大量
-# 就是这种名字——把事件名毁掉和把证据毁掉没有区别。三条都要求值至少 8 字符。
+# 就是这种名字——把事件名毁掉和把证据毁掉没有区别。带标签的形状都要求值至少 8 字符。
 # 裸十六进制（40 位 commit SHA、sha256 摘要）故意不认：它们会进审计，是证据。
 _BEARER_RE = re.compile(r"(\bbearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.I)
 _PREFIXED_KEY_RE = re.compile(r"\b(?:sk|pk)-[A-Za-z0-9._\-]{8,}", re.I)
+# 无标签也一眼认得出的两类：GitHub PAT 与 AWS 访问密钥 ID。前缀保留当线索
+# （能看出是哪种凭据），值一律打码。
+_GH_TOKEN_RE = re.compile(r"ghp_[A-Za-z0-9]{10,}")
+_AWS_ACCESS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16,}\b")
 # 两条分组：标签与分隔符原样保留（group 1 + group 2），只把值换成 ***。
 # 标签前用「非字母数字」而不是词边界：new_password= 这类下划线复合标签也要覆盖；
-# 事件名里没有 : 或 =，不会被吃到。
+# 事件名里没有 : 或 =，不会被吃到。复合标签排在裸 token 之前，长标签优先保留。
 _LABELED_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(api[_-]?key|authorization|access[_-]?token|secret"
-    r"|password|passwd|pwd)"
+    r"(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token"
+    r"|id[_-]?token|session[_-]?token|token|secret|password|passwd|pwd)"
     r"([\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{8,})",
     re.I,
 )
@@ -76,6 +80,8 @@ def _scrub_text(text: str) -> str:
     out = str(text)
     out = _LABELED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "***", out)
     out = _BEARER_RE.sub(lambda m: m.group(1) + "***", out)
+    out = _GH_TOKEN_RE.sub("ghp_***", out)
+    out = _AWS_ACCESS_KEY_RE.sub("AKIA***", out)
     return _PREFIXED_KEY_RE.sub("***", out)
 
 

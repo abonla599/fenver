@@ -20,11 +20,14 @@
 - 单在途/窄窗口：慢调用期间第二次调用「正忙」、``close()`` 立即唤醒在途调用、
   出站 id 从 1 递增。
 """
+import io
 import json
+import logging
 import subprocess
 import sys
 import threading
 import time
+import types
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
@@ -727,3 +730,34 @@ def test_stderr_sanitizer_hides_each_credential_shape_and_keeps_the_label(label,
     value = token[len(label):]
     assert value not in cleaned, f"{label} 的密钥值没有被打码"
     assert label in cleaned, f"{label} 标签被一起吃掉了"
+
+
+def test_stderr_thread_logs_only_sanitized_lines(caplog):
+    """接线锁：``_stderr_main`` 必须把 ``_sanitize_stderr_line`` 的产物交给 logger。
+
+    只测脱敏函数本体锁不住「调用被拆掉」：这里直接跑 stderr 线程函数，喂四类形状，
+    判「日志里有标签、没有原值」。拆掉那一行调用就会把明文写进日志，本用例当场红。
+    """
+    tokens = {
+        "Bearer ": "Bearer " + "H" * 24,
+        "sk-": "sk" + "-" + "I" * 24,
+        "password=": "password" + "=" + "J" * 16,
+        "AKIA": "AKIA" + "K" * 16,
+    }
+    lines = [("server stderr：" + token + " 请检查").encode("utf-8")
+             for token in tokens.values()]
+    proc = types.SimpleNamespace(stderr=io.BytesIO(b"\n".join(lines) + b"\n"))
+    client = MCPStdioClient(spawner=lambda: None)
+    client._proc = proc
+    caplog.set_level(logging.INFO, logger="app.core.mcp_stdio")
+    client._stderr_main()                     # 流读到底即返回
+
+    assert client.stats["stderr_lines"] == len(lines), "stderr 线程没把每行都走完"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "***" in logged, f"logger 里没有打码记号：{logged!r}"
+    for label, token in tokens.items():
+        assert token not in logged, f"{label} 的密钥原值进了日志"
+        assert label in logged, f"{label} 标签被一起吃掉了：{logged!r}"
+    ring = "\n".join(client._stderr_ring)
+    for label, token in tokens.items():
+        assert token not in ring, f"{label} 的密钥原值进了 stderr 环形缓冲"

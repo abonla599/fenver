@@ -265,6 +265,30 @@ def test_labeled_secret_keeps_the_label_and_hides_the_value(audit_file):
     assert "***" in raw
 
 
+@pytest.mark.parametrize("label", ["token", "refresh_token", "id_token",
+                                   "session-token"])
+def test_oauth_token_labels_in_detail_keep_the_label_and_hide_the_value(
+        audit_file, label):
+    """token 家族（含 refresh/id/session 复合标签）与 password 同口径：
+    值落盘就是泄露，标签必须留着，否则排障时认不出被隐的是哪一格。"""
+    value = "Zz9" + "tokenvalue"          # 13 位，越过 8 字符下限
+    raw = _probe(audit_file, detail=f"{label}={value}")
+    assert value not in raw, f"detail 里的 {label} 值原样落盘"
+    assert f"{label}=" in raw, f"{label} 标签被一起吃掉了：{raw}"
+    assert "***" in raw
+
+
+def test_github_and_aws_token_shapes_in_detail_are_hidden(audit_file):
+    """ghp_… / AKIA… 不带 `标签=值` 也一眼是凭据：前缀保留、值打码。"""
+    github = "ghp" + "_" + "F" * 24
+    aws = "AKIA" + "G" * 16
+    raw = _probe(audit_file, detail=f"部署失败：{github} 与 {aws}")
+    assert github[len("ghp_"):] not in raw, "detail 里的 ghp_ 令牌原样落盘"
+    assert aws[len("AKIA"):] not in raw, "detail 里的 AKIA 访问密钥原样落盘"
+    assert "ghp_***" in raw and "AKIA***" in raw, f"前缀/打码记号没留下：{raw}"
+    assert "部署失败" in raw, "脱敏只该吃凭据形状，不该吃文案"
+
+
 def test_snake_case_event_names_survive_scrubbing(audit_file):
     """反向锁：谁把这里换成 providers.scrub_secrets 那一套，这条就会红——那套的
     第一条正则会连 auth_login_failed 整段吃掉，审计就再也认不出发生过什么。"""
@@ -385,3 +409,19 @@ def test_actor_name_scrubbing_actually_has_teeth(audit_file, monkeypatch):
         check()                               # 脱敏被拆：必须红
     monkeypatch.setattr(audit, "_scrub_text", real)
     check()                                   # 还原：复绿
+
+
+def test_actor_name_is_scrubbed_before_it_is_truncated(audit_file):
+    """顺序锁：`_scrub_text(...)[:64]` 不能换成 `_scrub_text(...[:64])`。
+
+    50 个 x 把 `password=` 推到第 51 位；值的 13 位里只有前 4 位落在 64 边界内。
+    先截断再脱敏的话，那 4 位低于 8 字符下限、绕不过打码，会原样落盘。
+    """
+    value = "Zz9" + "pw12345678"              # 13 位
+    name = "x" * 50 + " password=" + value
+    rec = audit.log({"user_id": "u_a", "username": name, "role": "admin"}, "x.probe")
+    got = rec["actor_name"]
+    assert "password=***" in got, f"脱敏发生在截断之后：{got!r}"
+    assert value[:4] not in got, "被 64 边界切开的凭据前缀落盘了"
+    assert got == "x" * 50 + " password=***", got
+    assert len(got) <= audit._ACTOR_NAME_CHARS
