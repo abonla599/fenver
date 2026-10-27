@@ -18,12 +18,15 @@ Windows 专属用例 ``skipif(os.name != "nt")``；POSIX 用例 ``skipif(os.name
 所有临时目录用 ``tmp_path``，每个用例 finally 杀树；Windows 上用 ``is_pid_alive``
 （``OpenProcess`` + ``GetExitCodeProcess``）断言无孤儿。
 """
+import ast
 import functools
+import inspect
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -449,6 +452,69 @@ def test_job_limits_readback(tmp_path):
     finally:
         assert wrapper.terminate_tree() is True
     _assert_gone(wrapper.pid)
+
+
+@WINDOWS_ONLY
+@SPAWN_OK
+def test_job_creation_failure_kills_spawned_tree(tmp_path, monkeypatch):
+    """Job 建不起来 = 没有限额：已启动的进程必须被杀，spawn 必须拒绝启动。"""
+    spawned_pids = []
+
+    def failing_create_job(proc, **_kwargs):
+        spawned_pids.append(proc.pid)
+        return None, "boom"
+
+    monkeypatch.setattr(mcp_stdio_process, "_create_job_for", failing_create_job)
+    root = tmp_path / "mcp"
+    with pytest.raises(MCPStdioConfigError) as excinfo:
+        spawn_stdio(_entry("ok", tmp_path / "rec", sid="jobfail"), str(root))
+    assert "job_failed" in str(excinfo.value)
+    assert "boom" in str(excinfo.value)
+    assert spawned_pids, "用例前提：_create_job_for 被调用，子进程已经启动"
+    _assert_gone(spawned_pids[0], timeout=5.0)
+
+
+def test_spawn_stdio_job_failure_branch_raises_not_returns():
+    """平台无关：Job 创建失败必须抛配置错，且该分支不许返回半启动的 runtime。"""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(mcp_stdio_process.spawn_stdio)))
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+
+    branches = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(call, ast.Call)
+            and getattr(call.func, "id", "") == "_create_job_for"
+            for call in ast.walk(node)
+        )
+    ]
+    assert len(branches) == 1, "spawn_stdio 里找不到唯一的 Job 创建分支"
+
+    branch = branches[0]
+    raises = [node for node in ast.walk(branch) if isinstance(node, ast.Raise)]
+    assert raises, "Job 创建失败只记 job_error/返回错误串，没有 fail-closed"
+    raised = {
+        getattr(node.exc.func, "id", getattr(node.exc.func, "attr", ""))
+        for node in raises
+        if isinstance(node.exc, ast.Call)
+    }
+    assert raised & {"_config_error", "MCPStdioConfigError"}, raised
+    assert not [node for node in ast.walk(branch) if isinstance(node, ast.Return)], (
+        "Job 创建失败的分支里出现了 return"
+    )
+
+    # 整个函数只有一处 runtime 构造，且在 Job 分支之后：失败路径交不出 runtime。
+    runtime_returns = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", "") == "StdioProcess"
+    ]
+    assert len(runtime_returns) == 1
+    assert runtime_returns[0].lineno > branch.end_lineno
 
 
 # --------------------------------------------------------------------------- C7 内存限额
