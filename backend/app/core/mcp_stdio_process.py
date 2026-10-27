@@ -420,7 +420,11 @@ def _apply_job_limits(
     active_processes: int,
     cpu_time_100ns: int,
 ) -> None:
-    """设置 Job 限额；失败抛 OSError（由调用方降级为 ``job_attached=False``）。"""
+    """设置 Job 限额；失败抛 OSError。
+
+    ``_create_job_for`` 把它收成 ``attach_failed:<code>``；spawn 随后杀树、收尸、
+    关管道并拒绝启动——**不降级**为 ``job_attached=False`` 的半启动 runtime。
+    """
     info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     basic = info.BasicLimitInformation
     basic.LimitFlags = (
@@ -748,8 +752,9 @@ def spawn_stdio(
         if job is None:
             # 没有 Job 就没有 KILL_ON_JOB_CLOSE 与资源限额：这半启动的进程绝不能被
             # supervisor 当成可用 runtime。杀树、收尸、关管道之后再按终态拒绝。
+            # 杀树是承重防线：只关 stdin 靠 EOF 收子进程不算数（对方可以不理会 EOF）。
             wrapper = StdioProcess(proc, job_error=job_error)
-            wrapper.terminate_tree()
+            killed = wrapper.terminate_tree()
             try:
                 wrapper.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
@@ -760,5 +765,10 @@ def spawn_stdio(
                         stream.close()
                     except OSError:
                         pass
-            raise _config_error("job_failed:" + str(job_error or "unknown"))
+            reason = "job_failed:" + str(job_error or "unknown")
+            if not killed:
+                # 杀树没能在超时内确认进程已死：把这一点带进终态短码，供审计区分
+                # "Job 建不起来但已收尸" 与 "Job 建不起来且可能留下孤儿"。
+                reason += ":kill_failed"
+            raise _config_error(reason)
     return StdioProcess(proc, job=job, job_error=job_error)

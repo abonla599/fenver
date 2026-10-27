@@ -46,6 +46,7 @@ from app.core.mcp_stdio import (
     STATE_STOPPING,
     StdioSupervisor,
     _Runtime,
+    _refused_reason,
     get_supervisor,
 )
 from app.core.mcp_stdio_client import MCPStdioClient
@@ -826,6 +827,20 @@ def test_worker_binds_the_generation_stop_event_not_runtime_stop_event(tmp_path)
 
 
 # --------------------------------------------------------------------------- 单例
+
+
+def test_job_failure_refused_reason_maps_to_spawn_failed():
+    """Job 建不起来是"起进程"失败，不是命令规则问题：审计枚举必须是 spawn_failed。"""
+    for raw in (
+        "job_failed:boom",
+        "job_failed:attach_failed:5",
+        "job_failed:attach_failed:5:kill_failed",
+    ):
+        assert _refused_reason(raw) == "spawn_failed", raw
+    # 邻接语义不变：env / 命令判据仍按原枚举收敛。
+    assert _refused_reason("spawn_failed:2") == "spawn_failed"
+    assert _refused_reason("env_name_reserved") == "env_denied"
+    assert _refused_reason("command:host_denied") == "command_denied"
 
 
 def test_get_supervisor_is_lazy_and_singleton():

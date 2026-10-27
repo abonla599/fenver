@@ -474,6 +474,71 @@ def test_job_creation_failure_kills_spawned_tree(tmp_path, monkeypatch):
     _assert_gone(spawned_pids[0], timeout=5.0)
 
 
+@WINDOWS_ONLY
+@SPAWN_OK
+def test_job_failure_path_kills_tree_while_stdin_still_open(tmp_path, monkeypatch):
+    """Job 建不起来时，杀树必须是承重防线，不是"关 stdin 让子进程读到 EOF"。
+
+    spy 记录 ``terminate_tree`` 被调用、调用时子进程仍活着、且 stdin 尚未关闭。
+    只删失败分支里的 ``wrapper.terminate_tree()`` 时本用例必须红（只留 wait +
+    关管道，``ok`` 子进程会被 stdin EOF 收掉，旧用例因此抓不住）。
+    """
+    observed = []
+    original = mcp_stdio_process.StdioProcess.terminate_tree
+
+    def spy(self, *args, **kwargs):
+        stdin = self.proc.stdin
+        observed.append(
+            {
+                "pid": self.pid,
+                "alive": is_pid_alive(self.pid),
+                "stdin_closed": stdin is None or stdin.closed,
+            }
+        )
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        mcp_stdio_process, "_create_job_for", lambda proc, **_kwargs: (None, "boom")
+    )
+    monkeypatch.setattr(mcp_stdio_process.StdioProcess, "terminate_tree", spy)
+
+    root = tmp_path / "mcp"
+    with pytest.raises(MCPStdioConfigError) as excinfo:
+        spawn_stdio(_entry("ok", tmp_path / "rec", sid="jobkill"), str(root))
+
+    assert "job_failed:boom" in str(excinfo.value)
+    assert observed, "Job 失败路径没有调用 terminate_tree：子进程只是被 stdin EOF 收掉"
+    assert observed[0]["alive"] is True, "杀树时子进程已退出，承重防线没有被钉住"
+    assert observed[0]["stdin_closed"] is False, "关管道发生在杀树之前"
+    _assert_gone(observed[0]["pid"], timeout=5.0)
+
+
+@WINDOWS_ONLY
+@SPAWN_OK
+def test_job_failure_kill_failure_is_reported_in_short_code(tmp_path, monkeypatch):
+    """杀树没能确认进程已死时，终态短码必须带 ``:kill_failed``。"""
+    original = mcp_stdio_process.StdioProcess.terminate_tree
+
+    def kill_but_report_failure(self, *args, **kwargs):
+        original(self, *args, **kwargs)  # 仍真杀，别把子进程留成孤儿
+        return False
+
+    monkeypatch.setattr(
+        mcp_stdio_process, "_create_job_for", lambda proc, **_kwargs: (None, "attach_failed:5")
+    )
+    monkeypatch.setattr(
+        mcp_stdio_process.StdioProcess, "terminate_tree", kill_but_report_failure
+    )
+
+    root = tmp_path / "mcp"
+    with pytest.raises(MCPStdioConfigError) as excinfo:
+        spawn_stdio(_entry("ok", tmp_path / "rec", sid="jobkillfail"), str(root))
+
+    message = str(excinfo.value)
+    assert message == "job_failed:attach_failed:5:kill_failed", message
+    assert str(tmp_path) not in message, "短码不许回显配置值"
+
+
 def test_spawn_stdio_job_failure_branch_raises_not_returns():
     """平台无关：Job 创建失败必须抛配置错，且该分支不许返回半启动的 runtime。"""
     tree = ast.parse(textwrap.dedent(inspect.getsource(mcp_stdio_process.spawn_stdio)))
@@ -504,6 +569,24 @@ def test_spawn_stdio_job_failure_branch_raises_not_returns():
     assert not [node for node in ast.walk(branch) if isinstance(node, ast.Return)], (
         "Job 创建失败的分支里出现了 return"
     )
+
+    # 杀树是失败路径的承重防线，且必须先于关管道：只留 wait + 关 stdin 时，子进程
+    # 会被 EOF 收掉，行为用例会误绿（helper 忽略不了 EOF 时尤其如此）。
+    tree_calls = [
+        node
+        for node in ast.walk(branch)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", "") == "terminate_tree"
+    ]
+    closes = [
+        node
+        for node in ast.walk(branch)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", "") == "close"
+    ]
+    assert tree_calls, "Job 失败分支没有调用 terminate_tree"
+    assert closes, "前提：Job 失败分支有关管道"
+    assert tree_calls[0].lineno < closes[0].lineno, "关管道发生在杀树之前"
 
     # 整个函数只有一处 runtime 构造，且在 Job 分支之后：失败路径交不出 runtime。
     runtime_returns = [
