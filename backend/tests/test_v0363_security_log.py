@@ -382,3 +382,103 @@ def test_account_scrubbing_actually_has_teeth(tmp_path, monkeypatch):
         check(tmp_path / "red.jsonl")         # 脱敏被拆：必须红
     monkeypatch.setattr(audit, "_scrub_text", real)
     check(tmp_path / "green-again.jsonl")     # 还原：复绿
+
+
+# ---------- 环内占用：拒绝类事件最多 MAX_REJECTION_IN_RING 条 ----------
+#
+# 401 不占 120/min 的 abuse 预算（那会压掉真实暴力破解证据），但未鉴权、可轮换
+# 账号/来源，不设环内上限同样能把 system.anomaly 等非拒绝事件挤出去。下面的
+# 场景一律用唯一账号 + 唯一 /24，避免合并与匿名埋点预算干扰判据。
+
+def _record_rejections(start, count, now=1000.0):
+    ids = []
+    for i in range(start, start + count):
+        event = security_log.record(
+            "auth.fail", ip=f"10.{(i // 256) % 200}.{i % 256}.1",
+            account=f"u{i}", route="/v1/auth/login", status=401,
+            detail="login.failed", now=now)
+        assert event is not None
+        ids.append(event["id"])
+    return ids
+
+
+def _record_anomalies(count, now=1000.0):
+    ids = []
+    for i in range(count):
+        event = security_log.record(
+            "system.anomaly", ip=f"172.16.{(i // 256) % 200}.{i % 256}",
+            account=f"a{i}", route="/v1/admin/users", status=500,
+            detail="unspecified", now=now)
+        assert event is not None
+        ids.append(event["id"])
+    return ids
+
+
+def _assert_rejection_ring_invariants(cap, anomaly_ids, oldest_id):
+    rows = list(security_log._EVENTS)
+    ring_ids = {event["id"] for event in rows}
+    assert set(anomaly_ids) <= ring_ids, "非拒绝事件被拒绝类洪水挤出了内存环"
+    rejections = [event for event in rows
+                  if security_log._is_rejection_record(event["type"],
+                                                       event["status"])]
+    assert len(rejections) <= cap, (
+        f"环内拒绝类事件 {len(rejections)} 条，超过上限 {cap}")
+    assert len(rows) <= security_log.MAX_EVENTS
+    assert oldest_id not in ring_ids, "最旧的拒绝类事件没有被淘汰"
+
+
+def test_rejection_records_cap_their_share_and_spare_non_rejection_events():
+    cap = security_log.MAX_REJECTION_IN_RING
+    anomalies = security_log.MAX_EVENTS - cap
+    oldest_id = _record_rejections(0, cap)[0]
+    anomaly_ids = _record_anomalies(anomalies)
+    _record_rejections(cap, 500)
+
+    _assert_rejection_ring_invariants(cap, anomaly_ids, oldest_id)
+    newest = security_log._EVENTS[-1]
+    assert newest["type"] == "auth.fail" and newest["account"] == f"u{cap + 499}", \
+        "最新写入的 401 应当仍在环里"
+
+    # 只多写 500 条时，旧的 FIFO 恰好也只淘汰最老的 401；再灌满一轮才能证明
+    # 上限真的在拦，而不是队尾恰好都是拒绝类。
+    _record_rejections(cap + 500, cap)
+    _assert_rejection_ring_invariants(cap, anomaly_ids, oldest_id)
+
+
+def test_rejections_below_the_ring_cap_are_all_kept():
+    ids = _record_rejections(0, 100)
+    assert {event["id"] for event in security_log._EVENTS} == set(ids), \
+        "低于环内上限时拒绝类事件被提前丢弃"
+
+
+def test_evicted_rejections_leave_pending_before_flush(slog):
+    cap = security_log.MAX_REJECTION_IN_RING
+    anomalies = security_log.MAX_EVENTS - cap
+    oldest_id = _record_rejections(0, cap)[0]
+    anomaly_ids = _record_anomalies(anomalies)
+    _record_rejections(cap, 500)
+
+    pending_ids = {event["id"] for event in security_log._PENDING}
+    assert security_log._PENDING_IDS == pending_ids, "pending 的 id 簿记与队列不一致"
+    assert oldest_id not in security_log._PENDING_IDS, "被淘汰的 id 仍留在 pending 簿记里"
+
+    assert security_log.flush() == security_log.MAX_EVENTS
+    rows = [json.loads(line) for line in _lines(slog)]
+    assert len(rows) <= security_log.MAX_EVENTS
+    assert set(anomaly_ids) <= {row["id"] for row in rows}
+    assert oldest_id not in {row["id"] for row in rows}, \
+        "已淘汰且未落盘的拒绝事件仍被写进文件"
+    assert security_log._PENDING_IDS == set()
+
+
+def test_the_rejection_ring_cap_actually_has_teeth(monkeypatch):
+    """负控：跳过「淘汰最旧拒绝类」这一支，核心场景必须红。"""
+    monkeypatch.setattr(security_log, "_is_rejection_record", lambda *_: False)
+    cap = security_log.MAX_REJECTION_IN_RING
+    anomalies = security_log.MAX_EVENTS - cap
+    oldest_id = _record_rejections(0, cap)[0]
+    anomaly_ids = _record_anomalies(anomalies)
+    _record_rejections(cap, 500)
+    _record_rejections(cap + 500, cap)
+    with pytest.raises(AssertionError, match="非拒绝事件被拒绝类洪水挤出了内存环"):
+        _assert_rejection_ring_invariants(cap, anomaly_ids, oldest_id)

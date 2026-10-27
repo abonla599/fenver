@@ -53,6 +53,11 @@ DETAILS = frozenset({
 })
 
 MAX_EVENTS = 2000
+# 拒绝类事件在 2000 条环内的占用上限：最多 1200 条，给 system.anomaly /
+# admin.action 等非拒绝事件留出固定位置。这是"环里能躺多少"的容量上限，不是
+# 限速，也不替代 MAX_ABUSE_EVENTS / MAX_ABUSE_IN_EVENTS 的 60 秒预算——401
+# 仍走路由层自己的失败限流，不并入那份按分钟计费的额度。
+MAX_REJECTION_IN_RING = 1200
 MAX_PENDING = 2000
 MERGE_KEY_LIMIT = 4096
 MERGE_WINDOW_SECONDS = 60.0
@@ -146,6 +151,16 @@ def _is_abuse_record(event_type: str, status: int) -> bool:
     计费，不在这里重复收费。
     """
     return event_type in ABUSE_TYPES or (event_type == "auth.fail" and status == 422)
+
+
+def _is_rejection_record(event_type: str, status: int) -> bool:
+    """哪些事件算"拒绝类"、占用环内的 MAX_REJECTION_IN_RING 额度。
+
+    比 `_is_abuse_record` 宽：所有 `auth.fail`（401/409/422…）都算。401/409 不占
+    120 条/分钟的匿名埋点预算（那会压掉真实暴力破解证据），但未鉴权就能触发、且
+    账号/来源可轮换，不设环内上限同样能把非拒绝事件挤出去。
+    """
+    return _is_abuse_record(event_type, status) or event_type == "auth.fail"
 
 
 def _abuse_budget_locked(source: str, now: float) -> bool:
@@ -363,6 +378,28 @@ def record(event_type, *, request=None, ip=None, account="", route=None, status=
                 "detail": detail,
             }
             _NEXT_ID += 1
+            if _is_rejection_record(event_type, clean_status):
+                rejection_in_ring = 0
+                evict_at = None
+                for index, existing in enumerate(_EVENTS):
+                    if _is_rejection_record(existing["type"], existing["status"]):
+                        rejection_in_ring += 1
+                        if evict_at is None:
+                            evict_at = index
+                if rejection_in_ring >= MAX_REJECTION_IN_RING:
+                    if evict_at is None:     # 理论上不可达：数到了却扫不到那一条
+                        return None
+                    evicted = _EVENTS[evict_at]
+                    # 取舍：被淘汰且尚未落盘的拒绝事件一并从 pending 移除，不做无损
+                    # 归档——环要给非拒绝事件留位置，允许放掉这几条（已落盘的那份
+                    # 不动，文件仍是只增账）。
+                    if evicted["id"] in _PENDING_IDS:
+                        _PENDING.remove(evicted)
+                        _PENDING_IDS.discard(evicted["id"])
+                    evicted_key = _key_of(evicted)
+                    if _MERGE.get(evicted_key) is evicted:
+                        del _MERGE[evicted_key]
+                    del _EVENTS[evict_at]
             _EVENTS.append(event)
             _PENDING.append(event)
             _PENDING_IDS.add(event["id"])
