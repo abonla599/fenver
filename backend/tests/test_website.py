@@ -40,6 +40,7 @@ STATIC_CSP = (
     "img-src 'self' data: blob:; "
     "connect-src 'self' https://api.bochaai.com/v1/web-search https://api.tavily.com/search; "
     "frame-src 'none'; "
+    "frame-ancestors 'none'; "
     "object-src 'none'; "
     "base-uri 'self'; "
     "form-action 'self'"
@@ -63,6 +64,46 @@ def test_site_assets_are_public_and_uncached():
     assert res.headers["content-security-policy"] == STATIC_CSP, \
         f"静态资源的 CSP 被改了：{res.headers['content-security-policy']!r}"
     assert fresh.headers["content-security-policy"] == STATIC_CSP
+
+
+# ---------- 1b. 安全响应头：点击劫持 / 嗅探 / Referrer / HSTS ----------
+
+def test_the_landing_page_sends_the_clickjacking_and_sniffing_headers():
+    res = client.get("/")
+    assert res.status_code == 200
+    assert "frame-ancestors 'none'" in res.headers["content-security-policy"], \
+        "CSP 里没有 frame-ancestors：别的站可以把官网嵌进自己的 iframe"
+    assert res.headers["x-frame-options"] == "DENY"
+    assert res.headers["x-content-type-options"] == "nosniff"
+    assert res.headers["referrer-policy"] == "no-referrer"
+
+
+def test_health_is_covered_by_the_global_header_middleware():
+    """/health 没有 CSP，点击劫持防护全靠 main.py 那层全局中间件。"""
+    res = client.get("/health")
+    assert res.status_code == 200
+    assert "content-security-policy" not in res.headers  # 前提：它不是页面那条路
+    assert res.headers["x-frame-options"] == "DENY"
+    assert res.headers["x-content-type-options"] == "nosniff"
+    assert res.headers["referrer-policy"] == "no-referrer"
+
+
+def test_hsts_follows_self_origin_not_the_inbound_scheme(monkeypatch):
+    """cloudflared 回源是 http，所以 HSTS 只能按 `_self_origin` 判，不能看 scheme。"""
+    import app.main as main_module
+
+    # 默认夹具的 Host 是 testserver，不是我们的域名 → 一枚 HSTS 都不许发
+    assert "strict-transport-security" not in client.get("/").headers
+
+    monkeypatch.setattr(main_module, "_self_origin",
+                        lambda request: "https://ai.fenever.xyz")
+    res = client.get("/")
+    assert res.headers["strict-transport-security"] == \
+        "max-age=31536000; includeSubDomains"
+
+    # 空串 = 不是我们的 https 源（含本机 localhost）→ 不许发，否则开发时被钉死在 https
+    monkeypatch.setattr(main_module, "_self_origin", lambda request: "")
+    assert "strict-transport-security" not in client.get("/health").headers
 
 
 def test_unknown_paths_still_get_the_framework_json_404():

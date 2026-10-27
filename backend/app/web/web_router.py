@@ -218,6 +218,7 @@ def content_security_policy(script_hashes=(), page_path: str = "/") -> str:
         "img-src 'self' data: blob:; "
         f"connect-src {connect_src}; "
         "frame-src 'none'; "
+        "frame-ancestors 'none'; "
         "object-src 'none'; "
         "base-uri 'self'; "
         "form-action 'self'"
@@ -295,6 +296,10 @@ def site_headers(response, cache: str = "no-cache", script_hashes=(),
       https，不放开 http/ws，其余页面照旧严格。
     - `frame-src 'none'`：全站零 iframe（2026-09-19 grep 确认），它挡的是"WebView 里
       @JavascriptInterface 会挂到每个 frame"这条路。
+    - `frame-ancestors 'none'`：没人能把这几个页面嵌进自己的 iframe（点击劫持）。
+      它管的方向与 `frame-src` 相反：一个管"我们嵌别人"，一个管"别人嵌我们"，
+      两条都要有。`/health`、`/v1/*`、框架 404 没有 CSP，由 main.py 的全局
+      `X-Frame-Options: DENY` 兜住同一件事。
     - `object-src 'none'`：没有插件/内嵌 PDF 需求，堵 <object>/<embed> 这条执行面。
     - `base-uri 'self'`：被注入的 <base> 不能把相对脚本地址挪去别处。
     - `form-action 'self'`：表单全是同源 JS 提交，注入一个外站 action 也送不出去。

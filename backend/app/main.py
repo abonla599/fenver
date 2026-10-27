@@ -286,6 +286,28 @@ async def reject_oversized_json_body(request: Request, call_next):
             return JSONResponse(status_code=413, content={"detail": "请求体过大"})
     return await call_next(request)
 
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """给**所有**响应补齐四枚安全头——页面、/health、/v1/*、框架 404 一个都不落。
+
+    CSP 只挂在页面那几条路上（`web_router.site_headers`），所以点击劫持与嗅探
+    不能只靠它：一个被嵌进 iframe 的 `/health` 照样能拿来做界面伪装。三枚常驻头
+    没有条件；HSTS 只在 `_self_origin(request)` 非空时发：
+
+    * 不看 `request.url.scheme`：cloudflared 从回环转进来，源站这一跳永远是 http，
+      按 scheme 判会让公网那趟 HTTPS 请求一个 HSTS 都拿不到；
+    * 也不给本机 localhost 发：浏览器一旦记住 HSTS，开发时就再也走不了 http。
+    """
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if _self_origin(request):
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains")
+    return response
+
 # ---------- 数据模型 ----------
 
 # 一次聊天请求的体积闸门。限流挡的是**次数**，这几条挡的是**单次的大小**——
