@@ -5,7 +5,8 @@
 ``tools/call``，外加安全外壳：
 
 - URL 判据**不在这里**：私网/白名单等由调用方注入 ``url_guard(url) -> 拒绝理由|None``
-  （后续接 net_guard）。本文件只在构造与每次物理请求前调用它，拒绝即停。
+  （后续接 net_guard）。该参数**必填**；未配置时构造与请求都拒绝（fail-closed），
+  本文件在构造与每次物理请求前调用它，拒绝即停。
 - 凭据只走调用方显式传入的 headers（如 Authorization）。URL 里出现 userinfo /
   query / fragment 一律在构造期拒绝（fail-closed）：
   * userinfo 会被 httpx 自动转成 ``Authorization: Basic``，凭据并非只走显式 headers，
@@ -878,8 +879,9 @@ class MCPClient:
     # ------------------------------------------------------------------ 外壳工具
 
     def _check_url(self, url: str, *, what: str) -> None:
+        # 构造期已拒绝 None；这里再挡一次，防止绕过构造或改私有属性后 fail-open。
         if self._url_guard is None:
-            return
+            raise MCPError("URL 守卫未配置，拒绝请求", retryable=False)
         reason = self._url_guard(url)
         if reason:
             raise MCPError(f"{what} 被 URL 守卫拒绝: {reason}", retryable=False)

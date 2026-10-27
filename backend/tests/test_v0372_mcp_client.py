@@ -880,6 +880,19 @@ def test_permissive_url_guard_still_initializes(fake_server):
     assert fake.count("initialize") == 1
 
 
+def test_check_url_rejects_none_guard_at_request_layer():
+    """纵深防御：越过构造校验把守卫置空后，_check_url 自身也必须 fail-closed。"""
+    with MCPClient(
+        "https://mcp.example.invalid/mcp",
+        url_guard=lambda url: None,
+        budget=MCPConnectionBudget(),
+    ) as client:
+        client._url_guard = None  # 模拟绕过构造/私改属性的形态
+        with pytest.raises(MCPError, match="URL 守卫未配置") as ei:
+            client._check_url("https://mcp.example.invalid/mcp", what="请求地址")
+        assert not ei.value.retryable
+
+
 def test_redirect_not_followed(fake_server):
     fake = fake_server(override_status={"initialize": 302}, redirect_location="/next")
     with make_client(fake) as client:
@@ -1226,7 +1239,11 @@ def test_legacy_sse_roundtrip():
 
 def test_legacy_bad_transport_rejected():
     with pytest.raises(MCPError, match="未知传输类型"):
-        MCPClient("https://mcp.example.invalid/mcp", transport="carrier-pigeon")
+        MCPClient(
+            "https://mcp.example.invalid/mcp",
+            transport="carrier-pigeon",
+            url_guard=lambda u: None,
+        )
 
 
 def test_legacy_scheme_downgrade_rejected():
