@@ -240,40 +240,63 @@ def test_public_and_boundary_outside_literals_stay_allowed(literal):
 
 # ---------- 抽取不换口径：既有句式逐字钉住 ----------
 
-def test_existing_reason_sentences_are_unchanged():
-    """文案一位都不动（v0.33 立的原话），管理员与既有断言看到的句子不变。
+def test_detailed_reason_sentences_are_unchanged():
+    """net_guard 的详细文案一位都不动（v0.33 立的原话）。
+
+    M-4 之后 providers 的出口只回类别，所以逐字句式改为直接对 net_guard 断言；
+    这同时证明内部排障信息没被削掉。
 
     负向锁：改动 net_guard 里任何一条 f-string 模板，本条红。
     """
-    assert (providers._base_url_reject_reason("http://10.1.2.3/v1")
-            == "base_url 指向内网地址 10.1.2.3（10.0.0.0/8），服务端不做内网请求")
-    assert (providers._base_url_reject_reason("http://127.0.0.1:8000/v1")
-            == "base_url 指向本机地址 127.0.0.1，服务端不做本机请求；"
-               "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
+    assert net_guard.reject_reason(
+        "10.1.2.3", resolve=_forbidden_resolver, allow_loopback=False,
+        where="base_url") == (
+        "base_url 指向内网地址 10.1.2.3（10.0.0.0/8），服务端不做内网请求")
+    assert net_guard.reject_reason(
+        "127.0.0.1", resolve=_forbidden_resolver, allow_loopback=False,
+        where="base_url") == (
+        "base_url 指向本机地址 127.0.0.1，服务端不做本机请求；"
+        "确实要把模型自建在本机的话，把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
     assert providers._base_url_reject_reason("http:///v1") == "base_url 里没有主机名"
+
+
+def test_provider_outlet_returns_public_categories_only():
+    """经 ProviderError 回显的文案只有类别：具体地址/CIDR 不出 providers 这一层。
+
+    负向锁：把 `_base_url_reject_reason` 的返回改回未公开化的 `detail`，本条红。
+    """
+    why = providers._base_url_reject_reason("http://10.1.2.3/v1")
+    assert why == "该地址属于内网，不被允许", why
+    assert "10.1.2.3" not in why and "10.0.0.0/8" not in why
+
+    why = providers._base_url_reject_reason("http://127.0.0.1:8000/v1")
+    assert why == "该地址指向本机，不被允许", why
+    assert "127.0.0.1" not in why and "ALLOW_LOCALHOST_BASE_URL" not in why
 
 
 def test_domain_branch_wordings_survive_the_move(monkeypatch):
     """域名支的"链路本地/组播/内网"三种分类词不因补 CIDR 而改写：
     fe80/组播走属性判断（排在清单前），169.254 仍走 CIDR 文案。
 
+    详细句式直接对 net_guard 断言（providers 出口已公开化，见上一测试）。
+
     负向锁：把属性判断挪到 CIDR 循环之后，前两条参数会变成"内网地址"文案而红。
     """
+    cases = [
+        ("fe80::1", "解析到链路本地地址 fe80::1"),
+        ("224.0.0.1", "解析到组播地址 224.0.0.1"),
+        ("169.254.1.1", "解析到内网地址 169.254.1.1（169.254.0.0/16）"),
+        ("100.64.1.2", "解析到内网地址 100.64.1.2（100.64.0.0/10）"),
+    ]
+    for answer, snippet in cases:
+        why = net_guard.reject_reason(
+            "mine.example", resolve=lambda host, a=answer: [a],
+            allow_loopback=False, where="base_url")
+        assert snippet in why, why
+
     monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["fe80::1"])
     why = providers._base_url_reject_reason("https://mine.example/v1")
-    assert "解析到链路本地地址 fe80::1" in why, why
-
-    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["224.0.0.1"])
-    why = providers._base_url_reject_reason("https://mine.example/v1")
-    assert "解析到组播地址 224.0.0.1" in why, why
-
-    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["169.254.1.1"])
-    why = providers._base_url_reject_reason("https://mine.example/v1")
-    assert "解析到内网地址 169.254.1.1（169.254.0.0/16）" in why, why
-
-    monkeypatch.setattr(providers, "_resolve_addresses", lambda h: ["100.64.1.2"])
-    why = providers._base_url_reject_reason("https://mine.example/v1")
-    assert "解析到内网地址 100.64.1.2（100.64.0.0/10）" in why, why
+    assert "链路本地" in why and "fe80::1" not in why, why
 
 
 def test_providers_still_owns_the_injection_points():
@@ -297,11 +320,17 @@ def test_providers_still_owns_the_injection_points():
 # ---------- 多答案 / 解析失败 / 空 / 垃圾 ----------
 
 def test_multi_answer_rejects_when_any_one_crosses(monkeypatch):
-    """全称判据：公网排前也不许只看第一条；理由点名踩线的那条新段地址。"""
+    """全称判据：公网排前也不许只看第一条；对外只报「内网」类别。"""
     monkeypatch.setattr(providers, "_resolve_addresses",
                         lambda h: ["93.184.216.34", "100.64.5.6"])
     why = providers._base_url_reject_reason("https://mixed.example/v1")
-    assert why and "100.64.5.6" in why, why
+    assert why and "内网" in why, why
+    assert "100.64.5.6" not in why, why
+
+    detail = net_guard.reject_reason(
+        "mixed.example", resolve=lambda h: ["93.184.216.34", "100.64.5.6"],
+        allow_loopback=False, where="base_url")
+    assert "100.64.5.6" in detail, f"内部理由要点名踩线的那条：{detail!r}"
 
 
 def test_multi_answer_all_public_is_allowed(monkeypatch):
@@ -310,13 +339,14 @@ def test_multi_answer_all_public_is_allowed(monkeypatch):
     assert providers._base_url_reject_reason("https://dual.example/v1") == ""
 
 
-@pytest.mark.parametrize("answers,keyword", [
-    (None, "解析失败"),
-    ([], "解析结果为空"),
-    (["not-an-ip"], "无法识别"),
+@pytest.mark.parametrize("answers,detail_keyword,public_keyword", [
+    (None, "解析失败", "解析失败"),
+    ([], "解析结果为空", "解析结果为空"),
+    (["not-an-ip"], "无法识别", "不被允许"),
 ])
-def test_resolution_failure_modes_reject_fail_closed(monkeypatch, answers, keyword):
-    """解析炸/空/垃圾三类都拒（fail closed），理由句式与 v0.34.2 一致。"""
+def test_resolution_failure_modes_reject_fail_closed(monkeypatch, answers,
+                                                     detail_keyword, public_keyword):
+    """解析炸/空/垃圾三类都拒（fail closed）；内部句式不变，对外只给类别。"""
     def fake(host):
         if answers is None:
             raise OSError(-2, "Name or service not known")
@@ -324,7 +354,12 @@ def test_resolution_failure_modes_reject_fail_closed(monkeypatch, answers, keywo
 
     monkeypatch.setattr(providers, "_resolve_addresses", fake)
     why = providers._base_url_reject_reason("https://bad.example/v1")
-    assert why and keyword in why, f"{keyword}: {why!r}"
+    assert why and public_keyword in why, f"{public_keyword}: {why!r}"
+    assert "bad.example" not in why, f"对外文案回了主机名：{why!r}"
+
+    detail = net_guard.reject_reason(
+        "bad.example", resolve=fake, allow_loopback=False, where="base_url")
+    assert detail_keyword in detail, f"{detail_keyword}: {detail!r}"
 
 
 # ---------- allow_loopback 只放回环类 ----------
@@ -351,7 +386,9 @@ def test_allow_loopback_never_releases_private_link_local_or_multicast(target):
 
 
 def test_allow_loopback_continues_past_loopback_to_the_next_answer(monkeypatch):
-    """域名多答案：开关打开跳过回环那条，继续查出后面踩线的地址并点名它。
+    """域名多答案：开关打开跳过回环那条，继续查出后面踩线的地址。
+
+    对外只报「内网」；详细理由仍点名 203.0.113.9（TEST-NET-3）。
 
     负向锁：把开关分支的 return "" 写成"整个函数放行"，本条红。
     """
@@ -359,7 +396,13 @@ def test_allow_loopback_continues_past_loopback_to_the_next_answer(monkeypatch):
                         lambda h: ["127.0.0.1", "203.0.113.9"])
     monkeypatch.setattr(providers, "ALLOW_LOCALHOST_BASE_URL", True)
     why = providers._base_url_reject_reason("https://mine.example/v1")
-    assert why and "203.0.113.9" in why, why
+    assert why and "内网" in why, why
+    assert "203.0.113.9" not in why, why
+
+    detail = net_guard.reject_reason(
+        "mine.example", resolve=lambda h: ["127.0.0.1", "203.0.113.9"],
+        allow_loopback=True, where="base_url")
+    assert "203.0.113.9" in detail, f"内部理由要点名踩线的那条：{detail!r}"
 
 
 def test_literals_and_localhost_never_reach_the_resolver():

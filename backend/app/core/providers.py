@@ -155,18 +155,14 @@ def _resolve_addresses(host: str) -> list:
 
 
 def _base_url_reject_reason(base_url: str) -> str:
-    """这个 base_url 能不能让服务端替它出网。返回 "" = 放行，否则返回拒的理由。
+    """这个 base_url 能不能让服务端替它出网。返回 "" = 放行，否则是**对外**理由。
 
-    拒的判据（说清是哪一条，管理员才改得动；清单与句式在 net_guard）：
-    * 解析不出主机名——`http:///v1`、`http://:80/v1` 这类空壳；
-    * 主机名是本机——回环（127.0.0.0/8、::1）、全零（0.0.0.0、::）或 localhost
-      这个名字：受 ALLOW_LOCALHOST_BASE_URL 管，默认拒；
-    * 主机名是 IP 字面量且落在 net_guard 清单的任一段里（私有/链路本地/组播/
-      CGNAT/文档与基准/保留段，或 IPv4 映射的 IPv6 写法）：无论如何都拒；
-    * 主机名是域名：**解析之后**任一地址落在上述任一类里也拒。这一条是 v0.34.2
-      补的——此前域名只看名字本身，于是一条指着 127.0.0.1 或 169.254.169.254 的
-      A 记录能直接过关；解析失败同样拒（fail closed），因为一个连服务端都解析
-      不出来的名字，放行它等于让下一次连接去猜它指向哪儿。
+    判据全在 net_guard（清单、判定顺序与详细句式都在那边）；本函数只剩 URL 层：
+    拆主机名、空壳检查，以及把 net_guard 的详细理由过一遍
+    `public_reject_reason`。详细理由里有解析出的地址、命中的 CIDR、zone-id 值与
+    主机名——它经 `ProviderError` 会原样进普通用户的 400 响应，逐字回显就是一台
+    内网 DNS oracle。所以那层细节只留在内部（直接调 `net_guard.reject_reason`
+    排障/审计），这里对外只给类别。
 
     还有一件事这一层**没有**关掉，别把它当成已覆盖：闸门只在配置写入时跑一次
     （唯一调用点是 `ProviderStore._validate`），而真正出站在 `build_client` 里由
@@ -184,12 +180,14 @@ def _base_url_reject_reason(base_url: str) -> str:
     # resolve / allow_loopback 必须在**调用时**从模块属性取（裸名字即可：函数体
     # 里的全局名每次执行都重新解析）——这正是 conftest autouse 桩与逐用例
     # monkeypatch 能生效的原因；net_guard 拿到的只是这一次调用的引用。
-    return net_guard.reject_reason(
+    # 详细理由只在这一层内部使用：跨出这一层的只有公开类别。
+    detail = net_guard.reject_reason(
         host,
         resolve=_resolve_addresses,
         allow_loopback=ALLOW_LOCALHOST_BASE_URL,
         where="base_url",
     )
+    return net_guard.public_reject_reason(detail)
 
 
 # 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。

@@ -93,6 +93,41 @@ _V4_EMBEDDED_NETWORKS = (
 _LOOPBACK_HINT = ("；确实要把模型自建在本机的话，"
                   "把 providers.ALLOW_LOCALHOST_BASE_URL 打开")
 
+# 详细理由要服务内部排障与审计，会带解析出的地址、命中的 CIDR、zone-id 值与
+# 主机名。这些细节一旦经 ProviderError 原样进普通用户的 400 响应，就是一台
+# 内网 DNS oracle（M-4）；对外只回下面的类别文案。
+PUBLIC_REJECT_GENERIC = "该地址不被允许"
+
+
+def public_reject_reason(reason: str) -> str:
+    """把 ``reject_reason`` 的详细理由收成可对外展示的类别文案（纯字符串映射）。
+
+    输入为空 = 放行，返回空串；认不出的类别回通用文案。输出只由固定句子组成，
+    不拼接输入里的任何片段，因此解析地址、CIDR、zone-id 值与主机名都不可能
+    出现在返回值里。
+
+    zone-id 必须排在「本机」之前：zone-id 的理由句里也含「本机」
+    （"只在本机链路上有意义"），反过来判会把它误报成本机地址。
+    """
+    if not reason:
+        return ""
+    text = str(reason)
+    if "zone-id" in text:
+        return "该地址带 zone-id，不被允许"
+    if "解析失败" in text:
+        return "该主机名解析失败，不被允许"
+    if "解析结果为空" in text:
+        return "该主机名解析结果为空，不被允许"
+    if "本机" in text:
+        return "该地址指向本机，不被允许"
+    if "链路本地" in text:
+        return "该地址是链路本地地址，不被允许"
+    if "组播" in text:
+        return "该地址是组播地址，不被允许"
+    if "内网" in text:
+        return "该地址属于内网，不被允许"
+    return PUBLIC_REJECT_GENERIC
+
 
 def reject_reason(host: str, *, resolve, allow_loopback: bool, where: str,
                   loopback_hint: str | None = None) -> str:

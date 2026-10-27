@@ -40,6 +40,8 @@ import socket
 
 import pytest
 
+from app.core import net_guard
+
 
 def _stub(monkeypatch, *addresses, raises=None):
     """把 DNS 解析换成固定答案（生产走真 getaddrinfo，测试一次都不许出网）。"""
@@ -63,7 +65,7 @@ def _record(**over):
     return base
 
 
-# ---------- 域名解析到内网：必须拒，且理由要说清解析到了什么 ----------
+# ---------- 域名解析到内网：必须拒，对外理由只给类别 ----------
 
 PRIVATE_ANSWERS = {
     "回环 v4": "127.0.0.1",
@@ -86,6 +88,8 @@ PRIVATE_ANSWERS = {
 def test_domain_resolving_to_private_range_is_rejected(monkeypatch, literal):
     """一个像公网的名字解析到内网/回环/链路本地/组播 → 必须是拒，不是放行。
 
+    对外理由只给类别（M-4：解析地址是内网 DNS oracle），但仍须说清属于哪一类。
+
     负向锁：把域名那一支解析+判段的整段删掉（恢复成 v0.34.2 之前的 `return ""`），
     本条 13 个参数全部红——理由那一句变成空串，断言当场抓到。
     """
@@ -94,7 +98,7 @@ def test_domain_resolving_to_private_range_is_rejected(monkeypatch, literal):
     why = providers._base_url_reject_reason("https://good-model.example/v1")
     assert isinstance(why, str), f"理由必须是字符串，拿到 {type(why).__name__}"
     assert why, f"解析到 {literal} 居然放行了（返回空串=放行）"
-    assert literal in why, f"理由里要说清解析到了哪个地址：{why!r}"
+    assert any(k in why for k in ("本机", "链路本地", "组播", "内网")), why
 
 
 @pytest.mark.parametrize("literal", PRIVATE_ANSWERS.values(), ids=list(PRIVATE_ANSWERS))
@@ -103,6 +107,7 @@ def test_domain_resolving_to_private_range_blocks_the_write_path(monkeypatch, li
 
     只测纯函数是半条命：闸门挂在 `_validate` 里才挡得住管理员点保存和
     POST /v1/providers/test 的草稿试连（调用点见 providers.py 的 `_validate`）。
+    抛出的文案同样只含类别，不含这个地址。
 
     负向锁：把 `_validate` 里 `blocked = _base_url_reject_reason(base_url)` 那三行
     删掉，本条红（异常不发生）。
@@ -111,11 +116,16 @@ def test_domain_resolving_to_private_range_blocks_the_write_path(monkeypatch, li
 
     with pytest.raises(providers.ProviderError) as caught:
         providers.ProviderStore._validate(_record(base_url="https://good-model.example/v1"))
-    assert literal in str(caught.value), f"抛出来的得是那句理由：{caught.value!r}"
+    assert any(k in str(caught.value) for k in ("本机", "链路本地", "组播", "内网")), \
+        f"抛出来的得是类别理由：{caught.value!r}"
+    assert literal not in str(caught.value), f"异常文案回显了解析地址：{caught.value!r}"
 
 
 def test_any_address_of_a_multi_answer_name_rejects_it(monkeypatch):
     """A/AAAA 多条记录：只要**有一条**踩线就拒——全称判据，不是看第一条。
+
+    对外文案只给「内网」类别；详细理由（点名踩线的那条地址）仍可从
+    net_guard.reject_reason 拿到。
 
     负向锁：把 `for literal in addresses` 改成只看 `addresses[0]`，本条红
     （公网排在前，内网那条就被忽略了）。
@@ -123,8 +133,15 @@ def test_any_address_of_a_multi_answer_name_rejects_it(monkeypatch):
     providers = _stub(monkeypatch, "93.184.216.34", "10.0.0.5")
 
     why = providers._base_url_reject_reason("https://good-model.example/v1")
-    assert why, "多记录里混了一条内网必须拒"
-    assert "10.0.0.5" in why, f"要点名那条踩线的地址：{why!r}"
+    assert why and "内网" in why, why
+    assert "10.0.0.5" not in why, why
+    detail = net_guard.reject_reason(
+        "good-model.example",
+        resolve=lambda host: ["93.184.216.34", "10.0.0.5"],
+        allow_loopback=False,
+        where="base_url",
+    )
+    assert "10.0.0.5" in detail, f"内部详细理由要点名踩线的地址：{detail!r}"
 
 
 def test_resolving_to_public_ip_is_allowed(monkeypatch):
@@ -146,6 +163,67 @@ def test_dual_stack_public_answers_both_pass(monkeypatch):
     providers = _stub(monkeypatch, "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946")
 
     assert providers._base_url_reject_reason("https://good-model.example/v1") == ""
+
+
+# ---------- M-4：对外文案不回显解析地址 / CIDR / host ----------
+
+def test_provider_facing_reason_hides_resolved_address_cidr_and_host(monkeypatch):
+    """普通用户能看到的拒因只能是类别：地址、CIDR、host 三者一个都不许出现。
+
+    闸门仍先在内部拿详细理由（排障与未来审计要它），再经 public_reject_reason
+    收成类别；把详细理由直接回显就是一台内网 DNS oracle。
+
+    负向锁：把 providers 的返回值改回未公开化的 `blocked`，本条红。
+    """
+    providers = _stub(monkeypatch, "10.1.2.3")
+
+    why = providers._base_url_reject_reason("https://intranet.corp.example")
+    assert why, "解析到内网必须拒"
+    assert "10.1.2.3" not in why, f"回显了解析地址：{why!r}"
+    assert "10.0.0.0/8" not in why, f"回显了命中 CIDR：{why!r}"
+    assert "intranet.corp.example" not in why, f"回显了主机名：{why!r}"
+    assert "内网" in why and "不被允许" in why, why
+
+
+def test_provider_facing_reason_still_allows_public_answers(monkeypatch):
+    """公开化不许把放行改成拒绝：公网答案仍返回空串（=放行）。"""
+    providers = _stub(monkeypatch, "93.184.216.34")
+
+    assert providers._base_url_reject_reason("https://good-model.example") == ""
+
+
+def test_provider_facing_reason_hides_zone_id_value():
+    """zone-id 只报类别，`%eth0` 这类接口名与地址本身都不回显。"""
+    from app.core import providers
+
+    why = providers._base_url_reject_reason("http://[fe80::1%eth0]/v1")
+    assert why, "zone-id 写法必须拒"
+    assert "zone-id" in why, why
+    assert "eth0" not in why and "fe80" not in why, f"回显了 zone-id 值/地址：{why!r}"
+
+
+def test_detailed_reason_survives_in_net_guard_for_troubleshooting():
+    """内部排障没被削掉：直接调 net_guard.reject_reason 仍点名地址与命中 CIDR。"""
+    why = net_guard.reject_reason(
+        "intranet.corp.example",
+        resolve=lambda host: ["10.1.2.3"],
+        allow_loopback=False,
+        where="base_url",
+    )
+    assert "10.1.2.3" in why, why
+    assert "10.0.0.0/8" in why, why
+    assert "intranet.corp.example" in why, why
+
+
+def test_public_reject_reason_is_a_pure_category_mapping():
+    """纯函数口径：放行回空串，未知类别回通用文案，已知类别只由固定句子组成。"""
+    assert net_guard.public_reject_reason("") == ""
+    assert net_guard.public_reject_reason("别的东西") == net_guard.PUBLIC_REJECT_GENERIC
+    assert net_guard.PUBLIC_REJECT_GENERIC == "该地址不被允许"
+    public = net_guard.public_reject_reason(
+        "base_url 的主机名 x 解析到内网地址 10.1.2.3（10.0.0.0/8），服务端不做内网请求")
+    assert public == "该地址属于内网，不被允许"
+    assert "10.1.2.3" not in public and "10.0.0.0/8" not in public
 
 
 # ---------- 解析失败：fail closed ----------
@@ -222,7 +300,7 @@ def test_localhost_switch_still_does_not_release_private_answers(monkeypatch):
     monkeypatch.setattr(providers, "ALLOW_LOCALHOST_BASE_URL", True)
     why = providers._base_url_reject_reason("https://mine.example/v1")
     assert why, "开关打开不等于允许扫内网"
-    assert "10.0.0.5" in why
+    assert "内网" in why and "10.0.0.5" not in why, why
 
     for literal in ("169.254.169.254", "192.168.1.1", "fe80::1"):
         _stub(monkeypatch, literal)
