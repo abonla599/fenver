@@ -124,14 +124,17 @@ def _warn(message: str) -> None:
 
 
 def _clean_account(value) -> str:
-    """去控制字符（Cc/Cf：含 NUL、零宽连接符）、strip、截断 64；空 → anonymous。
+    """去控制字符（Cc/Cf：含 NUL、零宽连接符）、隐掉凭据形状、strip、截断 64；
+    空 → anonymous。
 
-    只扫有界前缀：2 MB 用户名不该在这里被逐字符分类（公开端点可并发放大）。
+    账号来自公开端点，可能整段是 `password=…` / `sk-…`：落盘前先过审计同一套
+    值级脱敏，再去首尾空白。只扫有界前缀：2 MB 用户名不该在这里被逐字符分类
+    （公开端点可并发放大）。
     """
     raw = str(value or "")[:ACCOUNT_SCAN_LIMIT]
     text = "".join(ch for ch in raw
                    if unicodedata.category(ch) not in ("Cc", "Cf"))
-    text = text.strip()[:MAX_ACCOUNT_CHARS]
+    text = audit._scrub_text(text).strip()[:MAX_ACCOUNT_CHARS]
     return text or "anonymous"
 
 

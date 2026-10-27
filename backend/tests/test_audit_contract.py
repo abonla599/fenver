@@ -13,7 +13,7 @@ import json
 import pytest
 from fastapi.routing import APIRoute
 
-from app.core import audit
+from app.core import audit, security_log
 from app.core.authz import require_admin
 from app.main import app
 
@@ -323,3 +323,65 @@ def test_key_blacklist_actually_has_teeth(audit_file, monkeypatch):
                         audit._SECRET_KEYS - {"device_secrets"})
     with pytest.raises(AssertionError, match="device_secrets 的值原样落盘"):
         check()                               # 名单被摘：必须红
+
+
+# ---------- 6. 账号栏：actor_name 也是公开输入 ----------
+#
+# actor_name 来自登录名。注册接口对一个能让所有人看见的字符串不作凭据形状校验，
+# 所以它和 detail 一样必须过值级脱敏；长度也要有界，否则一条审计能把管理页撑爆。
+
+def test_password_like_labels_in_detail_keep_the_label_and_hide_the_value(audit_file):
+    value = "Zz9" + "pw123456"
+    for label in ("password", "passwd", "pwd", "new_password"):
+        raw = _probe(audit_file, detail=f"{label}={value}")
+        assert value not in raw, f"detail 里的 {label} 值原样落盘"
+        assert f"{label}=" in raw, f"{label} 标签被一起吃掉了：{raw}"
+    assert raw.count("***") >= 4
+
+
+def test_actor_name_credential_shapes_are_scrubbed_before_they_land(audit_file):
+    key = "sk" + "-" + "A" * 24
+    password = "Zz9" + "accountpw"
+    audit.log({"user_id": "u_a", "username": "ops password=" + password + " " + key,
+               "role": "admin"}, "x.probe")
+    raw = audit_file.read_text(encoding="utf-8")
+    assert password not in raw, "actor_name 里的口令值原样落盘"
+    assert key not in raw, "actor_name 里的 sk- 密钥原样落盘"
+    assert "password=" in raw, "标签被一起吃掉了"
+
+
+def test_ordinary_actor_names_survive_scrubbing(audit_file):
+    for name in ("张三", "alice"):
+        rec = audit.log({"user_id": "u_a", "username": name, "role": "admin"}, "x.probe")
+        assert rec["actor_name"] == name
+        assert (rec["actor_id"], rec["actor_role"]) == ("u_a", "admin")
+    raw = audit_file.read_text(encoding="utf-8")
+    assert "张三" in raw and "alice" in raw
+
+
+def test_actor_name_is_bounded_like_the_security_log_account(audit_file):
+    long_name = "名" * 200
+    rec = audit.log({"user_id": "u_a", "username": long_name, "role": "admin"}, "x.probe")
+    assert rec["actor_name"] == long_name[:audit._ACTOR_NAME_CHARS]
+    assert audit._ACTOR_NAME_CHARS == security_log.MAX_ACCOUNT_CHARS, \
+        "actor_name 与安全日志账号的上限口径漂了"
+
+
+def test_actor_name_scrubbing_actually_has_teeth(audit_file, monkeypatch):
+    """负控：拆掉 _scrub_text 后，同一条「盘上查不到」必须当场报红。"""
+    key = "sk" + "-" + "B" * 24
+
+    def check():
+        audit_file.write_text("", encoding="utf-8")
+        audit.log({"user_id": "u_a", "username": "ops " + key, "role": "admin"},
+                  "x.probe")
+        raw = audit_file.read_text(encoding="utf-8")
+        assert key not in raw, "actor_name 里的 sk- 密钥原样落盘"
+
+    check()                                   # 正常实现：红不了
+    real = audit._scrub_text
+    monkeypatch.setattr(audit, "_scrub_text", lambda s: s)
+    with pytest.raises(AssertionError, match="actor_name 里的 sk- 密钥原样落盘"):
+        check()                               # 脱敏被拆：必须红
+    monkeypatch.setattr(audit, "_scrub_text", real)
+    check()                                   # 还原：复绿

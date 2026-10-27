@@ -34,7 +34,11 @@ from app.core.mcp_client import (
     DEFAULT_PROTOCOL_VERSION,
     MCPError,
 )
-from app.core.mcp_stdio_client import MCPStdioClient, _same_id
+from app.core.mcp_stdio_client import (
+    MCPStdioClient,
+    _same_id,
+    _sanitize_stderr_line,
+)
 
 SERVER = Path(__file__).with_name("fake_mcp_stdio_server.py")
 
@@ -701,3 +705,25 @@ def test_a1b_outbound_ids_start_at_one_and_increment(tmp_path):
         first_list = next(m for m in requests if m["method"] == "tools/list")
         assert init["id"] == 1
         assert first_list["id"] == 2
+
+
+# ---------- stderr 脱敏：值不出现、标签保留 ----------
+#
+# 假密钥一律运行时拼接：整颗字面量会让 tools/secret_scan.py 在自己的测试文件上红。
+
+_FAKE_STDERR_SECRETS = [
+    ("sk-", "sk" + "-" + "A" * 24),
+    ("ghp_", "ghp" + "_" + "B" * 24),
+    ("Bearer ", "Bearer " + "C" * 24),
+    ("password=", "password" + "=" + "D" * 16),
+    ("AKIA", "AKIA" + "E" * 16),
+]
+
+
+@pytest.mark.parametrize("label, token", _FAKE_STDERR_SECRETS,
+                         ids=[label.strip() for label, _ in _FAKE_STDERR_SECRETS])
+def test_stderr_sanitizer_hides_each_credential_shape_and_keeps_the_label(label, token):
+    cleaned = _sanitize_stderr_line("server 报错：" + token + " 请检查配置")
+    value = token[len(label):]
+    assert value not in cleaned, f"{label} 的密钥值没有被打码"
+    assert label in cleaned, f"{label} 标签被一起吃掉了"

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core import security_log
+from app.core import audit, security_log
 
 
 @pytest.fixture(autouse=True)
@@ -328,3 +328,57 @@ def test_events_filter_by_severity_only_returns_that_level():
 
     everything, _ = security_log.events()
     assert len(everything) == 3, "None 不该过滤任何级别"
+
+
+# ---------- 账号栏：凭据形状不进盘 ----------
+#
+# account 来自登录/注册请求体，攻击者可以把 `password=…` 或 `sk-…` 直接填进用户名。
+# 判据写在「盘上查不到那串字节」这一层，不写在「清洗函数返回什么」那一层。
+
+def test_account_credential_shapes_are_scrubbed_before_disk(slog):
+    password = "Zz9" + "accountpw"
+    key = "sk" + "-" + "C" * 24
+    _event(account="password=" + password)
+    _event(account=key)
+    assert security_log.flush() == 2
+    raw = slog.read_text(encoding="utf-8")
+    assert password not in raw, "账号里的口令值原样落盘"
+    assert key not in raw, "账号里的 sk- 密钥原样落盘"
+    assert "password=***" in raw, "口令标签被一起吃掉了"
+    assert '"account":"***"' in raw, "sk- 形状没有整体隐去"
+
+
+def test_ordinary_accounts_survive_cleaning():
+    for name in ("张三", "alice", "secretary"):
+        assert _event(account=name)["account"] == name
+
+
+def test_account_scrubbing_runs_before_the_length_cap():
+    secret = "SECRET" + "123456"
+    event = _event(account="x" * 50 + " password=" + secret)
+    assert event["account"] == "x" * 50 + " password=***"
+    assert secret[:4] not in event["account"], "截断把凭据值的片段留了下来"
+    assert len(event["account"]) <= security_log.MAX_ACCOUNT_CHARS
+
+
+def test_account_scrubbing_actually_has_teeth(tmp_path, monkeypatch):
+    """负控：把 audit._scrub_text 换成恒等函数，同一条「盘上查不到」必须变红。"""
+    password = "Zz9" + "accountpw"
+
+    def check(path):
+        security_log.reset_for_tests(path=str(path), autoflush=False)
+        security_log.record("auth.fail", ip="203.0.113.77",
+                            account="password=" + password,
+                            route="/v1/auth/login", status=401,
+                            detail="login.failed")
+        assert security_log.flush() == 1
+        raw = path.read_text(encoding="utf-8")
+        assert password not in raw, "安全日志账号里的口令值原样落盘"
+
+    check(tmp_path / "green.jsonl")           # 正常实现：红不了
+    real = audit._scrub_text
+    monkeypatch.setattr(audit, "_scrub_text", lambda s: s)
+    with pytest.raises(AssertionError, match="安全日志账号里的口令值原样落盘"):
+        check(tmp_path / "red.jsonl")         # 脱敏被拆：必须红
+    monkeypatch.setattr(audit, "_scrub_text", real)
+    check(tmp_path / "green-again.jsonl")     # 还原：复绿

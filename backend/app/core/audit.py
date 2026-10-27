@@ -34,6 +34,10 @@ _LOCK = threading.Lock()
 _STATS_LOCK = threading.Lock()
 _STATS_CACHE = {"key": None, "value": None}
 
+# actor_name 与 security_log 的账号落盘上限同口径：两边是同一类公开输入，界不一样
+# 就没有"有界"可言。security_log 反向 import 本模块，所以数字只能在这里再写一遍。
+_ACTOR_NAME_CHARS = 64
+
 # 出现在 before/after 摘要里就一律不落明文的键名（小写比对）。这些不是"我们判断
 # 它们敏感"，而是它们本就不该被记下来：审计要的是"这一格被改过"，不是那格的内容。
 _SECRET_KEYS = {
@@ -54,8 +58,12 @@ _SECRET_KEYS = {
 _BEARER_RE = re.compile(r"(\bbearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.I)
 _PREFIXED_KEY_RE = re.compile(r"\b(?:sk|pk)-[A-Za-z0-9._\-]{8,}", re.I)
 # 两条分组：标签与分隔符原样保留（group 1 + group 2），只把值换成 ***。
+# 标签前用「非字母数字」而不是词边界：new_password= 这类下划线复合标签也要覆盖；
+# 事件名里没有 : 或 =，不会被吃到。
 _LABELED_SECRET_RE = re.compile(
-    r"\b(api[_-]?key|authorization|access[_-]?token|secret)"
+    r"(?<![A-Za-z0-9])"
+    r"(api[_-]?key|authorization|access[_-]?token|secret"
+    r"|password|passwd|pwd)"
     r"([\"']?\s*[:=]\s*[\"']?)([^\s\"',;]{8,})",
     re.I,
 )
@@ -99,14 +107,18 @@ def _redact(obj):
 
 
 def _actor_bits(actor):
-    """Principal 或带同名键的 dict 都能取，取不到就留空——审计宁可少一栏也不炸。"""
+    """Principal 或带同名键的 dict 都能取，取不到就留空——审计宁可少一栏也不炸。
+
+    actor_name 是登录名，不是可信标签：有人会把 `password=…` 或 `sk-…` 填进用户名，
+    所以它和 detail 走同一套凭据脱敏并截到有界长度。actor_id/role 是内部枚举，不动。
+    """
     def pick(name):
         if isinstance(actor, dict):
             return actor.get(name)
         return getattr(actor, name, None)
     return {
         "actor_id": pick("user_id"),
-        "actor_name": pick("username"),
+        "actor_name": _scrub_text(pick("username"))[:_ACTOR_NAME_CHARS],
         "actor_role": pick("role"),
     }
 
