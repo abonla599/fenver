@@ -288,11 +288,14 @@ async def reject_oversized_json_body(request: Request, call_next):
 
 # ---------- 数据模型 ----------
 
-# 一次聊天请求的三条体积闸门。限流挡的是**次数**，这三条挡的是**单次的大小**——
+# 一次聊天请求的体积闸门。限流挡的是**次数**，这几条挡的是**单次的大小**——
 # 乘起来才是真正花掉的 token 与吃掉的内存；只装前者，20 次/分每次塞几 MB 照样能
 # 把服务打穿。判据集中在 backend/tests/test_request_size_caps.py。
-MAX_CHAT_MESSAGES = 50
-MAX_MESSAGE_CHARS = 32_000
+# 三个常量住在 app.core.limits：session_store 也要用同一个条数上限，放在这里
+# 会逼它 import app.main（而 main 构造 SessionStore），拧成环。这里的名字保留，
+# `from app.main import MAX_CHAT_MESSAGES` 的既有用法一个字不用改。
+from app.core.limits import (MAX_CHAT_MESSAGES, MAX_MESSAGE_CHARS,
+                             MAX_SESSION_MESSAGES)
 MAX_CHAT_ATTACHMENTS = 5
 MAX_FEEDBACK_COMMENT_CHARS = 500
 
@@ -348,7 +351,9 @@ class AgentRequest(BaseModel):
     model: Optional[str] = None
 
 class OrchestrateRequest(BaseModel):
-    goal: str
+    # 目标文本和 AgentRequest.task 同一档上限：它会被送进一次付费规划调用，
+    # 没有上限就等于按调用方的字数替服务方买单。
+    goal: str = Field(..., max_length=MAX_MESSAGE_CHARS)
     task_id: Optional[str] = None
     # ⭐ v0.35 A3：用户对"挂在断上等输入的那一步"的回答（验证码、收货地址……）。
     # Optional + 默认 None = 现网那两个字段的老调用方一个比特都不用改；不带它而
@@ -359,7 +364,7 @@ class OrchestrateRequest(BaseModel):
     user_answer: Optional[str] = None
 
 # ---------- 会话存储 ----------
-from app.session.session_store import SessionStore
+from app.session.session_store import SessionLimitError, SessionStore
 
 # ⚠️ 导入期副作用：这一行会把 $SESSION_DB_PATH 指向的文件读进来并做 owner 回填，
 # 未设置该变量时就是仓库真实的 data/sessions.json —— 也就是说"只是 import 一下
@@ -1178,13 +1183,23 @@ def delete_session(session_id: str, principal: Principal = CurrentPrincipal):
     raise HTTPException(status_code=404, detail="会话不存在")
 
 class SessionMessagesRequest(BaseModel):
-    messages: List[Dict[str, Any]] = []
+    # 整份回写与单次聊天不是一个量：前端每次发消息都回写整份历史，500 条是
+    # "会话还能正常存回去"的上限，不是"一次对话能带多少轮"。
+    messages: List[Dict[str, Any]] = Field(default_factory=list,
+                                           max_length=MAX_SESSION_MESSAGES)
 
 @app.put("/v1/sessions/{session_id}/messages")
 def replace_session_messages(session_id: str, req: SessionMessagesRequest,
                                    principal: Principal = CurrentPrincipal):
     """整体替换会话消息，使前端编辑/删除/重新生成后的视图与后端一致。"""
-    if not sessions_store.replace(session_id, principal.user_id, req.messages):
+    try:
+        replaced = sessions_store.replace(session_id, principal.user_id, req.messages)
+    except SessionLimitError as e:
+        # 422 而不是 404：replace 返回 False 的含义是"没有这条会话"，而超限是
+        # "这条会话存在，但你给的这份历史存不下"。混成 404 只会让客户端把一次
+        # 永远存不下的回写当成会话丢了，反复重试。
+        raise HTTPException(status_code=422, detail=str(e))
+    if not replaced:
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
 
@@ -1202,7 +1217,10 @@ class ScheduleItem(BaseModel):
 
 class ScheduleRequest(BaseModel):
     day: Optional[str] = None           # 空 = 服务端本地日期的今天
-    items: List[ScheduleItem] = []
+    # 与 schedule.set_plan 的落盘上限同一个数：模型层先拒，存储层仍是最后一道闸
+    # （工具那条路不经过这个模型）。
+    items: List[ScheduleItem] = Field(default_factory=list,
+                                      max_length=schedule.MAX_ITEMS_PER_DAY)
 
 
 @app.get("/v1/schedule")

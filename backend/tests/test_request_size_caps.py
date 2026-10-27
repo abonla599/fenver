@@ -24,7 +24,8 @@ from pathlib import Path
 import pytest
 
 from app.core import auth_router as ar
-from app.main import MAX_CHAT_MESSAGES, MAX_MESSAGE_CHARS
+from app.core import schedule
+from app.main import MAX_CHAT_MESSAGES, MAX_MESSAGE_CHARS, MAX_SESSION_MESSAGES
 from app.memory import memory_router as mr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +107,80 @@ def test_update_content_is_bounded_but_a_weight_only_edit_is_not(client):
     over = client.put("/v1/memory/update",
                       json={"memory_id": mem, "new_content": "x" * (mr.MAX_MEMORY_CONTENT_CHARS + 1)})
     assert over.status_code == 422, over.text
+
+
+# ---------- 1c. 三个此前没有上限的请求体 ----------
+# 这三个字段都会落进"解析—校验—（可能）上游调用"这条路，而模型层原先是敞口的：
+# goal 直接进规划调用，messages 落整份 JSON，items 落 schedule.json。上限放在
+# Pydantic 层是"请求还没进端点就挡住"，存储层再各判一次是纵深防御。
+
+def test_orchestrate_goal_length_is_capped(client, monkeypatch):
+    import app.main as main_module
+    # 不真叫编排器：这一条判的是长度闸门，不是任务能不能跑完。
+    monkeypatch.setattr(main_module.orchestrator, "run",
+                        lambda **kwargs: {"task_id": "t", "status": "completed"})
+    over = client.post("/v1/agent/orchestrate",
+                       json={"goal": "x" * (MAX_MESSAGE_CHARS + 1)})
+    assert over.status_code == 422, over.text
+    at_cap = client.post("/v1/agent/orchestrate", json={"goal": "x" * MAX_MESSAGE_CHARS})
+    assert at_cap.status_code != 422, f"恰好 32000 字被长度闸门误拒：{at_cap.text}"
+
+
+def test_session_replacement_accepts_the_history_cap_and_refuses_one_more(client):
+    """整份回写的上限是 500，不是单次聊天的 50：长会话每次发消息都整份回写。"""
+    sid = client.post("/v1/sessions").json()["session_id"]
+    messages = [{"role": "user", "content": "m"} for _ in range(MAX_SESSION_MESSAGES)]
+    at_cap = client.put(f"/v1/sessions/{sid}/messages", json={"messages": messages})
+    assert at_cap.status_code == 200, at_cap.text
+    assert at_cap.json()["count"] == MAX_SESSION_MESSAGES
+    over = client.put(f"/v1/sessions/{sid}/messages",
+                      json={"messages": messages + [{"role": "user", "content": "m"}]})
+    assert over.status_code == 422, over.text
+
+
+def test_a_store_level_session_limit_maps_to_422_not_404(client, monkeypatch):
+    """Pydantic 拒掉的是模型层；存储层再判一次时，路由必须回 422 而不是当 404。
+
+    把 replace 换成直接抛 SessionLimitError：这条钉的是 `replace_session_messages`
+    的 except 分支。若被误写成"返回 False"，这里会拿到 404，与"会话不存在"混成
+    一句——客户端只会反复重试一份永远存不下的历史。
+    """
+    from app.session.session_store import SessionLimitError
+    import app.main as main_module
+
+    def boom(*args, **kwargs):
+        raise SessionLimitError("messages 最多 500 条，现在 501 条")
+
+    monkeypatch.setattr(main_module.sessions_store, "replace", boom)
+    sid = client.post("/v1/sessions").json()["session_id"]
+    res = client.put(f"/v1/sessions/{sid}/messages",
+                     json={"messages": [{"role": "user", "content": "m"}]})
+    assert res.status_code == 422, res.text
+
+
+def test_schedule_items_are_capped_at_the_daily_limit(client, isolated_schedule):
+    items = [{"text": f"第 {i} 条"} for i in range(schedule.MAX_ITEMS_PER_DAY)]
+    ok = client.put("/v1/schedule", json={"items": items})
+    assert ok.status_code == 200, ok.text
+    over = client.put("/v1/schedule", json={"items": items + [{"text": "多一条"}]})
+    assert over.status_code == 422, over.text
+
+
+def test_the_session_store_itself_refuses_an_oversized_replacement(tmp_path):
+    """绕过 HTTP 直调存储层：模型层被改宽的那天，这一道仍然拦得住。"""
+    from app.session.session_store import SessionLimitError, SessionStore
+
+    store = SessionStore(path=str(tmp_path / "sessions.json"))
+    sid = store.create("m", owner="o")["session_id"]
+    messages = [{"role": "user", "content": "m"} for _ in range(MAX_SESSION_MESSAGES)]
+    assert store.replace(sid, "o", messages) is True
+    assert len(store.get(sid, owner="o")["messages"]) == MAX_SESSION_MESSAGES
+
+    with pytest.raises(SessionLimitError):
+        store.replace(sid, "o", messages + [{"role": "user", "content": "m"}])
+    # 被拒的那一次不许留下半份：原有 500 条原样还在。
+    assert len(store.get(sid, owner="o")["messages"]) == MAX_SESSION_MESSAGES
+    assert issubclass(SessionLimitError, ValueError)
 
 
 # ---------- 2. 花钱的入口都要记账 ----------

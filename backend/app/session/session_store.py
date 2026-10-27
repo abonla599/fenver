@@ -14,8 +14,18 @@ from datetime import datetime
 
 from app.core import stream_events as se
 from app.core.atomic_write import write_json_atomic
+from app.core.limits import MAX_SESSION_MESSAGES
 from app.core.owner_backfill import backfill_owner
 from app.core.paths import data_root
+
+
+class SessionLimitError(ValueError):
+    """整份回写的消息条数超过 `MAX_SESSION_MESSAGES`。
+
+    单独一个类型是为了让路由能把它翻成 422：`replace()` 的另一条失败分支是
+    "没有这条会话"（返回 False → 404），把"太大了"混进那条路，客户端会把一次
+    永远存不下的回写当成会话丢了。
+    """
 
 
 def _default_path() -> str:
@@ -204,7 +214,16 @@ class SessionStore:
             return True
 
     def replace(self, session_id: str, owner: str, messages: list) -> bool:
-        """整体替换会话消息，使前端编辑/删除/重新生成后的视图与存储一致。"""
+        """整体替换会话消息，使前端编辑/删除/重新生成后的视图与存储一致。
+
+        条数在清洗**之前**判：清洗会丢掉形状不对的条目，先清洗再判等于让一份
+        501 条的请求因为其中几条不合法而"恰好"过关，而解析与内存已经吃下了它。
+        超限抛 `SessionLimitError`（ValueError 子类），不返回 False——False 在
+        本层的意思是"没有这条会话"，路由会把它翻成 404。
+        """
+        if len(messages or []) > MAX_SESSION_MESSAGES:
+            raise SessionLimitError(
+                f"messages 最多 {MAX_SESSION_MESSAGES} 条，现在 {len(messages)} 条")
         cleaned = self._clean(messages)
         with self._lock:
             session = self._sessions.get(session_id)
