@@ -152,7 +152,7 @@ def test_base_url_refuses_private_and_loopback_hosts(bad):
         ProviderStore._validate(_record(base_url=bad))
     except ProviderError as e:
         why = str(e)
-        # 面向管理员的错误文案要说清是哪个地址、为什么，不许是裸异常
+        # 对外文案只给类别（M-4：地址/CIDR/host 不回显），但必须说清哪一类
         assert bad.rstrip("/").split("/")[-1] or True
         assert any(k in why for k in ("内网", "本机", "localhost", "全零")), \
             f"理由没说出属于哪一类：{why!r}"
