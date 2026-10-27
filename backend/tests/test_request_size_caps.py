@@ -123,7 +123,9 @@ def test_orchestrate_goal_length_is_capped(client, monkeypatch):
                        json={"goal": "x" * (MAX_MESSAGE_CHARS + 1)})
     assert over.status_code == 422, over.text
     at_cap = client.post("/v1/agent/orchestrate", json={"goal": "x" * MAX_MESSAGE_CHARS})
-    assert at_cap.status_code != 422, f"恰好 32000 字被长度闸门误拒：{at_cap.text}"
+    # 只写 `!= 422` 会把 500 一并放行——这条本该证明"闸门没误伤边界"，却会让一次
+    # 内部崩溃替它签字；成功码必须写死。
+    assert at_cap.status_code == 200, f"恰好 {MAX_MESSAGE_CHARS} 字没被放行：{at_cap.text}"
 
 
 def test_session_replacement_accepts_the_history_cap_and_refuses_one_more(client):
