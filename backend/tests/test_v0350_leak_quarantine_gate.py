@@ -21,9 +21,9 @@
    每个可推送 ref 都能解析成提交，"没有 ref 能到达它"就是**正面证明** ⇒ 放行。这正是本机
    生产仓库今天的形状；
 4. **fail-closed**：对象还在、但某个可推送 ref 解析不成提交（指向 blob 的 tag），或对象不存在
-   却有 ref 解析不成提交 ⇒ merge-base 128 / ref 预检失败 ⇒ **拒绝**。第 3 与第 4 之间只差
-   "每个 ref 能不能解析成提交"，两条一起在场才证明放行读的是两个世界事实，而不是"看起来没
-   报错"（#74 咬的就是把 128 当成 1 那一口）。
+   却有 ref 解析不成提交，或名单里那一项在库里**不是提交**（误放的 tree/blob）⇒ merge-base
+   128 / ref 预检失败 ⇒ **拒绝**。第 3 与第 4 之间只差 "每个 ref 能不能解析成提交"，两条一起
+   在场才证明放行读的是两个世界事实，而不是"看起来没报错"（#74 咬的就是把 128 当成 1 那一口）。
 
 后面还有一组「没有开关」的钉子：候选的 opt-out 旗名一律被 argparse 拒、`--help` 里不多一面旗、
 环境变量改不出绿灯、三面既有降级旗一起带上也照样红。
@@ -466,6 +466,56 @@ def test_fail_closed_the_empty_ref_list_blocks_the_whole_gate(repo, gate, monkey
     assert code == 2, "空清单走的是「判据拿不到」那一档（2），不是已证相反（1）：%s" % out
     assert "leak-quarantine=REFUSED token=refs-unenumerable" in out, out
     assert "verdict=PASS" not in out, "空扫描仍然封版了"
+
+
+# --------------------------------------------------------------------------
+# 3b) 名单里误放 tree/blob：`^{commit}` 的 128 把它伪装成「对象不存在」
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["tree", "blob"])
+def test_fail_closed_a_tree_or_blob_in_the_quarantine_is_undecidable(
+        repo, gate, monkeypatch, capsys, kind):
+    """`QUARANTINED` 里那一项是 tree/blob 时，必须按 `probe-undecidable` 拒绝，不许 PASS。
+
+    这一类对象还被 HEAD 的提交引用着，`cat-file -e <sha>^{commit}` 却退 128——只看这一次，
+    它就和"对象已被清掉"长得一模一样；再叠上"全 ref 可解析"，旧判据会把它记成 absent 并
+    放行。不带后缀的 `cat-file -e <sha>` 退 0 是拆穿它的世界事实：对象还在库里，只是不是
+    提交。这里把两半都先让 git 当场证实，再要求闸门走 fail-closed。
+    """
+    obj = _must(repo, "rev-parse", "HEAD^{tree}" if kind == "tree" else "HEAD:clean.txt")
+    assert HEX40.match(obj), "夹具没拿到完整对象名：%r" % obj
+    listed = _must(repo, "rev-list", "--objects", "--all").splitlines()
+    assert any(line.split(" ", 1)[0] == obj for line in listed), (
+        "夹具对象没有被任何提交引用，测的就不是「对象还在、只是不是提交」这一档")
+    assert _must(repo, "cat-file", "-t", obj) == kind, "夹具对象类型不是 %s" % kind
+    assert _git(repo, "cat-file", "-e", obj).returncode == 0, "夹具对象不存在"
+    probe = _git(repo, "cat-file", "-e", obj + "^{commit}")
+    assert probe.returncode == 128, (
+        "带 ^{commit} 本该落到 128（实退 %d）：夹具没造出被伪装成 absent 的形状"
+        % probe.returncode)
+    refs, why = gate.pushable_refs(str(repo))
+    assert refs and why == "ok", "夹具没有可推送 ref，下面测不到「全 ref 可解析」那一半"
+    for ref in refs:
+        assert _git(repo, "rev-parse", "--verify", "--quiet",
+                    ref + "^{commit}").returncode == 0, (
+            "夹具里 %s 解析不成提交：这会把结论引到坏 ref 那一档，而不是本条的 tree/blob" % ref)
+    monkeypatch.setattr(gate, "QUARANTINED", (obj,))
+
+    state, state_detail = gate._commit_object_exists(str(repo), obj)
+    assert state == "undecidable", (
+        "名单里的 %s 被读成了 %r：%s" % (kind, state, state_detail))
+
+    ok, token, detail = gate.check_leak_quarantine(str(repo))
+    assert ok is False and token == "probe-undecidable", (
+        "QUARANTINED 里误放的 %s 被当成了 absent 放行：%r / %r" % (kind, token, detail))
+    assert obj[:12] in detail, "说明里要点名那个不是提交的对象：%s" % detail
+    assert "不是提交" in detail, "说明里要写清原因（对象存在但不是提交）：%s" % detail
+
+    code = _main_at(gate, repo, monkeypatch)
+    out = capsys.readouterr().out
+    assert code == 2, "判不出来走「判据拿不到」那档（2），不是已证相反（1）：%s" % out
+    assert "leak-quarantine=REFUSED token=probe-undecidable" in out
+    assert "verdict=PASS" not in out, "tree/blob 误放清单时闸门仍然封了这一版"
 
 
 # --------------------------------------------------------------------------

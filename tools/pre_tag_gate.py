@@ -98,7 +98,9 @@ scope 的读法**不在这里重写**：直接吃 `tools/release_marker.py` 的 
 ref 能把它推出去——这正是 `git filter-repo` + `git gc` 把泄露对象清掉之后的形状，也是
 `absent` 那一档放行的依据（`_commit_object_exists` + ref 可解析预检）。反过来，只要有一个
 ref 解析不成提交（悬空 ref、指向 blob 的 tag、目录不是仓库），"到不了"就失去依据，仍按
-`probe-undecidable` 拒绝：坏 ref 与 merge-base 的 128 都还是 fail-closed。
+`probe-undecidable` 拒绝：坏 ref 与 merge-base 的 128 都还是 fail-closed。名单里若误放了
+tree/blob，`<sha>^{commit}` 的 128 **不是**"对象不存在"——不带后缀的 `cat-file -e` 会退 0
+证明对象还在，这一档同样按 `probe-undecidable` 拒绝，不许借 absent 的证明放行。
 
 这一格**没有旗子、没有环境变量、没有 warn-only 模式**，是有意的：本文件另外三面旗能做的
 都只是把"取不到"降级，而"要不要放过一个含泄露的 ref"不属于任何操作者当场能授权的事。
@@ -523,16 +525,29 @@ def _commit_object_exists(repo_root: str, commit: str):
     """这个提交对象在不在库里？回 `present` / `absent` / `undecidable` 三档 + 说明。
 
     `git cat-file -e <commit>^{commit}` 的 rc=0 是"在"；非零只是"没找到"，而 git 把
-    「对象不存在」与「目录不是仓库」都折进 128，所以这个负数**不能单独当结论**——它只是
-    "该走 ref 可解析预检"的信号，真正把"没有"变成正面证明的是
-    `_all_refs_resolve_to_commits`：每个可推送 ref 都能解析成提交时，没有 ref 能指向一个
-    不存在的对象。超时 / 起不来 git / 其它退出码 ⇒ `undecidable`，不许吞成 `absent`。
+    「对象不存在」「对象在但不是提交（tree/blob）」「目录不是仓库」都折进 128，所以这个
+    负数**不能单独当结论**。rc=1/128 时再不带后缀问一次 `cat-file -e <commit>`：退 0 说明
+    对象其实在库里，只是 `QUARANTINED` 里放错了类型——"对象缺失"的前提不成立，按
+    `undecidable` 处理，不许当成 `absent` 去借 ref 可解析预检放行。两次都非零才是
+    `absent` 候选，交给 `_all_refs_resolve_to_commits` 把"没有"变成正面证明：每个可推送
+    ref 都能解析成提交时，没有 ref 能指向一个不存在的对象。超时 / 起不来 git / 其它退出码
+    ⇒ `undecidable`，不许吞成 `absent`。
     """
     _out, rc, err = _git_probe(repo_root, ["cat-file", "-e", "%s^{commit}" % commit])
     if rc == 0:
         return "present", "ok"
     if rc in (1, 128):
-        return "absent", "rc=%d%s" % (rc, (" %s" % err if err else ""))
+        # `^{commit}` 的 128 同时罩着"对象不存在"和"对象在、但不是提交"。若名单里误放
+        # tree/blob，只问带后缀这一条就会把它读成 absent，叠上"全 ref 可解析"就是假 PASS。
+        _out2, rc2, err2 = _git_probe(repo_root, ["cat-file", "-e", commit])
+        if rc2 == 0:
+            return "undecidable", (
+                "对象存在但不是提交（cat-file -e %s 退 0，带 ^{commit} 退 %d）"
+                % (commit[:12], rc))
+        if rc2 in (1, 128):
+            return "absent", "rc=%d%s" % (rc, (" %s" % err if err else ""))
+        return "undecidable", "cat-file -e rc=%s%s" % (
+            "?" if rc2 is None else rc2, (" %s" % err2 if err2 else ""))
     return "undecidable", "rc=%s%s" % (
         "?" if rc is None else rc, (" %s" % err if err else ""))
 
@@ -565,7 +580,8 @@ def check_leak_quarantine(repo_root: str):
     - `ref-reaches-quarantined`：名单里的 ref 一个都不许留下——说明里就是那份"该删哪些"，
       不需要人再数一遍；
     - `probe-undecidable`：某个 ref 的祖先关系判不出来，或者对象不存在却有 ref 解析不成
-      提交。**判不出来就不是干净**，不放行；
+      提交，或者名单里那一项在库里**不是提交**（误放的 tree/blob——`^{commit}` 的 128 会
+      把它伪装成"对象不存在"）。**判不出来就不是干净**，不放行；
     - `refs-unenumerable`：连 ref 清单都列不出来（这个目录到底是不是仓库都答不上来），
       那就没有一条判据谈得上"通过"；清单列出来了却是**空的**（既无 tag 也无分支头）
       也在这一档——没扫过任何 ref 的绿灯同样是"通过"这两个字没有依据。
