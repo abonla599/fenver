@@ -8,7 +8,8 @@ SSRF 判据。隔离锁 `tests/test_v0374_single_source_of_egress_predicates.py`
 
 刻意**不 import** 的两样（`tests/test_v0370_isolation_locks.py` 钉着）：
 * `app.sandbox`——沙箱容器 `network_disabled=True`，本模块是它的对照面；
-* `app.core.providers`——两个出网面共享的只有 `net_guard` 判据，解析器不借用。
+* `app.core.providers`——两个出网面共享 `net_guard` 判据与
+  `core/pinned_http.py` 的连接层钉扎实现，解析器不借用。
 
 DNS rebinding：每一跳只解析一次，判闸与连接用的是同一份地址列表——
 `make_client(pins=...)` 把这份列表交给 `PinnedBackend`（定义已搬到

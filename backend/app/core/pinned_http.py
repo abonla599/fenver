@@ -10,6 +10,7 @@ DNS rebinding / TOCTOU。这里的做法是：把**判过的那一份地址列�
 升级后形状一旦变了必须 fail-closed 抛错，绝不静默退回"按主机名重新解析"的连接
 路径——那正是这个模块要关掉的窗口。
 """
+import ipaddress
 import time
 
 import httpcore
@@ -61,15 +62,29 @@ def install_pins(client, pins) -> None:
     """把 `PinnedBackend(pins)` 挂到该 client 默认连接池的传输层上。
 
     `pins` 是 `{hostname: [已由 net_guard 校验过的地址]}`。空 dict 是"没有已
-    校验地址"，不是"随便连"——fail-closed 抛 `ValueError`；httpx 传输层不再
-    长成 `_transport._pool._network_backend` 时抛 `RuntimeError`。
+    校验地址"，不是"随便连"——fail-closed 抛 `ValueError`；值不是 IP 字面量
+    同样抛 `ValueError`（纵深防御：主机名绝不许作为 pin 值交回系统解析器）；
+    httpx 传输层不再长成 `_transport._pool._network_backend` 时抛 `RuntimeError`。
 
     失败时**不**关 `client`：所有权在调用方，由它在自己的 except 里 close。
     """
     if not pins:
         raise ValueError("pins 不能为空：没有已校验地址就不该建客户端")
+    checked = {}
+    for host, ips in pins.items():
+        values = tuple(str(ip) for ip in ips)
+        for ip in values:
+            # 纵深防御：连接层只许连 IP 字面量。地址若是主机名（上游解析器被改坏、
+            # 或调用方把"判过的名字"当地址传进来），连接时又会走一次系统解析，
+            # 判闸与连接就不是同一份答案——这里 fail-closed，不交给 httpcore。
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                raise ValueError(
+                    "pins 的值必须是 IP 字面量：连接层只许连已校验地址") from None
+        checked[host] = values
     transport = getattr(client, "_transport", None)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
         raise RuntimeError("httpx 传输层结构变化，无法把已校验地址钉进连接")
-    pool._network_backend = PinnedBackend(pins)
+    pool._network_backend = PinnedBackend(checked)

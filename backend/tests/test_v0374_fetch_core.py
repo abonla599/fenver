@@ -451,6 +451,16 @@ def test_make_client_refuses_empty_pins():
         fetch_core._PinnedBackend({OK_HOST: []}).connect_tcp(OK_HOST, 443)
 
 
+def test_make_client_refuses_a_hostname_as_a_pin_value():
+    """pin 的值必须是 IP 字面量；主机名交回连接层就等于第二次解析。
+
+    负向锁：删掉 `install_pins` 里的 `ipaddress.ip_address` 校验，本条会拿到
+    一个"看似钉好、实际按名字连"的客户端，`pytest.raises(ValueError)` 红。
+    """
+    with pytest.raises(ValueError):
+        fetch_core.make_client(pins={OK_HOST: ["evil.example"]})
+
+
 def test_make_client_installs_the_pinned_backend():
     client = fetch_core.make_client(pins={OK_HOST: [PUBLIC_IP]})
     try:

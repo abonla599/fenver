@@ -169,8 +169,10 @@ def _base_url_reject_reason(base_url: str) -> str:
 
     本函数是**写入时**的校验（唯一调用点是 `ProviderStore._validate`），只回答
     "这个 base_url 该不该被保存"。真正出站的那条路（`build_client`）走
-    `_resolve_and_check`：解析一次，同一份地址列表既判闸也钉进连接层，写入时验过
-    的地址与连接时用的地址之间没有第二次解析（DNS rebinding / TOCTOU 在那里关）。
+    `_resolve_and_check`：写入与出站各解析一次，写入那次的结果不会传给连接层。
+    `_resolve_and_check` 关掉的是"出站判闸 → 连接"这一次——解析一次，同一份
+    地址列表既判闸又钉进连接层（DNS rebinding / TOCTOU 的窗口在那里，不在两次
+    解析之间；TTL 到期后重建客户端会重新解析、重新判闸）。
     """
     try:
         host = urlparse(base_url).hostname
@@ -245,6 +247,28 @@ def _resolve_and_check(base_url: str) -> tuple:
             return host, [], net_guard.public_reject_reason(
                 f"base_url 的主机名 {host} 解析结果为空")
     return host, list(resolved), net_guard.public_reject_reason(detail)
+
+
+def _pin_key(base_url: str) -> str:
+    """连接层实际查询的主机名键：httpx 的 `raw_host`（IDNA / ASCII bytes）。
+
+    httpcore 不用 `urlparse(...).hostname`：httpx 交给它的是 URL 经 IDNA 编码的
+    `raw_host`，httpcore 再 `decode("ascii")` 后作为 `connect_tcp(host=...)`。
+    pin 键必须是这同一个值——Unicode 主机名（如 `例子.测试`）若按 `urlparse`
+    的 Unicode 形式钉、连接层却按 `xn--...` 查，就会被判成"没有钉住"而拒绝，
+    合法 IDN provider 从"可用"变成"全挂"。
+
+    与 net_guard 各取所需：判闸用的是用户写的原始主机名（Unicode 照旧，解析与
+    公开理由口径不变），这里只算连接层查询用的 ASCII 键。解析失败一律
+    fail-closed，公开文案不带主机名（不替调用方回显输入）。
+    """
+    try:
+        key = httpx.URL(base_url).raw_host.decode("ascii")
+    except Exception:  # noqa: BLE001 - httpx 认不出的 URL 不许建立连接
+        raise ProviderError("base_url 解析失败") from None
+    if not key:
+        raise ProviderError("base_url 解析失败")
+    return key
 
 
 # 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。
@@ -764,7 +788,9 @@ def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -
     任何配置写路径（_flush）整表作废：改过 key/base_url 的下一次调用必然建新的。
 
     DNS 只在缓存未命中时解析一次（`_resolve_and_check`），校验过的地址列表由
-    `install_pins` 钉进连接层，httpcore 不再自己解析主机名。解析与判闸在锁**外**
+    `install_pins` 钉进连接层，httpcore 不再自己解析主机名。pin 的键是
+    `_pin_key`——httpx 交给 httpcore 的 IDNA `raw_host`，不是 net_guard 判闸用的
+    原始（可能是 Unicode 的）主机名；两者各取所需，见 `_pin_key`。解析与判闸在锁**外**
     （DNS 可能阻塞到超时，持锁会把所有 provider 的取客户端串成一条队伍）；锁内
     只做二次检查与构造。两个并发首调各自解析、先到的那份进缓存，另一份的客户端
     由调用方照常使用（不 close 旧客户端是本次接受的残余：换下的 client 只等 GC）。
@@ -776,10 +802,10 @@ def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -
         if cached is not None and now - cached["resolved_at"] < _CLIENT_CACHE_TTL_SECONDS:
             return cached["client"]
 
-    host, addresses, blocked = _resolve_and_check(provider["base_url"])
+    _validated_host, addresses, blocked = _resolve_and_check(provider["base_url"])
     if blocked:
         raise ProviderError(blocked)
-    pins = {host: addresses}
+    pins = {_pin_key(provider["base_url"]): addresses}
     now = time.monotonic()
 
     with _CLIENT_CACHE_LOCK:

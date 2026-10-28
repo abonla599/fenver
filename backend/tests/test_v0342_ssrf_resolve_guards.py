@@ -396,6 +396,8 @@ def test_resolver_indirection_is_module_level_and_used(monkeypatch):
 PUBLIC_IP = "93.184.216.34"
 PRIVATE_IP = "10.0.0.5"
 PIN_HOST = "pin-target.example"
+IDN_HOST = "例子.测试"
+IDN_HOST_ASCII = "xn--fsqu00a.xn--0zwm56d"
 
 
 def test_build_client_pins_the_addresses_it_validated(monkeypatch):
@@ -451,3 +453,92 @@ def test_build_client_pins_the_addresses_it_validated(monkeypatch):
         assert calls == [PIN_HOST], f"连接时又做了一次 DNS：{calls}"
     finally:
         providers.invalidate_client_cache()
+
+
+def test_build_client_pins_an_idn_base_url_under_the_ascii_host_httpcore_queries(
+        monkeypatch):
+    """IDN base_url 的 pin 键必须是 httpcore 实际查询的 ASCII 主机名。
+
+    net_guard 判闸用 URL 里原样的主机名（`例子.测试`，解析与公开理由口径不变），
+    但 httpx 交给 httpcore 的是 IDNA `raw_host`，httpcore 再
+    `decode("ascii")` 后作为 `connect_tcp(host=...)`。pin 键若照
+    `urlparse(...).hostname` 取，就是 `例子.测试`；连接层按
+    `xn--fsqu00a.xn--0zwm56d` 查不到，抛"没有钉住"把合法 IDN provider 全挂。
+
+    三段一起判：
+    1. 判闸期间解析器看到的是原 Unicode 主机名（校验与 pin 键各取所需）；
+    2. `_pins` 的键是 IDNA ASCII，值是校验时那份公网地址；
+    3. 用 `httpx.URL(...).raw_host.decode("ascii")` 直达 `connect_tcp` 不抛
+       RuntimeError，底座只被要求连那个公网字面量。
+
+    负向锁：把 pins 键改回 `_resolve_and_check` 返回的 host，第 2、3 段都红。
+    """
+    import httpcore
+    import httpx
+
+    from app.core import providers
+    from app.core.pinned_http import PinnedBackend
+
+    calls = []
+
+    def fake_resolve(host):
+        calls.append(host)
+        return [PUBLIC_IP]
+
+    monkeypatch.setattr(providers, "_resolve_addresses", fake_resolve)
+    providers.invalidate_client_cache()
+    provider = {"id": "m3-idn-pin-test", "api_key": "sk-idn-pin-0001",
+                "base_url": f"https://{IDN_HOST}/v1", "model": "m"}
+    try:
+        client = providers.build_client(provider)
+        assert calls == [IDN_HOST], \
+            f"net_guard 判闸没拿到原 Unicode 主机名：{calls}"
+        backend = client._client._transport._pool._network_backend
+        assert isinstance(backend, PinnedBackend), \
+            "build_client 返回的客户端没钉地址：httpcore 会自己再解析一次"
+        assert backend._pins == {IDN_HOST_ASCII: (PUBLIC_IP,)}, backend._pins
+
+        connect_host = httpx.URL(provider["base_url"]).raw_host.decode("ascii")
+        assert connect_host == IDN_HOST_ASCII, connect_host
+        targets = []
+
+        def fake_connect(self, host, port, timeout=None, local_address=None,
+                         socket_options=None):
+            targets.append((host, port))
+            return object()
+
+        monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+        try:
+            backend.connect_tcp(connect_host, 443)
+        except RuntimeError as exc:
+            raise AssertionError(
+                f"连接层按 httpcore 实际查询的 host 找不到 pin：{exc}")
+        assert targets == [(PUBLIC_IP, 443)], \
+            f"连接层没有用校验过的地址：{targets}"
+    finally:
+        providers.invalidate_client_cache()
+
+
+def test_build_client_pin_key_parse_failure_stays_public(monkeypatch):
+    """urlparse 收得下、httpx 解析不了的 base_url 必须 fail-closed 且不回显主机名。
+
+    `https://例子.测试:abc/v1` 的主机名过得了 net_guard（这里桩成公网），但
+    httpx 在算连接层的主机名键时拒收。此时必须抛 `ProviderError`：既不能退回
+    "按主机名重新解析"的连接路径，公开文案也不能带主机名/IP。
+
+    负向锁：`_pin_key` 不捕获 httpx 的解析异常，本条会收到 `InvalidURL` 而不是
+    `ProviderError`；把异常原样拼进文案，主机名断言红。
+    """
+    from app.core import providers
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda host: [PUBLIC_IP])
+    providers.invalidate_client_cache()
+    try:
+        with pytest.raises(providers.ProviderError) as caught:
+            providers.build_client({"id": "m3-idn-bad-test", "api_key": "sk-idn-x",
+                                    "base_url": f"https://{IDN_HOST}:abc/v1",
+                                    "model": "m"})
+    finally:
+        providers.invalidate_client_cache()
+    message = str(caught.value)
+    assert message and IDN_HOST not in message and PUBLIC_IP not in message, message
