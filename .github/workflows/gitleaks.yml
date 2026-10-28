@@ -4,7 +4,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # 全历史扫。浅克隆会漏掉早期提交里的形状，而"历史清不干净"正是
           # 本仓为 .env 被跟踪付过的学费（一把 API Key 公开了五个月）。

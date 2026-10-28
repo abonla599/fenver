@@ -4,7 +4,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           # 取全历史。两把钉**字面 SHA** 的锁（backend/tests/test_swap_package_data_snapshot.py
           # 的 262b1224、test_swap_package_post_acceptance_tokens.py 的 b0cde6be/00f7fded）判的
@@ -20,7 +20,7 @@ jobs:
           # gitleaks.yml 靠的是 `gitleaks detect` 那一行；标记之外仍读历史、今天抓不住的形状
           # 列在那个文件的"仍漏清单"里。
           fetch-depth: 0
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           # 与本地开发/验证以及 PyInstaller 冻结时所用的解释器对齐。
           # 此前钉在 3.10，而这批代码全是在 3.12 上写、在 3.12 上验、并按 3.12 打成 EXE
