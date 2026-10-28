@@ -325,6 +325,80 @@ def test_a_ticket_past_the_grace_window_is_never_resurrected(isolated_approvals)
         "刚过期的那张仍要读得回来（消费它的那一次会照直判 timeout）"
 
 
+# ---------- 周期清理：只清窗口外的，刚消费的留给轮询 ----------
+
+def test_sweep_stale_removes_a_ticket_past_one_extra_ttl_and_flushes(isolated_approvals):
+    """到期之后又过一个 TTL 的票据：内存删掉，盘上也要删掉。
+
+    审计 M-5 的清理面：票据落盘后只增不减，过期记录带着参数与执行结果长期躺在
+    data/approvals.json 上。周期清理必须把盘上那一份一起带走。
+
+    负向锁：把 `sweep_stale` 里的 `_flush_locked()` 删掉，红在盘上那条断言。
+    """
+    tid, _ = _make(user_id="u-stale")
+    key = approval.hash_ticket(tid)
+    with approval._lock:
+        approval._tickets[key].expires_at = (
+            time.time() - approval.ticket_ttl_seconds() - 1)
+        # 做旧必须回写：只改内存的话，"盘上也删掉了"就成了在验内存自己
+        approval._flush_locked()
+    assert key in json.loads(_raw_file(isolated_approvals))["tickets"], \
+        "前置：旧票得先在盘上"
+
+    assert approval.sweep_stale() == 1
+    with approval._lock:
+        assert key not in approval._tickets
+    assert key not in json.loads(_raw_file(isolated_approvals))["tickets"], \
+        "内存删了、盘上还留着——过期票据会带着参数与结果一直躺在文件里"
+
+
+def test_sweep_stale_keeps_a_just_consumed_ticket_for_the_polling_window(
+        isolated_approvals):
+    """与 `cleanup_expired` 的关键区别：刚消费的票在窗口内不许被周期清掉。
+
+    confirm 之后客户端紧跟着 GET 取执行结果；周期清理若按 `cleanup_expired` 的判据
+    （consumed 立刻删），那次轮询就是 404。这正是"把 cleanup_expired 挂上周期"会
+    长出来的回归，本条钉住周期那头用的是惰性同口径。
+
+    负向锁：把 `sweep_stale` 的判据换成 `t.consumed or now > t.expires_at`，这条
+    红在 `sweep_stale() == 0` 之后的取票断言。
+    """
+    tid, _ = _make(user_id="u-poll")
+    assert approval.consume_ticket(tid, "allow", "u-poll") is not None
+    approval.record_execution(tid, "✓ ok", True)
+
+    assert approval.sweep_stale() == 0, \
+        "刚消费的票被周期清理删了：confirm 之后紧接的那次 GET 会 404"
+    back = approval.get_ticket(tid)
+    assert back is not None and back.consumed is True and back.result == "✓ ok", \
+        "轮询窗口内取不到执行结果"
+    assert approval.hash_ticket(tid) in json.loads(
+        _raw_file(isolated_approvals))["tickets"], "盘上那份也要留着，否则重启后轮询断掉"
+
+
+def test_sweep_stale_keeps_unexpired_and_just_expired_tickets(isolated_approvals):
+    """未过期的、刚过期但还在一个 TTL 宽限里的，都留着。
+
+    负向锁：把 `_sweep_locked` 的判据从 `expires_at + grace` 改成 `expires_at`，
+    这条红在"刚过期"那张上。
+    """
+    fresh_id, _ = _make(user_id="u-fresh")
+    just_expired_id, _ = _make(user_id="u-grace")
+    with approval._lock:
+        approval._tickets[approval.hash_ticket(just_expired_id)].expires_at = (
+            time.time() - 1)
+        approval._flush_locked()
+    fresh_key = approval.hash_ticket(fresh_id)
+    grace_key = approval.hash_ticket(just_expired_id)
+
+    assert approval.sweep_stale() == 0
+    with approval._lock:
+        assert fresh_key in approval._tickets, "周期清理误删了未过期的票"
+        assert grace_key in approval._tickets, "刚过期的票还在轮询宽限里，不许清"
+    on_disk = json.loads(_raw_file(isolated_approvals))["tickets"]
+    assert fresh_key in on_disk and grace_key in on_disk
+
+
 # ---------- TTL：可配，且默认值没变 ----------
 
 def test_ttl_default_is_unchanged_and_the_knob_is_config_store_only(monkeypatch):

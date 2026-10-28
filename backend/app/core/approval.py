@@ -476,8 +476,8 @@ def cleanup_expired() -> int:
     与 `_sweep_locked` 的差别是有意的、别抄混：这条把**已消费的**也立刻删（判据
     `t.consumed or now > t.expires_at`），而惰性那条保留到"到期之后再过一个 TTL 窗口"，
     为的是客户端还能轮询到执行结果。所以这条适合"会话彻底收尾时清场"，不适合挂在每次
-    查询上——那会让 confirm 之后紧跟着的那一次 GET 直接 404。
-    全项目仍然没有定时调用点（本票刻意不起后台线程），它现在也会落盘。
+    查询上——那会让 confirm 之后紧跟着的那一次 GET 直接 404。周期那头接的是
+    `sweep_stale`（同一个惰性判据）；这条仍是显式收尾入口，不挂定时器。
     """
     now = time.time()
     cleaned = 0
@@ -491,6 +491,24 @@ def cleanup_expired() -> int:
         for k in fused_expired:
             del _round_fused[k]
         if expired or fused_expired:
+            _flush_locked()
+    return cleaned
+
+
+def sweep_stale() -> int:
+    """周期清理：只删"到期之后又过一个 TTL"的票据，返回清掉的条数。
+
+    判据就是 `_sweep_locked` 那一句（`now > expires_at + ticket_ttl_seconds()`）。
+    **刚消费的票据不在这里删**：confirm 之后客户端紧跟着轮询 GET 取执行结果，撞在
+    TTL 窗口里的票必须留着，否则那次轮询直接 404。`cleanup_expired()` 判据更急
+    （已消费的立刻删），语义不变，仍是显式收尾，不挂周期。
+
+    不起线程、不加定时器：调用方是 `main.run_scheduler_cycle` 那条已有的
+    5 分钟周期。
+    """
+    with _lock:
+        cleaned = _sweep_locked(time.time())
+        if cleaned:
             _flush_locked()
     return cleaned
 

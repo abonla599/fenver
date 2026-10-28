@@ -397,6 +397,9 @@ from app.session.session_store import SessionLimitError, SessionStore
 sessions_store = SessionStore()
 
 # ---------- 后台定时任务 ----------
+from app.core import approval
+
+
 def run_scheduler_cycle():
     """跑一轮周期性后台任务。
 
@@ -407,8 +410,15 @@ def run_scheduler_cycle():
 
     这里刻意不碰权重：写权重的只有用户反馈与两个显式端点，见
     `app/memory_weight_updater.py` 的模块文档。
+
+    审批票据的周期清理走 `approval.sweep_stale()`：只清"过期超过一个 TTL"的，
+    刚消费的票留给客户端轮询执行结果（见那里判据；`cleanup_expired()` 的立刻删
+    是显式收尾，不挂这里）。
     """
     print("--- 开始执行周期性后台任务 ---")
+    cleaned = approval.sweep_stale()
+    if cleaned:
+        print(f"清理过期审批票据 {cleaned} 张")
     if HAS_BG_TASKS and preference_analyzer:
         # 定时器没有"当前调用者"，所以它不能替某一个人决定归属：
         # 反馈里出现过谁就重算谁那一份（偏好摘要按人分账，见

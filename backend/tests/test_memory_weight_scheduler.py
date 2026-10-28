@@ -65,6 +65,38 @@ def test_one_scheduler_cycle_runs_preferences_and_never_touches_weights(monkeypa
         f"读日志的人会以为它在随时间自动衰减：{out!r}")
 
 
+def test_one_scheduler_cycle_sweeps_stale_approval_tickets(monkeypatch, capsys):
+    """已有的 5 分钟周期必须真的调一次 `approval.sweep_stale()`，且仍不碰权重。
+
+    审计 M-5 的清理面：票据落盘后 `cleanup_expired()` 全项目无定时调用点，文件
+    只增不减。这里把惰性清理挂到既有周期上（不新起线程），所以"装了但没接上"必须
+    红在这条上。
+
+    负向锁：把 `run_scheduler_cycle` 里那句 `approval.sweep_stale()` 删掉，这条红在
+    `calls == []`；把打印那两行删掉，红在报数那句。
+    """
+    import app.main as main
+    from app.core import approval
+
+    prefs, calls = [], []
+    tripwire = _Tripwire()
+    monkeypatch.setattr(main, "HAS_BG_TASKS", True, raising=False)
+    monkeypatch.setattr(main, "preference_analyzer", types.SimpleNamespace(
+        analyze_all_preferences=lambda: prefs.append("pref")), raising=False)
+    monkeypatch.setattr(main, "memory_weight_updater", tripwire, raising=False)
+    monkeypatch.setattr(approval, "sweep_stale",
+                        lambda: (calls.append("sweep"), 2)[1])
+
+    main.run_scheduler_cycle()
+
+    assert calls == ["sweep"], (
+        "这一轮没有调用审批票据清理：过期记录会一直躺在 approvals.json 上")
+    assert prefs == ["pref"], "偏好分析没跑了：这一轮就成了只验 sweep 的空转"
+    assert tripwire.calls == [], f"定时器仍然碰了权重那一路：{tripwire.calls}"
+    out = capsys.readouterr().out
+    assert "审批票据" in out and "2" in out, f"清了 2 张却没报数：{out!r}"
+
+
 def test_weight_policy_line_tells_the_truth(capsys):
     """那句日志只能说出真实存在的写入者：用户反馈 + 管理员手动衰减。"""
     from app import memory_weight_updater
