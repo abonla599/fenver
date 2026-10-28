@@ -246,6 +246,9 @@ def test_build_client_feeds_that_context_to_httpx(monkeypatch):
 
     用抛哨兵异常的方式截获构造参数：假客户端要装到能让 openai SDK 跑完，就得连
     timeout、base_url 一起仿，那测的就成了 SDK 的内部约定而不是我们的接线。
+
+    trust_env / follow_redirects 一并钉住：前者必须是 False（否则代理 mounts
+    会把钉好的地址绕过去），后者保持旧行为 False。
     """
     import pytest
 
@@ -265,9 +268,89 @@ def test_build_client_feeds_that_context_to_httpx(monkeypatch):
     # 打在 providers 的名字上：它是 from ... import 进来的直接绑定，
     # 改 tls 模块那份属性对 build_client 不起作用
     monkeypatch.setattr(providers, "system_ssl_context", lambda: "SENTINEL")
-    with pytest.raises(Recorder):
-        providers.build_client({"api_key": "sk-x", "base_url": "https://api.deepseek.com"})
+    providers.invalidate_client_cache()
+    try:
+        with pytest.raises(Recorder):
+            providers.build_client({"id": "m3-ctx-test", "api_key": "sk-x",
+                                    "base_url": "https://api.deepseek.com"})
+    finally:
+        providers.invalidate_client_cache()
     assert seen.get("verify") == "SENTINEL", f"httpx 没拿到系统信任锚：{seen}"
+    assert seen.get("trust_env") is False, \
+        f"trust_env 不是 False：代理变量能把已校验的地址改道（{seen}）"
+    assert seen.get("follow_redirects") is False, f"重定向语义变了：{seen}"
+
+
+def test_build_client_rejects_a_base_url_that_resolves_private(monkeypatch):
+    """出站前的那次解析走同一道地址闸：私网答案 → ProviderError，文案不含 IP。
+
+    负向锁：把 build_client 里 `if blocked: raise ProviderError(blocked)` 删掉，
+    本条红（会带着一个钉到内网地址的客户端继续跑）。
+    """
+    from app.core import providers
+
+    monkeypatch.setattr(providers, "_resolve_addresses", lambda host: ["10.0.0.5"])
+    providers.invalidate_client_cache()
+    try:
+        with pytest.raises(providers.ProviderError) as caught:
+            providers.build_client({"id": "m3-private-test", "api_key": "sk-x",
+                                    "base_url": "https://intranet.example/v1",
+                                    "model": "m"})
+    finally:
+        providers.invalidate_client_cache()
+    message = str(caught.value)
+    assert "内网" in message, message
+    assert "10.0.0.5" not in message and "intranet.example" not in message, message
+
+
+def test_build_client_cache_reuses_per_config_and_respects_timeout():
+    """同配置复用、timeout 不同不复用、invalidate 清表——三条一起钉。
+
+    负向锁：缓存键漏掉 timeout/max_retries（探活与聊天共用一份客户端），
+    中间那条红；invalidate_client_cache 不再清表，最后那条红。
+    """
+    from app.core import providers
+
+    provider = {"id": "m3-cache-test", "api_key": "sk-cache-0001",
+                "base_url": "https://cache.example/v1", "model": "m"}
+    providers.invalidate_client_cache()
+    try:
+        first = providers.build_client(provider)
+        assert providers.build_client(dict(provider)) is first, "同配置又建了一份"
+        assert providers.build_client(dict(provider), timeout=20.0,
+                                      max_retries=0) is not first, \
+            "timeout/重试不同的两个用途共用了同一份客户端"
+        providers.invalidate_client_cache()
+        assert providers.build_client(dict(provider)) is not first, "invalidate 没清表"
+    finally:
+        providers.invalidate_client_cache()
+
+
+def test_build_client_cache_expires_after_ttl(monkeypatch):
+    """pin 的地址不能永久复用：TTL 一到，下一次 build 重新解析并重建客户端。
+
+    时钟用 monkeypatch 钉在 `providers.time.monotonic`（与 fetch_core 的预算测试
+    同一手法）。TTL 之内必须还是同一个对象；跨过 TTL 必须是新对象——否则 CDN /
+    灾备换 IP 后，缓存的客户端会一直连校验时那个已经失效的地址。
+
+    负向锁：把 build_client 的 TTL 判据删掉（命中就返回），最后一条红。
+    """
+    from app.core import providers
+
+    clock = [10_000.0]
+    monkeypatch.setattr(providers.time, "monotonic", lambda: clock[0])
+    provider = {"id": "m3-ttl-test", "api_key": "sk-ttl-0001",
+                "base_url": "https://ttl.example/v1", "model": "m"}
+    providers.invalidate_client_cache()
+    try:
+        first = providers.build_client(provider)
+        clock[0] += providers._CLIENT_CACHE_TTL_SECONDS - 1.0
+        assert providers.build_client(dict(provider)) is first, "TTL 内又建了一份"
+        clock[0] += 2.0
+        second = providers.build_client(dict(provider))
+        assert second is not first, "TTL 过期仍复用旧客户端：pin 的地址会一直用下去"
+    finally:
+        providers.invalidate_client_cache()
 
 
 def test_adding_a_default_provider_clears_the_previous_star():

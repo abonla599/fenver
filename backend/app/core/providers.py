@@ -6,11 +6,13 @@
 "选了没反应的模型"这类问题无法根治。
 """
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import socket
 import threading
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -20,6 +22,7 @@ from openai import OpenAI
 from app.core import credits, net_guard
 from app.core.atomic_write import write_json_atomic
 from app.core.paths import data_root, load_project_env
+from app.core.pinned_http import install_pins
 from app.core.tls import system_ssl_context
 
 # 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
@@ -164,12 +167,10 @@ def _base_url_reject_reason(base_url: str) -> str:
     内网 DNS oracle。所以那层细节只留在内部（直接调 `net_guard.reject_reason`
     排障/审计），这里对外只给类别。
 
-    还有一件事这一层**没有**关掉，别把它当成已覆盖：闸门只在配置写入时跑一次
-    （唯一调用点是 `ProviderStore._validate`），而真正出站在 `build_client` 里由
-    httpx/OpenAI SDK 重新解析一次主机名。写入时验过的那个 IP 和连接时用的那个 IP
-    之间隔着一次重新解析，这就是 DNS rebinding / TOCTOU 窗口。要真关掉它，得把
-    "已校验的 IP"钉进连接层（自定 transport 按 IP 连、Host/SNI 另给），那是改动
-    整条客户端路径的另一件事，不该混在配置校验里顺手做一半。
+    本函数是**写入时**的校验（唯一调用点是 `ProviderStore._validate`），只回答
+    "这个 base_url 该不该被保存"。真正出站的那条路（`build_client`）走
+    `_resolve_and_check`：解析一次，同一份地址列表既判闸也钉进连接层，写入时验过
+    的地址与连接时用的地址之间没有第二次解析（DNS rebinding / TOCTOU 在那里关）。
     """
     try:
         host = urlparse(base_url).hostname
@@ -188,6 +189,62 @@ def _base_url_reject_reason(base_url: str) -> str:
         where="base_url",
     )
     return net_guard.public_reject_reason(detail)
+
+
+def _resolve_and_check(base_url: str) -> tuple:
+    """解析一次、判闸一次，返回 `(host, addresses, public_reason)`。
+
+    与 `_base_url_reject_reason` 同一套判据（同一个 net_guard 调用、同一个
+    `_resolve_addresses` 注入点），区别是这里把**解析出来的那份地址列表**也交
+    出去：`build_client` 把它原样钉进连接层，于是"判闸看到的地址"与"连接用的
+    地址"是同一次解析的结果，中间没有第二次 DNS 查询——DNS rebinding / TOCTOU
+    的窗口就关在这一次解析上。对外理由仍是 `public_reject_reason` 的类别（M-4）。
+
+    两条快路不碰 DNS（与 net_guard 一致）：IP 字面量的地址就是它自己；
+    localhost 名字由 net_guard 按开关判，开关关着时下面先拒，走不到取地址那步。
+    解析失败/结果为空由 net_guard 折成 fail-closed 的理由，行为与旧写法一致。
+    """
+    try:
+        host = urlparse(base_url).hostname
+    except ValueError:
+        return "", [], "base_url 解析失败"
+    if not host:
+        return "", [], "base_url 里没有主机名"
+
+    try:
+        literal = str(ipaddress.ip_address(host.strip("[]")))
+    except ValueError:
+        literal = None
+    if literal is not None:
+        detail = net_guard.reject_reason(
+            host, resolve=lambda _h: [literal],
+            allow_loopback=ALLOW_LOCALHOST_BASE_URL, where="base_url")
+        return host, [literal], net_guard.public_reject_reason(detail)
+
+    resolved = []
+
+    def _resolve_once(_host):
+        # net_guard 对域名只调一次；这里再兜一层"只解析一次"，别让今后的改动
+        # 在判闸循环里重复问 DNS。
+        if not resolved:
+            resolved.extend(_resolve_addresses(host))
+        return resolved
+
+    detail = net_guard.reject_reason(
+        host, resolve=_resolve_once,
+        allow_loopback=ALLOW_LOCALHOST_BASE_URL, where="base_url")
+    if not detail and not resolved:
+        # 只有 localhost 这一支会到这里：net_guard 的快路不解析，而连接层必须
+        # 有一个可连的地址。能走到这里说明开关放行了"本机"这一类。
+        try:
+            resolved.extend(_resolve_addresses(host))
+        except Exception:                    # noqa: BLE001 - 解析失败一律不放行
+            return host, [], net_guard.public_reject_reason(
+                f"base_url 的主机名 {host} 解析失败")
+        if not resolved:
+            return host, [], net_guard.public_reject_reason(
+                f"base_url 的主机名 {host} 解析结果为空")
+    return host, list(resolved), net_guard.public_reject_reason(detail)
 
 
 # 模型档案里"上下文上限（K token）"的兜底值：没填的条目按 64K 算。
@@ -688,6 +745,13 @@ def _client_cache_key(provider: dict, timeout: float, max_retries: int) -> tuple
     return (hashlib.sha256(raw.encode("utf-8")).hexdigest(), timeout, max_retries)
 
 
+# 钉住地址的客户端最多复用多久（秒）。pin 之后旧 IP 不能永久复用：CDN / CNAME /
+# 灾备换了地址时，缓存的客户端会一直连"校验时那个已经没有这个域名的 IP"。
+# TTL 到期后下一次调用重建并重新解析/校验；期间**不在每个请求上做 DNS**，代价是
+# 换 IP 后最多 300 秒才生效。
+_CLIENT_CACHE_TTL_SECONDS = 300.0
+
+
 def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -> OpenAI:
     """唯一一个构造上游客户端的地方。
 
@@ -697,18 +761,51 @@ def build_client(provider: dict, timeout: float = 120.0, max_retries: int = 2) -
 
     同一份配置现在只建一次（2026-09-23 审查 #9）：旧写法每次聊天都新建
     `httpx.Client` + `OpenAI` 且从不 close，没有连接复用、fd 一路泄漏。
-    构造放锁内：客户端的构造不发网络请求，代价可忽略，换来的是"两个并发
-    首调各建一份、后一份覆盖前一份、前一份永远没人 close"这种竞态不存在。
     任何配置写路径（_flush）整表作废：改过 key/base_url 的下一次调用必然建新的。
+
+    DNS 只在缓存未命中时解析一次（`_resolve_and_check`），校验过的地址列表由
+    `install_pins` 钉进连接层，httpcore 不再自己解析主机名。解析与判闸在锁**外**
+    （DNS 可能阻塞到超时，持锁会把所有 provider 的取客户端串成一条队伍）；锁内
+    只做二次检查与构造。两个并发首调各自解析、先到的那份进缓存，另一份的客户端
+    由调用方照常使用（不 close 旧客户端是本次接受的残余：换下的 client 只等 GC）。
     """
     key = _client_cache_key(provider, timeout, max_retries)
+    now = time.monotonic()
     with _CLIENT_CACHE_LOCK:
-        client = _CLIENT_CACHE.get(key)
-        if client is None:
+        cached = _CLIENT_CACHE.get(key)
+        if cached is not None and now - cached["resolved_at"] < _CLIENT_CACHE_TTL_SECONDS:
+            return cached["client"]
+
+    host, addresses, blocked = _resolve_and_check(provider["base_url"])
+    if blocked:
+        raise ProviderError(blocked)
+    pins = {host: addresses}
+    now = time.monotonic()
+
+    with _CLIENT_CACHE_LOCK:
+        cached = _CLIENT_CACHE.get(key)
+        if cached is not None and now - cached["resolved_at"] < _CLIENT_CACHE_TTL_SECONDS:
+            return cached["client"]
+        # trust_env=False 是**有意与旧行为不同**：httpx 默认会读 HTTP(S)_PROXY，
+        # 一旦挂了代理，连接走的是 proxy mounts 而不是被 patch 的默认连接池，
+        # 已校验地址的 pin 就被绕过去了。代价是"只能靠代理出网"的部署会连不上。
+        # follow_redirects=False 保持旧行为（SDK 只在请求显式要求时才下传重定向）。
+        http_client = httpx.Client(verify=system_ssl_context(), trust_env=False,
+                                   follow_redirects=False)
+        try:
+            install_pins(http_client, pins)
+        except Exception as exc:             # noqa: BLE001 - 钉不住就不许连
+            http_client.close()
+            raise ProviderError(
+                "无法把已校验的上游地址钉进连接层，拒绝建立连接") from exc
+        try:
             client = OpenAI(api_key=provider["api_key"], base_url=provider["base_url"],
                             timeout=timeout, max_retries=max_retries,
-                            http_client=httpx.Client(verify=system_ssl_context()))
-            _CLIENT_CACHE[key] = client
+                            http_client=http_client)
+        except Exception:
+            http_client.close()
+            raise
+        _CLIENT_CACHE[key] = {"client": client, "resolved_at": now}
         return client
 
 

@@ -18,12 +18,13 @@ IP 字面量、以及名字是不是 `localhost`/`*.localhost`。剩下所有**�
 localhost 这个名字），私有与链路本地在任何开关状态下都拒。这个开关的理由是
 "把模型自建在本机"（Ollama 那种），不是"允许扫内网"。
 
-**这一轮没有关掉的东西**（写在这里免得下一个人以为已经关完）：闸门只在配置**写入时**
-跑一次（唯一调用点是 `ProviderStore._validate`），真正出站在 `build_client` 里由
-SDK 重新解析一次主机名——写入时验过的 IP 和连接时用的 IP 之间隔着一次重新解析，
-DNS rebinding / TOCTOU 窗口仍然在。要钉死它得把已校验的 IP 传进连接层（自定
-transport 按 IP 连、Host/SNI 另给），那是改客户端路径的另一件事。本文件里
-`test_toctou_window_is_documented_not_closed` 就是钉"别把它写成已覆盖"的。
+**v0.37.8 起出站路径上的那个窗口关掉了**：`build_client` 用 `_resolve_and_check`
+只解析一次，把同一份地址列表交给 `install_pins` 钉进连接层（`PinnedBackend`
+只连字面量，主机名只用于 Host/SNI）。本文件末尾的
+`test_build_client_pins_the_addresses_it_validated` 是这条的行为锁：解析器第一次
+给公网、第二次给内网，断言它只被调用一次且 pins 就是第一次那份。写入时的校验
+（`_validate` → `_base_url_reject_reason`）仍单独跑一次，两条路径共用 net_guard
+判据。
 
 判据的形状照本目录既有风格写成负向锁：每条都注明"把哪一段删掉，这条会红"。
 每条断言都收在"理由是一句**非空**的话"上——只断 `is not None` 是本项目产假绿的
@@ -392,21 +393,61 @@ def test_resolver_indirection_is_module_level_and_used(monkeypatch):
     assert seen == ["good-model.example"], f"解析注入点没被用上：{seen}"
 
 
-def test_toctou_window_is_documented_not_closed():
-    """把"这一轮没关掉重新解析的窗口"钉成一条测试，防止下一个人在文档里吹圆。
+PUBLIC_IP = "93.184.216.34"
+PRIVATE_IP = "10.0.0.5"
+PIN_HOST = "pin-target.example"
 
-    判据是源码形状：`build_client` 直接把记录里的 `base_url`（一个**名字**）交给
-    SDK，中间没有任何"钉住已校验 IP"的动作；因此写入时验过的地址与连接时用的
-    地址之间隔着第二次解析。真要关闭它需要改客户端构造路径（见本文件顶部）。
 
-    负向锁：如果哪天连接层真的把 IP 钉住了（base_url 在出站前被换成校验过的
-    字面量），本条会红——那时该做的不是删掉这条，而是把它改成钉"必须钉住"。
+def test_build_client_pins_the_addresses_it_validated(monkeypatch):
+    """build_client 必须把**第一次校验过的那个 IP** 钉进连接层。
+
+    解析器第一次给公网、第二次给内网（DNS 换答案）。三条一起判：
+
+    1. build_client 只调用解析器一次——写入/校验与连接之间没有第二次 DNS；
+    2. 客户端默认连接池的 `_network_backend` 是 `PinnedBackend`，且
+       `_pins == {host: [第一次那份公网地址]}`；
+    3. 真发一次 `connect_tcp`：底座只被要求连那个公网字面量，主机名不交给
+       系统解析器（解析器调用次数仍是 1）。
+
+    负向锁：把 `install_pins(http_client, pins)` 那一行删掉（退回普通 httpx
+    客户端），第 2 段立刻红——默认 backend 不是 PinnedBackend，也没有 `_pins`。
     """
-    import inspect
+    import httpcore
 
     from app.core import providers
+    from app.core.pinned_http import PinnedBackend
 
-    src = inspect.getsource(providers.build_client)
-    assert 'base_url=provider["base_url"]' in src, (
-        "build_client 的形状变了：请确认 TOCTOU 是否已关，并同步本文件与 "
-        "_base_url_reject_reason 的注释——注释现在写的是「仍然有窗口」")
+    calls = []
+
+    def fake_resolve(host):
+        calls.append(host)
+        if len(calls) == 1:
+            return [PUBLIC_IP]
+        return [PRIVATE_IP]                  # rebinding：第二次解析换答案
+
+    monkeypatch.setattr(providers, "_resolve_addresses", fake_resolve)
+    providers.invalidate_client_cache()
+    provider = {"id": "m3-pin-test", "api_key": "sk-pin-test-0001",
+                "base_url": f"https://{PIN_HOST}/v1", "model": "m"}
+    try:
+        client = providers.build_client(provider)
+        assert calls == [PIN_HOST], f"连接前解析了 {len(calls)} 次：{calls}"
+        backend = client._client._transport._pool._network_backend
+        assert isinstance(backend, PinnedBackend), \
+            "build_client 返回的客户端没钉地址：httpcore 会自己再解析一次"
+        assert backend._pins == {PIN_HOST: (PUBLIC_IP,)}, backend._pins
+
+        targets = []
+
+        def fake_connect(self, host, port, timeout=None, local_address=None,
+                         socket_options=None):
+            targets.append((host, port))
+            return object()
+
+        monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", fake_connect)
+        backend.connect_tcp(PIN_HOST, 443)
+        assert targets == [(PUBLIC_IP, 443)], \
+            f"连接层没有用校验过的地址：{targets}"
+        assert calls == [PIN_HOST], f"连接时又做了一次 DNS：{calls}"
+    finally:
+        providers.invalidate_client_cache()

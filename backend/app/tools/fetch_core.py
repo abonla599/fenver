@@ -10,11 +10,10 @@ SSRF 判据。隔离锁 `tests/test_v0374_single_source_of_egress_predicates.py`
 * `app.sandbox`——沙箱容器 `network_disabled=True`，本模块是它的对照面；
 * `app.core.providers`——两个出网面共享的只有 `net_guard` 判据，解析器不借用。
 
-DNS rebinding 残余风险（本版**接受并写明**，不声称已防护）：`net_guard` 判的
-是这里解析出的地址，而连接由 httpx/httpcore 另建；一个 TTL=0 的域名仍可能在
-两次解析之间换答案。`make_client(pins=...)` 把本次校验过的地址钉进连接层，
-收窄了窗口，但 TLS 握手前的解析仍发生在 httpcore 内部；彻底消除需要自定义
-resolver + IP 直连并保留 SNI/Host 校验，不在本版范围。
+DNS rebinding：每一跳只解析一次，判闸与连接用的是同一份地址列表——
+`make_client(pins=...)` 把这份列表交给 `PinnedBackend`（定义已搬到
+`app.core.pinned_http`，本模块按历史名字 `_PinnedBackend` 再导出），连接层
+只连字面量，主机名只用于 Host/SNI。
 
 时间语义（继承 v0.37.0 审查 B3）：
 * `total_timeout` 是**墙钟总时限**，每跳开始、每个响应块读取前都由单调时钟检查；
@@ -32,10 +31,14 @@ from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 import httpx
-import httpcore
 
 from app.core import audit
 from app.core.net_guard import reject_reason
+from app.core.pinned_http import (  # noqa: F401 - PER_ADDRESS_CONNECT_CAP re-export
+    PER_ADDRESS_CONNECT_CAP,
+    PinnedBackend,
+    install_pins,
+)
 from app.core.tls import system_ssl_context
 from app.tools.extract import BODY_CHAR_LIMIT, EMPTY_BODY_TEXT, extract_text
 
@@ -43,7 +46,6 @@ MAX_BODY_BYTES = 1024 * 1024          # 解码后 1 MiB：超过就中止，不�
 MAX_REDIRECTS = 3                     # 初始请求之外最多跟 3 跳，每跳重过全部闸
 READ_TIMEOUT = 8.0                    # 单次 socket 读/写/池等待的默认上限
 CONNECT_TIMEOUT = 3.5                 # 单次连接的上限
-PER_ADDRESS_CONNECT_CAP = 1.0         # 多地址时单个地址的尝试上限：别让前两个黑洞吃光预算
 HARD_TOTAL_TIMEOUT = 15.0             # 一次 fetch() 的**墙钟硬总时限**（含 DNS/重定向/读体）
 DNS_TIMEOUT = 3.0                     # 一次 DNS 解析的等待上限（daemon 线程 + 队列）
 MAX_LOCATION_LENGTH = 2048            # 单个 Location 头的长度上限
@@ -110,44 +112,9 @@ def client_kwargs(*, hop_timeout=None, connect_timeout=None) -> dict:
             "timeout": httpx.Timeout(read_timeout, connect=connect_limit)}
 
 
-class _PinnedBackend(httpcore.SyncBackend):
-    """只连 net_guard 校验过的地址字面量；主机名只用于 Host/SNI。
-
-    一个主机名可能解析出多个公网地址；按传入顺序逐个尝试，全部失败才把
-    最后一个异常抛出去。总尝试时间不超过单跳 timeout。TLS 握手发生在
-    httpcore 拿到 stream 之后，不在这层回退（httpcore retries=0）。
-    任何情况下都不把原主机名交回系统解析器——那正是 rebinding 窗口的入口。
-    """
-
-    def __init__(self, pins):
-        self._pins = {str(host).lower(): tuple(str(ip) for ip in ips)
-                      for host, ips in pins.items()}
-
-    def connect_tcp(self, host, port, timeout=None, local_address=None,
-                    socket_options=None):
-        targets = self._pins.get(str(host).lower(), ())
-        if not targets:
-            raise RuntimeError(f"没有为 {host} 钉住已校验地址，拒绝连接")
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
-        last_exc = None
-        for target in targets:
-            if deadline is None:
-                attempt_timeout = None
-            else:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    break
-                attempt_timeout = (min(left, PER_ADDRESS_CONNECT_CAP)
-                                   if len(targets) > 1 else left)
-            try:
-                return super().connect_tcp(
-                    target, port, timeout=attempt_timeout,
-                    local_address=local_address, socket_options=socket_options)
-            except Exception as exc:             # noqa: BLE001 - 换下一个已校验地址
-                last_exc = exc
-        if last_exc is not None:
-            raise last_exc
-        raise TimeoutError(f"连接 {host} 的所有已校验地址超过单跳超时")
+# 历史名字：`http_fetch._PinnedBackend` 与既有测试按这个类名引用；实现只有
+# core/pinned_http.py 那一份。
+_PinnedBackend = PinnedBackend
 
 
 def make_client(*, hop_timeout=None, pins=None, connect_timeout=None) -> httpx.Client:
@@ -156,19 +123,16 @@ def make_client(*, hop_timeout=None, pins=None, connect_timeout=None) -> httpx.C
 
     `pins` 是 `{hostname: [已由 net_guard 校验过的地址]}`：把传输层的
     `connect_tcp` 换成只连校验过的字面量；TLS 的 SNI 与 Host 头仍由 httpcore
-    用原主机名设置，证书校验不受影响。"""
+    用原主机名设置，证书校验不受影响。钉不住（空 pins / 传输层形状变了）时
+    关掉刚建的 client 再抛——与旧实现同一行为。"""
     client = httpx.Client(**client_kwargs(hop_timeout=hop_timeout,
                                           connect_timeout=connect_timeout))
     if pins is not None:
-        if not pins:
+        try:
+            install_pins(client, pins)
+        except Exception:
             client.close()
-            raise ValueError("pins 不能为空：没有已校验地址就不该建客户端")
-        transport = getattr(client, "_transport", None)
-        pool = getattr(transport, "_pool", None)
-        if pool is None or not hasattr(pool, "_network_backend"):
-            client.close()
-            raise RuntimeError("httpx 传输层结构变化，无法把已校验地址钉进连接")
-        pool._network_backend = _PinnedBackend(pins)
+            raise
     return client
 
 
