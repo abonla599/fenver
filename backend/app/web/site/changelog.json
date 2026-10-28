@@ -2,6 +2,50 @@
   "generated_from": "docs/releases/*.md",
   "releases": [
     {
+      "version": "0.37.7",
+      "server_only": true,
+      "title": "v0.37.7 更新说明",
+      "intro": "本版只换服务端，**没有新的安卓包**：安卓 `versionName` 不变，官网与 App 的检查更新仍按现有清单报最新可安装版本（以 `data/version.json` 与 `/site/version.json` 为准，本说明不写死）。这一版把 #176 安全约束总审计与 2026-10-27 外部安全审计的 P0 代码项收进生产：日志凭据卫生、MCP 失败关闭、请求体上限、点击劫持防护、地址闸对外文案与管理面凭据失败计数。",
+      "sections": [
+        {
+          "heading": "安全修复",
+          "items": [
+            "**安全日志与审计的凭据形状**：`security_log` 的账号字段与 `audit` 的 `actor_name` 在落盘前先过硬编码凭据脱敏，覆盖 `password=`、`token=`/`refresh_token=`、`sk-`/`pk-`、`ghp_`、`AKIA`、`Bearer` 等形状；账号仍截断 64 字，审计名仍先脱敏再截断。",
+            "**MCP stdio 的 Job 失败关闭**：Windows Job 分配失败时不再把无资源限额的子进程交给 supervisor；先杀树、收尸、关管道，再以 `config_error` 终态拒绝启动。杀树未确认时短码带 `kill_failed`。",
+            "**MCP HTTP 客户端的 URL 守卫**：`url_guard` 未配置（缺省或 `None`）时构造即拒绝，请求层再拒一次；不再存在“忘传守卫 = 默认放行”的形状。当前没有生产构造点，这道闸是给未来接线用的。",
+            "**401 `auth.fail` 洪水与安全事件环**：2000 条内存环增加“拒绝类事件最多 1200 条”的占用上限；环满且全是非拒绝事件时丢弃新拒绝事件，保住 `system.anomaly`、`admin.action` 等证据。401 仍不并入 120 次/分的 abuse 预算，避免压掉真实爆破证据。",
+            "**gitleaks 工作流契约锁**：钉住镜像版本、`--redact`、`--exit-code 1`、`fetch-depth: 0`、`jobs.gitleaks` 归属，以及禁止 `continue-on-error`/`|| true`/`; true` 等吞失败写法；先剥注释再断言，注释里的命令不算数。"
+          ]
+        },
+        {
+          "heading": "审计 P0 / H-1 代码项",
+          "items": [
+            "**请求体上限单源**：新增 `core/limits.py`（单次聊天 50 条 / 单条 32000 字 / 整份会话回写 500 条）；`OrchestrateRequest.goal`、`SessionMessagesRequest.messages`、`ScheduleRequest.items` 均补上限；`session_store.replace()` 在清洗前再判一次，超限 422，不把 500 条卡成永久无法回写。",
+            "**点击劫持与传输头**：CSP 增加 `frame-ancestors 'none'`；全局响应加 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`；HSTS 只在自源 HTTPS（`_self_origin` 非空）时发送，本机/HTTP 不发。",
+            "**地址闸对外文案**：provider 写路径不再把 `net_guard` 解析出的具体内网 IP/CIDR/host 回给调用方，只回“内网/本机/链路本地/组播/zone-id/解析失败”类别；详细理由仍保留在 `net_guard.reject_reason` 内部。",
+            "**管理面凭据失败计数**：`/v1/admin/*` 与 `/v1/auth/adopt` 上提供凭据但解析失败，按来源 IP 计 10 次/10 分钟，超限 429 + `Retry-After`，并落 `security_log(detail=limit.admin)`；成功解析不清账，换 IP 可分摊额度。管理端 reauth 与真实 admin 账号仍不在本版。"
+          ]
+        },
+        {
+          "heading": "运维变更",
+          "items": [
+            "`data/config.json` 已改为 `registration_open=false`、`credit_shadow_daily_limit=1000.0`。**本版换包重启后生效**；改前备份在仓库外，回滚需把备份复制回去并再次重启。",
+            "本版不新增 APK、不改 `versionName`、不改更新通道清单；APK 与通道仍按现有版本。",
+            "安全审计报告归档到本机 `docs-internal/`（不入库）；公开仓库不包含该报告。"
+          ]
+        },
+        {
+          "heading": "边界与残余",
+          "items": [
+            "MCP 子进程仍拥有服务账号权限；Windows Job 与 `CreateProcess` 之间的毫秒级竞态、`args` 在 `data/config.json` 的明文存储、第三方工具输出可能含 prompt injection——这些既有残余本版不变，审批与“仅管理员”仍是主防线。",
+            "provider `base_url` 的 DNS rebinding TOCTOU 窗口本版未关；地址闸仍只在写入/试连时解析一次。",
+            "管理端 reauth、真实 admin 账号、P1/P2 审计项（审批票据清理、CI actions SHA 固定、更新清单签名、安卓凭据/通知、日志轮转等）不在本版。",
+            "本版只证明代码与包内行为；Cloudflare 边缘是否补发 HSTS/XFO、真机安卓行为仍需外部验证。"
+          ]
+        }
+      ]
+    },
+    {
       "version": "0.37.6",
       "server_only": true,
       "title": "v0.37.6 更新说明",
