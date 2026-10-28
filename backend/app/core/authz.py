@@ -6,6 +6,7 @@ import hmac
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -107,19 +108,25 @@ UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
 
 # 凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
 # （bootstrap 没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
-# 慢动作。计数射程是**任何受保护路径上带了请求头凭据却解析失败**的尝试：
-# resolve_principal 在所有受保护路径上都会拿请求头凭据去比 bootstrap 口令，只记
-# 管理面与会话兑换出口的话，/v1/auth/me、/v1/sessions 就是不计数的口令比对器。
-# 只带 Cookie 的 401 不计数——正常过期会话不该耗掉来源额度。进程重启清零是接受的
-# 边界：持久化会把这份可被匿名填充的表带上磁盘。
+# 慢动作。计数射程分两半，共用同一本账：
+# - 请求头凭据在**解析之前**预占（任何受保护路径）：resolve_principal 在所有受保护
+#   路径上都会拿请求头凭据去比 bootstrap 口令，只记管理面与会话兑换出口的话，
+#   /v1/auth/me、/v1/sessions 就是不计数的口令比对器。预占把并发突发也关进预算。
+# - 只带 Cookie 的请求在**解析失败之后**补记：有效 Cookie 不计数、更不 429。这里
+#   不能预占——adopt 会把 bootstrap 原样写进会话 Cookie，正常管理台浏览器每个请求
+#   都带着它，预占会让饱和来源上的合法管理台会话一起被 429。代价是并发/猜测各自
+#   仍会先做一次常量时间比较；这是低危取舍（比较之后不会服务任何业务逻辑）。
+# 没带任何凭据的 401 不计数。进程重启清零是接受的边界：持久化会把这份可被匿名
+# 填充的表带上磁盘。
 ADMIN_FAIL_WINDOW_SECONDS = 600.0
 ADMIN_FAIL_LIMIT = 10
 ADMIN_THROTTLED_DETAIL = "管理员凭据尝试过多，请稍后再试"
-_ADMIN_FAILS = {}                    # ip -> [monotonic 时间戳]，升序，最多 LIMIT 个
+_ADMIN_FAILS = OrderedDict()         # ip -> [monotonic 时间戳]，升序，最多 LIMIT 个
 _ADMIN_FAILS_LOCK = threading.Lock()
 # 硬上限，与 security_log 的来源表同量级。窗口内全是新来源时"只清过期项"清不掉
-# 任何东西，表会无限增长；到达上限后按各来源最后一次尝试从旧到新淘汰（LRU）。
-# 不整表清空：那会把攻击者的失败预算一并重置，也误伤最近还在尝试的来源。
+# 任何东西，表会无限增长；到达上限后先清完全过期项，再按"最久未触碰"淘汰
+# （OrderedDict 的触碰序，append 后 move_to_end）。不整表清空：那会把攻击者的失败
+# 预算一并重置，也误伤最近还在尝试的来源。
 _ADMIN_FAILS_MAX_KEYS = 4096
 
 
@@ -269,23 +276,43 @@ def _purge_expired_admin_failures_locked(now: float) -> None:
     cutoff，前面只可能更旧。彻底过期的来源留着只会占键位，硬上限淘汰时还要替它
     做一次比较。部分过期的条目不必在这里裁——单来源的读取路径
     （_live_admin_failures_locked）每次都会把自己裁干净，而每个列表本身最多
-    ADMIN_FAIL_LIMIT 项。
+    ADMIN_FAIL_LIMIT 项。全表扫描只在超限那一刻发生，正常请求不付这份成本。
     """
     cutoff = now - ADMIN_FAIL_WINDOW_SECONDS
     for ip in [key for key, stamps in _ADMIN_FAILS.items() if stamps[-1] <= cutoff]:
         del _ADMIN_FAILS[ip]
 
 
-def _evict_oldest_admin_failures_locked() -> None:
-    """超出硬上限时按各来源最后一次尝试从旧到新淘汰（调用方持锁）。
+def _evict_oldest_admin_failures_locked(now: float) -> None:
+    """超出硬上限时先清完全过期项，再淘汰最久未触碰的来源（调用方持锁）。
 
-    只淘汰到上限为止，不整表清空：整表清空既会重置攻击者的失败预算（等于把限速
-    变成"撑满就松闸"），也会误伤最近还在尝试的来源。本次刚 append 的来源带着
-    最新的时间戳，不会被这条链先挑中。
+    用 OrderedDict 的触碰序而不是每次现扫时间戳取 min：16ms 时钟粒度下先后两次
+    失败的 monotonic 值可以相同，旧的普通 dict 实现里 min() 同值按插入序挑，
+    刚刷新过的来源会被当成"最旧"淘汰掉。append 后 move_to_end 才是确定且 O(1)
+    的 LRU。只淘汰到上限为止，不整表清空：整表清空既会重置攻击者的失败预算
+    （等于把限速变成"撑满就松闸"），也会误伤最近还在尝试的来源。
     """
+    if len(_ADMIN_FAILS) <= _ADMIN_FAILS_MAX_KEYS:
+        return
+    _purge_expired_admin_failures_locked(now)
     while len(_ADMIN_FAILS) > _ADMIN_FAILS_MAX_KEYS:
-        oldest = min(_ADMIN_FAILS, key=lambda key: _ADMIN_FAILS[key][-1])
-        del _ADMIN_FAILS[oldest]
+        _ADMIN_FAILS.popitem(last=False)
+
+
+def _record_admin_failure_locked(ip: str, now: float) -> bool:
+    """判定与记账同一个动作（调用方持 _ADMIN_FAILS_LOCK）。
+
+    返回 False 表示该来源在窗口内已经没有预算；返回 True 表示这一条已经入账。
+    判定和记账分成两步的话，同一瞬间的 N 个请求都能在任何人记账之前看到"还没满"。
+    """
+    times = _live_admin_failures_locked(ip, now)
+    if len(times) >= ADMIN_FAIL_LIMIT:
+        return False
+    times.append(now)
+    _ADMIN_FAILS[ip] = times
+    _ADMIN_FAILS.move_to_end(ip)
+    _evict_oldest_admin_failures_locked(now)
+    return True
 
 
 def _admin_attempt_start(ip: str, now: float) -> bool:
@@ -298,17 +325,23 @@ def _admin_attempt_start(ip: str, now: float) -> bool:
     预占把并发突发也关进了预算：判定和记账分成两步的话，同一瞬间的 N 个请求都能
     在任何人记账之前看到"还没满"。代价是同一时刻超过 ADMIN_FAIL_LIMIT 个带请求头
     凭据的合法请求，多出来的会被 429；只带 Cookie 的流量不经过这里，正常网页会话
-    不受影响。
+    的**解析失败**走 _note_cookie_failure 补记，有效会话不受影响。
     """
     with _ADMIN_FAILS_LOCK:
-        times = _live_admin_failures_locked(ip, now)
-        if len(times) >= ADMIN_FAIL_LIMIT:
-            return False
-        times.append(now)
-        _ADMIN_FAILS[ip] = times
-        _purge_expired_admin_failures_locked(now)
-        _evict_oldest_admin_failures_locked()
-        return True
+        return _record_admin_failure_locked(ip, now)
+
+
+def _note_cookie_failure(ip: str, now: float) -> bool:
+    """记一次"只带 Cookie 的请求解析失败"；返回 False 表示该来源预算已满。
+
+    与请求头共用一个预算，但走**失败后计数**而不是解析前预占：adopt 会把
+    bootstrap 口令原样写进会话 Cookie，饱和来源上的正常管理台浏览器每个请求都
+    带着它；预占会把这些合法会话一起 429。有效 Cookie 在调用方已经解析成功、
+    根本走不到这里，所以不计数；猜测请求的代价是各自先做一次常量时间比较再吃
+    429（低危取舍：比较之后不再服务任何业务逻辑）。
+    """
+    with _ADMIN_FAILS_LOCK:
+        return _record_admin_failure_locked(ip, now)
 
 
 def _admin_attempt_success(ip: str, now: float) -> None:
@@ -387,8 +420,10 @@ def install_auth(app) -> None:
         ip = client_ip(request)
         # 任何受保护路径上的请求头凭据都进同一本账：resolve_principal 会拿它去比
         # bootstrap 口令，口径收窄到管理面/adopt 就等于给 /v1/auth/me、/v1/sessions
-        # 留了一条不计数的比对器。只带 Cookie 的 401 不计数（正常过期会话不该耗
-        # 额度）；没带任何凭据的 401 也不计数（disabled 模式在上面的分支已整体放行）。
+        # 留了一条不计数的比对器。只带 Cookie 的请求不能预占（adopt 把 bootstrap
+        # 原样写进 Cookie，会让饱和来源上的正常管理台会话 429），改在解析失败后
+        # 由 _note_cookie_failure 补记；没带任何凭据的 401 不计数（disabled 模式在
+        # 上面的分支已整体放行）。
         attempt_now = None
         if _header_credential(request):
             attempt_now = time.monotonic()
@@ -406,7 +441,17 @@ def install_auth(app) -> None:
 
         principal = resolve_principal(request)
         if principal is None:
-            # 解析失败：预占留着，它已经是一笔失败（中间不再另记一次）。
+            # 解析失败：请求头预占留着，它已经是一笔失败（中间不再另记一次）。
+            # 只带 Cookie 的失败在这里补记同一本账：有效 Cookie 在上一行已经解析
+            # 成功、走不到这里；错 Cookie 每次落一笔，第 11 次起 429。
+            if attempt_now is None and _cookie_credential(request):
+                if not _note_cookie_failure(ip, time.monotonic()):
+                    security_log.record("auth.rate_limited", request=request,
+                                        ip=ip, status=429, detail="limit.admin")
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": ADMIN_THROTTLED_DETAIL},
+                        headers={"Retry-After": str(int(ADMIN_FAIL_WINDOW_SECONDS))})
             security_log.record("auth.blocked", request=request,
                                 ip=ip, status=401,
                                 detail="token.unknown")

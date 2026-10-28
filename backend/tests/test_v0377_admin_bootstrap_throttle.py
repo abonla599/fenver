@@ -1,10 +1,13 @@
 """bootstrap 凭据失败按来源 IP 计数：第 11 次 429，窗口过后重新放行。
 
-计数的射程是"任何受保护路径 + 带了请求头凭据 + 解析失败"：resolve_principal 在
-所有受保护路径上都会拿请求头凭据去比 bootstrap 口令，只记管理面与会话兑换出口的
-话，/v1/sessions、/v1/auth/me 就是不计数的口令比对器。只带 Cookie 的 401 与没带
-任何凭据的 401 都不动这本账——正常过期会话不该把来源额度耗光。窗口按来源滚动，
-所以共享 NAT 下的正常用户会一起等窗口；这是限速按来源计的已知代价。
+计数的射程分两半、共用同一本账：任何受保护路径上带了请求头凭据的尝试在解析
+**之前**预占；只带 Cookie 的尝试在解析**失败之后**补记（有效 Cookie 不计数也不
+429）。请求头必须预占是因为 resolve_principal 在所有受保护路径上都会拿它去比
+bootstrap 口令，只记管理面与会话兑换出口的话，/v1/sessions、/v1/auth/me 就是
+不计数的口令比对器。Cookie 不能预占：adopt 会把 bootstrap 原样写进 Cookie，饱和
+来源上的正常管理台会话会被误伤；代价是并发猜测仍会各自先做一次常量时间比较，这是
+低危取舍。没带任何凭据的 401 不动这本账。窗口按来源滚动，所以共享 NAT 下的正常
+用户会一起等窗口；这是限速按来源计的已知代价。
 """
 import pytest
 
@@ -90,16 +93,52 @@ def test_non_admin_path_bad_credentials_share_the_same_budget(admin_client):
     assert admin_client.get(ADMIN_PATH, headers=BAD).status_code == 429
 
 
-def test_cookie_only_failures_do_not_consume_the_budget(admin_client):
-    """Cookie-only 的 401 不计数：正常过期会话不该把来源额度耗光。"""
-    admin_client.cookies.set(authz.SESSION_COOKIE, "garbage-not-a-token", path="/v1")
-    for _ in range(authz.ADMIN_FAIL_LIMIT + 1):
-        assert admin_client.get(SESSIONS_PATH).status_code == 401
-    assert authz._ADMIN_FAILS == {}, "Cookie-only 的 401 进了凭据失败账"
+def test_cookie_only_bad_cookies_hit_429_on_the_eleventh_attempt(admin_client):
+    """错 Cookie 也必须进同一本账：不计数的话，Cookie 通道就是无限次的口令比对器。
 
-    # 这个来源的请求头凭据额度仍从零开始
-    assert admin_client.get(SESSIONS_PATH, headers=BAD).status_code == 401
-    assert len(authz._ADMIN_FAILS["203.0.113.10"]) == 1
+    这条替代了旧版"Cookie-only 不计数"的契约——那正是审查指出的缺口：攻击者用
+    `Cookie: session=<猜的 bootstrap>` 打受保护路径可以无限试且账为空。
+    """
+    admin_client.cookies.set(authz.SESSION_COOKIE, "garbage-not-a-token", path="/v1")
+    for attempt in range(authz.ADMIN_FAIL_LIMIT):
+        assert admin_client.get(SESSIONS_PATH).status_code == 401, attempt
+
+    blocked = admin_client.get(SESSIONS_PATH)
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == ADMIN_FAIL_DETAIL
+    assert blocked.headers.get("retry-after") == str(int(authz.ADMIN_FAIL_WINDOW_SECONDS))
+    assert "garbage-not-a-token" not in blocked.text, "429 回显了凭据"
+    assert len(authz._ADMIN_FAILS["203.0.113.10"]) == authz.ADMIN_FAIL_LIMIT
+
+    items, _ = security_log.events(type="auth.rate_limited")
+    assert [item["detail"] for item in items] == ["limit.admin"]
+
+
+def test_valid_bootstrap_cookie_is_never_counted_or_throttled(admin_client):
+    """有效 Cookie 不计数也不 429：正常管理台浏览器会话不能被失败预算误伤。
+
+    adopt 把 bootstrap 原样写进会话 Cookie，所以管理台每个请求都带着它；这里
+    连打 11 次，账本必须一份不涨。
+    """
+    admin_client.cookies.set(authz.SESSION_COOKIE, BOOT_TOKEN, path="/v1")
+    for _ in range(authz.ADMIN_FAIL_LIMIT + 1):
+        assert admin_client.get(SESSIONS_PATH).status_code == 200
+    assert authz._ADMIN_FAILS == {}, "有效 Cookie 进了凭据失败账"
+
+
+def test_cookie_and_header_failures_share_one_budget(admin_client):
+    """同一来源混合 9 次请求头失败 + 1 次 Cookie 失败就满：两条通道一本账。"""
+    for _ in range(authz.ADMIN_FAIL_LIMIT - 1):
+        assert admin_client.get(SESSIONS_PATH, headers=BAD).status_code == 401
+
+    admin_client.cookies.set(authz.SESSION_COOKIE, "garbage-not-a-token", path="/v1")
+    assert admin_client.get(SESSIONS_PATH).status_code == 401
+    assert len(authz._ADMIN_FAILS["203.0.113.10"]) == authz.ADMIN_FAIL_LIMIT
+
+    # 两条通道同时吃 429；账不因通道切换而另起一本
+    assert admin_client.get(SESSIONS_PATH, headers=BAD).status_code == 429
+    assert admin_client.get(SESSIONS_PATH).status_code == 429
+    assert len(authz._ADMIN_FAILS["203.0.113.10"]) == authz.ADMIN_FAIL_LIMIT
 
 
 def test_correct_bootstrap_can_still_adopt_from_unsaturated_source(admin_client):
@@ -241,6 +280,37 @@ def test_hard_key_limit_evicts_the_oldest_source(monkeypatch):
     assert set(authz._ADMIN_FAILS) == {"198.51.100.0", "198.51.100.2", "198.51.100.9"}
     # 被淘汰的是键位，不是整表：最近还在尝试的来源预算原样保留
     assert len(authz._ADMIN_FAILS["198.51.100.0"]) == 2
+
+
+def test_lru_uses_touch_order_not_timestamps(monkeypatch):
+    """同戳下也必须淘汰"最久未触碰"的来源，而不是按插入序挑 min(timestamp)。
+
+    16ms 的 monotonic 粒度下先后两次失败可以拿到完全相同的时间戳；旧实现
+    min(last_timestamp) 在同值时按插入序取，刚刷新过的 A 会被当成最旧的淘汰。
+    账本是 OrderedDict，append 后 move_to_end，淘汰队首。
+    """
+    monkeypatch.setattr(authz, "_ADMIN_FAILS_MAX_KEYS", 3)
+    now = 7100.0
+    for suffix in ("0", "1", "2"):
+        assert authz._admin_attempt_start(f"198.51.100.{suffix}", now)
+    # 刷新 A：时间戳与别人相同，唯一能区分"刚触碰"的是账本顺序
+    assert authz._admin_attempt_start("198.51.100.0", now)
+
+    assert authz._admin_attempt_start("198.51.100.9", now)
+    assert list(authz._ADMIN_FAILS) == ["198.51.100.2", "198.51.100.0", "198.51.100.9"]
+    assert "198.51.100.1" not in authz._ADMIN_FAILS, "同戳下淘汰的不是最久未触碰的来源"
+    assert len(authz._ADMIN_FAILS["198.51.100.0"]) == 2, "刷新过的 A 被误淘汰或丢了记录"
+
+
+def test_key_limit_purges_expired_sources_before_evicting_fresh_ones(monkeypatch):
+    """超限时先清完全过期的键位：过期的条目不该逼着新来源替它占位。"""
+    monkeypatch.setattr(authz, "_ADMIN_FAILS_MAX_KEYS", 2)
+    base = 8000.0
+    assert authz._admin_attempt_start("198.51.100.1", base)
+    assert authz._admin_attempt_start("198.51.100.2", base)
+    later = base + authz.ADMIN_FAIL_WINDOW_SECONDS + 1.0
+    assert authz._admin_attempt_start("198.51.100.3", later)
+    assert list(authz._ADMIN_FAILS) == ["198.51.100.3"], "过期的键位没在超限时清掉"
 
 
 def test_non_loopback_cf_header_is_not_trusted_for_the_ledger(enforced):
