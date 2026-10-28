@@ -12,6 +12,23 @@ CI 下一次跑的就是另一份代码，而我们的 diff 里什么都不会�
 `@vN`、`@main`、`@master`、没有 `@` 的形状全部算违规。行尾 `# vN` 注释只给人看，
 不参与判据——Actions 读到的是 `#` 之前那一串。
 
+按行文本匹配，不是 YAML 解析器。认得这些等价形状：
+
+- 块写法的行首键，带不带列表符都算：`uses: ...`、`uses : ...`、`- uses: ...`；
+- 引号键：`"uses": ...`、`'uses': ...`；
+- 同一行的 flow mapping：`- {uses: x@v4, with: ...}`（只提取 `uses:` 后到
+  `,` / `}` / `]` 之前的那段值；同一行有多个 `{...}` 时逐个提取）。
+
+仍漏清单（不声称全 YAML 覆盖）：
+
+- 显式键语法 `? uses` 与下一行的 `: owner/repo@v4`；
+- 经 YAML 别名 / merge 间接拿到的引用（`uses: *alias`、`<<: *defaults`）——
+  文本里根本没有可判的目标；
+- key 与值跨行拆开（`uses:` 一行、目标在下一行），包括跨行的 flow mapping；
+- 键的转义或非字面写法（例如 `"\x75ses"`）；
+- 藏在 block scalar（`run: |`）或引号字符串里的 `uses:` 片段：按行匹配无法与
+  真键区分，可能被当成语句误报；这是边界，不是 YAML 语义。
+
 射程与不做的事：
 
 - 只判 `.github/workflows/` 下的 `*.yml` / `*.yaml`（两种扩展名在 Actions 里等价）；
@@ -40,6 +57,10 @@ AUDITED_WORKFLOWS = (
 )
 
 _USES_PINNED = re.compile(r"uses:\s*[^@\s]+@[0-9a-f]{40}(?:\s*#.*)?$")
+# 键与冒号之间允许空白，键本身允许单/双引号；`\s*` 也吃 tab。
+_USES_KEY = re.compile(r"""(?:"uses"|'uses'|uses)\s*:""")
+_LIST_MARKER = re.compile(r"^-\s+")
+_FLOW_VALUE_END = re.compile(r"[,}\]]")
 
 
 def workflow_files(root=None) -> list:
@@ -51,21 +72,77 @@ def workflow_files(root=None) -> list:
     return sorted({p for p in base.glob("*.yml")} | {p for p in base.glob("*.yaml")})
 
 
+def _unquote(value: str) -> str:
+    """剥掉一对包住整个值的引号；找不到成对引号就原样返回。"""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _canonical(target: str) -> str:
+    """把各种等价写法归一到判据模板认得的 `uses: <target>`。"""
+    return "uses: " + target if target else "uses:"
+
+
+def _flow_target(line: str, key_end: int) -> str:
+    """取 flow mapping 里 `uses:` 后到 `,` / `}` / `]` 之前的值。
+
+    值带引号时按引号取，避免把引号里的逗号当分隔符。没闭合的引号退化为取到行尾，
+    反正它过不了固定 SHA 的判据。
+    """
+    rest = line[key_end:].lstrip()
+    if rest[:1] in "\"'":
+        quote = rest[0]
+        close = rest.find(quote, 1)
+        if close != -1:
+            return rest[1:close]
+        return rest[1:].strip()
+    return _FLOW_VALUE_END.split(rest, maxsplit=1)[0].strip()
+
+
+def _flow_key_matches(line: str):
+    """只认 flow mapping 的键位（前面是 `{` 或 `,`）上的 `uses`。
+
+    不解析引号字符串，所以 `with: {note: "uses: x"}` 这类文本仍可能误报；
+    边界写进了模块 docstring，这里不假装是 YAML 词法分析。
+    """
+    for match in _USES_KEY.finditer(line):
+        before = match.start() - 1
+        while before >= 0 and line[before] in " \t":
+            before -= 1
+        if before >= 0 and line[before] in "{,":
+            yield match
+
+
 def _uses_statements(text: str) -> list:
-    """逐行抽 `uses:` 语句，返回 [(行号, 去掉缩进与列表符后的整句)]。
+    """逐行抽 `uses:` 语句，返回 [(行号, 归一成 `uses: <target>` 的整句)]。
 
     整行注释不算：被注释掉的一行不会被执行，拿它判红等于拿散文当判据。行内 `#`
     不剥——`# vN` 是这条语句的一部分，合不合法由判据模板决定。
+
+    块写法先剥列表符再认行首键；行里出现 flow mapping 时，再按 `{` / `,` 后的键位
+    逐个取值。两种写法在同一行同时命中时以块写法为准，避免同一条语句报两次。
     """
     out = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("- "):
-            line = line[2:].lstrip()
-        if line.startswith("uses:"):
-            out.append((lineno, line))
+        body = line
+        while True:
+            marker = _LIST_MARKER.match(body)
+            if not marker:
+                break
+            body = body[marker.end():]
+        key = _USES_KEY.match(body)
+        if key:
+            target = _unquote(body[key.end():].strip())
+            out.append((lineno, _canonical(target)))
+            continue
+        if "{" not in line:
+            continue
+        for match in _flow_key_matches(line):
+            out.append((lineno, _canonical(_flow_target(line, match.end()))))
     return out
 
 
@@ -73,8 +150,8 @@ def _violations(text: str) -> list:
     """纯函数：返回这份 workflow 里所有没有固定到 commit SHA 的 `uses:`。
 
     空列表 = 通过。本地 action（`./...`）没有远端仓库可固定，豁免；其余目标必须
-    匹配 `uses:\\s*[^@\\s]+@[0-9a-f]{40}(?:\\s*#.*)?$`。红话带行号与整句，读的人
-    不用回去搜。
+    匹配 `uses:\\s*[^@\\s]+@[0-9a-f]{40}(?:\\s*#.*)?$`。红话带行号与归一后的整句，
+    读的人不用回去搜。
     """
     out = []
     for lineno, statement in _uses_statements(text):
@@ -171,6 +248,39 @@ def test_the_ruler_judges_the_whole_shape_table(case_id, line, expect_violation)
     """一张表同时量两边：`@vN`/`@main`/`@master`/无 `@`/短 SHA 必须报，
     固定 SHA、本地 action、注释行必须放行。只钉其中一边的话，恒真或恒假的尺子
     都能通过。
+    """
+    got = _violations(line + "\n")
+    assert bool(got) is expect_violation, (
+        "样本「" + case_id + "」的期望是 %s，实得 %r（原句 %r）"
+        % ("报违规" if expect_violation else "放行", got, line))
+
+
+# 审查发现的等价 YAML 写法：执行语义与 `uses: actions/checkout@v4` 相同，但只认
+# 行首 `uses:` 的扫描器会全部漏掉。每种形状都配一条固定 SHA 的对照，防止修复走成
+# "见到空格/引号/花括号就报" 的一刀切。
+_PINNED_CHECKOUT = "11d5960a326750d5838078e36cf38b85af677262"
+_YAML_EQUIVALENT_CASES = (
+    ("space-before-colon", "      - uses : actions/checkout@v4", True),
+    ("space-before-colon-pinned",
+     "      - uses : actions/checkout@" + _PINNED_CHECKOUT, False),
+    ("quoted-key", '      - "uses": actions/checkout@v4', True),
+    ("single-quoted-key-pinned",
+     "      - 'uses': actions/checkout@" + _PINNED_CHECKOUT, False),
+    ("flow-mapping",
+     "      - {uses: actions/checkout@v4, with: {fetch-depth: 0}}", True),
+    ("flow-mapping-pinned",
+     "      - {uses: actions/checkout@" + _PINNED_CHECKOUT + "}", False),
+)
+
+
+@pytest.mark.parametrize("case_id,line,expect_violation", _YAML_EQUIVALENT_CASES,
+                         ids=[case[0] for case in _YAML_EQUIVALENT_CASES])
+def test_the_ruler_flags_yaml_equivalent_spellings(case_id, line,
+                                                   expect_violation):
+    """`uses :`、引号键、同行 flow mapping 必须和行首 `uses:` 同判。
+
+    这三种形状实测都能绕过只认 `line.startswith("uses:")` 的旧扫描器；样本固定
+    `@v4`，漏判时 `_violations` 返回空列表，测试当场红。
     """
     got = _violations(line + "\n")
     assert bool(got) is expect_violation, (
