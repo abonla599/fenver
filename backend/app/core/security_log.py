@@ -49,7 +49,8 @@ SEVERITY_BY_TYPE = {"auth.fail": "warn", "auth.rate_limited": "warn",
 DETAILS = frozenset({
     "login.failed", "register.rejected", "reset.rejected", "reauth.denied",
     "limit.login", "limit.register", "limit.reset", "limit.reauth", "limit.chat",
-    "limit.orchestrate", "token.unknown", "csrf.missing", "unspecified",
+    "limit.orchestrate", "limit.admin",
+    "token.unknown", "csrf.missing", "unspecified",
 })
 
 MAX_EVENTS = 2000

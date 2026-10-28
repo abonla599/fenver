@@ -1142,6 +1142,7 @@
     "limit.reauth": "二次验证频率超限",
     "limit.chat": "对话频率超限",
     "limit.orchestrate": "编排频率超限",
+    "limit.admin": "管理员凭据尝试超限",
     "token.unknown": "令牌无法识别",
     "csrf.missing": "缺少 CSRF 标记",
     "unspecified": "未注明",

@@ -300,6 +300,10 @@ def _isolated_throttle():
     # 出来了"的用例会拿到一句"调用过于频繁"。
     from app.tools import executor as _tools_executor
     _tools_executor._FREQ_LEDGER.clear()
+    # 管理员凭据失败账同样是按来源、窗口内不自动松的进程内状态：不清的话，
+    # 前一条用例的坏令牌会把 127.0.0.1 攒到上限，后一条正常的 401 变成 429。
+    from app.core import authz as _authz
+    _authz.reset_admin_throttle_for_tests()
     yield
 
 

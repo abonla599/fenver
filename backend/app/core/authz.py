@@ -4,6 +4,8 @@
 """
 import hmac
 import os
+import threading
+import time
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -102,6 +104,19 @@ _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 # 401 文案只有一份：中间件与依赖各写一遍迟早会漂移，而它是对客户端的语义承诺
 # （"没有身份"，区别于 403 的"有身份但不够"）。
 UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
+
+# 管理员凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
+# （管理员没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
+# 慢动作。只记"带了凭据且解析失败"的管理面请求；成功与其它路径的 401 都不计数，
+# 免得正常用户把自己的来源额度耗光。进程重启清零是接受的边界：持久化会把这份
+# 可被匿名填充的表带上磁盘。
+ADMIN_FAIL_WINDOW_SECONDS = 600.0
+ADMIN_FAIL_LIMIT = 10
+ADMIN_THROTTLED_DETAIL = "管理员凭据尝试过多，请稍后再试"
+_ADMIN_FAILS = {}                    # ip -> [monotonic 时间戳]，升序，最多 LIMIT 个
+_ADMIN_FAILS_LOCK = threading.Lock()
+# 与 security_log 的来源表同量级：超过就先清过期项，不让匿名来源把内存撑大。
+_ADMIN_FAILS_MAX_KEYS = 4096
 
 
 def is_public_path(path: str) -> bool:
@@ -229,6 +244,49 @@ def _has_any_identity() -> bool:
     return bool(_bootstrap_token()) or auth_store.has_role("admin")
 
 
+def _live_admin_failures_locked(ip: str, now: float) -> list:
+    """该来源在窗口内的失败时刻；顺带把过期项从表里删掉（调用方持锁）。"""
+    times = _ADMIN_FAILS.get(ip)
+    if not times:
+        return []
+    cutoff = now - ADMIN_FAIL_WINDOW_SECONDS
+    times = [stamp for stamp in times if stamp > cutoff]
+    if times:
+        _ADMIN_FAILS[ip] = times
+    else:
+        _ADMIN_FAILS.pop(ip, None)
+    return times
+
+
+def _admin_throttled(ip: str, now: float) -> bool:
+    """窗口内失败数是否已达上限：第 ADMIN_FAIL_LIMIT + 1 次请求在这里被挡下。"""
+    with _ADMIN_FAILS_LOCK:
+        return len(_live_admin_failures_locked(ip, now)) >= ADMIN_FAIL_LIMIT
+
+
+def _note_admin_failure(ip: str, now: float) -> None:
+    """记一次"带了凭据但解析失败"的管理面尝试。成功解析不走这里。"""
+    with _ADMIN_FAILS_LOCK:
+        times = _live_admin_failures_locked(ip, now)
+        if len(times) >= ADMIN_FAIL_LIMIT:
+            # 并发窗口里可能有两个请求同时通过上面的判定；已满就不再入账，
+            # 否则每漏过一个都会把窗口往后续，限速反而变成永久封锁。
+            return
+        times.append(now)
+        _ADMIN_FAILS[ip] = times
+        if len(_ADMIN_FAILS) > _ADMIN_FAILS_MAX_KEYS:
+            cutoff = now - ADMIN_FAIL_WINDOW_SECONDS
+            for key in [key for key, stamps in _ADMIN_FAILS.items()
+                        if stamps[-1] <= cutoff]:
+                del _ADMIN_FAILS[key]
+
+
+def reset_admin_throttle_for_tests() -> None:
+    """只给测试用：清空按来源的管理员失败账。生产没有"清零"这条运维动作。"""
+    with _ADMIN_FAILS_LOCK:
+        _ADMIN_FAILS.clear()
+
+
 def install_auth(app) -> None:
     if _auth_mode() == "disabled":
         if _disabled_mode_allowed():
@@ -274,10 +332,28 @@ def install_auth(app) -> None:
             return JSONResponse(status_code=503,
                                 content={"detail": "服务端未配置访问凭据"})
 
+        ip = client_ip(request)
+        # 只有管理面 + 确实带了凭据才进入这本账：没带凭据的 401 是"忘登录"，
+        # 不该消耗来源额度；disabled 模式在上面的分支已整体放行，走不到这里。
+        admin_attempt = path.startswith("/v1/admin/") and bool(_credential(request))
+        if admin_attempt:
+            now = time.monotonic()
+            if _admin_throttled(ip, now):
+                security_log.record("auth.rate_limited", request=request, ip=ip,
+                                    status=429, detail="limit.admin")
+                # 文案固定、不回显凭据；Retry-After 用满窗口，宁可让客户端多等，
+                # 不泄漏"这个来源还差几秒松闸"。
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": ADMIN_THROTTLED_DETAIL},
+                    headers={"Retry-After": str(int(ADMIN_FAIL_WINDOW_SECONDS))})
+
         principal = resolve_principal(request)
         if principal is None:
+            if admin_attempt:
+                _note_admin_failure(ip, time.monotonic())
             security_log.record("auth.blocked", request=request,
-                                ip=client_ip(request), status=401,
+                                ip=ip, status=401,
                                 detail="token.unknown")
             return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
         request.state.principal = principal
