@@ -105,30 +105,22 @@ _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 # （"没有身份"，区别于 403 的"有身份但不够"）。
 UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
 
-# 管理员凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
-# （管理员没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
-# 慢动作。只记"带了凭据且解析失败"的管理面与会话兑换出口请求；成功与其它路径的
-# 401 都不计数，免得正常用户把自己的来源额度耗光。进程重启清零是接受的边界：
-# 持久化会把这份可被匿名填充的表带上磁盘。
+# 凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
+# （bootstrap 没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
+# 慢动作。计数射程是**任何受保护路径上带了请求头凭据却解析失败**的尝试：
+# resolve_principal 在所有受保护路径上都会拿请求头凭据去比 bootstrap 口令，只记
+# 管理面与会话兑换出口的话，/v1/auth/me、/v1/sessions 就是不计数的口令比对器。
+# 只带 Cookie 的 401 不计数——正常过期会话不该耗掉来源额度。进程重启清零是接受的
+# 边界：持久化会把这份可被匿名填充的表带上磁盘。
 ADMIN_FAIL_WINDOW_SECONDS = 600.0
 ADMIN_FAIL_LIMIT = 10
 ADMIN_THROTTLED_DETAIL = "管理员凭据尝试过多，请稍后再试"
 _ADMIN_FAILS = {}                    # ip -> [monotonic 时间戳]，升序，最多 LIMIT 个
 _ADMIN_FAILS_LOCK = threading.Lock()
-# 与 security_log 的来源表同量级：超过就先清过期项，不让匿名来源把内存撑大。
+# 硬上限，与 security_log 的来源表同量级。窗口内全是新来源时"只清过期项"清不掉
+# 任何东西，表会无限增长；到达上限后按各来源最后一次尝试从旧到新淘汰（LRU）。
+# 不整表清空：那会把攻击者的失败预算一并重置，也误伤最近还在尝试的来源。
 _ADMIN_FAILS_MAX_KEYS = 4096
-
-# 管理面之外，adopt 是唯一会拿请求头凭据去比 bootstrap 口令的出口——管理页
-# 粘贴口令、手动录令牌都从这里换会话。不并入同一本账，它就成了不计数的比对器。
-_ADMIN_ATTEMPT_PATHS = frozenset({"/v1/auth/adopt"})
-
-
-def _is_admin_attempt_path(path: str) -> bool:
-    """这条路径上的凭据解析失败算不算"在猜管理员口令"。
-
-    判定只有这一份：中间件计数与测试共用，避免两处各写一遍字符串后漂移。
-    """
-    return path.startswith("/v1/admin/") or path in _ADMIN_ATTEMPT_PATHS
 
 
 def is_public_path(path: str) -> bool:
@@ -270,31 +262,79 @@ def _live_admin_failures_locked(ip: str, now: float) -> list:
     return times
 
 
-def _admin_throttled(ip: str, now: float) -> bool:
-    """窗口内失败数是否已达上限：第 ADMIN_FAIL_LIMIT + 1 次请求在这里被挡下。"""
-    with _ADMIN_FAILS_LOCK:
-        return len(_live_admin_failures_locked(ip, now)) >= ADMIN_FAIL_LIMIT
+def _purge_expired_admin_failures_locked(now: float) -> None:
+    """把整张表里已经滑出窗口的来源删掉（调用方持锁）。
+
+    每个来源的时刻列表升序，所以看最后一项就知道整条是否过期：最后一项都过了
+    cutoff，前面只可能更旧。彻底过期的来源留着只会占键位，硬上限淘汰时还要替它
+    做一次比较。部分过期的条目不必在这里裁——单来源的读取路径
+    （_live_admin_failures_locked）每次都会把自己裁干净，而每个列表本身最多
+    ADMIN_FAIL_LIMIT 项。
+    """
+    cutoff = now - ADMIN_FAIL_WINDOW_SECONDS
+    for ip in [key for key, stamps in _ADMIN_FAILS.items() if stamps[-1] <= cutoff]:
+        del _ADMIN_FAILS[ip]
 
 
-def _note_admin_failure(ip: str, now: float) -> None:
-    """记一次"带了凭据但解析失败"的管理面/会话兑换尝试。成功解析不走这里。"""
+def _evict_oldest_admin_failures_locked() -> None:
+    """超出硬上限时按各来源最后一次尝试从旧到新淘汰（调用方持锁）。
+
+    只淘汰到上限为止，不整表清空：整表清空既会重置攻击者的失败预算（等于把限速
+    变成"撑满就松闸"），也会误伤最近还在尝试的来源。本次刚 append 的来源带着
+    最新的时间戳，不会被这条链先挑中。
+    """
+    while len(_ADMIN_FAILS) > _ADMIN_FAILS_MAX_KEYS:
+        oldest = min(_ADMIN_FAILS, key=lambda key: _ADMIN_FAILS[key][-1])
+        del _ADMIN_FAILS[oldest]
+
+
+def _admin_attempt_start(ip: str, now: float) -> bool:
+    """为一次"带了请求头凭据的受保护请求"预占额度；判定与记账在同一把锁里。
+
+    返回 False 表示该来源在窗口内已经没有预算，调用方直接 429；返回 True 表示
+    这一次尝试已经入账，解析失败时保留这条记录（它就是一次失败），解析成功则
+    必须用同一个 now 调 _admin_attempt_success 把**这一条**还回去。
+
+    预占把并发突发也关进了预算：判定和记账分成两步的话，同一瞬间的 N 个请求都能
+    在任何人记账之前看到"还没满"。代价是同一时刻超过 ADMIN_FAIL_LIMIT 个带请求头
+    凭据的合法请求，多出来的会被 429；只带 Cookie 的流量不经过这里，正常网页会话
+    不受影响。
+    """
     with _ADMIN_FAILS_LOCK:
         times = _live_admin_failures_locked(ip, now)
         if len(times) >= ADMIN_FAIL_LIMIT:
-            # 并发窗口里可能有两个请求同时通过上面的判定；已满就不再入账，
-            # 否则每漏过一个都会把窗口往后续，限速反而变成永久封锁。
-            return
+            return False
         times.append(now)
         _ADMIN_FAILS[ip] = times
-        if len(_ADMIN_FAILS) > _ADMIN_FAILS_MAX_KEYS:
-            cutoff = now - ADMIN_FAIL_WINDOW_SECONDS
-            for key in [key for key, stamps in _ADMIN_FAILS.items()
-                        if stamps[-1] <= cutoff]:
-                del _ADMIN_FAILS[key]
+        _purge_expired_admin_failures_locked(now)
+        _evict_oldest_admin_failures_locked()
+        return True
+
+
+def _admin_attempt_success(ip: str, now: float) -> None:
+    """把本次预占的那一枚时间戳还回去：成功的请求不消耗失败预算。
+
+    只删与 now 相等的那一条，绝不整本清空——否则一个正确口令就能替同一来源把
+    窗口里的失败洗掉（管理员口令可以被撞对，失败记录不该跟着消失）。找不到就
+    no-op：那条预占可能已被 LRU 淘汰或随来源过期清走，这时什么都不做比误删
+    别人的记录安全。
+    """
+    with _ADMIN_FAILS_LOCK:
+        times = _ADMIN_FAILS.get(ip)
+        if not times:
+            return
+        try:
+            times.remove(now)
+        except ValueError:
+            return
+        if times:
+            _ADMIN_FAILS[ip] = times
+        else:
+            _ADMIN_FAILS.pop(ip, None)
 
 
 def reset_admin_throttle_for_tests() -> None:
-    """只给测试用：清空按来源的管理员失败账。生产没有"清零"这条运维动作。"""
+    """只给测试用：清空按来源的 bootstrap 凭据失败账。生产没有"清零"这条运维动作。"""
     with _ADMIN_FAILS_LOCK:
         _ADMIN_FAILS.clear()
 
@@ -345,12 +385,16 @@ def install_auth(app) -> None:
                                 content={"detail": "服务端未配置访问凭据"})
 
         ip = client_ip(request)
-        # 只有管理面（含会话兑换出口）+ 确实带了凭据才进入这本账：没带凭据的
-        # 401 是"忘登录"，不该消耗来源额度；disabled 模式在上面的分支已整体放行。
-        admin_attempt = _is_admin_attempt_path(path) and bool(_credential(request))
-        if admin_attempt:
-            now = time.monotonic()
-            if _admin_throttled(ip, now):
+        # 任何受保护路径上的请求头凭据都进同一本账：resolve_principal 会拿它去比
+        # bootstrap 口令，口径收窄到管理面/adopt 就等于给 /v1/auth/me、/v1/sessions
+        # 留了一条不计数的比对器。只带 Cookie 的 401 不计数（正常过期会话不该耗
+        # 额度）；没带任何凭据的 401 也不计数（disabled 模式在上面的分支已整体放行）。
+        attempt_now = None
+        if _header_credential(request):
+            attempt_now = time.monotonic()
+            if not _admin_attempt_start(ip, attempt_now):
+                # detail 沿用 limit.admin：管理台对它有现成映射。它现在表示
+                # bootstrap 凭据尝试（任何受保护路径），不再是"管理面尝试"。
                 security_log.record("auth.rate_limited", request=request, ip=ip,
                                     status=429, detail="limit.admin")
                 # 文案固定、不回显凭据；Retry-After 用满窗口，宁可让客户端多等，
@@ -362,12 +406,14 @@ def install_auth(app) -> None:
 
         principal = resolve_principal(request)
         if principal is None:
-            if admin_attempt:
-                _note_admin_failure(ip, time.monotonic())
+            # 解析失败：预占留着，它已经是一笔失败（中间不再另记一次）。
             security_log.record("auth.blocked", request=request,
                                 ip=ip, status=401,
                                 detail="token.unknown")
             return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
+        if attempt_now is not None:
+            # 解析成功：释放本次预占，成功请求不消耗失败预算。
+            _admin_attempt_success(ip, attempt_now)
         request.state.principal = principal
         response = await call_next(request)
         # v0.34.0：把"这枚会话还剩几秒"贴在每一个已鉴权的响应上。
