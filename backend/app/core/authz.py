@@ -107,9 +107,9 @@ UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
 
 # 管理员凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
 # （管理员没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
-# 慢动作。只记"带了凭据且解析失败"的管理面请求；成功与其它路径的 401 都不计数，
-# 免得正常用户把自己的来源额度耗光。进程重启清零是接受的边界：持久化会把这份
-# 可被匿名填充的表带上磁盘。
+# 慢动作。只记"带了凭据且解析失败"的管理面与会话兑换出口请求；成功与其它路径的
+# 401 都不计数，免得正常用户把自己的来源额度耗光。进程重启清零是接受的边界：
+# 持久化会把这份可被匿名填充的表带上磁盘。
 ADMIN_FAIL_WINDOW_SECONDS = 600.0
 ADMIN_FAIL_LIMIT = 10
 ADMIN_THROTTLED_DETAIL = "管理员凭据尝试过多，请稍后再试"
@@ -117,6 +117,18 @@ _ADMIN_FAILS = {}                    # ip -> [monotonic 时间戳]，升序，�
 _ADMIN_FAILS_LOCK = threading.Lock()
 # 与 security_log 的来源表同量级：超过就先清过期项，不让匿名来源把内存撑大。
 _ADMIN_FAILS_MAX_KEYS = 4096
+
+# 管理面之外，adopt 是唯一会拿请求头凭据去比 bootstrap 口令的出口——管理页
+# 粘贴口令、手动录令牌都从这里换会话。不并入同一本账，它就成了不计数的比对器。
+_ADMIN_ATTEMPT_PATHS = frozenset({"/v1/auth/adopt"})
+
+
+def _is_admin_attempt_path(path: str) -> bool:
+    """这条路径上的凭据解析失败算不算"在猜管理员口令"。
+
+    判定只有这一份：中间件计数与测试共用，避免两处各写一遍字符串后漂移。
+    """
+    return path.startswith("/v1/admin/") or path in _ADMIN_ATTEMPT_PATHS
 
 
 def is_public_path(path: str) -> bool:
@@ -265,7 +277,7 @@ def _admin_throttled(ip: str, now: float) -> bool:
 
 
 def _note_admin_failure(ip: str, now: float) -> None:
-    """记一次"带了凭据但解析失败"的管理面尝试。成功解析不走这里。"""
+    """记一次"带了凭据但解析失败"的管理面/会话兑换尝试。成功解析不走这里。"""
     with _ADMIN_FAILS_LOCK:
         times = _live_admin_failures_locked(ip, now)
         if len(times) >= ADMIN_FAIL_LIMIT:
@@ -333,9 +345,9 @@ def install_auth(app) -> None:
                                 content={"detail": "服务端未配置访问凭据"})
 
         ip = client_ip(request)
-        # 只有管理面 + 确实带了凭据才进入这本账：没带凭据的 401 是"忘登录"，
-        # 不该消耗来源额度；disabled 模式在上面的分支已整体放行，走不到这里。
-        admin_attempt = path.startswith("/v1/admin/") and bool(_credential(request))
+        # 只有管理面（含会话兑换出口）+ 确实带了凭据才进入这本账：没带凭据的
+        # 401 是"忘登录"，不该消耗来源额度；disabled 模式在上面的分支已整体放行。
+        admin_attempt = _is_admin_attempt_path(path) and bool(_credential(request))
         if admin_attempt:
             now = time.monotonic()
             if _admin_throttled(ip, now):

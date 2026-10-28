@@ -1,8 +1,8 @@
 """管理员凭据失败按来源 IP 计数：第 11 次 429，窗口过后重新放行。
 
-计数的射程就是"管理面 + 带了凭据 + 解析失败"：普通端点的 401 与成功解析都不动
-这本账——否则一条正确会话就能替同一个来源把失败次数洗掉。窗口按来源滚动，
-所以共享 NAT 下的正常用户会一起等窗口；这是限速按来源计的已知代价。
+计数的射程就是"管理面与会话兑换出口 + 带了凭据 + 解析失败"：普通端点的 401 与
+成功解析都不动这本账——否则一条正确会话就能替同一个来源把失败次数洗掉。窗口按
+来源滚动，所以共享 NAT 下的正常用户会一起等窗口；这是限速按来源计的已知代价。
 """
 import pytest
 
@@ -10,6 +10,7 @@ from app.core import authz, security_log
 from tests.conftest import peer_client
 
 ADMIN_PATH = "/v1/admin/security/summary"
+ADOPT_PATH = "/v1/auth/adopt"
 BOOT_TOKEN = "boot-token"
 ADMIN_FAIL_DETAIL = "管理员凭据尝试过多，请稍后再试"
 BAD = {"Authorization": "Bearer not-the-bootstrap-token"}
@@ -44,6 +45,33 @@ def test_eleventh_bad_admin_credential_is_429(admin_client):
 
     items, _ = security_log.events(type="auth.rate_limited")
     assert [item["detail"] for item in items] == ["limit.admin"]
+
+
+def test_adopt_bad_credentials_share_the_admin_budget(admin_client):
+    # adopt 是管理页粘贴 bootstrap 口令后的换会话出口；若不计在这里，它就是一个
+    # 不限速的口令比对器。10 次失败走同一本账，第 11 次和管理面一样 429。
+    for attempt in range(authz.ADMIN_FAIL_LIMIT):
+        res = admin_client.post(ADOPT_PATH, headers=BAD)
+        assert res.status_code == 401, (attempt, res.text)
+
+    blocked = admin_client.post(ADOPT_PATH, headers=BAD)
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == ADMIN_FAIL_DETAIL
+    assert "not-the-bootstrap-token" not in blocked.text
+
+    items, _ = security_log.events(type="auth.rate_limited")
+    assert [item["detail"] for item in items] == ["limit.admin"]
+
+    # 同一本账：这个来源的管理面额度也一起被挡下
+    assert admin_client.get(ADMIN_PATH, headers=BAD).status_code == 429
+
+
+def test_correct_bootstrap_can_still_adopt_from_unsaturated_source(admin_client):
+    res = admin_client.post(ADOPT_PATH,
+                            headers={"Authorization": "Bearer " + BOOT_TOKEN})
+    assert res.status_code == 200, res.text
+    assert res.json()["role"] == "admin"
+    assert authz._ADMIN_FAILS == {}
 
 
 def test_failures_outside_admin_are_not_counted(admin_client):
