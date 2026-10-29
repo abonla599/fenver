@@ -315,3 +315,20 @@ def test_save_state_creates_the_data_dir_before_writing():
     assert "New-Item -ItemType Directory -Path $DataDir" in save, "没有把 data/ 建出来"
     assert save.index("New-Item") < save.index("Set-Content"), (
         "先写状态再建目录：全新机器上的第一次写照样失败")
+
+
+def test_current_log_paths_point_at_logs_not_data():
+    """日志搬家之后，看门狗里"现在去看哪份日志"的话必须指向 logs\\。
+
+    判据只看剥掉注释后的代码：文件头 2026-09-19 事故叙述里的 `data/backend.log` 是
+    历史事实（当时日志确实在 data\\），不能被这条锁逼着改写；而真正会落进
+    logs\\watchdog.log 的提示语是字符串，剥不掉。反过来，谁把提示语改回 data\\，
+    这里当场红——照着它去翻，只会看到一份不再增长的历史文件。
+    """
+    code = _code(WATCHDOG.read_text(encoding="utf-8"))
+    for stale in (r"data\cloudflared.log", "data/cloudflared.log",
+                  r"data\backend.log", "data/backend.log"):
+        assert stale not in code, (
+            f"现行提示语还在指 {stale}：日志已迁到 logs\\，按它去翻是空的")
+    assert r"logs\cloudflared.log" in code, (
+        "隧道那条的提示语没指向 logs\\cloudflared.log：日志搬家后它得说清新位置")

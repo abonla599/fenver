@@ -422,7 +422,7 @@ function Invoke-Guard {
                 Write-Log 'WARN' ("$Title $why —— 按【隧道对外不可用】处理，再起一个 connector。" +
                                   "旧的那个【不杀】（本脚本只启动、从不杀进程），而多条 connector " +
                                   "指向同一条隧道是 Cloudflare 支持的形态，" +
-                                  "不是抢端口。旧进程为什么挂着不重连，看 data\cloudflared.log。")
+                                  "不是抢端口。旧进程为什么挂着不重连，看 logs\cloudflared.log。")
                 Set-Counter -State $State -Key $LivenessKey -Value 0
                 $escalate = $true      # 往下走，与"进程不在"共用同一份预算和熔断
             }
