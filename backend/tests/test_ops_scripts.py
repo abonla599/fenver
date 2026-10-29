@@ -298,3 +298,20 @@ def test_the_watchdog_asks_whether_the_backend_is_complete():
             f"自检报 broken 就 {forbidden}：坏的是配置，重启修不好它，"
             f"只会把正在进行的对话每分钟带走一次"
         )
+
+
+def test_save_state_creates_the_data_dir_before_writing():
+    """日志与状态分家之后，Write-Log 只建 logs/，谁负责建 data/？
+
+    新机器上（或 data/ 被移走时）没有任何人建过它，`Set-Content` 会以"找不到路径"
+    失败，而 Save-State 的设计是**只留一条 WARN 继续跑**。于是预算与告警节流每轮
+    都从空账开始：守护看着在巡检，熔断却永远不会触发——这正是本文件要守的
+    "效果没了但不报错"的形状。判据是顺序，不只是存在：目录必须先于 Set-Content。
+    """
+    code = _code(WATCHDOG.read_text(encoding="utf-8"))
+    save = _region(code, "function Save-State", "function Get-LaunchCount", "Save-State")
+    assert "if (-not (Test-Path -LiteralPath $DataDir))" in save, (
+        "Save-State 没先确认 data/ 存在：状态写不进去只留一条 WARN，重启预算静默失效")
+    assert "New-Item -ItemType Directory -Path $DataDir" in save, "没有把 data/ 建出来"
+    assert save.index("New-Item") < save.index("Set-Content"), (
+        "先写状态再建目录：全新机器上的第一次写照样失败")

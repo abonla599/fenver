@@ -9,6 +9,7 @@
 """
 import ast
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -355,6 +356,30 @@ def test_log_file_env_override_wins(fake_root, monkeypatch):
     elsewhere = str(fake_root / "elsewhere" / "backend.log")
     monkeypatch.setenv("BACKEND_LOG_PATH", elsewhere)
     assert log_file("BACKEND_LOG_PATH", "backend.log") == elsewhere
+
+
+def test_gitignore_ignores_the_logs_directory():
+    """.gitignore 的 `/logs/` 必须真把日志挡在版本库外，判据不许用带尾斜杠的问法。
+
+    带尾斜杠的 `git check-ignore -- 'logs/'` 在本仓是**恒真的假阳性**：`.gitignore`
+    里的裸 CR 空行被 git 读成一枚空模式，任何 `路径/` 都回"被排除"（见
+    test_machine_read_pointers.py 里 `_SENTINEL` 那段）。所以这里问目录里的一个
+    具体文件（不带尾斜杠），并核对 `-v` 报出的规则就是 `/logs/` 那一行本身——
+    只看 rc 不够，被别的规则或空模式命中也会是 0。git 答不上来就判红：判不了
+    不许当作通过。
+    """
+    probe = "logs/backend.log"
+    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-v", "--", probe],
+                         capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    assert res.returncode == 0 and report, (
+        f"git 没说 {probe} 被忽略（rc={res.returncode}）：logs/ 一进版本库，"
+        "运行期日志与滚动份就会被提交")
+    rule_part, _, path_part = report.partition(chr(9))
+    assert path_part == probe, f"报告行认不出被问的是哪条路径：{report!r}"
+    assert rule_part.endswith(":/logs/"), (
+        f"{probe} 命中的不是 /logs/ 那条规则，而是 {rule_part!r}——"
+        "空模式（一枚裸 CR 的空行）也会命中，而那正是这条锁要挡的假阳性")
 
 
 def _calls_named(node, names):

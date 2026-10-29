@@ -188,6 +188,12 @@ function Save-State {
     param([hashtable] $State)
     if ($DryRun) { return }
     try {
+        # Write-Log 只建 logs/，状态仍写 data/：新机器上（或 data/ 被移走时）没有人建过
+        # 这个目录，Set-Content 会以"找不到路径"失败——只留一条 WARN，预算与告警节流
+        # 于是每轮都从空账开始：守护看着在跑，熔断却永远不会触发。
+        if (-not (Test-Path -LiteralPath $DataDir)) {
+            New-Item -ItemType Directory -Path $DataDir | Out-Null
+        }
         $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding UTF8
     } catch {
         Write-Log 'WARN' ('状态文件写不下去：{0}' -f $_.Exception.Message)
