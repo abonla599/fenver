@@ -107,15 +107,20 @@ _PROTECTED_PREFIXES = ("/v1/", "/docs", "/redoc", "/openapi.json")
 UNAUTHORIZED_DETAIL = "缺少或错误的访问凭据"
 
 # 凭据失败账：按来源 IP 计，窗口滚动，只在本进程内存里。目的不是"锁号"
-# （bootstrap 没有可锁的账号名），而是让猜 bootstrap 口令从"每次一往返"变成有预算的
-# 慢动作。计数射程分两半，共用同一本账：
+# （bootstrap 没有可锁的账号名），而是给猜 bootstrap 口令加一道按来源的错误
+# 答案闸。两半共用同一本账，但拦下的东西不同：
 # - 请求头凭据在**解析之前**预占（任何受保护路径）：resolve_principal 在所有受保护
 #   路径上都会拿请求头凭据去比 bootstrap 口令，只记管理面与会话兑换出口的话，
-#   /v1/auth/me、/v1/sessions 就是不计数的口令比对器。预占把并发突发也关进预算。
-# - 只带 Cookie 的请求在**解析失败之后**补记：有效 Cookie 不计数、更不 429。这里
-#   不能预占——adopt 会把 bootstrap 原样写进会话 Cookie，正常管理台浏览器每个请求
-#   都带着它，预占会让饱和来源上的合法管理台会话一起被 429。代价是并发/猜测各自
-#   仍会先做一次常量时间比较；这是低危取舍（比较之后不会服务任何业务逻辑）。
+#   /v1/auth/me、/v1/sessions 就是不计数的口令比对器。预算在比较之前判定，
+#   饱和即 429、这一条根本不进入比较，所以真正限住尝试次数，也关住了并发突发。
+# - 只带 Cookie 的请求在**解析失败之后**计数：预占在这里不可行——adopt 会把
+#   bootstrap 原样写进会话 Cookie，正常管理台浏览器每个请求都带着它，预占会让
+#   饱和来源上的合法管理台会话一起被 429。代价是来源饱和后，每条错 Cookie 仍会
+#   先做一次常量时间比较，429 只改变错误答案的状态码，不减少比较本身；有效
+#   Cookie 解析成功、不计数也不受预算影响，照常 200。
+# 残余风险：bootstrap 口令是 32 字符高熵值，逐次比较的猜测窗口风险低。另注意
+# 管理台会话 Cookie 过期后冷启动重载会带着旧 Cookie 逐条落账，可能把同一来源的
+# 预算耗到饱和、连 adopt 一起自锁；彻底解法是管理台用 bootstrap 换真会话（另单）。
 # 没带任何凭据的 401 不计数。进程重启清零是接受的边界：持久化会把这份可被匿名
 # 填充的表带上磁盘。
 ADMIN_FAIL_WINDOW_SECONDS = 600.0
@@ -337,8 +342,9 @@ def _note_cookie_failure(ip: str, now: float) -> bool:
     与请求头共用一个预算，但走**失败后计数**而不是解析前预占：adopt 会把
     bootstrap 口令原样写进会话 Cookie，饱和来源上的正常管理台浏览器每个请求都
     带着它；预占会把这些合法会话一起 429。有效 Cookie 在调用方已经解析成功、
-    根本走不到这里，所以不计数；猜测请求的代价是各自先做一次常量时间比较再吃
-    429（低危取舍：比较之后不再服务任何业务逻辑）。
+    根本走不到这里，所以不计数。预算饱和只让错误答案改报 429：比较仍然逐次
+    发生（拦截在 resolve 之后），限住的是响应而不是比较次数。猜测风险由 32 字符
+    高熵口令兜底；过期会话 Cookie 的冷启动重载同样会消耗这份预算，注意自锁。
     """
     with _ADMIN_FAILS_LOCK:
         return _record_admin_failure_locked(ip, now)
@@ -420,10 +426,12 @@ def install_auth(app) -> None:
         ip = client_ip(request)
         # 任何受保护路径上的请求头凭据都进同一本账：resolve_principal 会拿它去比
         # bootstrap 口令，口径收窄到管理面/adopt 就等于给 /v1/auth/me、/v1/sessions
-        # 留了一条不计数的比对器。只带 Cookie 的请求不能预占（adopt 把 bootstrap
-        # 原样写进 Cookie，会让饱和来源上的正常管理台会话 429），改在解析失败后
-        # 由 _note_cookie_failure 补记；没带任何凭据的 401 不计数（disabled 模式在
-        # 上面的分支已整体放行）。
+        # 留了一条不计数的比对器。预算在比较之前判定，饱和即 429，真正限次数。
+        # 只带 Cookie 的请求不能预占（adopt 把 bootstrap 原样写进 Cookie，会让饱和
+        # 来源上的正常管理台会话 429），改在解析失败后由 _note_cookie_failure 补记：
+        # 饱和后错 Cookie 仍会各做一次比较、只是改报 429，有效 Cookie 不受影响。
+        # 管理台过期 Cookie 冷启动重载也走这条补记，会消耗同一预算，注意自锁。
+        # 没带任何凭据的 401 不计数（disabled 模式在上面的分支已整体放行）。
         attempt_now = None
         if _header_credential(request):
             attempt_now = time.monotonic()
@@ -443,7 +451,8 @@ def install_auth(app) -> None:
         if principal is None:
             # 解析失败：请求头预占留着，它已经是一笔失败（中间不再另记一次）。
             # 只带 Cookie 的失败在这里补记同一本账：有效 Cookie 在上一行已经解析
-            # 成功、走不到这里；错 Cookie 每次落一笔，第 11 次起 429。
+            # 成功、走不到这里；错 Cookie 每次落一笔（这次比较已经发生），
+            # 第 11 次起 429。
             if attempt_now is None and _cookie_credential(request):
                 if not _note_cookie_failure(ip, time.monotonic()):
                     security_log.record("auth.rate_limited", request=request,
