@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.38.1：本版只换服务端（M-9 日志治理 B1，app/watchdog/cloudflared 日志移出 data）；APK 仍 0.36.4。 */
 /* release-marker-v0.38.0：本版只换服务端（provider DNS pin + 审批清理 + 认证限速 + Actions SHA）；APK 仍 0.36.4。 */
 /* release-marker-v0.37.7：本版只换服务端（#176 安全约束 + 审计 P0/H-1 代码项）；APK 仍 0.36.4。 */
 /* release-marker-v0.37.6：本版只换服务端（管理台 MCP 外部工具分区 + 桌面 mobile-only 卡片回归锁）；APK 仍 0.36.4。 */

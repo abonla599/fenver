@@ -2,6 +2,34 @@
   "generated_from": "docs/releases/*.md",
   "releases": [
     {
+      "version": "0.38.1",
+      "server_only": true,
+      "title": "v0.38.1 更新说明",
+      "intro": "本版只换服务端，**没有新的安卓包**：安卓 `versionName` 不变，官网与 App 的检查更新仍按现有清单报最新可安装版本（以 `data/version.json` 与 `/site/version.json` 为准，本说明不写死）。这一版把 M-9 日志治理的 B1 收进包内，并同步已经在本机生效的 B2/B3：运行日志搬出 `data/`，cloudflared 主日志改用目录轮转。",
+      "sections": [
+        {
+          "heading": "日志治理（M-9）",
+          "items": [
+            "**app 日志迁出 data**：`run_backend.py` 默认写 `<项目根>/logs/backend.log`，不再写 `data/backend.log`；`BACKEND_LOG_PATH` 环境变量仍可覆盖。1MB×3 代轮转、落盘脱敏、启动打印路径保持不变。本版换包后生效。",
+            "**watchdog 日志迁出 data**：`watchdog.log`、`tunnel-launch.stderr.log` 已改写 `logs/`；`watchdog-state.json` 仍留在 `data/`。此项已在本机保存后生效。",
+            "**cloudflared 主日志**：隧道配置从 `logfile: data\\cloudflared.log` 改为 `log-directory: <项目根>\\logs`，使用 cloudflared 2026.9.1 内置的 1MB×5 轮转；隧道已重启，新日志写 `logs/cloudflared.log`，旧 `data/cloudflared.log` 不再增长。此项已在本机生效。",
+            "**旧日志保留**：升级前已有的 `data/backend.log`（含 `.1`–`.3`）、`data/watchdog.log`、`data/tunnel-launch.stderr.log`、`data/cloudflared.log` 不迁移、不删除，排障仍可查。",
+            "`.gitignore` 增加 `/logs/`，`.dockerignore` 增加 `logs/`；安装部署指南、用户手册与 watchdog 现行告警路径已同步。"
+          ]
+        },
+        {
+          "heading": "边界与残余",
+          "items": [
+            "**没有新 APK**：本版不涉及安卓包、`versionName` 与更新通道清单；APK/通道仍按现有版本。",
+            "cloudflared 当前为**单 connector**（重启时从两个降为一个）；下次登录启动项可能再起一个 config 口径 connector，watchdog 同时检查 35467/35468，需观察是否重复。",
+            "cloudflared 的 1MB×5 轮转尚未实际触发（当前日志远小于上限），只验证了配置与写入路径。",
+            "`deploy/register-watchdog.ps1` 是本机专属、gitignored，未纳入仓库；其注册日志路径不在本版代码内。",
+            "本版不新增配置键、不改 `data/config.json`、不改 `data/` ACL；审批票参数/结果与 MCP `args` 明文等既有残余不变。"
+          ]
+        }
+      ]
+    },
+    {
       "version": "0.38.0",
       "server_only": true,
       "title": "v0.38.0 更新说明",
