@@ -521,7 +521,7 @@ def test_ping_does_not_echo_the_key(tmp_path, monkeypatch):
 def test_a_vendor_that_echoes_the_header_back_leaves_no_key_in_the_ping_detail(tmp_path, monkeypatch):
     """真故障注入：上游把收到的 Authorization 原样回在 401 正文里。
 
-    这是中转网关的常规做法，而那句话会一路走到管理员屏幕与 data/backend.log。
+    这是中转网关的常规做法，而那句话会一路走到管理员屏幕与 logs/backend.log。
     用 httpx 的 MockTransport 而不是本机起一台真服务器：实测本机杀软会偶发把回环
     连接掐掉（WinError 10053），全套跑起来红、单跑却绿，那种红与本条要守的东西无关。
     桩打在 build_client 上而不是 httpx.Client 那个类名上——把类名换成 lambda 会让

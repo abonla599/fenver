@@ -32,7 +32,7 @@ load_project_env()
 PLACEHOLDER_HINTS = ("your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme")
 
 # 出口脱敏要认的形状。宁可多隐一些字，也不要漏一条 key：这些字符串同时会进
-# data/backend.log 和管理员看得到的响应体，而日志文件不在任何加密范围内。
+# logs/backend.log 和管理员看得到的响应体，而日志文件不在任何加密范围内。
 _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk|pk|key|api|secret|token|auth)[-_][A-Za-z0-9_.\-]{5,}", re.I),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]+"),

@@ -28,8 +28,11 @@ build*/
 .worktrees/
 deploy_local/
 
-# 二进制与日志：gitleaks.exe、以及各处 *.log（含 data/backend.log、data/watchdog.log）。
-# 后者是运行时产物，而容器里 data/ 由 compose 挂载进来，镜像内那份只会是过期的。
+# 二进制与日志：gitleaks.exe、以及各处 *.log（旧 data/backend.log、data/watchdog.log
+# 仍可能由 compose 挂载进来，镜像内那份只会是过期的）。
+# 应用与看门狗的日志已迁到项目根 logs/，轮转份（backend.log.1 等）不叫 *.log，所以
+# 整目录挡；容器不用这份日志，挂载的也只会是宿主机那份。
+logs/
 *.exe
 *.log
 

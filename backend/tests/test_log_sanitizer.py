@@ -1,6 +1,6 @@
 """运行期日志脱敏与轮转的判据（派单②，验收＝"新日志样本无明文服务商名"）。
 
-泄露面不是仓库而是运行期：部署版把 stdout/stderr 整体接进 data/backend.log，
+泄露面不是仓库而是运行期：部署版把 stdout/stderr 整体接进 logs/backend.log，
 09-22 的安全审查在 auth.log / named.log 里抓到了服务商名与后端域名明文。
 本文件把三件事各自钉死：
 1. redact 对登记词与 `model=` 查询串的行为（含最长优先、短词不误伤）；

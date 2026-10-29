@@ -274,7 +274,8 @@ def _ignored_by_dockerignore(rel_path: str) -> str | None:
     (".worktrees/v032-d1/Dockerfile", "101MB，3 份完整源码副本"),
     ("dist_new/run_backend", "另一次构建的产物"),
     ("deploy_local/swap_backend_v028.py", "一次性换包脚本"),
-    ("data/backend.log", "运行时日志，容器里 data/ 由 compose 挂载"),
+    ("logs/backend.log", "运行时日志，已从 data/ 迁到项目根 logs/"),
+    ("logs/backend.log.1", "轮转份：*.log 不覆盖 .log.1，靠 logs/ 目录条目挡"),
 ])
 def test_dockerignore_blocks_the_bulky_build_artifacts(rel_path, why):
     assert _ignored_by_dockerignore(rel_path), f"{rel_path}（{why}）仍会进构建上下文"

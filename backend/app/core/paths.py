@@ -80,6 +80,30 @@ def data_file(env_var: str, filename: str) -> str:
     return fresh
 
 
+def log_dir() -> str:
+    """应用与看门狗日志的共同目录：`<项目根>/logs`。
+
+    只算路径、不建目录：paths 被大量模块在 import 期引用，这里顺手 mkdir 会让任何
+    一次导入都往仓库里写东西。目录由第一次真正写盘的人建（run_backend 的 makedirs、
+    watchdog 的 Write-Log），与 ensure_parent 的取舍一致。
+    """
+    return os.path.join(data_root(), "logs")
+
+
+def log_file(env_var: str, filename: str) -> str:
+    """一份日志的落点：`$env_var` > `<项目根>/logs/<filename>`。
+
+    刻意不复用 data_file()：那个函数的第一档是"data/ 下已有同名文件就以它为准"，
+    而 `data/backend.log` 正是迁出前写下的旧文件——回落到它等于新日志永远挪不出
+    data/：规则生效了、结果还是原地写。日志没有"继续读老的"这种需求，只有显式
+    覆盖与固定新家两档。
+    """
+    override = os.getenv(env_var, "").strip()
+    if override:
+        return override
+    return os.path.join(log_dir(), filename)
+
+
 def ensure_parent(path: str) -> str:
     """写盘前把父目录建出来，返回原路径。
 

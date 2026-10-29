@@ -7,6 +7,7 @@
    的裸文件名靠 `.gitignore` 里逐个记名兜底，改个名字（preference-<uid>.txt）就会
    被提交进公开仓库。规则收在 paths.data_file，这里按优先级逐档钉住。
 """
+import ast
 import os
 import sys
 from pathlib import Path
@@ -314,3 +315,79 @@ def test_log_data_locations_tells_the_two_reasons_apart(capsys, tmp_path, monkey
 # 必须等于上面这条规则"的那一条：conftest 的 autouse 夹具会把这两个常量 patch 到临时
 # 目录，那种断言区分不了真实值与 patch 值，永远绿（写过，已删过一次）。规则本身由上面
 # 几条钉住，两个模块各用一行 data_file(...) 接上，接线点就在模块开头第三行。
+
+
+# ---------- 日志落点：项目根 logs/，不是 data/，且不许回落到 data_file ----------
+# B1 的动机：data/ 里是运行时数据（会被 ACL 收紧、被挂载/快照），日志只是会滚动的
+# 旁证，另放一棵树便于单独排除与归档。而 data_file() 的第一档是"data/ 下已有同名
+# 文件就以它为准"——直接复用它，旧的 data/backend.log 会让新日志永远写回 data/。
+# 规则收在 paths.log_file，这里按"默认 / 覆盖 / 不回退"各钉一次。
+
+
+def test_log_dir_is_the_project_root_logs_and_creates_nothing(fake_root):
+    from app.core.paths import log_dir
+
+    assert log_dir() == str(fake_root / "logs")
+    assert not (fake_root / "logs").exists(), "log_dir 只算路径：建目录是写盘人的事"
+
+
+def test_log_file_defaults_into_logs_not_data(fake_root, monkeypatch):
+    from app.core.paths import log_file
+
+    monkeypatch.delenv("BACKEND_LOG_PATH", raising=False)
+    assert log_file("BACKEND_LOG_PATH", "backend.log") == str(fake_root / "logs" / "backend.log")
+
+
+def test_log_file_ignores_the_old_data_log_and_never_creates_dirs(fake_root, monkeypatch):
+    """data/backend.log 是迁出前的旧文件；它在不在都不许把新日志拽回 data/。"""
+    from app.core.paths import log_file
+
+    monkeypatch.delenv("BACKEND_LOG_PATH", raising=False)
+    (fake_root / "data").mkdir()
+    (fake_root / "data" / "backend.log").write_text("old", encoding="utf-8")
+    assert log_file("BACKEND_LOG_PATH", "backend.log") == str(fake_root / "logs" / "backend.log")
+    assert not (fake_root / "logs").exists(), "算路径不许顺手建目录"
+
+
+def test_log_file_env_override_wins(fake_root, monkeypatch):
+    from app.core.paths import log_file
+
+    elsewhere = str(fake_root / "elsewhere" / "backend.log")
+    monkeypatch.setenv("BACKEND_LOG_PATH", elsewhere)
+    assert log_file("BACKEND_LOG_PATH", "backend.log") == elsewhere
+
+
+def _calls_named(node, names):
+    """AST 里按被调名收 Call：Name 与 Attribute 两种写法都认（锁的是调用，不是文本）。"""
+    return [n for n in ast.walk(node)
+            if isinstance(n, ast.Call)
+            and ((isinstance(n.func, ast.Name) and n.func.id in names)
+                 or (isinstance(n.func, ast.Attribute) and n.func.attr in names))]
+
+
+def test_run_backend_routes_the_log_through_log_file_only():
+    """静态锁：入口只能用 log_file("BACKEND_LOG_PATH", …)。
+
+    改回 data_file 时这条红——那正是 B1 要拆掉的形状：旧 data/backend.log 存在时，
+    data_file 会让新日志继续写旧位置，换包后看起来"迁了"，实际一个字节没动。
+    """
+    source = (REPO_ROOT / "run_backend.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    log_calls = [c for c in _calls_named(tree, {"log_file"})
+                 if c.args and isinstance(c.args[0], ast.Constant)
+                 and c.args[0].value == "BACKEND_LOG_PATH"]
+    assert log_calls, 'run_backend.py 没有 log_file("BACKEND_LOG_PATH", …)'
+    assert not _calls_named(tree, {"data_file"}), \
+        "run_backend.py 又走 data_file 了：旧 data/backend.log 存在时日志永远迁不出 data/"
+
+
+def test_paths_log_file_does_not_call_data_file():
+    """防回落：log_file 的实现里不许出现 data_file 调用（含 paths.data_file）。"""
+    import inspect
+    import textwrap
+
+    from app.core.paths import log_file
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(log_file)))
+    assert not _calls_named(tree, {"data_file"}), \
+        "log_file 调用了 data_file：它的 data/ 回落会把旧 data/backend.log 变成新落点"

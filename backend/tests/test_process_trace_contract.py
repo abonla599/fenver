@@ -882,7 +882,7 @@ def test_nobody_writes_process_text_into_a_log():
     """思考原文与搜索命中只进界面与会话，不进日志：日志的可见面比会话归属宽得多。
 
     风险登记里那句"思考文本可能复述用户隐私"的前提是它只落在 owner 读得到的地方；而
-    `data/backend.log` 既没有 owner 概念也常常被再抄一份出去。判据是**日志调用的实参**里
+    `logs/backend.log` 既没有 owner 概念也常常被再抄一份出去。判据是**日志调用的实参**里
     出现过程内容（帧名、reasoning、trace、过程类标识），而不是"禁止一切 print"——发帧侧
     那句既有诊断 `[Stream] 调用工具: name(args)` 保留，它给的是工具名与参数，不是思考全文。
 

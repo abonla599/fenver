@@ -62,8 +62,8 @@ def test_every_request_logs_when_it_arrived_and_how_long_it_took(capsys):
 def test_the_query_string_never_reaches_the_log(capsys):
     """查询串不进日志。令牌一旦被写进 URL，就会被这行原样抄进一个公开可读的文件。
 
-    `backend.log` 不在 .gitignore 的保护范围内（它躺在 data/ 下，而 data/ 已被排除，
-    但任何一次"顺手把日志贴给别人看"都会把它送出去）。路径留着，`?...` 一律不带。
+    `logs/backend.log` 已被 `.gitignore` 的 `/logs/` 挡在仓库外，
+    但任何一次"顺手把日志贴给别人看"都会把它送出去。路径留着，`?...` 一律不带。
     """
     with TestClient(_app_with(**{"/ping": _ok})) as client:
         client.get("/ping?token=SK-a-very-live-token")

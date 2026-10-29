@@ -25,9 +25,9 @@ AI 智能助手 —— 崩溃守护看门狗
    一次的无限重启风暴。到上限就停手并把话说清楚，等人来看——守护的底线是
    别把故障放大成日志洪水。
 
-日志：data\watchdog.log（超 1MB 滚一份 .1）
+日志：logs\watchdog.log（超 1MB 滚一份 .1）
 状态：data\watchdog-state.json（拉起预算 + 告警节流时间戳）
-两个文件都在 data/ 下，而 data/ 已经整体 gitignore，不会污染仓库。
+日志在项目根 logs/（已 gitignore），状态仍在 data/（同样已 gitignore），都不污染仓库。
 
 ------------------------------------------------------------------------------
 用法
@@ -131,7 +131,10 @@ if ($DryRun) {
 $BackendExe      = Join-Path $ProjectRoot 'dist\run_backend\run_backend.exe'
 $TunnelExe       = Join-Path $ProjectRoot 'tools\cloudflared.exe'
 $DataDir         = Join-Path $ProjectRoot 'data'
-$LogPath         = Join-Path $DataDir 'watchdog.log'
+# 日志与运行时数据分家：data/ 里是会话、库与状态（会被 ACL 收紧、被快照/挂载），
+# logs/ 只放会滚动的日志，整个目录可以单独排除、单独归档。
+$LogDir          = Join-Path $ProjectRoot 'logs'
+$LogPath         = Join-Path $LogDir 'watchdog.log'
 $StatePath       = Join-Path $DataDir 'watchdog-state.json'
 $LogMaxBytes     = 1MB
 $WarnRepeatMins  = 15   # 同一条告警最多每 15 分钟说一次，别把真信号埋进重复行
@@ -146,8 +149,8 @@ function Write-Log {
     }
     $line = '[{0}] {1,-7} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     try {
-        if (-not (Test-Path -LiteralPath $DataDir)) {
-            New-Item -ItemType Directory -Path $DataDir | Out-Null
+        if (-not (Test-Path -LiteralPath $LogDir)) {
+            New-Item -ItemType Directory -Path $LogDir | Out-Null
         }
         # 滚存方式与 run_backend.py 里那套一致：超 1MB 先转成 .1，无人清理也不会无限长。
         if ((Test-Path -LiteralPath $LogPath) -and
@@ -445,7 +448,7 @@ function Invoke-Guard {
         # 把故障放大成日志洪水，所以停手等人工。
         if (Test-ShouldLog -State $State -Key ("seen:cap:" + $Key)) {
             Write-Log 'ERROR' ("熔断：$Title 最近 1 小时内已拉起 $recent 次仍没活住，" +
-                               "停止自动重启，需要人工介入。先看 data\backend.log 和 $LogPath。" +
+                               "停止自动重启，需要人工介入。先看 logs\backend.log 和 $LogPath。" +
                                "确认排查完想恢复自动守护：删掉 $StatePath 里的 '$Key' 那一项" +
                                "（或整个文件删掉，等于重新计时）。")
         }
@@ -492,7 +495,7 @@ function Invoke-Guard {
             Write-Log 'INFO' ("$Title 已拉起：PID $alivePid（启动进程 PID $($started.Id)），$note")
         } else {
             Write-Log 'ERROR' ("$Title 拉起后 ${StartGraceSec}s 内没看到进程，这次算失败（预算已计一次）。" +
-                               "如果反复走到这一行，多半是 exe 本身起不来，看 data\backend.log。")
+                               "如果反复走到这一行，多半是 exe 本身起不来，看 logs\backend.log。")
         }
     } catch {
         Write-Log 'ERROR' ("$Title 拉起动作本身失败：{0}" -f $_.Exception.Message)
@@ -570,8 +573,8 @@ try {
                     # 藏了一整轮：日志写着已拉起，进程表里却只有原来那一个）。
                     # 文件名不带时间戳：Start-Process 每次覆盖写，只留最近一次尝试。
                     # 带时间戳的话这个文件没人清（本脚本从不删文件），而"哪一次拉起"的时间本来就在
-                    # data\watchdog.log 紧邻的那行里，重复记一遍等于给自己留第二个事实来源。
-                    $errLog = Join-Path $DataDir 'tunnel-launch.stderr.log'
+                    # logs\watchdog.log 紧邻的那行里，重复记一遍等于给自己留第二个事实来源。
+                    $errLog = Join-Path $LogDir 'tunnel-launch.stderr.log'
                     Start-Process -FilePath $TunnelExe -ArgumentList $tunnelArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardError $errLog -PassThru
                 }
         } else {

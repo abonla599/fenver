@@ -1,6 +1,6 @@
 """运行期日志脱敏：服务商名、模型 id、上游地址不允许以明文进日志文件。
 
-这个仓库是公开的，而部署版把 stdout/stderr 整体接进 data/backend.log——
+这个仓库是公开的，而部署版把 stdout/stderr 整体接进 logs/backend.log——
 "哪家在替我们做推理"写进源码是泄露，打进行为日志同样是泄露（09-22 安全审查
 已在 named.log/auth.log 抓到实例）。日志不加密，唯一可靠的办法是让它压根
 不含这些词。
@@ -100,7 +100,7 @@ class _RedactFilter(logging.Filter):
     每条访问日志都在 formatter 里抛
     `ValueError: not enough values to unpack (expected 5, got 0)`，logging 把这
     一段 `--- Logging error ---` 连同整条调用栈吐到 stderr——也就是
-    data/backend.log。现网实测：换包前后每一代日志里各有 828 / 2,462 次，
+    logs/backend.log。现网实测：换包前后每一代日志里各有 828 / 2,462 次，
     真正的访问记录被噪声挤掉，而 1MB 轮转又把噪声本身也滚没了：出事故时
     唯一该留下的东西（谁在什么时候打了哪个接口）恰恰不在。请求本身不受影响
     （状态码照旧 200），所以这条不会让任何功能测试变红——正是本仓反复拆的那类形状。

@@ -16,7 +16,7 @@ _LOG_SINK = None
 
 
 def _route_logs_to_file() -> None:
-    """冻结版把 stdout/stderr 接到 data/backend.log。
+    """冻结版把 stdout/stderr 接到 logs/backend.log。
 
     这个 exe 是以隐藏窗口启动的，日志原本落在一条没人看的管道上，而开机自启那条
     快捷方式也不带重定向。那次"模型全挂、界面只说 Connection error."因此全程没有
@@ -30,9 +30,9 @@ def _route_logs_to_file() -> None:
     """
     global _LOG_SINK
     from app.core.logsanitizer import RedactingStream
-    from app.core.paths import data_file
+    from app.core.paths import log_file
 
-    path = data_file("BACKEND_LOG_PATH", "backend.log")
+    path = log_file("BACKEND_LOG_PATH", "backend.log")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
