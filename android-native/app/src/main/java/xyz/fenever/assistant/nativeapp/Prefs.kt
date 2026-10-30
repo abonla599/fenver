@@ -10,8 +10,8 @@ import kotlinx.serialization.json.Json
  * - identities/currentId：这台机器上认识谁（多账户切换），上限 5 个人；
  *   条目字段与 app.js 的 addIdentity 逐一对应（userId/username/role/
  *   lastSessionId/providerId/addedAt）。网页方案 C 不存凭据明文（走 Cookie），
- *   原生没有 Cookie 通道，Bearer 令牌必须留在本机条目里——这是唯一一处
- *   有意不同步的实现差异，存储位置是应用私有目录。
+ *   原生没有 Cookie 通道，Bearer 令牌与续命凭据都落加密区（SecretStore）；
+ *   条目里的 token 字段只是旧版明文数据的迁移来源，启动后立即清空。
  * - persona:{sessionId}：角色设定按会话存，全局不共享。
  * - contextTokensK：上下文预算（k token），默认 8，同网页。
  * - reminders：提醒存在设备侧（服务端没有这件事），所以原生也是本机排期。
@@ -26,13 +26,30 @@ object Prefs {
     private const val IDENTITY_CAP = 5
     private lateinit var sp: SharedPreferences
     private val json = Json { ignoreUnknownKeys = true }
+    // 加密区建不起来时的退路：令牌只活在这个进程里，进程一死就要重新登录。
+    // 宁可多输一次口令，也不把令牌落回明文文件。
+    private val tokenMemory = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     fun init(ctx: Context) {
         sp = ctx.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        // 续命凭据落在另一个文件：ai_native_prefs 是明文的，那一把必须进 Keystore 加密区（v0.34.0）
+        // 续命凭据与会话令牌都进 Keystore 加密区（v0.39 M-8）
         SecretStore.init(ctx)
+        migrateLegacyTokens()
         // 冷启动第一帧就带上外观，不闪一下深色
         xyz.fenever.assistant.nativeapp.theme.ThemeMode.value = themeMode
+    }
+
+    /** 旧版把会话令牌明文写在 identities JSON 里：搬进加密区（或进程内存）后立刻抹掉。 */
+    private fun migrateLegacyTokens() {
+        val list = readIdentities()
+        if (list.none { it.token.isNotEmpty() }) return
+        val cleaned = list.map {
+            if (it.token.isEmpty()) it else {
+                stashToken(it.userId, it.token)
+                it.copy(token = "")
+            }
+        }
+        saveIdentities(cleaned)
     }
 
     var baseUrl: String
@@ -104,32 +121,38 @@ object Prefs {
         saveIdentities(readIdentities().map { if (it.userId == hit.userId) it.fields() else it })
     }
 
-    /** 登录/注册成功后记一个人：同 userId 旧条目先去掉再追加，超上限挤掉最旧的
-     *（只忘本机——被挤掉那位的令牌到服务端自然过期/封顶作废，与网页同一取舍）。
+    /** 登录/注册成功后记一个人：同 userId 旧条目先去掉再追加，超上限挤掉最旧的。
+     * 返回被挤掉那几位的令牌（调用方负责 best-effort 调服务端 logout 让它们失效；
+     * 本机只忘不撤会留下看不见的活凭据——M-8 第 3 条）。
      * minSdk 24 没有 java.time，addedAt 用定长毫秒串，排序语义与 ISO 串等价。 */
-    fun addIdentity(res: AuthResult) {
+    fun addIdentity(res: AuthResult): List<String> {
         val list = readIdentities().filter { it.userId != res.user_id }.toMutableList()
         list.add(Identity(userId = res.user_id, username = res.username, role = res.role,
-            token = res.token, addedAt = "%013d".format(System.currentTimeMillis())))
+            addedAt = "%013d".format(System.currentTimeMillis())))
         saveIdentities(list)
         currentId = res.user_id
-        /* v0.34.0：登录/注册这一刻服务端发的续命凭据落**加密区**，不落这个明文文件
-         * （判据 4、11）。服务端只在 register / login / reauth 三处发它（见 auth_router.py
-         * 的那三个 return）；adopt 一个外来令牌拿到的 AuthResult 里这个字段是默认空串，
-         * save 收到空串直接不写——语义与"这条来路没有静默重登，到点重输一次口令"一致。 */
+        /* v0.39 M-8：会话令牌与续命凭据都只进加密区，清单里不再留明文。
+         * adopt 来的令牌也走同一条路；两个 SecretStore 方法在加密区不可用时
+         * 静默降级（令牌只活进程内存）。 */
+        stashToken(res.user_id, res.token)
         SecretStore.save(res.user_id, res.device_secret)
+        val evicted = mutableListOf<String>()
         while (readIdentities().size > IDENTITY_CAP) {
             val oldest = readIdentities().minByOrNull { it.addedAt }!!
+            val dead = tokenFor(oldest.userId)
             saveIdentities(readIdentities().filter { it.userId != oldest.userId })
-            // 人从清单上挤出去，加密区那把也得跟着走：留着就成了一枚没人认领的续命凭据
+            dropToken(oldest.userId)
             SecretStore.drop(oldest.userId)
+            if (dead.isNotEmpty()) evicted += dead
         }
+        return evicted
     }
 
     fun dropIdentity(userId: String) {
         saveIdentities(readIdentities().filter { it.userId != userId })
-        // 本机忘掉这个人 = 服务端那把续命凭据在本机也不再留着（它已被服务端连带
-        // 吊销的那一批里，见 auth.py 的 revoke：退出清全部 secrets）。
+        // 本机忘掉这个人 = 服务端那把续命凭据在本机也不再留着（调用方会先/随后
+        // 用 tokenFor 拿到的令牌去调 logout；这里只负责本机侧不再保留）。
+        dropToken(userId)
         SecretStore.drop(userId)
         if (currentId == userId) currentId = ""
     }
@@ -144,9 +167,44 @@ object Prefs {
         patchCurrent { copy(username = username, role = role) }
 
     // ---------- 当前身份的派生读写（都落在清单条目上，不再单独存键） ----------
+    /* 令牌本体不在条目里：SecretStore 加密区优先，加密区不可用时退到进程内存。
+     * 旧版留下的明文 token 字段由 migrateLegacyTokens() 搬走并清空。 */
     var token: String
-        get() = currentEntry()?.token ?: ""
-        set(value) = patchCurrent { copy(token = value) }
+        get() {
+            val id = currentEntry()?.userId ?: return ""
+            return tokenFor(id)
+        }
+        set(value) {
+            val id = currentEntry()?.userId ?: return
+            stashToken(id, value)
+        }
+
+    /** 指定身份那一枚令牌：删别人/退出登录时要在丢掉条目之前拿到它去调 logout。 */
+    fun tokenFor(userId: String): String {
+        if (userId.isEmpty()) return ""
+        val encrypted = SecretStore.readToken(userId)
+        if (encrypted.isNotEmpty()) return encrypted
+        return tokenMemory[userId].orEmpty()
+    }
+
+    private fun stashToken(userId: String, token: String) {
+        if (userId.isEmpty()) return
+        if (token.isEmpty()) { dropToken(userId); return }
+        if (SecretStore.ready) {
+            SecretStore.saveToken(userId, token)
+            // saveToken 内部吞异常（加密区坏了不该炸登录）：回读一次确认真的落住了，
+            // 没落住就退回进程内存，别让一次静默失败变成"重启后凭空掉登录"。
+            if (SecretStore.readToken(userId) == token) tokenMemory.remove(userId)
+            else tokenMemory[userId] = token
+        } else {
+            tokenMemory[userId] = token
+        }
+    }
+
+    private fun dropToken(userId: String) {
+        SecretStore.dropToken(userId)
+        tokenMemory.remove(userId)
+    }
 
     var username: String
         get() = currentEntry()?.username ?: ""
@@ -190,6 +248,7 @@ object Prefs {
         saveIdentities(emptyList())
         currentId = ""
         // 清单整本清空 = 加密区也不能留任何一把（换服务器时旧地址那把在新地址上毫无意义）
+        tokenMemory.clear()
         SecretStore.clear()
     }
 }

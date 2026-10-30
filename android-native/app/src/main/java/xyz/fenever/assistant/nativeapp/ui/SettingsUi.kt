@@ -811,9 +811,10 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     Spacer(Modifier.height(18.dp))
     SetRow(FenverIcon.Logout, "退出登录", danger = true, trailing = null, divider = false) {
         val hit = Prefs.currentEntry() ?: run { onLoggedOut(); return@SetRow }
+        val tok = Prefs.tokenFor(hit.userId)
         scope.launch {
-            runCatching { Api.logout(hit.token) }   // 服务端不作数也得把本机忘掉
-            Prefs.forgetCurrent()
+            runCatching { Api.logout(tok) }   // 服务端不作数也得把本机忘掉
+            Prefs.dropIdentity(hit.userId)
             onLoggedOut()
         }
     }
@@ -985,6 +986,7 @@ private fun openSystemNotificationSettings(ctx: android.content.Context): Boolea
 private fun AccountsPage(tick: Int, onTick: () -> Unit,
                          onRequireAuth: (String) -> Unit, onSwitched: () -> Unit) {
     tick
+    val scope = rememberCoroutineScope()
     val here = Prefs.currentEntry()?.userId ?: ""
     val list = Prefs.readIdentities().sortedByDescending { it.addedAt }
     Spacer(Modifier.height(12.dp))
@@ -1002,9 +1004,14 @@ private fun AccountsPage(tick: Int, onTick: () -> Unit,
                             if (Prefs.switchTo(x.userId)) onSwitched()
                         }
                         SetMini("删除账号", del = true) {
-                            // 方案 C 的既成代价照抄：删别人只忘本机
+                            // 先拿到令牌再去掉本机条目：服务端那枚也撤掉，别留看不见的活凭据。
+                            // logout 的既有语义会连带清掉这个人的 device_secrets（其他设备到点重输口令）。
+                            val dead = Prefs.tokenFor(x.userId)
                             Prefs.dropIdentity(x.userId)
                             onTick()
+                            if (dead.isNotEmpty()) scope.launch {
+                                runCatching { Api.logout(dead) }
+                            }
                         }
                     }
                 },
@@ -1656,9 +1663,12 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
             scope.launch {
                 runCatching { Api.adopt(t) }.onSuccess { info ->
                     tokenInput = ""; tokenBusy = false; result = ""
-                    // 本机收编这个人（明文令牌只活过这一次请求头，之后躺在私有存储里）
-                    Prefs.addIdentity(AuthResult(token = t, user_id = info.user_id,
+                    // 本机收编这个人（明文令牌只活过这一次请求头，之后进 Keystore 加密区）
+                    val evicted = Prefs.addIdentity(AuthResult(token = t, user_id = info.user_id,
                         username = info.username, role = info.role))
+                    if (evicted.isNotEmpty()) scope.launch {
+                        evicted.forEach { runCatching { Api.logout(it) } }
+                    }
                     onAdopted()
                 }.onFailure { tokenBusy = false; testBox("这枚凭据没被认：" + (it.message ?: "")) }
             }

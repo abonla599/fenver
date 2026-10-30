@@ -166,11 +166,18 @@ object ExportTracker {
                 nm.createNotificationChannel(android.app.NotificationChannel(
                     CHANNEL_ID, "导出", android.app.NotificationManager.IMPORTANCE_DEFAULT))
             }
+            val publicVersion = androidx.core.app.NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Fenver")
+                .setContentText("有一条导出结果通知")
+                .build()
             nm.notify(tag.hashCode(),
                 androidx.core.app.NotificationCompat.Builder(ctx, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.stat_sys_download_done)
                     .setContentTitle("导出本次对话")
                     .setContentText(text)
+                    .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PRIVATE)
+                    .setPublicVersion(publicVersion)
                     .setAutoCancel(true)
                     .build())
         }

@@ -17,14 +17,14 @@ import androidx.security.crypto.MasterKey
  * 口令）"，也不"凭据躺在明文里但功能看起来更顺"。ready 为假时登录照旧成功，只是
  * 不落这把凭据：SessionRenew.reauthOnce 读到空串直接返回 false，401 原样冒给界面落登录页。
  *
- * 会话令牌本身仍留在 Prefs 的明文条目里（本版改动面收口的决定，PRD 第三节明写
- * "令牌是否一并搬由开工时的改动面定"）：它 30 天滑动、180 天封顶，且 revoke/logout
- * 都能立即作废；device_secret 是另一类——400 天没动过才失效，而且它换的是"免口令开
- * 一段新会话"，两者不同级。
+ * 会话令牌也走这里（v0.39 M-8）：它虽然 30 天滑动、180 天封顶，但同样是"拿到即可
+ * 以这个人身份说活"的凭据，且旧版把它落在明文的 ai_native_prefs 里。两类凭据用
+ * 不同前缀分开存，清单条目里的 token 字段只作为旧版迁移来源，迁移后立即清空。
  */
 object SecretStore {
     private const val FILE = "ai_native_secrets"
     private const val PREFIX = "device_secret:"
+    private const val TOKEN_PREFIX = "session_token:"
 
     @Volatile private var store: SharedPreferences? = null
     @Volatile var ready: Boolean = false
@@ -64,6 +64,22 @@ object SecretStore {
     fun drop(userId: String) {
         val s = store ?: return
         runCatching { s.edit().remove(PREFIX + userId).apply() }
+    }
+
+    fun saveToken(userId: String, token: String) {
+        val s = store ?: return
+        if (userId.isEmpty() || token.isEmpty()) return
+        runCatching { s.edit().putString(TOKEN_PREFIX + userId, token).apply() }
+    }
+
+    fun readToken(userId: String): String =
+        if (userId.isEmpty()) "" else runCatching {
+            store?.getString(TOKEN_PREFIX + userId, "")
+        }.getOrNull().orEmpty()
+
+    fun dropToken(userId: String) {
+        val s = store ?: return
+        runCatching { s.edit().remove(TOKEN_PREFIX + userId).apply() }
     }
 
     fun clear() {

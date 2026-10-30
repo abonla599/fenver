@@ -34,8 +34,18 @@ services:
       - ./data:/app/data
       - ./chroma_db:/app/chroma_db
     restart: unless-stopped
+    # 备用部署也要有资源上限：没有上限时一个失控请求能把这台机器吃满，
+    # 把"备用路"变成宿主机的单点故障。数值按本机现网峰值留了余量。
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+          pids: 512
+    # 健康检查打 /health 并判 status == ok；打 / 只能证明静态页还能吐，
+    # 模型与记忆都坏掉时容器仍会显示 healthy。
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health | python -c \"import json,sys; sys.exit(0 if json.load(sys.stdin).get('status') == 'ok' else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3

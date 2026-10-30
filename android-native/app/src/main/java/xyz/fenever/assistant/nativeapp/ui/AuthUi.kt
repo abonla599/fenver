@@ -96,11 +96,14 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
     var serverFixOpen by remember { mutableStateOf(false) }
     var serverDraft by remember { mutableStateOf(Prefs.baseUrl) }
 
-    // afterAuth（网页同名）：令牌落进本机清单 + 告诉提醒排期器"现在是谁"。
+    // afterAuth（网页同名）：令牌进本机加密区 + 告诉提醒排期器"现在是谁"。
     fun afterAuth(res: AuthResult) {
-        Prefs.addIdentity(res)
+        val evicted = Prefs.addIdentity(res)
         ReminderStore.setOwner(res.user_id)
         scope.launch {
+            // 超上限被挤掉的身份：本机忘掉之前先撤掉服务端那枚令牌（M-8 第 3 条）。
+            // logout 的既有语义会连带清掉这个人的 device_secrets：另一台设备到点要重输口令。
+            evicted.forEach { runCatching { Api.logout(it) } }
             runCatching { Api.me() }.onSuccess {
                 Prefs.touchIdentity(it.username, it.role)
             }
@@ -294,7 +297,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                         if (reg && regStep == 2) {
                             // regStep2 块：自己的 auth-sub + 三组「题面/答案」
                             Text("最后一步：这三道题将来用于忘记密码时自助找回，答案只有你自己知道才对得上。" +
-                                "它们和密码一样只存这台机器上的摘要，管理员也看不到原话。",
+                                "它们和密码一样在服务端只保存不可逆摘要，管理员也看不到原话。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             RECOVERY_QUESTIONS.forEachIndexed { i, q ->
@@ -306,7 +309,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                         }
 
                         // .auth-note
-                        Text("对话与记忆只存在这台机器上，不会上传到别处。",
+                        Text("对话与记忆保存在你连接的服务器上；登录凭据只保存在本机安全存储中。",
                             style = MaterialTheme.typography.bodySmall,
                             color = text3Color())
 

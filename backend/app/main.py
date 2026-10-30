@@ -197,6 +197,9 @@ from app.web.web_router import mount_admin, mount_pwa
 # 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
 from app.core.authz import (_auth_mode, CurrentPrincipal, docs_kwargs_for_mode,
                             install_auth, Principal, RequireAdmin)
+# 用户可见的异常文案统一过路径网：校验类 ValueError 里偶尔会带上绝对路径，
+# 原样回显等于把本机目录结构交给调用者（审计 L-5）。
+from app.core.pathmask import hide_paths
 
 # 非 disabled 模式连文档路由都不生成（路由表本身就是侦察材料）
 app = FastAPI(
@@ -731,7 +734,7 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
     try:
         used_memory_ids = []
@@ -1019,7 +1022,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
     try:
         provider, messages, user_text = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
     # 流式此前直接调 stream_chat、绕过 pipeline，因此既没注入记忆与偏好，
     # 也不会把本轮对话写回记忆。这里复用同一个 pipeline 实例补齐两者。
@@ -1230,7 +1233,7 @@ def replace_session_messages(session_id: str, req: SessionMessagesRequest,
         # 422 而不是 404：replace 返回 False 的含义是"没有这条会话"，而超限是
         # "这条会话存在，但你给的这份历史存不下"。混成 404 只会让客户端把一次
         # 永远存不下的回写当成会话丢了，反复重试。
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail=hide_paths(str(e)))
     if not replaced:
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "updated", "count": len(req.messages)}
@@ -1268,7 +1271,7 @@ def get_schedule(day: Optional[str] = None, principal: Principal = CurrentPrinci
                 "items": schedule.plan(principal.user_id, target),
                 "days": schedule.days_for(principal.user_id)}
     except schedule.ScheduleError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
 
 @app.put("/v1/schedule")
@@ -1279,7 +1282,7 @@ def put_schedule(req: ScheduleRequest, principal: Principal = CurrentPrincipal):
         rows = schedule.set_plan(principal.user_id,
                                  [item.model_dump() for item in req.items], day=target)
     except schedule.ScheduleError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     return {"day": target, "items": rows, "count": len(rows)}
 
 
@@ -1424,7 +1427,7 @@ def add_provider(req: ProviderRequest, actor: Principal = RequireAdmin):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     # after 走 _public：密钥在这一层就已经是掩码，审计要的是"这一格被建过"。
     audit.log(actor, "provider.create", target=saved["id"],
               after=provider_store._public(saved))
@@ -1442,7 +1445,7 @@ def update_provider(provider_id: str, req: ProviderRequest,
     try:
         saved = provider_store.upsert(record)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     _audit_pricing_change(actor, provider_id, existing, saved)
     audit.log(actor, "provider.update", target=provider_id,
               after=provider_store._public(saved))
@@ -1489,14 +1492,14 @@ def test_provider(provider_id: str, _: Principal = RequireAdmin):
     try:
         return provider_store.ping(provider_id)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
 def _test_draft(req: ProviderRequest) -> dict:
     """保存前用草稿配置试连，避免存了一个根本用不了的模型。"""
     try:
         candidate = provider_store._validate(req.model_dump())
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     if looks_placeholder(candidate["api_key"]):
         return {"ok": False, "detail": "请先填写有效的 API Key"}
     try:
@@ -1539,7 +1542,7 @@ def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipa
     try:
         saved = provider_store.upsert(record)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.put("/v1/me/providers/{provider_id}")
@@ -1553,7 +1556,7 @@ def update_my_provider(provider_id: str, req: ProviderRequest,
     try:
         saved = provider_store.upsert(record)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     # 私有单价同样进审计：属主改的是"自己烧多少积分"的尺子，影子、倍率、
     # 护栏都跟着它重算——跨用户看不了内容，但变更史必须在（管理员排账时
     # 这是唯一能说"哪天这把尺子换过"的地方）。
@@ -1576,7 +1579,7 @@ def set_my_default_provider(req: ProviderDefaultRequest,
     try:
         provider_store.set_pref(principal.user_id, req.provider_id)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     return {"status": "ok", "default": req.provider_id}
 
 @app.post("/v1/me/providers/{provider_id}/test")
@@ -1586,7 +1589,7 @@ def test_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
     try:
         return provider_store.ping(provider_id)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
 @app.post("/v1/me/providers/test")
 def test_my_provider_draft(req: ProviderRequest, principal: Principal = CurrentPrincipal):
@@ -1621,7 +1624,7 @@ def set_search_key(source: str, req: SearchKeyRequest, actor: Principal = Requir
     try:
         masked = search_keys.set_key(source, req.api_key)
     except search_keys.SearchKeyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     audit.log(actor, "search-key.set", target=source, after={"masked": masked})
     return {"status": "saved", "source": source, "configured": True, "masked": masked}
 
@@ -1649,7 +1652,7 @@ def upload_attachment(file: UploadFile = File(...),
         record = upload_store.save(file.filename or "unnamed", blob,
                                    file.content_type or "", owner=principal.user_id)
     except UploadError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=hide_paths(str(e)))
     return record
 
 @app.get("/v1/uploads/{upload_id}/file")
@@ -1701,7 +1704,7 @@ def submit_feedback(feedback: FeedbackRequest,
         save_feedback(feedback.message_id, feedback.rating, feedback.comment or "",
                       principal.user_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"反馈保存失败：{e}")
+        raise HTTPException(status_code=500, detail=hide_paths(f"反馈保存失败：{e}"))
 
     adjusted = []
     # 消息是你的，不代表消息上挂的 memory_ids 是你的：整份回写会话的端点接受
@@ -1779,7 +1782,7 @@ def submit_user_feedback(req: UserFeedbackRequest,
     try:
         saved = user_feedback_storage.submit(principal.user_id, text, email, sources)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"意见反馈保存失败：{e}")
+        raise HTTPException(status_code=500, detail=hide_paths(f"意见反馈保存失败：{e}"))
     return {"id": saved["id"], "created_at": saved["created_at"]}
 
 
@@ -1964,7 +1967,7 @@ def _resolve_agent_provider(principal: Principal, requested: str = None) -> dict
         return provider_store.resolve(requested, legacy_model=requested,
                                       user_id=principal.user_id)
     except ProviderError as e:
-        raise HTTPException(status_code=400, detail=scrub_secrets(str(e)))
+        raise HTTPException(status_code=400, detail=hide_paths(scrub_secrets(str(e))))
 
 
 @app.post("/v1/agent/run")
