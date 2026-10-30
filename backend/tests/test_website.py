@@ -354,9 +354,18 @@ def test_landing_page_has_the_six_sections():
 # ---------- 4. 实拍图：存在、被引用、不许把页面压垮 ----------
 
 def test_four_real_screenshots_are_present_and_small():
+    """四张实拍 + 四张细节裁切都在，且合计仍守移动网络的预算。
+
+    裁切不是新拍的假图：它们由四张原图按固定区域裁出，只用来把同一份证据放大。
+    总预算不跟着视觉单元数量翻倍，仍按 600 KB 守。
+    """
     import os
     from app.web.web_router import SITE_DIR
-    shots = ("img/register.jpg", "img/chat.jpg", "img/memory.jpg", "img/settings.jpg")
+    shots = (
+        "img/register.jpg", "img/chat.jpg", "img/memory.jpg", "img/settings.jpg",
+        "img/detail-register.jpg", "img/detail-chat.jpg",
+        "img/detail-memory.jpg", "img/detail-settings.jpg",
+    )
     total = 0
     for name in shots:
         path = os.path.join(SITE_DIR, name.replace("/", os.sep))
@@ -366,20 +375,23 @@ def test_four_real_screenshots_are_present_and_small():
     for name in shots:
         assert name in page, f"{name} 没被页面引用"
     budget = 600 * 1024
-    assert total < budget, f"四张图合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
+    assert total < budget, f"实拍与裁切合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
+
+
+def test_the_site_uses_no_gradients():
+    """官网这次明确定的是实色 + 硬边；渐变会把“编辑式粗野主义”稀释回普通落地页。"""
+    assert "gradient" not in _css().lower(), "site.css 里又出现了渐变"
 
 
 def test_only_the_first_screenshot_loads_eagerly():
-    """四张实拍合计约 500 KB。一起下载的话，首屏那次绘制是在给三张看不见的图让路。
+    """八张视觉单元里只让首屏那张抢带宽。
 
-    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余三张 `loading="lazy"`。
-    轮播时代还要在 JS 里把它们提升成 eager——轨道是 `overflow:hidden`，浏览器始终
-    不认为它们"快滚进视口"，光加 lazy 翻过去就是空壳。现在四张摆在正常网格里，
-    滚动到才下载这件事交回给浏览器原生行为，那段提升代码跟着轮播一起删了。
+    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余七张 `loading="lazy"`。
+    四张原图之外的四张细节裁切也是真实图片文件；它们都在证据墙里，滚动到才下载。
     """
     import re
     imgs = re.findall(r"<img\b[^>]*>", _page())
-    assert len(imgs) == 4, f"截图 <img> 数量变了，这条的假设要一起改：{len(imgs)}"
+    assert len(imgs) == 8, f"截图 <img> 数量变了，这条的假设要一起改：{len(imgs)}"
     assert 'fetchpriority="high"' in imgs[0], \
         f"首屏那张没有提到高优先：{imgs[0][:70]}"
     for tag in imgs[1:]:
@@ -473,13 +485,13 @@ def test_all_four_shots_are_visible_at_once():
     assert "repeat(4" in _css(), "宽屏下没有排成四列，等于还是只看得见一两张"
 
 
-def test_theme_toggle_exists_and_dark_is_the_default():
-    """界面截图全是深色的，浅色页配深色截图会打架；默认改成深色，
-    但保留切换——有人就是要浅色。偏好要落 localStorage，否则每开一次都要重选。"""
+def test_theme_toggle_exists_and_light_is_the_default():
+    """官网默认日间：深色首屏对访客太黑；保留深色切换，偏好落 localStorage。"""
     page = _page()
-    assert 'aria-label="切换到浅色"' in page, "缺主题切换键"
+    assert 'data-theme="light"' in page, "默认主题不是日间"
+    assert 'aria-label="切换到深色"' in page, "缺主题切换键"
     css = _css()
-    assert "prefers-color-scheme" in css, "首屏不该闪一下才变深色"
+    assert "prefers-color-scheme" in css, "首屏主题口径丢了"
     assert "localStorage" in _js(), "主题偏好要记住，不能每次回到默认"
     # 图标不靠 JS 换 innerHTML（Blink 下赋 innerHTML 的 svg 有时不渲染），而是两个
     # 都在 DOM 里靠 CSS 换着显示。少了这条规则，按钮里会上下叠出太阳和月亮。

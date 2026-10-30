@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>Fenver：跑在你自己服务器上的 AI 智能助手</title>
 <meta name="description" content="开源的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆，数据待在你自己的服务器上。">
-<meta name="theme-color" content="#0a0b0e">
+<meta name="theme-color" content="#f3f0e7">
 <link rel="stylesheet" href="/site/site.css">
 <script>
 /* 首屏之前把主题定下来：等 site.js 再读 localStorage 会先闪一下深色。 */
 (function () {
   try {
     var saved = localStorage.getItem("site-theme");
-    if (saved !== "dark" && saved !== "light") {
-      saved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-    }
+    if (saved !== "dark" && saved !== "light") saved = "light";
     document.documentElement.setAttribute("data-theme", saved);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f3f0e7");
   } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
 })();
 </script>
@@ -24,125 +24,279 @@
 <body>
 
 <a class="skip" href="#can-do">跳到正文</a>
+<div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
 
 <nav class="topbar" aria-label="页面导航">
-  <span class="brand">Fenver</span>
-  <ul class="navlinks">
-    <li><a href="#can-do">能做什么</a></li>
-    <li><a href="#shell-only">移动端功能</a></li>
-    <li><a href="#start">怎么开始</a></li>
-    <li><a href="#faq">常见问题</a></li>
-    <li><a href="/changelog">更新日志</a></li>
+  <a class="brand-link" href="/"><span class="brand">Fenver</span></a>
+  <p class="issue">SELF-HOSTED AI / VOL. 01</p>
+  <button class="menubtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="navlinks">目录</button>
+  <ul class="navlinks" id="navlinks">
+    <li><a href="#can-do"><span>01</span>能做什么</a></li>
+    <li><a href="#shell-only"><span>02</span>移动端</a></li>
+    <li><a href="#shots"><span>03</span>界面证据</a></li>
+    <li><a href="#start"><span>04</span>怎么开始</a></li>
+    <li><a href="#not-now"><span>05</span>边界</a></li>
+    <li><a href="#faq"><span>06</span>常见问题</a></li>
   </ul>
-  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到浅色">
-    <!-- 两个图标都在 DOM 里，靠 CSS 换：JS 改 innerHTML 会把 SVG 命名空间写坏（Blink 下
-         赋 innerHTML 的 svg 有时不渲染），而这里没有谁在监听子树变化。 -->
+  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到深色">
     <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2.2V5.8M12 18.2V21.8M2.2 12H5.8M18.2 12H21.8M5.1 5.1L7.6 7.6M16.4 16.4L18.9 18.9M18.9 5.1L16.4 7.6M7.6 16.4L5.1 18.9"/></svg>
     <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 19.4A8.4 8.4 0 1 1 15 4.6M15 19.4A7.4 7.4 0 1 1 15 4.6"/></svg>
   </button>
 </nav>
 
 <header class="hero">
-  <h1>Fenver</h1>
-  <p class="lede">一个记得住你的 AI 智能助手，代码全开源。它记得住你说过的事，能算数，能读你发过去的文件，每个人各用各的、互不串味。</p>
-  <p class="cta">
-    <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版</a>
-    <a class="btn" href="/site/android.apk" download>安卓版</a>
-  </p>
-  <p class="note">不需要邀请码，不需要填 API 密钥。用户名密码自己定，注册完就能聊。</p>
+  <p class="hero-kicker"><span>自托管</span><span>多用户</span><span>Apache-2.0</span></p>
+  <div class="hero-grid">
+    <div class="hero-main">
+      <h1>Fenver</h1>
+      <p class="hero-title">记得住你的<br><em>AI 智能助手</em></p>
+      <p class="lede">它记得住你说过的事，能算数，能读你发过去的文件。每个人各用各的，数据留在这台属于你的机器上。</p>
+      <p class="cta">
+        <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版 <span aria-hidden="true">↗</span></a>
+        <a class="btn" href="/site/android.apk" download>安卓版 <span aria-hidden="true">↓</span></a>
+      </p>
+      <p class="note">不需要邀请码，不需要填 API 密钥。用户名密码自己定，注册完就能聊。</p>
+    </div>
+    <aside class="manifesto" aria-label="产品声明">
+      <p class="label">MANIFESTO / 001</p>
+      <p class="manifesto-big">你的数据<br>留在<br><span>你的机器</span>。</p>
+      <ul>
+        <li><span>01</span>会话与记忆按账号隔离</li>
+        <li><span>02</span>提醒只存在你的手机里</li>
+        <li><span>03</span>代码开源，随时能自己架</li>
+      </ul>
+    </aside>
+  </div>
+  <div class="hero-foot">
+    <span>SCROLL TO INSPECT</span>
+    <span>01 — 06</span>
+  </div>
 </header>
 
-<section id="can-do">
-  <h2>已有功能</h2>
-  <ul class="cards">
-    <li class="reveal"><h3>多模型切换</h3><p>在可用模型间快速切换。模型列表、额度在设置页查看，默认模型由服务端配置，无需手动设置。</p></li>
-    <li class="reveal"><h3>会算数</h3><p>复杂运算调用计算器工具，本机安全解析算式，避免模型心算出错。</p></li>
-    <li class="reveal"><h3>读你发过去的文件</h3><p>支持 PDF、docx、txt、代码文件提取文本；视觉模型可识别截图文字，无视觉能力的模型会拒绝识图。</p></li>
-    <li class="reveal"><h3>长期记忆</h3><p>自动保存你的偏好，相关对话可自动唤起记忆；记忆内容可在设置页查看、删除。</p></li>
-    <li class="reveal"><h3>能查实时信息</h3><p>模型可以先联网搜索再回答，结果取自公开网页搜索并附来源链接。查不到时会说查不到，不会替你编一个；很长的问句偶尔只认开头的几个词，换个说法再问通常就行。</p></li>
-    <li class="reveal"><h3>多人各用各的</h3><p>会话、文件、记忆独立绑定账号，用户数据互相隔离、不可见。</p></li>
-  </ul>
-</section>
-
-<section id="shell-only">
-  <h2>移动端额外功能</h2>
-  <p>可解锁系统通知、分享入口、桌面小组件。</p>
-  <ul class="cards">
-    <li class="reveal"><h3>提醒</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储不上传云端。应用会申请「精准闹钟」系统权限，未授予时改用更省电的排期方式，时间可能略有延迟。</p></li>
-    <li class="reveal"><h3>分享</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型识图能力。</p></li>
-    <li class="reveal"><h3>桌面组件</h3><p>桌面小组件展示当日提醒，可一键拍照提问、新建对话；识图功能需要视觉模型支持。</p></li>
-  </ul>
-</section>
-
-<section id="start">
-  <h2>三步上手</h2>
-  <!-- 编号是 CSS counter 画的（list-style 被去掉了，Safari 会因此丢列表语义，role 补回来） -->
-  <ol class="steps" role="list">
-    <li class="reveal"><strong>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>（安装壳包可直接跳转）。</li>
-    <li class="reveal"><strong>注册账号</strong>：填写用户名、密码，设置密保问题用于找回密码。</li>
-    <li class="reveal"><strong>开始对话</strong>：更换设备登录同一账号，聊天记录与记忆可同步。</li>
+<section class="index-strip" aria-label="能力索引">
+  <ol>
+    <li><span>01</span>多模型切换</li>
+    <li><span>02</span>文件阅读</li>
+    <li><span>03</span>长期记忆</li>
+    <li><span>04</span>联网搜索</li>
+    <li><span>05</span>账号隔离</li>
+    <li><span>06</span>开源自建</li>
   </ol>
-  <p class="note">提示：若提示无可用模型，是管理员尚未配置模型，与你的账号无关。</p>
 </section>
 
-<section id="shots" class="shots-section">
-  <h2>界面长这样</h2>
-  <p class="note">四张都是线上实拍。</p>
+<main>
+  <section id="can-do">
+    <header class="section-head">
+      <p class="section-no">01</p>
+      <h2>能做什么</h2>
+      <p>六件已经能用的事。没有“即将上线”的占位，也没有把模型能力说成产品开关。</p>
+    </header>
+    <ul class="feature-grid">
+      <li class="feature feature-lead">
+        <span class="feature-no">01</span>
+        <h3>多模型切换</h3>
+        <p>在可用模型间快速切换。模型列表、额度在设置页查看，默认模型由服务端配置，无需手动设置。</p>
+      </li>
+      <li class="feature">
+        <span class="feature-no">02</span>
+        <h3>会算数</h3>
+        <p>复杂运算调用计算器工具，本机安全解析算式，避免模型心算出错。</p>
+      </li>
+      <li class="feature">
+        <span class="feature-no">03</span>
+        <h3>读你发过去的文件</h3>
+        <p>支持 PDF、docx、txt、代码文件提取文本；视觉模型可识图，无视觉能力的模型会拒绝。</p>
+      </li>
+      <li class="feature">
+        <span class="feature-no">04</span>
+        <h3>长期记忆</h3>
+        <p>自动保存你的偏好，相关对话可自动唤起记忆；记忆内容可在设置页查看、删除。</p>
+      </li>
+      <li class="feature">
+        <span class="feature-no">05</span>
+        <h3>能查实时信息</h3>
+        <p>模型可以先联网搜索再回答，结果取自公开网页搜索并附来源链接。查不到时会说查不到，不会替你编一个。</p>
+      </li>
+      <li class="feature">
+        <span class="feature-no">06</span>
+        <h3>多人各用各的</h3>
+        <p>会话、文件、记忆独立绑定账号，用户数据互相隔离、不可见。</p>
+      </li>
+    </ul>
+  </section>
 
-  <div class="shots">
-    <figure class="shot">
-      <div class="phone"><img src="/site/img/register.jpg" alt="注册第二步：三道固定找回题，答案填的是 0000、官网演示这类演示用的假值" width="780" height="1688" fetchpriority="high"></div>
-      <figcaption>注册：自己填用户名密码，答三条找回问题</figcaption>
-    </figure>
-    <figure class="shot">
-      <div class="phone"><img src="/site/img/chat.jpg" alt="对话页：上传 demo-note.pdf 之后，助手把文件里的三行原文复述了出来" width="780" height="1688" loading="lazy"></div>
-      <figcaption>对话：发过去的 PDF，它读得出里面的字</figcaption>
-    </figure>
-    <figure class="shot">
-      <div class="phone"><img src="/site/img/memory.jpg" alt="长期记忆页：搜「我不吃香菜」搜出来的那一条，右边有删除按钮" width="780" height="1688" loading="lazy"></div>
-      <figcaption>长期记忆：存了什么，能看到也能删</figcaption>
-    </figure>
-    <figure class="shot">
-      <div class="phone"><img src="/site/img/settings.jpg" alt="设置页：当前模型那一格是服务端给的模型清单，这里选中的是当前默认对话模型" width="780" height="1688" loading="lazy"></div>
-      <figcaption>设置：模型、提醒、账号都在这里</figcaption>
-    </figure>
-  </div>
-</section>
+  <section id="shell-only">
+    <header class="section-head section-head-narrow">
+      <p class="section-no">02</p>
+      <h2>移动端<br>多做一点</h2>
+      <p>可解锁系统通知、分享入口、桌面小组件。应用会申请「精准闹钟」权限，未授予时改用更省电的排期方式，时间可能略有延迟。</p>
+    </header>
+    <ul class="mobile-list">
+      <li>
+        <span>01</span>
+        <div><h3>提醒</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储，不上传云端。</p></div>
+      </li>
+      <li>
+        <span>02</span>
+        <div><h3>分享</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型的视觉能力。</p></div>
+      </li>
+      <li>
+        <span>03</span>
+        <div><h3>桌面组件</h3><p>展示当日提醒，可一键发起识图提问、新建对话；需要视觉模型支持。</p></div>
+      </li>
+    </ul>
+  </section>
 
-<section id="not-now">
-  <h2>当前未开启</h2>
-  <ul>
-    <li><strong>代码执行（沙箱）</strong>：代码里有，但需要宿主机上的 Docker，当前没开。</li>
-    <li><strong>扫描版 PDF</strong>：图片式的 PDF 要先经过 OCR，今天还不行。有文字层的 PDF 可以直接读，整页贴图的 Word 也一样读不出。</li>
-    <li><strong>离线使用</strong>：没有。界面和数据都在线上，断网就只能等着。</li>
-  </ul>
-</section>
+  <section id="shots">
+    <header class="section-head">
+      <p class="section-no">03</p>
+      <h2>界面证据</h2>
+      <p>四张当前 Web 版实拍，八个视觉单元。每张只证明一件事：这个功能不是文案里的设想。</p>
+    </header>
 
-<section id="open-source">
-  <h2>开源了</h2>
-  <p class="note">整个助手——后端、网页版、安卓壳——代码全公开，Apache-2.0 协议。</p>
-  <ul class="cards">
-    <li class="reveal"><h3>想自己架一份</h3><p>仓库 github.com/abonla599/fenver 里的 docs/INSTALL.md 把 venv 与 Docker 两条路都写全了。开源版默认关闭自助注册：谁装谁就是管理员，建号发给自己想给的人。</p></li>
-    <li class="reveal"><h3>用着在线的这份</h3><p>不用动任何代码。更新通道已经指向新仓库，老用户照常收更新，不需要重装。</p></li>
-  </ul>
-  <p class="cta">
-    <a class="btn primary" href="/changelog">更新日志</a>
-  </p>
-</section>
+    <div class="evidence-wall">
+      <figure class="shot shot-lead">
+        <div class="shot-frame">
+          <span class="shot-index">A</span>
+          <span class="shot-tag">对话 / WEB</span>
+          <img src="/site/img/chat.jpg" alt="对话页实拍：当前版本的 Fenver 回答账号隔离与记忆入口" width="780" height="1688" fetchpriority="high">
+        </div>
+        <figcaption><strong>对话是当前版本</strong><span>当前版本的 Fenver：回答账号隔离与记忆入口。</span></figcaption>
+      </figure>
+      <div class="shot-stack">
+        <figure class="shot">
+          <div class="shot-frame">
+            <span class="shot-index">B</span>
+            <span class="shot-tag">注册 / WEB</span>
+            <img src="/site/img/register.jpg" alt="注册页实拍：Fenver 品牌与当前图标，三道固定找回题" width="780" height="1688" loading="lazy">
+          </div>
+          <figcaption><strong>当前品牌与图标</strong><span>注册留三道找回题；演示值仅用于演示。</span></figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="shot-frame">
+            <span class="shot-index">C</span>
+            <span class="shot-tag">记忆 / WEB</span>
+            <img src="/site/img/memory.jpg" alt="长期记忆页实拍：三条演示记忆，可逐条删除" width="780" height="1688" loading="lazy">
+          </div>
+          <figcaption><strong>记忆看得见</strong><span>三条演示记忆，可逐条删除。</span></figcaption>
+        </figure>
+        <figure class="shot">
+          <div class="shot-frame">
+            <span class="shot-index">D</span>
+            <span class="shot-tag">设置 / WEB</span>
+            <img src="/site/img/settings.jpg" alt="设置页实拍：账户、模型、搜索与对话入口" width="780" height="1688" loading="lazy">
+          </div>
+          <figcaption><strong>控制权在手</strong><span>账户、模型、搜索与对话都在这一页。</span></figcaption>
+        </figure>
+      </div>
+    </div>
 
-<section id="faq">
-  <h2>常见问题</h2>
-  <details><summary>要自己配 API 密钥吗？</summary><p>不用。模型由这台助手的管理员配，普通人什么都不用填。</p></details>
-  <details><summary>换手机 / 重装 App，记录会丢吗？</summary><p>不会丢。聊天记录、附件、长期记忆都在服务器上你这个账号里，用同一个用户名再登录一次就回来。提醒存在旧手机本机，不跟着账号走。</p></details>
-  <details><summary>谁能看到我的数据？</summary><p>只有你。会话、附件、记忆按账号隔离，别的注册用户看不到你的。</p></details>
-  <details><summary>怎么删干净？</summary><p>设置里删会话与记忆条目。要注销整个账号，联系这台助手的管理员做删除；记忆库里哪些会一起被抹掉，删之前当面问清。</p></details>
-  <details><summary>有 iOS 吗？</summary><p>没有壳，但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用，加到主屏幕后接近全屏体验，只是没有提醒、分享入口和桌面组件。</p></details>
-  <details><summary>打不开怎么办？</summary><p>这台助手跑在一台个人电脑上。机器关机、断网，或者重启后没人登录，它就会暂时够不着。那不是你的账号出了问题，等一会儿再试。</p></details>
-</section>
+    <div class="detail-wall" aria-label="界面细节">
+      <figure class="detail">
+        <img src="/site/img/detail-register.jpg" alt="注册页细节：三道固定找回题" width="740" height="700" loading="lazy">
+        <figcaption><span>01 / 找回</span>三道题，答案自己填。</figcaption>
+      </figure>
+      <figure class="detail">
+        <img src="/site/img/detail-chat.jpg" alt="对话页细节：当前版本的回答与操作按钮" width="740" height="720" loading="lazy">
+        <figcaption><span>02 / 对话</span>当前版本的账号隔离说明。</figcaption>
+      </figure>
+      <figure class="detail">
+        <img src="/site/img/detail-memory.jpg" alt="记忆页细节：搜索与记忆条目" width="740" height="620" loading="lazy">
+        <figcaption><span>03 / 记忆</span>搜索、查看、删除。</figcaption>
+      </figure>
+      <figure class="detail">
+        <img src="/site/img/detail-settings.jpg" alt="设置页细节：模型、搜索与对话入口" width="740" height="640" loading="lazy">
+        <figcaption><span>04 / 控制</span>模型与对话设置。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="start">
+    <header class="section-head">
+      <p class="section-no">04</p>
+      <h2>三步上手</h2>
+      <p>没有安装向导，没有密钥配置。打开网页就能开始。</p>
+    </header>
+    <ol class="steps" role="list">
+      <li>
+        <span class="step-no">01</span>
+        <strong>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>
+        <p>安装壳包可直接跳转。</p>
+      </li>
+      <li>
+        <span class="step-no">02</span>
+        <strong>注册账号</strong>
+        <p>填写用户名、密码，设置密保问题用于找回密码。</p>
+      </li>
+      <li>
+        <span class="step-no">03</span>
+        <strong>开始对话</strong>
+        <p>更换设备登录同一账号，聊天记录与记忆可同步。</p>
+      </li>
+    </ol>
+    <p class="note">提示：若提示无可用模型，是管理员尚未配置模型，与你的账号无关。</p>
+  </section>
+
+  <section id="not-now">
+    <header class="section-head">
+      <p class="section-no">05</p>
+      <h2>当前未开启</h2>
+      <p>把不能做的写在脸上，比在发布说明里藏一行更有用。</p>
+    </header>
+    <ul class="boundary-list">
+      <li><span aria-hidden="true">×</span><div><h3>代码执行（沙箱）</h3><p>代码里有，但需要宿主机上的 Docker，当前没开。</p></div></li>
+      <li><span aria-hidden="true">×</span><div><h3>扫描版 PDF</h3><p>图片式的 PDF 要先经过 OCR，今天还不行。有文字层的 PDF 可以直接读。</p></div></li>
+      <li><span aria-hidden="true">×</span><div><h3>离线使用</h3><p>没有。界面和数据都在线上，断网就只能等着。</p></div></li>
+    </ul>
+  </section>
+
+  <section id="open-source">
+    <header class="section-head">
+      <p class="section-no">06</p>
+      <h2>开源了</h2>
+      <p>后端、网页版、安卓壳，代码全公开，Apache-2.0 协议。</p>
+    </header>
+    <div class="source-grid">
+      <div class="terminal" role="group" aria-label="自建命令">
+        <p class="terminal-bar"><span></span><span></span><span></span><em>INSTALL / README</em></p>
+        <pre><code>git clone https://github.com/abonla599/fenver
+cd fenver
+# 两条路：venv 或 Docker
+# 详见 docs/INSTALL.md</code></pre>
+      </div>
+      <div class="source-copy">
+        <h3>想自己架一份</h3>
+        <p>仓库 <span class="plain-url">github.com/abonla599/fenver</span> 里的 docs/INSTALL.md 把 venv 与 Docker 两条路都写全了。开源版默认关闭自助注册：谁装谁就是管理员，建号发给自己想给的人。</p>
+        <h3>用着在线的这份</h3>
+        <p>不用动任何代码。更新通道已经指向新仓库，老用户照常收更新，不需要重装。</p>
+        <a class="btn" href="/changelog">更新日志 <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <header class="section-head">
+      <p class="section-no">07</p>
+      <h2>常见问题</h2>
+      <p>先回答最容易被问到的六件事。</p>
+    </header>
+    <div class="faq-list">
+      <details><summary><span>01</span>要自己配 API 密钥吗？</summary><p>不用。模型由这台助手的管理员配，普通人什么都不用填。</p></details>
+      <details><summary><span>02</span>换手机 / 重装 App，记录会丢吗？</summary><p>不会丢。聊天记录、附件、长期记忆都在服务器上你这个账号里，用同一个用户名再登录一次就回来。提醒存在旧手机本机，不跟着账号走。</p></details>
+      <details><summary><span>03</span>谁能看到我的数据？</summary><p>只有你。会话、附件、记忆按账号隔离，别的注册用户看不到你的。</p></details>
+      <details><summary><span>04</span>怎么删干净？</summary><p>设置里删会话与记忆条目。要注销整个账号，联系这台助手的管理员做删除；记忆库里哪些会一起被抹掉，删之前当面问清。</p></details>
+      <details><summary><span>05</span>有 iOS 吗？</summary><p>没有壳，但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用，加到主屏幕后接近全屏体验，只是没有提醒、分享入口和桌面组件。</p></details>
+      <details><summary><span>06</span>打不开怎么办？</summary><p>这台助手跑在一台个人电脑上。机器关机、断网，或者重启后没人登录，它就会暂时够不着。那不是你的账号出了问题，等一会儿再试。</p></details>
+    </div>
+  </section>
+</main>
 
 <footer>
-  <p><a href="/changelog">更新日志</a>
-     <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  <div class="footer-top">
+    <p class="label">FENVER / END OF ISSUE</p>
+    <p><a href="/changelog">更新日志</a> <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  </div>
+  <p class="footer-mark" aria-hidden="true">Fenver</p>
   <p class="note" id="copyHint" role="status"></p>
   <p class="note">界面跑在服务器上，没有「更新」这个动作，下次打开就是当前这一版。</p>
 </footer>

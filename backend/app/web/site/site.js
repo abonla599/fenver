@@ -1,7 +1,5 @@
-/* 官网交互：主题、轮播、滚动渐显、导航高亮、复制链接、回到顶部。
-   零依赖、零外部请求——脚本里不该出现任何别人的域名：把可用性押在别人的
-   uptime 上，等于给自己埋一个"我这边明明是好的"的排障夜。
-   语法保守写（var / 函数）：这页要在各种 Android WebView 里跑。 */
+/* 官网交互：主题、目录、滚动渐显、导航高亮、阅读进度、复制链接、回到顶部。
+   零依赖、零外部请求；语法保守写（var / 函数），Android WebView 也能跑。 */
 (function () {
   "use strict";
 
@@ -11,7 +9,6 @@
   var reduceMotion = window.matchMedia &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  /* 节流用：滚动和指针追光都走 rAF，每帧最多写一次样式 */
   var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
   var cancel = window.cancelAnimationFrame || clearTimeout;
 
@@ -32,10 +29,33 @@
       var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
       root.setAttribute("data-theme", next);
       var meta = document.querySelector('meta[name="theme-color"]');
-      if (meta) meta.setAttribute("content", next === "dark" ? "#0a0b0e" : "#ffffff");
+      if (meta) meta.setAttribute("content", next === "dark" ? "#0a0b0e" : "#f3f0e7");
       storeTheme(next);
       syncThemeLabel();
     });
+  }
+
+  /* ---------- 目录 ---------- */
+  var menuBtn = document.getElementById("menuBtn");
+  var nav = document.getElementById("navlinks");
+  function setMenu(open) {
+    if (!menuBtn || !nav) return;
+    nav.classList.toggle("is-open", open);
+    menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  if (menuBtn && nav) {
+    menuBtn.addEventListener("click", function () {
+      setMenu(!nav.classList.contains("is-open"));
+    });
+    nav.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.closest("a")) setMenu(false);
+    });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape") setMenu(false);
+    });
+    window.addEventListener("resize", function () {
+      if (window.innerWidth > 860) setMenu(false);
+    }, { passive: true });
   }
 
   /* ---------- 滚动渐显 ---------- */
@@ -51,24 +71,23 @@
         });
       }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
       reveals.forEach(function (el) { io.observe(el); });
-      /* 兜底：渐显是装饰，内容才是正文。观察器因为任何原因没跑成（视口异常、
-         老 WebView、脚本在它之前抛了），都不能让整页停在 opacity:0。
-         宁可没有动画，也不能让人看见一张白页。 */
       setTimeout(showAll, 1500);
       window.addEventListener("pageshow", showAll);
     }
   }
 
-  /* ---------- 导航高亮当前区块 ---------- */
+  /* ---------- 导航高亮 ---------- */
   var links = [].slice.call(document.querySelectorAll(".navlinks a"));
   if (links.length && "IntersectionObserver" in window) {
     var byId = {};
     links.forEach(function (a) {
-      var id = a.getAttribute("href").slice(1);
+      var href = a.getAttribute("href") || "";
+      if (href.charAt(0) !== "#") return;
+      var id = href.slice(1);
       var sec = document.getElementById(id);
       if (sec) byId[id] = a;
     });
-    var nav = new IntersectionObserver(function (entries) {
+    var navIo = new IntersectionObserver(function (entries) {
       entries.forEach(function (en) {
         if (!en.isIntersecting) return;
         links.forEach(function (a) { a.removeAttribute("aria-current"); });
@@ -76,7 +95,7 @@
         if (a) a.setAttribute("aria-current", "true");
       });
     }, { rootMargin: "-45% 0px -50% 0px" });
-    Object.keys(byId).forEach(function (id) { nav.observe(document.getElementById(id)); });
+    Object.keys(byId).forEach(function (id) { navIo.observe(document.getElementById(id)); });
   }
 
   /* ---------- 复制链接 ---------- */
@@ -97,12 +116,11 @@
     });
   }
 
-  /* ---------- 滚动联动：导航吸起、回到顶部 ---------- */
-  /* 两件事共用一个 rAF 循环：scroll 一次手势能触发上百次，读布局/写样式每帧最多一次，
-     否则手机上这几处合成会互相抢主线程，滚起来就是掉帧。 */
+  /* ---------- 吸顶、进度、回到顶部 ---------- */
   var topbar = document.querySelector(".topbar");
   var topBtn = document.getElementById("topBtn");
-  if (topbar || topBtn) {
+  var progressBar = document.getElementById("progressBar");
+  if (topbar || topBtn || progressBar) {
     var frame = 0;
     var paint = function () {
       frame = 0;
@@ -110,6 +128,11 @@
       var y = window.pageYOffset || box.scrollTop || 0;
       if (topbar) topbar.classList.toggle("is-stuck", y > 8);
       if (topBtn) topBtn.hidden = y < 600;
+      if (progressBar) {
+        var max = box.scrollHeight - window.innerHeight;
+        var ratio = max > 0 ? Math.min(1, Math.max(0, y / max)) : 0;
+        progressBar.style.transform = "scaleX(" + ratio.toFixed(4) + ")";
+      }
     };
     var onScroll = function () { if (!frame) frame = raf(paint); };
     paint();
