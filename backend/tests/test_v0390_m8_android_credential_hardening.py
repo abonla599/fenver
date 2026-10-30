@@ -62,6 +62,16 @@ def test_login_copy_stops_claiming_data_never_leaves_the_phone():
     assert "只存这台机器上的摘要" not in auth_raw
 
 
+def test_exported_conversations_stay_in_app_private_storage():
+    downloads = _src(PKG / "export" / "SessionDownloads.kt")
+    assert "setDestinationInExternalFilesDir" in downloads
+    assert "setDestinationInExternalPublicDir" not in downloads
+    # 不再向系统要旧存储权限：私有目录不需要它
+    settings = _src(PKG / "ui" / "SettingsUi.kt")
+    assert "hasLegacyStorage" not in settings
+    assert "WRITE_EXTERNAL_STORAGE" not in settings
+
+
 def test_notifications_hide_content_on_the_lock_screen():
     reminders = _src(PKG / "Reminders.kt")
     export = _src(PKG / "export" / "ExportTracker.kt")

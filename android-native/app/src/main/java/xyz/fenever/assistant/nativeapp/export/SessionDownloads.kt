@@ -20,9 +20,8 @@ import android.os.Environment
  *   客户端半边——另一半是后端的一次性兑换。
  * - 文件名来自 ExportName.exportFileName（服务端清洗规则的同源镜像），
  *   不是用户输入直拼——禁用字符在那边就已经换成空格了。
- * - API ≤ 28 写公共 Downloads 要旧存储权限（manifest 里 maxSdkVersion="28"
- *   那条）；没给时 enqueue 抛 SecurityException，调用方 runCatching 兜成
- *   "导出失败：…"。权限拒绝的私有目录兜底在 T2.5。
+ * - 落点是 App 私有外部目录（M-8 第 5 条）：公共 Downloads 里的对话明码可被
+ *   其他应用读到，导出的是整段对话，不能走公共目录。私有目录不需要存储权限。
  */
 object SessionDownloads {
 
@@ -35,7 +34,7 @@ object SessionDownloads {
             // 完成时保留通知——这就是 PRD 里那颗系统「已下载」通知的来源
             setNotificationVisibility(
                 DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
         }
         return dm.enqueue(request)
     }

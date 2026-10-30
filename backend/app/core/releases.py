@@ -40,6 +40,7 @@ import urllib.request
 import httpx
 
 from app.core.paths import data_root
+from app.core.release_signature import signature_shape_ok
 from app.core.tls import system_ssl_context
 
 # 全后端的 GitHub 地址只写在这一处（`api.` 那条由 test_release_probe.py 数着）：
@@ -160,6 +161,9 @@ def _manifest_ok(data: dict):
     changelog = data.get("changelog", "")
     if changelog and not isinstance(changelog, str):
         return False, "changelog 若是存在就必须是字符串（更新日志锚点）"
+    signature = data.get("signature")
+    if signature is not None and not signature_shape_ok(signature):
+        return False, "signature 不是小写十六进制 DER 签名"
     return True, ""
 
 
@@ -270,6 +274,8 @@ def _synthesize_release(manifest: dict) -> dict:
             "browser_download_url": manifest["url"],
         }],
         "apk_sha256": manifest["sha256"],
+        # M-7：清单签名原样透传给壳；旧壳忽略这一格，新壳拿它验"清单没被改"。
+        "apk_signature": str(manifest.get("signature") or ""),
     }
 
 

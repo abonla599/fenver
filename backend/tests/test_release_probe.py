@@ -708,9 +708,15 @@ def test_the_jvm_bench_and_the_shipped_core_are_one_and_the_same_copy():
         "台架绿不再等于上线代码绿")
 
     tested = sorted(p.stem[:-len("Test")] for p in bench.TEST_PKG_DIR.glob("*Test.java"))
-    assert tested == [n[:-len(".java")] for n in shipped], (
-        f"判断核与用例名单不再一一对应（类 {shipped} / 用例 {tested}）："
-        "要么新增的类没人测，要么测的文件跟着壳一起没了")
+    expected = [n[:-len(".java")] for n in shipped]
+    # 允许"一个判断核多份用例"（例如 ReleasePlan + ReleasePlanSignature），但不许
+    # 有对不上任何判断核的孤儿用例，也不许某个判断核一份用例都没有。
+    orphans = [t for t in tested if not any(t == e or t.startswith(e) for e in expected)]
+    missing = [e for e in expected
+               if not any(t == e or t.startswith(e) for t in tested)]
+    assert not orphans and not missing, (
+        f"判断核与用例名单对不上（类 {shipped} / 用例 {tested}）："
+        f"孤儿用例 {orphans}，没有用例的判断核 {missing}")
 
 
 def test_the_native_shell_never_talks_to_github_directly():
@@ -909,22 +915,20 @@ def test_the_expired_ticket_gets_exactly_one_reissue():
 
 
 def test_the_permission_denied_fallback_names_the_private_path():
-    """≤28 拒权 → 先弹一次系统授权；仍拒则落 App 私有目录并把路径说全（R2 边缘）。
+    """M-8 第 5 条：导出直接落 App 私有目录，不再向系统要旧存储权限。
 
     这一格防的是"默默降级"：文件存到了人找不到的地方却不告诉人在哪，
-    等于没导出。所以路径必须进用户可见的文案，且兜底兑换依旧走匿名票据
-    （fetchTicketBytes 不带 Authorization 且自带形状门）。
+    等于没导出。所以成功文案必须带 `应用私有目录`；DownloadManager 入队失败时
+    仍走票据自取兜底（fetchTicketBytes 不带 Authorization 且自带形状门）。
     """
     from pathlib import Path
     from tests.test_apk_release_discipline import _code
 
     ui = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
                / "xyz" / "fenever" / "assistant" / "nativeapp" / "ui" / "SettingsUi.kt")
-    assert "ExportTracker.hasLegacyStorage" in ui, "≤28 的存储权限门不见了？"
-    assert "storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)" in ui, \
-        "拒权路径不再先征求一次授权？"
-    assert "viaPrivate = !granted" in ui and "已导出到应用私有目录" in ui, \
-        "拒绝后没有落私有目录并把路径念给用户"
+    assert "ExportTracker.savePrivateCopy" in ui, "入队失败的私有目录兜底不见了？"
+    assert "已导出到应用私有目录" in ui, "成功路径没有把私有目录念给用户"
+    assert "WRITE_EXTERNAL_STORAGE" not in ui, "私有目录不需要旧存储权限，别再弹授权框"
     assert "网络似乎不通" in ui, "断网那一格又没有专属文案了"
 
     api = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
@@ -936,3 +940,9 @@ def test_the_permission_denied_fallback_names_the_private_path():
                     / "ExportTracker.kt")
     assert "Api.fetchTicketBytes" in tracker and "getExternalFilesDir" in tracker, \
         "私有目录兜底的落盘点不见了？"
+    downloads = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+                      / "xyz" / "fenever" / "assistant" / "nativeapp" / "export"
+                      / "SessionDownloads.kt")
+    assert "setDestinationInExternalFilesDir" in downloads
+    assert "setDestinationInExternalPublicDir" not in downloads, \
+        "导出又落回公共 Downloads 了"

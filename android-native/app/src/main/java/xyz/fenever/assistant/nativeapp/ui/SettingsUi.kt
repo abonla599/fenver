@@ -547,12 +547,10 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
 
-    // ---------- 导出（T2.5）：一次点击的三条路都汇到 startExport ----------
-    // 授权框回来说"不给"时，得记得是给哪个会话导过——票据不缓存（R2-AC-3），
-    // 记的只是会话 id，重签新票再走兜底路。
-    var pendingSid by remember { mutableStateOf<String?>(null) }
-
-    fun startExport(sid: String, viaPrivate: Boolean) {
+    // ---------- 导出（T2.5）：一次点击汇到 startExport ----------
+    // 落点是 App 私有外部目录（M-8 第 5 条）：公共 Downloads 里的整段对话对
+    // 其他应用可读，私有目录不需要存储权限，也不再走授权框那条分支。
+    fun startExport(sid: String) {
         scope.launch {
             runCatching {
                 // 先取服务端标题再签票：标题拿不到就不浪费一张一次性票据；
@@ -562,26 +560,22 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                 if (!ExportName.isTicketPath(ticket.path))
                     throw IllegalStateException("服务端给的票据形状不对")
                 val fileName = ExportName.exportFileName(title)
-                if (viaPrivate) {
-                    ExportTracker.savePrivateCopy(ctx, ticket.path, fileName)
-                } else {
+                val dest = try {
                     SessionDownloads.enqueue(ctx,
                         Prefs.baseUrl.trimEnd('/') + ticket.path, fileName)
                         .also { ExportTracker.watch(ctx, it, sid) }
+                    "Download/$fileName"
+                } catch (e: Exception) {
+                    // 系统下载队列偶尔会被 ROM 拒（或同名目录不可写）：退回票据自取。
+                    ExportTracker.savePrivateCopy(ctx, ticket.path, fileName)
                 }
+                dest
             }.onSuccess { dest ->
-                if (viaPrivate) onNote("未获存储权限：已导出到应用私有目录 $dest", true)
+                onNote("已导出到应用私有目录 $dest", false)
             }.onFailure { onNote(exportClickFailure(it), true) }
         }
     }
 
-    val storageAsk = rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        val s = pendingSid
-        pendingSid = null
-        if (s != null) startExport(s, viaPrivate = !granted)
-    }
     // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
     // 值槽与两个对话框都从它读——这里不再另起一份 remember 状态做第二真相。
     val admin = Prefs.role == "admin"
@@ -692,23 +686,17 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
         // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
         // 说话；原生没有这层浏览器，文件名自己按同源规则算（ExportName），
-        // 字节流交给 DownloadManager 落系统 Downloads，完成通知是系统下载队列的。
+        // 字节流交给 DownloadManager 落 App 私有外部目录（M-8 第 5 条），
+        // 完成通知是系统下载队列的。
         // 曾经这里是 onOpenUrl(票据)：把一次性兑换权递给外部浏览器，既拿不到
         // 落盘通知也多一个能看见 URL 的人，按 R2-AC-3 判负，别再改回去。
         //
         // v0.23 T2.5 补上三条异常路径（R2-AC-2/3）：空会话文案沿用 T2.4（与网页
-        // 逐字同值）；≤28 写公共 Downloads 先要旧存储权限，被拒改走 App 私有目录
-        // 并把完整路径念给人听；签票/取标题阶段的断网给专属文案，不是"未知错误"。
+        // 逐字同值）；签票/取标题阶段的断网给专属文案，不是"未知错误"。
         // 票据过期（DownloadManager 侧的秒失败/迟到失败）由 ExportTracker 轮询
         // 识别后自动重签一次，仍失败才发通知报错。
         if (!canExport) { onNote("当前没有可导出的对话", true); return@SetRow }
-        val sid = Prefs.lastSessionId
-        if (!ExportTracker.hasLegacyStorage(ctx)) {
-            pendingSid = sid
-            storageAsk.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            return@SetRow
-        }
-        startExport(sid, viaPrivate = false)
+        startExport(Prefs.lastSessionId)
     }
 
     // —— 记忆 ——

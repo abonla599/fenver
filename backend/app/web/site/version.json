@@ -4,5 +4,6 @@
   "sha256": "e712ed6b09c303d5ccb9a6fd08d65d1a82fe444d6c58e5ce9a798ccf8f1bd488",
   "size": 7847523,
   "url": "https://ai.fenever.xyz/site/android.apk",
-  "changelog": "v0.36.4"
+  "changelog": "v0.36.4",
+  "signature": "3044022058abd794e05f47a6c90f00f94953be3e45eeaacf68eb0542899e340bddc4cfdc02202233eb9bb51a6f5cd75cb3c94260fcbbd48ab32501629c8af80e8ba4a6b08cce"
 }

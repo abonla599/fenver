@@ -19,8 +19,12 @@ from app.core.auth import (BOOTSTRAP_TOKEN_ENV, Principal, _as_hash_bytes,
 from app.core import security_log
 # 来源地址只认 client_ip 这一份口径；不从 auth_router 导入（那会成环）。
 from app.core.client_ip import client_ip
+from app.core import admin_reauth
 # 导出票据的路径形状只有存储层知道（长度跟着生成器走），这里引用而不是抄第二份。
 from app.session.export_store import EXPORT_PATH_PREFIX, TICKET_PATH_RE
+
+ADMIN_REAUTH_ENV = "ADMIN_REAUTH_REQUIRED"
+ADMIN_REAUTH_DETAIL = "这是高危操作，请重新输入管理员口令完成二次验证"
 
 BOOTSTRAP_PRINCIPAL = Principal("default_user", "本机管理员", "admin")
 
@@ -469,6 +473,16 @@ def install_auth(app) -> None:
             # 解析成功：释放本次预占，成功请求不消耗失败预算。
             _admin_attempt_success(ip, attempt_now)
         request.state.principal = principal
+        # H-1：管理员高危写操作要一张 5 分钟的二次验证票（H-1 的 reauth）。
+        # 默认开；测试用 ADMIN_REAUTH_REQUIRED=0 关掉，免得每条老用例都先领票。
+        if (request.method in _UNSAFE_METHODS and path.startswith("/v1/admin/")
+                and os.getenv(ADMIN_REAUTH_ENV, "1").strip() != "0"):
+            ticket = request.cookies.get(admin_reauth.COOKIE_NAME, "")
+            if not admin_reauth.valid(ticket, principal.user_id):
+                security_log.record("auth.blocked", request=request, ip=ip,
+                                    status=428, detail="reauth.required")
+                return JSONResponse(status_code=428,
+                                    content={"detail": ADMIN_REAUTH_DETAIL})
         response = await call_next(request)
         # v0.34.0：把"这枚会话还剩几秒"贴在每一个已鉴权的响应上。
         # 客户端据此决定要不要 renew（剩余 < 7 天才发一次，判据 1），所以这条头

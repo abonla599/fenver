@@ -84,7 +84,7 @@ object Updater {
         checking = true
         io.launch {
             val d = try {
-                ReleasePlan.decide(BuildConfig.VERSION_NAME, fetchInfo(), Prefs.baseUrl)
+                ReleasePlan.decide(BuildConfig.VERSION_NAME, fetchInfo(), Prefs.baseUrl, true)
             } catch (e: Exception) {
                 // 连不上/超时/被网关改了：说清是哪一种，绝不当成"已经是最新版"
                 ReleasePlan.unusable("连不上更新服务（" + e.javaClass.simpleName + "）")

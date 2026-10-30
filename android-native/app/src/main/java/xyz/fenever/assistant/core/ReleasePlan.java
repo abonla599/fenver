@@ -2,6 +2,11 @@ package xyz.fenever.assistant.core;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.List;
 import java.util.Map;
 
@@ -88,6 +93,20 @@ public final class ReleasePlan {
      */
     public static final String SELF_APK_PATH = "/site/android.apk";
 
+    /**
+     * 更新清单验签公钥（P-256，X.509 SubjectPublicKeyInfo 的 DER 十六进制）。
+     *
+     * <p>私钥不在仓库、也不在服务器进程里；发版时由 {@code tools/sign_update_manifest.py}
+     * 用 repo 外的私钥签 `version\napk_name\nsha256\nsize` 四行。站点被改只能改包和摘要，
+     * 没有私钥就签不出新的一版——这是 M-7 那层兜底的客户端半边。
+     * 与 backend/app/core/release_signature.py 的 PUBLIC_KEY_HEX 逐字符相同，
+     * 跨语言锁在 backend/tests/test_v0390_update_signature.py。
+     */
+    public static final String UPDATE_PUBLIC_KEY_HEX = ""
+            + "3059301306072a8648ce3d020106082a8648ce3d03010703420004"
+            + "6399ac26e125d62dfa40ac56f7ec257beb2acb471296a8b8d07ee52f085246c9"
+            + "c844fd0d7b757d3305a5fbe44b37504118ac00028149d0438b838afcb6f33b8d";
+
     private ReleasePlan() {}
 
     public enum Kind { UP_TO_DATE, AVAILABLE, UNUSABLE }
@@ -153,6 +172,22 @@ public final class ReleasePlan {
      * 那条 URL 才升级成可信下载口；传 null 或形状不对等于沿用旧的两条都不认。
      */
     public static Decision decide(String currentVersion, String releaseJson, String appUrl) {
+        return decide(currentVersion, releaseJson, appUrl, false);
+    }
+
+    /**
+     * 生产调用：{@code requireSignature=true} 时，AVAILABLE 必须带一枚可验的清单签名。
+     * 老调用方/判定表默认 false 只是为了不把"没有签名"的历史样本全改一遍；手机上的
+     * Updater 走的是这一支，并由 test_v0390_update_signature 的调用点锁钉住。
+     */
+    public static Decision decide(String currentVersion, String releaseJson, String appUrl,
+                                  boolean requireSignature) {
+        return decide(currentVersion, releaseJson, appUrl, requireSignature,
+                UPDATE_PUBLIC_KEY_HEX);
+    }
+
+    static Decision decide(String currentVersion, String releaseJson, String appUrl,
+                           boolean requireSignature, String publicKeyHex) {
         Object parsed;
         try {
             parsed = MiniJson.decode(releaseJson);
@@ -182,8 +217,59 @@ public final class ReleasePlan {
                     + " 与 " + LEGACY_APK_PREFIX + version + ".apk");
         }
         String body = text(rel.get("body"));
+        String sha = digestOrNull(text(rel.get("apk_sha256")));
+        String sig = text(rel.get("apk_signature"));
+        if (requireSignature) {
+            if (sha == null) return unusable("发布信息缺少校验值");
+            if (!isLowerHexSignature(sig)) return unusable("发布信息缺少签名");
+            String payload = version + "\n" + assetName(version) + "\n" + sha
+                    + "\n" + picked.sizeBytes;
+            if (!verifyUpdateSignature(publicKeyHex, payload, sig)) {
+                return unusable("更新包签名校验失败");
+            }
+        }
         return new Decision(Kind.AVAILABLE, version, picked.url, picked.sizeBytes,
-                truncate(body), null, digestOrNull(text(rel.get("apk_sha256"))));
+                truncate(body), null, sha);
+    }
+
+    /** 签名是小写十六进制 DER；P-256 ECDSA 的 DER 长度落在 66–72 字节。 */
+    private static boolean isLowerHexSignature(String value) {
+        if (value == null || value.length() < 132 || value.length() > 144
+                || (value.length() & 1) != 0) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
+        }
+        return true;
+    }
+
+    static boolean verifyUpdateSignature(String publicKeyHex, String payload,
+                                         String signatureHex) {
+        try {
+            byte[] keyBytes = hexBytes(publicKeyHex);
+            byte[] sigBytes = hexBytes(signatureHex);
+            if (keyBytes == null || sigBytes == null) return false;
+            PublicKey key = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(keyBytes));
+            Signature verifier = Signature.getInstance("SHA256withECDSA");
+            verifier.initVerify(key);
+            verifier.update(payload.getBytes(StandardCharsets.UTF_8));
+            return verifier.verify(sigBytes);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static byte[] hexBytes(String value) {
+        if (value == null || (value.length() & 1) != 0) return null;
+        byte[] out = new byte[value.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            int hi = Character.digit(value.charAt(i * 2), 16);
+            int lo = Character.digit(value.charAt(i * 2 + 1), 16);
+            if (hi < 0 || lo < 0) return null;
+            out[i] = (byte) ((hi << 4) | lo);
+        }
+        return out;
     }
 
     /**

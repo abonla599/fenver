@@ -32,6 +32,9 @@ os.environ["ACCESS_TOKEN"] = ""
 # 不显式降级则 Cookie 根本回不来，cookie 鉴权在测试里等于没测。生产忘配不会
 # fail-open——降级必须是这里的主动行为（判据见 tests/test_cookie_auth.py）。
 os.environ["AUTH_COOKIE_SECURE"] = "0"
+# H-1 的管理员二次验证默认开；绝大多数既有用例直接打 /v1/admin/* 写接口，
+# 统一在测试里关掉，需要演它的用例自己 monkeypatch 回 "1"。
+os.environ["ADMIN_REAUTH_REQUIRED"] = "0"
 
 # 身份库也是进程级单例。不指到临时目录，测试就会写进用户真实的
 # data/users.json —— 那是越出本次改动范围的外部副作用。
@@ -317,7 +320,8 @@ def _cleanup_test_data():
 # AUTH_MODE=enforced + ACCESS_TOKEN=boot-token 留满整场，于是三十条与故障毫不
 # 相干的用例集体 401，红的地方离真凶隔了六个文件。
 _PRISTINE_AUTH_ENV = {k: os.environ.get(k)
-                      for k in ("AUTH_MODE", "ACCESS_TOKEN", "AUTH_COOKIE_SECURE")}
+                      for k in ("AUTH_MODE", "ACCESS_TOKEN", "AUTH_COOKIE_SECURE",
+                                "ADMIN_REAUTH_REQUIRED")}
 _PREV_TEST = {"nodeid": None}
 
 

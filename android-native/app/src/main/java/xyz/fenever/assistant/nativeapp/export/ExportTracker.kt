@@ -1,11 +1,9 @@
 package xyz.fenever.assistant.nativeapp.export
 
-import android.Manifest
 import android.app.DownloadManager
 import android.content.Context
 import android.os.Build
 import android.os.Environment
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,20 +37,12 @@ object ExportTracker {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val retriedSids = ConcurrentHashMap.newKeySet<String>()
 
-    /** ≤28 写公共 Downloads 的旧存储权限是否在手。API 29+ 恒真（分区存储自带位）。 */
-    fun hasLegacyStorage(ctx: Context): Boolean =
-        Build.VERSION.SDK_INT >= 29 ||
-            ContextCompat.checkSelfPermission(ctx,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-
-    /** 拒绝写公共目录时的兜底：票据字节直接落到 App 私有 Downloads，返回绝对路径。 */
+    /** DownloadManager 入队失败时的兜底：票据字节直接落到 App 私有 Downloads。 */
     suspend fun savePrivateCopy(ctx: Context, ticketPath: String, fileName: String): String {
         val bytes = Api.fetchTicketBytes(ticketPath)
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             val dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                 ?: File(ctx.filesDir, "downloads").apply { mkdirs() }
-            // 私有目录没有 DownloadManager 的重名保护，自己加序号：兜底路径更要留得住每一份
             var target = File(dir, fileName)
             var n = 2
             while (target.exists()) {

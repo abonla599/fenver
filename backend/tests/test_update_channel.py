@@ -88,10 +88,10 @@ def test_info_returns_the_shape_the_shell_reads(client, enforced):
 
 
 def test_the_top_level_shape_is_exactly_what_we_synthesize(client, enforced):
-    """顶层就三格、资产就那几格：多写了什么都不是壳要的，少了哪一格壳就收不到更新。"""
+    """顶层四格、资产就那几格：多写了什么都不是壳要的，少了哪一格壳就收不到更新。"""
     prime()
     body = client.get("/v1/update/info", headers={"host": "ai.fenever.xyz"}).json()
-    assert set(body) == {"tag_name", "assets", "apk_sha256"}, sorted(body)
+    assert set(body) == {"tag_name", "assets", "apk_sha256", "apk_signature"}, sorted(body)
     for asset in body["assets"]:
         assert set(asset) == {"name", "size", "content_type", "browser_download_url"}, sorted(asset)
 

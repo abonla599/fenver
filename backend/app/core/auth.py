@@ -765,6 +765,23 @@ class AuthStore:
         return (Principal(user_id=record["user_id"], username=record["username"],
                           role=record.get("role", "user")), token, secret)
 
+    def verify_password(self, user_id: str, password: str) -> bool:
+        """只校验"这个人当前的口令对不对"，不发会话、不写库。
+
+        管理员高危操作的二次验证用它。bcrypt 同样在锁外跑，且查无此人/停用都走
+        同一份假摘要，别让时序把"这个 user_id 存不存在"漏出去。
+        """
+        if not user_id or not password:
+            return False
+        with self._lock:
+            record = self._users.get(user_id)
+            stored = (record or {}).get("pw_hash") or _DUMMY_PW_HASH
+        if not _check_password(password, stored):
+            return False
+        with self._lock:
+            record = self._users.get(user_id)
+            return bool(record and not _is_disabled(record))
+
     def reset_password(self, username: str, answers: list, new_password: str,
                        new_answers: list = None):
         """三题全答对就换密码（顺手也能换答案），并作废这个人名下所有会话令牌。
@@ -1106,17 +1123,22 @@ class AuthStore:
             return True
 
     def admin_create_user(self, username: str, password: str,
-                          security_answers: list = None) -> dict:
+                          security_answers: list = None,
+                          role: str = "user") -> dict:
         """管理端建号（v0.24 T3.1）：初始口令由管理员设定，新账号首登必须改密。
 
         与 register 同一个形状闸门与"慢哈希挪到锁外"的纪律；两处刻意的不同：
         ① 不发会话令牌——建号动作是管理操作，执行者没有以新身份登录的资格；
         ② must_change_password 恒为 True：口令经了别人的手，就还不属于这个人的秘密。
-        找回答案依旧可选、给就给满三条（与 register 同一判据）。role 无从传入：
-        这个函数与它上面的 HTTP 面都造不出管理员。
+        找回答案依旧可选、给就给满三条（与 register 同一判据）。role 默认 user；
+        HTTP 面永不传它（管理员提权只能走 offline 工具 + 重启，见
+        tools/create_admin_account.py），这里保留参数是为了让那条工具复用同一套
+        形状校验与慢哈希纪律。
         """
         cleaned = self._normalize_username(username)
         pw = self._check_password_shape(password)
+        if role not in ("user", "admin"):
+            raise AuthError("角色不合法")
         keys = None
         if security_answers is not None:
             keys = _check_answer_shapes(security_answers)
@@ -1133,7 +1155,7 @@ class AuthStore:
                 "username_lc": lc,
                 "pw_hash": pw_hash,
                 "tokens": [],
-                "role": "user",
+                "role": role,
                 "disabled": False,
                 "status": "active",
                 "must_change_password": True,

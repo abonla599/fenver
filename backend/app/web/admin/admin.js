@@ -175,7 +175,7 @@
 
   const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-  async function req(path, opts) {
+  async function req(path, opts, retried) {
     const method = (opts && opts.method) || "GET";
     const headers = { "Content-Type": "application/json" };
     // 会话凭据是 httpOnly Cookie；不安全方法必须声明 CSRF 头。
@@ -195,6 +195,25 @@
     }
     let data = null;
     try { data = await res.json(); } catch (e) { /* 空响应体 */ }
+    if (res.status === 428) {
+      // H-1：高危写操作要一次二次验证；票只活 5 分钟，换到 Cookie 后重试一次。
+      if (retried) throw new Error("二次验证仍未通过，请重新登录后再试");
+      const pw = window.prompt("这是高危操作，请重新输入管理员口令（5 分钟内有效）：");
+      if (!pw) throw new Error("已取消二次验证");
+      const rr = await fetch("/v1/auth/admin-reauth", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-CSRF": "1" },
+        body: JSON.stringify({ password: pw }),
+      });
+      if (!rr.ok) {
+        let rd = null;
+        try { rd = await rr.json(); } catch (e) { /* 空响应体 */ }
+        const detail = rd && rd.detail ? rd.detail : ("HTTP " + rr.status);
+        throw new Error("二次验证失败：" + detail);
+      }
+      return req(path, opts, true);
+    }
     if (res.status === 401) {
       showGate("会话无效或已过期，粘贴口令重新登录");
       throw new Error("401");

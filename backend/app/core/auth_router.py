@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.core import authz, usage
+from app.core import admin_reauth
 # v0.34.0 D1：限流账"住在哪儿"抽成一层后端（默认内存，Redis 那条路不落生产）。
 from app.core import ledger_backend
 # v0.32 W4：搜索这本账独立一份文件、独立一个读面（口径见 core/search_usage.py 头部）。
@@ -734,6 +735,44 @@ def reauth(request: Request, response: Response,
     return {"token": token, "device_secret": new_secret, **payload}
 
 
+class AdminReauthRequest(BaseModel):
+    password: str = Field(..., max_length=256)
+
+
+@router.post("/v1/auth/admin-reauth")
+def admin_reauth_endpoint(request: Request, response: Response,
+                          req: AdminReauthRequest,
+                          principal: Principal = CurrentPrincipal):
+    """给高危管理动作换一张 5 分钟二次验证票（H-1）。
+
+    必须已有管理员会话；这里只证明"本人刚点过头"。bootstrap 口令或真实 admin
+    账号的密码都可以，校验失败只回一句固定文案，不区分账号是否存在/是否停用。
+    """
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    password = (req.password or "").strip()
+    if principal.user_id == authz.BOOTSTRAP_PRINCIPAL.user_id:
+        ok = bool(password) and bool(authz._bootstrap_token()) \
+            and authz._secrets_match(password, authz._bootstrap_token())
+    else:
+        ok = _store().verify_password(principal.user_id, password)
+    if not ok:
+        audit.log(principal, "admin.reauth.denied", target=principal.user_id)
+        security_log.record("auth.fail", request=request, ip=_client_ip(request),
+                            account=principal.user_id, status=401,
+                            detail="admin.reauth.denied")
+        raise HTTPException(status_code=401, detail="口令不对")
+    ticket = admin_reauth.issue(principal.user_id)
+    response.set_cookie(
+        key=admin_reauth.COOKIE_NAME, value=ticket,
+        max_age=admin_reauth.TICKET_TTL_SECONDS, httponly=True,
+        samesite="strict", secure=_cookie_secure(),
+        path=admin_reauth.COOKIE_PATH)
+    audit.log(principal, "admin.reauth", target=principal.user_id)
+    return {"status": "ok", "expires_in": admin_reauth.TICKET_TTL_SECONDS}
+
+
+
 @router.post("/v1/auth/reset")
 def reset(req: ResetRequest, request: Request, response: Response):
     """三题全答对就换密码；该人名下所有会话令牌同时作废（每一台设备都掉线）。
@@ -941,6 +980,9 @@ def logout(request: Request, response: Response,
     # path 必须与 _attach_session 一致，否则删不掉（Cookie 按 域名+path 定位）。
     response.delete_cookie(key=authz.SESSION_COOKIE, path="/v1",
                            samesite="lax")
+    # 退出时把高危二次验证票也刮掉：它最多还能活 5 分钟，没必要留给下一双手。
+    response.delete_cookie(key=admin_reauth.COOKIE_NAME,
+                           path=admin_reauth.COOKIE_PATH, samesite="strict")
     # v0.35.0 #143②：退出会清掉这个人**全部** device_secrets，浏览器里这一枚
     # 也成了死钥匙。只在"退的是本浏览器自己的会话"时刮：带 Authorization 的
     # 那一形是替清单里的另一个人撤销，他的凭据不在这台浏览器的 Cookie 里，
