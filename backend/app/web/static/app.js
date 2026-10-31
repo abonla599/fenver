@@ -1432,7 +1432,8 @@ function renderSuggestions(show) {
  * ① 安全：服务端与模型给的每一个字符串只当文本进 DOM（createElement + textContent）。
  *    搜索结果的标题/摘要/网址是别人写的网页内容，拼进 innerHTML 就是 XSS；href 只认
  *    http(s)，服务端已经过滤过一轮，客户端再判一次（纵深防御，`javascript:` 走不到那行）。
- * ② 频率：帧来得比帧率快得多，所以累积不碰 DOM，重画统一走 runStream 那条 rAF 闸门；
+ * ② 频率：帧来得比帧率快得多，所以累积不碰 DOM，重画统一走 runStream 那条
+ *    STREAM_PAINT_MS 节流闸门（v0.39 起是固定 setTimeout，不再是 rAF）；
  *    而且每一拍只补新出现的步、只重画被帧改脏的那一步——30 条 thinking 分片不该变成
  *    30 行，也不该有 30 次整块重建。
  * ③ 默认：流式期间展开、`done` 落定后自动折叠（plan §7）。人手动点过之后
@@ -2330,6 +2331,11 @@ function stashKeyboardAfterSend() {
   if (el && typeof el.blur === "function") el.blur();
 }
 
+// 流式重画的节流窗口（ms）：v0.39 性能 A 包把 runStream 的 rAF 闸门换成固定
+// 定时器——paint 现在只做一行 textContent + 过程面板重画，50ms 的"手感延迟"
+// 换掉逐帧重排；判据见 backend/tests/test_v0390_stream_perf_contract.py。
+const STREAM_PAINT_MS = 50;
+
 async function runStream(holder) {
   state.streaming = true;
   state.controller = new AbortController();
@@ -2343,7 +2349,12 @@ async function runStream(holder) {
   // 标记"这里正在流式渲染"：markdown.js 的 highlightPending() 补扫会跳过带
   // data-live 的容器——半截代码块此刻高亮是无效功，流结束后的全量渲染才补。
   // 摘除在 finally 里，renderMessages 整棵重建之前。
-  if (body) body.setAttribute("data-live", "1");
+  // is-streaming 是同一拍的样式开关：流式期 body 只有裸 textContent（见 paint），
+  // pre-wrap 由 style.css 挂在这个类上——没有它，整段回答会被压成一行。
+  if (body) {
+    body.setAttribute("data-live", "1");
+    body.classList.add("is-streaming");
+  }
   // 过程面板进入"正在进行"态：默认展开、底部挂实时状态条；摘除在下面的 finally 里，
   // 与 .typing / data-live 同一拍，所以一条已经答完的消息不会还在闪。
   holder._traceLive = true;
@@ -2355,24 +2366,30 @@ async function runStream(holder) {
   // 现网输入框的 blur 监听本来就在键盘收起后清 body 高度，正好走同一条收尾路。
   stashKeyboardAfterSend();
 
-  /* chunk 到达的频率远高于帧率：每个 chunk 都全量重渲 + 强制滚底，长回复是
-     O(n²)，而且用户在生成期间一旦上翻，下一帧就被拽回底部。改成把「渲染 +
-     滚底」合并进 rAF，每帧最多一次（rAF 不可用时退回定时器，兜底风格同
-     site.js）；滚底只在本来贴底时做，上翻阅读不被打断。 */
+  /* v0.39 性能 A 包：流式期只做纯文本落地。旧形状是每个窗口拍都
+     MD.render(整段 content)——重解析 + innerHTML 重建 + 高亮，长回答 O(n²)；
+     现在 paint 只写 body.textContent（屏幕上短暂看到原始 Markdown 标记，
+     是明说的取舍：排版由 finally 之后 persistCurrent() + renderMessages()
+     走 messageNode 的完整 MD.render 一次性补回，字与样式都不丢）。
+     闸门从 rAF 换成固定 STREAM_PAINT_MS 的 setTimeout 节流：paint 到点读的是
+     最新的 holder.content，尾随更新不丢最后一个 chunk；finally 里取消未决
+     timer，迟到的 paint 不会打到 renderMessages 重建后的旧节点。
+     滚底仍只在本来贴底时做，上翻阅读不被打断；过程面板共用同一道闸门。 */
   const host = $("messages");
-  const raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 32); };
-  const cancelRaf = window.cancelAnimationFrame || clearTimeout;
   let pending = 0;
   const paint = () => {
     pending = 0;
     if (!body) return;
     // 贴底要先于渲染判断：渲染会撑高滚动区，渲染后再算就永远"不贴底"了。
     const stick = host.scrollHeight - host.scrollTop - host.clientHeight < 120;
-    MD.render(body, holder.content, true);
-    // 过程帧与正文块共用这一条 rAF 闸门：帧洪泛（reasoning 一个一个 token 地来）最多
-    // 也就是每帧重画一次，而且只补新步、只重画脏掉的那一步。
+    body.textContent = holder.content;
+    // 过程帧与正文共用这一条节流闸门：帧洪泛最多也就是每窗口重画一次，
+    // 而且只补新步、只重画脏掉的那一步。
     paintTrace(node, holder);
     if (stick) host.scrollTop = host.scrollHeight;
+  };
+  const schedulePaint = () => {
+    if (!pending) pending = setTimeout(paint, STREAM_PAINT_MS);
   };
 
   const lastUser = state.messages[state.messages.length - 2] || {};
@@ -2408,12 +2425,12 @@ async function runStream(holder) {
             startApprovalExpiry(holder, node);
             return;
           }
-          if (accumulateTrace(holder, evt) && node && !pending) pending = raf(paint);
+          if (accumulateTrace(holder, evt) && node) schedulePaint();
         },
       },
       (chunk) => {
         holder.content += chunk;
-        if (body && !pending) pending = raf(paint);
+        if (body) schedulePaint();
       });
     if (done && done.message_id) holder.message_id = done.message_id;
     if (done && done.model) holder.model = done.model;
@@ -2451,14 +2468,17 @@ async function runStream(holder) {
       if (!needsAuth(e)) setStatus(e.message, true);
     }
   } finally {
-    // 未决的那帧要取消：流结束后 renderMessages 会整棵重建消息区，
+    // 未决的那拍要取消：流结束后 renderMessages 会整棵重建消息区，
     // 迟到的 paint 会打到已经摘掉的旧节点上。
-    if (pending) cancelRaf(pending);
+    if (pending) { clearTimeout(pending); pending = 0; }
     traceTickStop();
     // v0.31 审批超时定时器：流结束后不再需要，重建消息时 startApprovalExpiry 会重挂。
     if (holder._approvalTimer) { clearTimeout(holder._approvalTimer); holder._approvalTimer = 0; }
     if (node) node.classList.remove("typing");
-    if (body) body.removeAttribute("data-live");
+    if (body) {
+      body.removeAttribute("data-live");
+      body.classList.remove("is-streaming");
+    }
     // 过程面板跟着落定：摘掉"进行中"的呼吸态、把没等到结果的步收落成一句话、
     // 默认折叠（人手动点过开合就不动它）。整块重画一次，因为 done.trace 已经换掉了
     // 本地累积的那份，步序与落盘的形状在这里对齐。

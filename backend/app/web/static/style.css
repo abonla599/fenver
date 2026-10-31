@@ -255,6 +255,10 @@ button:focus-visible, a:focus-visible, select:focus-visible,
   width: 100%; background: var(--fv-surface); border: 1px solid var(--line);
   border-radius: var(--fv-radius-lg); padding: 12px 16px;
 }
+/* v0.39 性能 A 包：流式期 app.js 只往 body 写一行 textContent（不重跑 Markdown），
+   pre-wrap 让原始文本里的换行照换行、段落形不塌成一行；is-streaming 由 runStream
+   起流挂上、finally 摘除，终稿（renderMessages → MD.render）不吃这条规则。 */
+.msg.assistant .msg-body.is-streaming { white-space: pre-wrap; }
 
 .msg-atts { display: flex; gap: 6px; flex-wrap: wrap; }
 .msg-atts img { max-height: 168px; max-width: 240px; border-radius: 10px; border: 1px solid var(--line); }
