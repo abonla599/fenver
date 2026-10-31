@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <title>更新日志 · Fenver</title>
 <meta name="description" content="Fenver 每一版改了什么、优化了什么、新增了什么。数据来自仓库里 docs/releases 的发版说明。">
-<meta name="theme-color" content="#f3f0e7">
+<meta name="theme-color" content="#f7f8fa">
 <link rel="stylesheet" href="/site/site.css">
 <script>
 /* 与首页同一招：首屏之前把主题定下来，等 site.js 再读 localStorage 会先闪一下深色。 */
@@ -16,7 +16,7 @@
     if (saved !== "dark" && saved !== "light") saved = "light";
     document.documentElement.setAttribute("data-theme", saved);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f3f0e7");
+    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f7f8fa");
   } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
 })();
 </script>
