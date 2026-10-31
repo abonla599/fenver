@@ -26,6 +26,11 @@
   续播请求要的位置已经被裁掉（有空洞）= cannot_resume。慢的在线读者追不上
   缓冲时，也会在同一连接里收到一帧 cannot_resume 后被关闭——同样是"别重发，
   去会话里取"。
+- 读时合帧（v0.39 性能 A 包）：sse_frames 在**出口**把相邻的纯 content 帧
+  拼成一帧再发（合并帧 seq 取被合并的最后一帧）。缓冲里仍然是一帧一帧——
+  合帧不改 append、不改 run.events、不动上面任何一条预算；省下的只是网络写
+  与客户端回调次数。代价是首帧延迟最多多 COALESCE_SECONDS（30ms）：批尾是
+  content 且 run 未终时等一次窗口再读，之后不再等（见 sse_frames 注释）。
 - 终态 run 的保留窗 FINISHED_RETAIN_SECONDS（默认 10 分钟）过后被清扫；
   清扫挂在新 run 创建时，没有定时器。
 
@@ -50,6 +55,17 @@ from app.core import stream_events
 MAX_EVENTS_PER_RUN = 2000
 MAX_CHARS_PER_RUN = 200_000
 FINISHED_RETAIN_SECONDS = 600.0
+
+# 读时合帧窗口（秒）：一批的末尾还是 content 且 run 未终时，读者在出口多等
+# 这一小段，让生产线程把下一两个字也推进缓冲，好并进同一帧发走。只等一次、
+# 有上界——它买的是"SSE 帧数与客户端回调次数塌缩一个量级"，卖的是首帧最多
+# 30ms 的额外延迟。测试可临时调宽它来证明窗口真的在等（逐字见
+# tests/test_v0390_stream_coalesce.py 判据 6）。
+COALESCE_SECONDS = 0.03
+
+# 只有键集合恰好是这四个的 content 帧才参与合并：哪天 content 长出第三个
+# 语义字段（记账、标记……），逐帧形状必须先由语义审查再谈合并，这里自动不并。
+_MERGEABLE_CONTENT_KEYS = frozenset({"type", "text", "seq", "run_id"})
 
 # run 的终态取值。"cancelled" 与 task_store.TaskStatus.CANCELLED.value 同词同义，
 # 见模块文档；"completed"/"failed" 对齐 done/error 两种终帧。
@@ -245,6 +261,50 @@ def _frame(run_id: str, seq: int, payload: dict) -> str:
     return f"id: {run_id}:{seq}\ndata: {json.dumps(payload)}\n\n"
 
 
+def _mergeable_content(payload: dict) -> bool:
+    """这一帧是"纯正文"吗：type 是 content，且键集合恰好是 {type,text,seq,run_id}。"""
+    return (payload.get("type") == stream_events.FRAME_CONTENT
+            and frozenset(payload.keys()) == _MERGEABLE_CONTENT_KEYS)
+
+
+def _merge_content(batch: List[dict]) -> List[dict]:
+    """读时合帧的纯函数：把批内**相邻**的可合并 content 帧拼成一帧。
+
+    规则（判据见 tests/test_v0390_stream_coalesce.py）：
+    - 合并帧的 text 按缓冲顺序拼接，seq 取被合并的最后一帧，run_id 不变——
+      客户端拿合并帧的 seq 当游标，续播时这一段的每一帧都已在其之前，天然
+      不重发；被并掉的中间 seq 只意味着"这些帧整段随本帧一起发过了"。
+    - 非 content 帧、以及键集合不恰好是那四个的 content 帧，原样、顺序不变
+      地透出去；单帧的 content 段也原样（不做无谓的字典复制）。
+    - 不改写传入的 batch 与其中的任何 payload——缓冲里的对象自始至终不动。
+    """
+    out: List[dict] = []
+    group: List[dict] = []          # 当前相邻可合并段，存的是 batch 里的原元素
+
+    def flush():
+        if not group:
+            return
+        if len(group) == 1:
+            out.append(group[0])
+        else:
+            head = group[0]["payload"]
+            tail = group[-1]
+            merged_payload = {**head,
+                              "text": "".join(g["payload"]["text"] for g in group),
+                              "seq": tail["seq"]}
+            out.append({"seq": tail["seq"], "payload": merged_payload})
+        group.clear()
+
+    for e in batch:
+        if _mergeable_content(e["payload"]):
+            group.append(e)
+        else:
+            flush()
+            out.append(e)
+    flush()
+    return out
+
+
 def resumable(run: Optional[StreamRun], cursor: int) -> bool:
     """这个游标之后的每一帧都还补得出来吗？空洞、越界、没有这一轮，都是 False。"""
     if run is None or cursor < 0:
@@ -268,6 +328,10 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
     （正常耗尽、显式 close、断开引发的 GeneratorExit 都走同一个 finally）。
     首帧 yield 之前完成 attach，因此握连接的语义与判据里"实际持有连接的
     SSE 生成器"逐字对应；续播同样经这里，重连即停宽限计时器。
+
+    v0.39 读时合帧：出口把批内相邻的纯 content 帧拼成一帧（_merge_content），
+    合并帧 seq 取末帧——游标语义不变，缓冲与 append 一个字都不动。批尾是
+    content 且未终态时多等一次 COALESCE_SECONDS（30ms）再读，只等这一次。
     """
     run.attach_reader()
     try:
@@ -280,6 +344,17 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
                 if not gap and not batch and not finished:
                     # 1 秒的超时只是兜底：append/finish 都 notify，正常等待不该走到它
                     run.cond.wait(1.0)
+                    gap = bool(run.events) and run.events[0]["seq"] > cursor + 1
+                    batch = [] if gap else [e for e in run.events if e["seq"] > cursor]
+                    finished = run.finished
+                    last = run.last_seq
+                # 读时合帧窗口：批尾还是可合并的 content 且 run 未终，才多等一次
+                # COALESCE_SECONDS 让相邻正文进缓冲，然后重读。只等这一次、有上界；
+                # 非 content 收尾、已终态、空批都不走这条路。窗口后必须重新判
+                # gap/finished/last——等的这段时间里缓冲可能已被裁、run 可能已终。
+                if (not gap and batch and not finished
+                        and _mergeable_content(batch[-1]["payload"])):
+                    run.cond.wait(COALESCE_SECONDS)
                     gap = bool(run.events) and run.events[0]["seq"] > cursor + 1
                     batch = [] if gap else [e for e in run.events if e["seq"] > cursor]
                     finished = run.finished
@@ -303,7 +378,7 @@ def sse_frames(run: StreamRun, cursor: int = 0) -> Generator[str, None, None]:
                     "message": "本连接因追不上服务端缓冲而结束：不要重发原文，"
                                "结果会写进会话历史，刷新会话取回"}) + "\n\n")
                 return
-            for e in batch:
+            for e in _merge_content(batch):
                 yield _frame(run.run_id, e["seq"], e["payload"])
                 cursor = e["seq"]
             if finished and cursor >= last:
