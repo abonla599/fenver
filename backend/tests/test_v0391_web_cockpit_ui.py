@@ -142,7 +142,8 @@ def test_tidy_offset_reaches_the_real_outbound_not_just_the_display():
     src = "\n".join(_fn_text(_js(), n) for n in (
         "estimateTokens", "truncateWithin", "contextBudgetStorageKey",
         "readContextBudgets", "contextBudgetK", "dropOldestToBudget",
-        "clientContextK", "outbound"))
+        "clientContextK", "outbound",
+        "serverDefaultProvider", "currentProvider", "budgetProviderId"))
     d = Path(tempfile.mkdtemp(prefix="model-cockpit-ring-"))
     (d / "fns.js").write_text(src, encoding="utf-8")
     (d / "harness.cjs").write_text(_DROP_SEND_HARNESS, encoding="utf-8")
@@ -170,3 +171,28 @@ def test_done_usage_is_booked_to_the_session_that_sent():
     assert re.search(r"pref\.sessionId === sidAtSend", rs), \
         "落账没有核对会话仍是出发时那一个"
     assert "providerId" in rs, "账本没记当时用的模型"
+
+
+def test_budget_provider_id_is_the_single_source_for_ring_outbound_and_send():
+    """Fix Round 1：环/账本/整理/滑杆原来读 currentProvider().id，而 outbound 截断与
+    runStream 实发 payload 读裸 pref.provider——pref.provider 不在清单、回落到服务端
+    默认时，环按默认模型的预算显示、实发按 pref 口径，显示≠实发。
+    现在两侧都必须经 budgetProviderId()（currentProvider 优先、pref 兜底），
+    旧的两处裸读法钉死不许回来。"""
+    js = _js()
+    assert "function budgetProviderId(" in js, "没有统一的预算/发送 provider helper"
+    assert "budgetProviderId(" in _function_body(js, "outbound"), \
+        "outbound 截断预算还读裸 pref.provider"
+    assert "const providerId = budgetProviderId()" in _function_body(js, "runStream"), \
+        "runStream 实发 payload 的 provider 与显示口径不同源"
+    for name in ("syncCtxRow", "renderContextRing", "renderContextPanel", "applyContextTidy"):
+        assert "budgetProviderId(" in _function_body(js, name), \
+            f"{name} 的预算没走统一口径"
+    assert "setContextBudget(budgetProviderId(" in js, "预算滑杆的写键没走统一口径"
+    assert "contextBudgetK(pref.provider)" not in js, \
+        "旧读法 contextBudgetK(pref.provider) 还在：显示与实发又能分叉"
+    assert "const providerId = pref.provider" not in js, \
+        "旧发送口径 const providerId = pref.provider 还在：payload 与环不同源"
+    ring = _function_body(js, "renderContextRing")
+    assert 'setProperty("--ctx-pct", "0")' in ring and "无可用模型" in ring, \
+        "清单为空时环必须归零并如实说'无可用模型'，不许 retain 上一次的填充"

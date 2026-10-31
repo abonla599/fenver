@@ -404,8 +404,8 @@ function syncCtxRow() {
   const range = $("ctxRange");
   range.max = cap;
   range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
-  const budget = contextBudgetK(pref.provider);
-  if (known && budget > cap) setContextBudget(pref.provider, cap);
+  const budget = contextBudgetK(budgetProviderId());
+  if (known && budget > cap) setContextBudget(budgetProviderId(), cap);
   const shown = Math.min(budget, cap);
   range.value = shown;
   $("ctxVal").textContent = shown;
@@ -418,7 +418,8 @@ function outbound() {
   const reserve = persona ? estimateTokens(persona) + 4 : 0;
   // 读数时再对模型上限取一次 min：这层夹逼现在住在 contextBudgetK 里
   // （按 provider 档案的 max_context_k），别指望界面刷新当唯一防线。
-  const budgetK = contextBudgetK(pref.provider);
+  // 预算的 provider 口径与环/账本/实发同源（budgetProviderId），各读各的必分叉。
+  const budgetK = contextBudgetK(budgetProviderId());
   // v0.39.x 驾驶舱：轻量整理过的条数在这里真的生效——先按 drop 从最早处切掉，
   // 再走原有的过滤/截断。环上的读数（clientContextK）用的是同一个 offset，
   // "显示降了、实发也降"才是整理，只改显示是假功能。
@@ -451,14 +452,22 @@ function sessionQueueK() {
 }
 
 function renderContextRing() {
-  const cm = currentProvider();
-  if (!cm) return;
   const btn = $("ctxRingBtn");
   if (!btn) return;
+  const cm = currentProvider();
+  if (!cm) {
+    // 清单为空/没有可用模型：归零并如实说，不许 retain 上一次的填充——
+    // 把旧账原样画着，等于告诉用户"预算还是刚才那样"，那是假账。
+    btn.style.setProperty("--ctx-pct", "0");
+    btn.style.setProperty("--ctx-color", "var(--accent)");
+    btn.setAttribute("aria-label", "无可用模型，上下文用量暂无从算起");
+    btn.classList.remove("warn", "danger");
+    return;
+  }
   const { known } = clientContextK();
   const last = state.lastUsageBySession[pref.sessionId];
   const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
-  const budget = contextBudgetK(cm.id);
+  const budget = contextBudgetK(budgetProviderId());
   const budgetTokens = Math.max(1, budget * 1000);
   const pct = Math.min(100, used / budgetTokens * 100);
   const over = used > budgetTokens;
@@ -492,7 +501,7 @@ function renderContextPanel() {
   const { known, msgs, persona } = clientContextK();
   const last = state.lastUsageBySession[pref.sessionId];
   const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
-  const budget = contextBudgetK(cm.id);
+  const budget = contextBudgetK(budgetProviderId());
   const pct = Math.min(100, used / Math.max(1, budget * 1000) * 100);
 
   const head = document.createElement("p");
@@ -594,7 +603,7 @@ function applyContextTidy() {
   const cm = currentProvider();
   if (!cm) return;
   const { msgs } = clientContextK();
-  const plan = dropOldestToBudget(msgs, contextBudgetK(cm.id) * 1000);
+  const plan = dropOldestToBudget(msgs, contextBudgetK(budgetProviderId()) * 1000);
   if (!plan.droppedCount) {
     setStatus("已在预算内，无需整理", false);
     renderContextPanel();
@@ -1284,6 +1293,16 @@ function currentProvider() {
   // 没选中、或选中的那个已经不可用（新身份的 providerId 是空的，管理员也可能刚把
   // 某家的密钥填坏）：退回服务端会用的那个默认，而不是把人拦在发送键上。
   return listed && listed.usable ? listed : serverDefaultProvider();
+}
+
+/* Fix Round 1：预算/发送口径的唯一 provider id。环、账本、整理、滑杆、
+   outbound 截断、runStream 实发 payload 全部读这一个——pref.provider 不在
+   清单里时 currentProvider() 回落服务端默认，若只让显示侧跟着回落、发送侧
+   仍读裸 pref.provider，环与实发就是两套口径（显示≠实发）。
+   currentProvider 优先，pref.provider 兜底（清单还没回来时不把用户自己的
+   选择抹成空串）；函数声明提升，前文的 outbound/syncCtxRow 可直接用。 */
+function budgetProviderId() {
+  return (currentProvider() || {}).id || pref.provider || "";
 }
 
 async function loadProviders() {
@@ -2730,7 +2749,8 @@ async function runStream(holder) {
   const lastUser = state.messages[state.messages.length - 2] || {};
   const sent = outbound();
   const attachments = (lastUser.attachments || []).map((a) => a.id);
-  const providerId = pref.provider;
+  // 与环/账本/截断同一口径：显示哪条模型与预算，就实发哪条（pref.provider 兜底）。
+  const providerId = budgetProviderId();
   // v0.39.x 驾驶舱账本锚点：这一轮"发出去时"的会话、客户端估算与所用模型。
   // done.usage 回来时只写给出发时那个会话（下面 pref.sessionId === sidAtSend 那道闸）——
   // 流还在途人就切了会话/换了模型的话，把 A 轮的用量记到 B 头上，校准就成系统性偏差。
@@ -4684,7 +4704,7 @@ function bind() {
   $("ctxBudgetRange").oninput = (e) => {
     const cm = currentProvider();
     if (!cm) return;
-    setContextBudget(cm.id, e.target.value);
+    setContextBudget(budgetProviderId(), e.target.value);
     syncCtxRow();            // 设置页那行与环都从同一口径重读，不各写各的
     renderContextPanel();
   };
@@ -4764,8 +4784,8 @@ function bind() {
   $("provCancelBtn").onclick = closeProviderForm;
 
   $("ctxRange").oninput = (e) => {
-    setContextBudget(pref.provider, e.target.value);
-    $("ctxVal").textContent = contextBudgetK(pref.provider);
+    setContextBudget(budgetProviderId(), e.target.value);
+    $("ctxVal").textContent = contextBudgetK(budgetProviderId());
     renderContextRing();   // 设置页滑杆拖一格，环的分母就得跟一格（Task 9 才迁移这一行）
   };
 
