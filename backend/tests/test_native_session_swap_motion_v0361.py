@@ -106,7 +106,12 @@ def test_leaving_card_interactions_are_all_live_gated():
     body = _block(c, "val live = card.sid == sessionId")
     assert body.count("if (!live) return@launch") >= 3, \
         "保存/删除/重生成的落地不再被 live 闸门拦住（旧卡一点就按快照 index 动全局）"
-    assert "if (live) streamText?.let" in body, "流式气泡没挂 live 闸门：新会话的字会画到旧卡上"
+    # v0.39 性能 A 包：挂载条件吃派生量 streamVisible（组合期不读正文），
+    # streamText 的字符串读取挪进 item 体内交给 StreamingBubble。
+    assert "if (live && streamVisible) item {" in body, \
+        "流式气泡没挂 live 闸门：新会话的字会画到旧卡上"
+    assert "StreamingBubble(streamText.orEmpty()" in body, \
+        "streamText 的读取没进 item 体内：live 闸的语义没了载体"
     assert "if (live && tc != null" in body, "任务卡没挂 live 闸门：它是当前会话的状态，不是快照"
     assert "seedDraft = if (live) editingDraft else null" in body, \
         "编辑态没按 live 隔离：旧卡会接管新会话的编辑框"

@@ -201,7 +201,7 @@ def test_settled_scroll_is_single_pass_with_one_next_frame_correction():
     c = _chat()
     assert "repeat(24)" not in c, \
         "24 帧贴底循环回来了：进会话整屏替换那一拍又要随帧连贴"
-    body = _block(c, "LaunchedEffect(messages.size, streamText, streamTrace.size, streamTraceChars) {")
+    body = _block(c, "LaunchedEffect(messages.size, streamActive, streamTrace.size, streamTraceChars) {")
     assert "withFrameNanos { }" in body, "落定不再等下一帧量高矮：贴的是旧高度"
     assert "scrollToItem(t - 1, MAX_SCROLL_OFFSET)" in body, \
         "没贴实时不再补夹滚动边界"
@@ -216,7 +216,7 @@ def test_settled_bottom_correction_is_bounded_not_an_unbounded_loop():
     c = _chat()
     assert "private const val MAX_BOTTOM_CORRECTIONS = 3" in c, \
         "贴底校正的轮数上限没了/被改大：校正必须是有界的 3 轮"
-    body = _block(c, "LaunchedEffect(messages.size, streamText, streamTrace.size, streamTraceChars) {")
+    body = _block(c, "LaunchedEffect(messages.size, streamActive, streamTrace.size, streamTraceChars) {")
     assert "repeat(MAX_BOTTOM_CORRECTIONS)" in body, \
         "落定分支不再走有界常量：要么退回单发、要么在别处自造循环"
     assert body.count("repeat(") == 1, \

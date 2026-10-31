@@ -76,14 +76,42 @@ def _settle_effect_keys(code: str) -> str:
     return m.group(1)
 
 
+def _follow_loop_body(code: str) -> str:
+    """v0.39 性能 A 包：流式跟随独立成 LaunchedEffect(streamActive) 的 80ms 环。"""
+    m = re.search(r"LaunchedEffect\(streamActive\)\s*\{", code)
+    assert m, "找不到独立的流式跟随环 LaunchedEffect(streamActive) { … }"
+    i = m.end() - 1
+    depth = 0
+    for j in range(i, len(code)):
+        if code[j] == "{":
+            depth += 1
+        elif code[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[i:j + 1]
+    raise AssertionError("跟随环大括号不配对")
+
+
 def test_the_follow_effect_wakes_up_when_the_panel_grows():
-    """key 里必须有过程面板的变化量：只有 streamText 的那份在"只想不说"时永不触发。"""
-    keys = _settle_effect_keys(_code())
-    assert "streamText" in keys, "正文不再触发跟随：答案流式期间会脱离底部"
+    """v0.39 改判后的同一条诉求：面板长高时列表必须跟到底。
+
+    形状变了：正文不再进落定效果的 key（streamText 的组合期读取就是逐 token 整页
+    重组的病根），流式跟随改由**独立的 streamActive 环**以 80ms 节拍驱动；
+    过程面板的变化量（步数 + 思考总字数）仍留在落定效果的 key 里。
+    """
+    code = _code()
+    keys = _settle_effect_keys(code)
+    assert "streamActive" in keys, \
+        "streamActive 没进落定效果 key：落定那一拍（空→有→null）无从触发"
     assert "streamTrace.size" in keys, \
         "面板步数没进 key：新增一步（工具/搜索）不会把列表带到底部"
     assert re.search(r"streamTrace\w*Chars", keys), \
         "思考总字数没进 key：连续思考并进末步时列表身份不变，等于没修"
+    body = _follow_loop_body(code)
+    assert "delay(STREAM_FOLLOW_MS)" in body, \
+        "跟随环没有 80ms 节拍：面板长高期间列表又是死的"
+    assert re.search(r"lastVisible\s*<\s*total\s*-\s*2", body), \
+        "跟随环没有同一道近底闸门：上翻阅读会被思考帧拽回底部"
 
 
 def test_the_trace_char_signal_is_a_real_derivation_not_a_constant():
@@ -97,7 +125,11 @@ def test_the_trace_char_signal_is_a_real_derivation_not_a_constant():
 
 
 def test_the_generate_branch_still_only_follows_when_near_bottom():
-    """加 key 不许把"上翻阅读不被拽回底部"这道闸一起改掉（判据与 v0.25.2 同源）。"""
+    """加 key 不许把"上翻阅读不被拽回底部"这道闸一起改掉（判据与 v0.25.2 同源）。
+
+    v0.39 性能 A 包：近底闸门搬进了独立跟随环（上一条判据已钉），这里钉搬走之后
+    落定效果本体剩下的两件——随帧量高（withFrameNanos）与"有界"（while 不许回来）。
+    """
     code = _code()
     m = re.search(r"LaunchedEffect\(messages\.size[^)]*\)\s*\{", code)
     assert m, "贴底效果不见了"
@@ -113,9 +145,11 @@ def test_the_generate_branch_still_only_follows_when_near_bottom():
                 break
     else:
         raise AssertionError("LaunchedEffect 体大括号不配对")
-    assert re.search(r"lastVisible\s*<\s*total\s*-\s*2", body), \
+    assert re.search(r"lastVisible\s*<\s*total\s*-\s*2", _follow_loop_body(code)), \
         "近底闸门没了：每来一步思考都会把正在上翻阅读的人拽回底部"
     assert "withFrameNanos" in body, "落定随帧重贴被删：v0.28 那个'条目事后长高'的 bug 会回来"
+    assert "while (" not in body and "while(" not in body, \
+        "落定效果里冒出 while：跟随已独立成环，这里更不许复活随帧循环"
 
 
 def test_the_follow_effect_is_still_a_single_one():

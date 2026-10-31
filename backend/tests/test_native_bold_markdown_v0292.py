@@ -17,8 +17,10 @@ Python 真跑一遍，还有一条**渲染支路**的锁：`RichText` 画正文�
 
 诚实边界：这套判据证明的是"逻辑与接线都对"，不是"屏幕上真的粗了"。真机效果要看
 v0.29.2 的 APK；如果 Compose 侧还有别的样式覆盖（例如 `Text` 上写死 `fontFamily`
-或非默认 `fontWeight`），那条只能靠肉眼。已知未修：`StreamResponse` 的自动跟随挂在
-`messages.size, streamText` 上，思考面板变高不会把列表带着往下走。
+或非默认 `fontWeight`），那条只能靠肉眼。曾经未修的跟随形状已在两版后收口：
+v0.29.2 把面板变化量挂进 key；v0.39 性能 A 包进一步把流式跟随拆成独立的
+`LaunchedEffect(streamActive)` 80ms 环，`RichText` 在 `streaming = true` 时早退
+不跑本文件的解析链（终稿照旧全量解析，形状锁见 test_v0390_native_stream_perf.py）。
 """
 import re
 from pathlib import Path

@@ -69,13 +69,14 @@ def _kt_code() -> str:
 
 
 def _settle_effect_body(code: str) -> str:
-    """取贴底跟随那条 LaunchedEffect 的函数体（大括号配对截断）。
+    """取落定贴底那条 LaunchedEffect 的函数体（大括号配对截断）。
 
-    key 列表允许变（v0.29.2 加了过程面板的变化量），钉的是"messages.size 与
-    streamText 仍在、且这是唯一那条贴底效果"。
+    key 列表允许变（v0.29.2 加了过程面板的变化量；v0.39 性能 A 包把 streamText
+    换成 streamActive——组合期不再逐 token 读正文），钉的是"streamActive 与
+    messages.size 仍在、且这是唯一那条挂 messages.size 的贴底效果"。
     """
-    m = re.search(r"LaunchedEffect\(\s*messages\.size,[^)]*streamText[^)]*\)\s*\{", code)
-    assert m, "找不到贴底跟随的 LaunchedEffect(messages.size, streamText, …)：这一整块被删了？"
+    m = re.search(r"LaunchedEffect\(\s*messages\.size,[^)]*streamActive[^)]*\)\s*\{", code)
+    assert m, "找不到落定贴底的 LaunchedEffect(messages.size, streamActive, …)：这一整块被删了？"
     i = m.end() - 1
     depth = 0
     while i < len(code):
@@ -90,6 +91,23 @@ def _settle_effect_body(code: str) -> str:
 
 
 # ---------- ① 落定贴底：随帧重贴，不许再用单发旧高度 ----------
+
+def _follow_effect_body(code: str) -> str:
+    """取 v0.39 性能 A 包独立出来的流式跟随环（LaunchedEffect(streamActive) { … }）。"""
+    m = re.search(r"LaunchedEffect\(streamActive\)\s*\{", code)
+    assert m, "找不到独立的流式跟随环 LaunchedEffect(streamActive)：贴底两条被并回一条了？"
+    i = m.end() - 1
+    depth = 0
+    while i < len(code):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[m.end() - 1:i + 1]
+        i += 1
+    raise AssertionError("跟随环大括号不配对，测试的截断器读不下去了")
+
 
 def test_native_settled_reply_resticks_after_layout_is_measured():
     """回答落定必须等新一帧量出真实高度后再贴：withFrameNanos 随帧重贴是唯一正解。
@@ -115,10 +133,20 @@ def test_native_settled_reply_resticks_after_layout_is_measured():
 
 
 def test_native_streaming_follow_still_gated_on_already_at_bottom():
-    """生成期间仍是"本来贴底才跟随"：上翻阅读不被拽回（网页 paint() 的 stick 闸，不许丢）。"""
-    body = _settle_effect_body(_kt_code())
+    """生成期间仍是"本来贴底才跟随"：上翻阅读不被拽回（网页 paint() 的 stick 闸，不许丢）。
+
+    v0.39 性能 A 包把这条闸从落定效果的 else 支搬进独立的 80ms 跟随环——判据同源，
+    锚点跟着搬家：近底闸门、80ms 节拍与 streamActive 退出条件必须在同一个环里。
+    """
+    code = _kt_code()
+    body = _follow_effect_body(code)
     assert re.search(r"lastVisible\s*<\s*total\s*-\s*2", body), \
-        "流式贴底闸门没了：每个 token 都把上翻阅读的人拽回底部（网页的流式贴底分支不这样）"
+        "近底闸门没跟进跟随环：每个 token 都把上翻阅读的人拽回底部（网页的流式贴底分支不这样）"
+    assert "delay(STREAM_FOLLOW_MS)" in body, "跟随环不吃节拍常量：80ms 的窗口不可审计了"
+    assert re.search(r"private const val STREAM_FOLLOW_MS = 80L", code), \
+        "STREAM_FOLLOW_MS=80L 的文件级常量没了：节拍被写死进环里、改不动也审不了"
+    assert "while (streamActive && streamText != null)" in body, \
+        "退出条件没挂 streamActive：流收尾后环还在空转/或提前退出漏掉最后一段"
 
 
 # ---------- ② 顶栏标题：显式主题墨色，不许落成默认纯黑 ----------
