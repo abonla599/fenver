@@ -5,19 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>Fenver：跑在你自己服务器上的 AI 智能助手</title>
-<meta name="description" content="开源的 AI 助手：多模型切换、计算器、读你发过去的文件、长期记忆，数据待在你自己的服务器上。">
-<meta name="theme-color" content="#f3f0e7">
+<meta name="description" content="开源的 AI 助手：多模型切换、文件阅读、长期记忆、联网搜索，数据待在你自己的服务器上。">
+<meta name="theme-color" content="#f7f8fa">
 <link rel="stylesheet" href="/site/site.css">
 <script>
-/* 首屏之前把主题定下来：等 site.js 再读 localStorage 会先闪一下深色。 */
+/* 首屏之前把主题定下来，避免页面加载时闪烁。 */
 (function () {
   try {
     var saved = localStorage.getItem("site-theme");
     if (saved !== "dark" && saved !== "light") saved = "light";
     document.documentElement.setAttribute("data-theme", saved);
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f3f0e7");
-  } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
+    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f7f8fa");
+  } catch (e) { /* 隐私模式下保留默认浅色。 */ }
 })();
 </script>
 </head>
@@ -27,16 +27,18 @@
 <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
 
 <nav class="topbar" aria-label="页面导航">
-  <a class="brand-link" href="/"><span class="brand">Fenver</span></a>
-  <p class="issue">SELF-HOSTED AI / VOL. 01</p>
-  <button class="menubtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="navlinks">目录</button>
+  <a class="brand-link" href="/" aria-label="Fenver 首页">
+    <svg class="brand-symbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4.5h16v11H9l-5 4v-15Z"/><path d="M8 10h.01M12 10h2M17 7.8l.7 1.5 1.5.7-1.5.7-.7 1.5-.7-1.5-1.5-.7 1.5-.7.7-1.5Z"/></svg>
+    <span class="brand">Fenver</span>
+  </a>
+  <p class="issue">PERSONAL AI / SELF-HOSTED</p>
+  <button class="menubtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="navlinks">菜单</button>
   <ul class="navlinks" id="navlinks">
-    <li><a href="#can-do"><span>01</span>能做什么</a></li>
-    <li><a href="#shell-only"><span>02</span>移动端</a></li>
-    <li><a href="#shots"><span>03</span>界面证据</a></li>
-    <li><a href="#start"><span>04</span>怎么开始</a></li>
-    <li><a href="#not-now"><span>05</span>边界</a></li>
-    <li><a href="#faq"><span>06</span>常见问题</a></li>
+    <li><a href="#can-do">能力</a></li>
+    <li><a href="#shell-only">移动端</a></li>
+    <li><a href="#shots">真实界面</a></li>
+    <li><a href="#open-source">开源</a></li>
+    <li><a href="#faq">常见问题</a></li>
   </ul>
   <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到深色">
     <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2.2V5.8M12 18.2V21.8M2.2 12H5.8M18.2 12H21.8M5.1 5.1L7.6 7.6M16.4 16.4L18.9 18.9M18.9 5.1L16.4 7.6M7.6 16.4L5.1 18.9"/></svg>
@@ -45,79 +47,118 @@
 </nav>
 
 <header class="hero">
-  <p class="hero-kicker"><span>自托管</span><span>多用户</span><span>Apache-2.0</span></p>
   <div class="hero-grid">
     <div class="hero-main">
+      <p class="hero-kicker"><span class="status-dot"></span>开源、自托管，为长期使用而生</p>
       <h1>Fenver</h1>
-      <p class="hero-title">记得住你的<br><em>AI 智能助手</em></p>
-      <p class="lede">它记得住你说过的事，能算数，能读你发过去的文件。每个人各用各的，数据留在这台属于你的机器上。</p>
+      <p class="hero-title">不只回答问题，<br><em>还记得你。</em></p>
+      <p class="lede">一个跑在你自己服务器上的 AI 智能助手。聊过的事能记住，发来的文件能读懂，需要实时信息时会联网查找。</p>
       <p class="cta">
-        <a class="btn primary" href="https://ai.fenever.xyz/app/">网页版 <span aria-hidden="true">↗</span></a>
+        <a class="btn primary" href="https://ai.fenever.xyz/app/">打开网页版 <span aria-hidden="true">↗</span></a>
         <a class="btn" href="/site/android.apk" download>安卓版 <span aria-hidden="true">↓</span></a>
       </p>
-      <p class="note">不需要邀请码，不需要填 API 密钥。用户名密码自己定，注册完就能聊。</p>
-    </div>
-    <aside class="manifesto" aria-label="产品声明">
-      <p class="label">MANIFESTO / 001</p>
-      <p class="manifesto-big">你的数据<br>留在<br><span>你的机器</span>。</p>
-      <ul>
-        <li><span>01</span>会话与记忆按账号隔离</li>
-        <li><span>02</span>提醒只存在你的手机里</li>
-        <li><span>03</span>代码开源，随时能自己架</li>
+      <ul class="hero-assurances" aria-label="使用条件">
+        <li>不需要邀请码</li>
+        <li>不用填 API 密钥</li>
+        <li>注册完就能聊</li>
       </ul>
-    </aside>
-  </div>
-  <div class="hero-foot">
-    <span>SCROLL TO INSPECT</span>
-    <span>01 — 06</span>
+      <div class="hero-proof" aria-label="产品特点">
+        <div><strong>长期记忆</strong><span>偏好跨越单次对话</span></div>
+        <div><strong>账号隔离</strong><span>会话与文件各自独立</span></div>
+        <div><strong>Apache-2.0</strong><span>代码公开，可自己部署</span></div>
+      </div>
+    </div>
+
+    <div class="product-stage" aria-label="Fenver 产品能力示意">
+      <span class="stage-orbit orbit-one" aria-hidden="true"></span>
+      <span class="stage-orbit orbit-two" aria-hidden="true"></span>
+      <div class="app-window">
+        <div class="window-bar">
+          <div class="window-brand"><span class="window-mark">F</span><strong>Fenver</strong></div>
+          <span class="online"><i></i>在线</span>
+        </div>
+        <div class="window-body">
+          <p class="conversation-date">今天 · 新对话</p>
+          <div class="message user">记住：我习惯先看结论，再看细节。</div>
+          <div class="assistant-row">
+            <span class="assistant-avatar">F</span>
+            <div>
+              <div class="message assistant">已记住。之后我会先给你结论，再展开关键细节。</div>
+              <span class="memory-chip"><i></i>长期记忆已更新</span>
+            </div>
+          </div>
+          <div class="message user">再帮我查一下今天的行业动态。</div>
+          <div class="assistant-row">
+            <span class="assistant-avatar">F</span>
+            <div class="search-answer">
+              <span class="search-label"><i></i>联网搜索</span>
+              <p>会先检索公开网页，再整理答案并附上来源。</p>
+              <div class="source-line"><span>01</span><i></i></div>
+              <div class="source-line short"><span>02</span><i></i></div>
+            </div>
+          </div>
+        </div>
+        <div class="composer"><span>发消息或按住说话</span><b aria-hidden="true">↑</b></div>
+      </div>
+      <div class="floating-card memory-float"><span>MEMORY</span><strong>你的偏好，持续生效</strong></div>
+      <div class="floating-card model-float"><span>MODEL</span><strong>多模型，自由切换</strong></div>
+      <p class="stage-note">PRODUCT PREVIEW / 产品能力示意</p>
+    </div>
   </div>
 </header>
 
 <section class="index-strip" aria-label="能力索引">
-  <ol>
+  <ul>
     <li><span>01</span>多模型切换</li>
     <li><span>02</span>文件阅读</li>
     <li><span>03</span>长期记忆</li>
     <li><span>04</span>联网搜索</li>
     <li><span>05</span>账号隔离</li>
     <li><span>06</span>开源自建</li>
-  </ol>
+  </ul>
 </section>
 
 <main>
   <section id="can-do">
     <header class="section-head">
-      <p class="section-no">01</p>
-      <h2>能做什么</h2>
-      <p>六件已经能用的事。没有“即将上线”的占位，也没有把模型能力说成产品开关。</p>
+      <p class="section-no">01 / CAPABILITIES</p>
+      <h2>一个助手，<br>六种实用能力</h2>
+      <p>不堆概念，只保留真正能用上的功能。每一项都已经落在当前产品里。</p>
     </header>
     <ul class="feature-grid">
       <li class="feature feature-lead">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg></span>
         <span class="feature-no">01</span>
         <h3>多模型切换</h3>
         <p>在可用模型间快速切换。模型列表、额度在设置页查看，默认模型由服务端配置，无需手动设置。</p>
+        <div class="model-pills" aria-hidden="true"><span>快速</span><span>深度</span><span>视觉</span></div>
       </li>
       <li class="feature">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="3"/><path d="M8 7h8M8 11h1M12 11h1M16 11h.01M8 15h1M12 15h1M16 15h.01M8 18h1M12 18h1M16 18h.01"/></svg></span>
         <span class="feature-no">02</span>
         <h3>会算数</h3>
         <p>复杂运算调用计算器工具，本机安全解析算式，避免模型心算出错。</p>
       </li>
       <li class="feature">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v5h4M9 12h6M9 16h6"/></svg></span>
         <span class="feature-no">03</span>
         <h3>读你发过去的文件</h3>
         <p>支持 PDF、docx、txt、代码文件提取文本；视觉模型可识图，无视觉能力的模型会拒绝。</p>
       </li>
       <li class="feature">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a7 7 0 0 0-7 7c0 2 1 3.5 2.5 4.7L7 20h10l-.5-4.3A7 7 0 0 0 12 4Z"/><path d="M9 11h6M10 14h4"/></svg></span>
         <span class="feature-no">04</span>
         <h3>长期记忆</h3>
         <p>自动保存你的偏好，相关对话可自动唤起记忆；记忆内容可在设置页查看、删除。</p>
       </li>
       <li class="feature">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M8 10.5h5M10.5 8v5"/></svg></span>
         <span class="feature-no">05</span>
         <h3>能查实时信息</h3>
         <p>模型可以先联网搜索再回答，结果取自公开网页搜索并附来源链接。查不到时会说查不到，不会替你编一个。</p>
       </li>
       <li class="feature">
+        <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2"/><path d="M3 20c0-4 2-6 6-6s6 2 6 6M15 14c3 0 5 2 5 5"/></svg></span>
         <span class="feature-no">06</span>
         <h3>多人各用各的</h3>
         <p>会话、文件、记忆独立绑定账号，用户数据互相隔离、不可见。</p>
@@ -125,123 +166,73 @@
     </ul>
   </section>
 
-  <section id="shell-only">
+  <section id="shell-only" class="reveal">
     <header class="section-head section-head-narrow">
-      <p class="section-no">02</p>
-      <h2>移动端<br>多做一点</h2>
-      <p>可解锁系统通知、分享入口、桌面小组件。应用会申请「精准闹钟」权限，未授予时改用更省电的排期方式，时间可能略有延迟。</p>
+      <p class="section-no">02 / ON ANDROID</p>
+      <h2>装进口袋，<br>再多做一点</h2>
+      <p>网页之外，安卓版把提醒、系统分享和桌面入口接进日常。应用会申请「精准闹钟」权限，未授予时改用更省电的排期方式，时间可能略有延迟。</p>
+      <a class="btn inverse-btn" href="/site/android.apk" download>下载安卓版 <span aria-hidden="true">↓</span></a>
     </header>
     <ul class="mobile-list">
-      <li>
-        <span>01</span>
-        <div><h3>提醒</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储，不上传云端。</p></div>
-      </li>
-      <li>
-        <span>02</span>
-        <div><h3>分享</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型的视觉能力。</p></div>
-      </li>
-      <li>
-        <span>03</span>
-        <div><h3>桌面组件</h3><p>展示当日提醒，可一键发起识图提问、新建对话；需要视觉模型支持。</p></div>
-      </li>
+      <li><span class="mobile-no">01</span><div><h3>提醒，到点出现</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储，不上传云端。</p></div></li>
+      <li><span class="mobile-no">02</span><div><h3>分享，直接送达</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型的视觉能力。</p></div></li>
+      <li><span class="mobile-no">03</span><div><h3>桌面组件，少绕一步</h3><p>展示当日提醒，可一键发起识图提问、新建对话；需要视觉模型支持。</p></div></li>
     </ul>
   </section>
 
-  <section id="shots">
+  <section id="shots" class="reveal">
     <header class="section-head">
-      <p class="section-no">03</p>
-      <h2>界面证据</h2>
-      <p>四张当前 Web 版实拍，八个视觉单元。每张只证明一件事：这个功能不是文案里的设想。</p>
+      <p class="section-no">03 / REAL SCREENS</p>
+      <h2>真实界面，<br>不靠想象</h2>
+      <p>四张当前 Web 版实拍，四张细节裁切。看到的就是产品正在使用的界面。</p>
     </header>
 
-    <div class="evidence-wall">
-      <figure class="shot shot-lead">
-        <div class="shot-frame">
-          <span class="shot-index">A</span>
-          <span class="shot-tag">对话 / WEB</span>
-          <img src="/site/img/chat.jpg" alt="对话页实拍：当前版本的 Fenver 回答账号隔离与记忆入口" width="780" height="1688" fetchpriority="high">
-        </div>
-        <figcaption><strong>对话是当前版本</strong><span>当前版本的 Fenver：回答账号隔离与记忆入口。</span></figcaption>
+    <div class="shot-grid">
+      <figure class="shot">
+        <div class="shot-frame"><span class="shot-tag">对话</span><img src="/site/img/chat.jpg" alt="对话页实拍：当前版本的 Fenver 回答账号隔离与记忆入口" width="780" height="1688" fetchpriority="high"></div>
+        <figcaption><strong>自然聊，持续记</strong><span>对话、记忆与当前模型都在一处。</span></figcaption>
       </figure>
-      <div class="shot-stack">
-        <figure class="shot">
-          <div class="shot-frame">
-            <span class="shot-index">B</span>
-            <span class="shot-tag">注册 / WEB</span>
-            <img src="/site/img/register.jpg" alt="注册页实拍：Fenver 品牌与当前图标，三道固定找回题" width="780" height="1688" loading="lazy">
-          </div>
-          <figcaption><strong>当前品牌与图标</strong><span>注册留三道找回题；演示值仅用于演示。</span></figcaption>
-        </figure>
-        <figure class="shot">
-          <div class="shot-frame">
-            <span class="shot-index">C</span>
-            <span class="shot-tag">记忆 / WEB</span>
-            <img src="/site/img/memory.jpg" alt="长期记忆页实拍：三条演示记忆，可逐条删除" width="780" height="1688" loading="lazy">
-          </div>
-          <figcaption><strong>记忆看得见</strong><span>三条演示记忆，可逐条删除。</span></figcaption>
-        </figure>
-        <figure class="shot">
-          <div class="shot-frame">
-            <span class="shot-index">D</span>
-            <span class="shot-tag">设置 / WEB</span>
-            <img src="/site/img/settings.jpg" alt="设置页实拍：账户、模型、搜索与对话入口" width="780" height="1688" loading="lazy">
-          </div>
-          <figcaption><strong>控制权在手</strong><span>账户、模型、搜索与对话都在这一页。</span></figcaption>
-        </figure>
-      </div>
+      <figure class="shot">
+        <div class="shot-frame"><span class="shot-tag">注册</span><img src="/site/img/register.jpg" alt="注册页实拍：Fenver 品牌与当前图标，三道固定找回题" width="780" height="1688" loading="lazy"></div>
+        <figcaption><strong>注册不绕路</strong><span>账号自己定，找回问题自己填。</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <div class="shot-frame"><span class="shot-tag">记忆</span><img src="/site/img/memory.jpg" alt="长期记忆页实拍：三条演示记忆，可逐条删除" width="780" height="1688" loading="lazy"></div>
+        <figcaption><strong>记忆看得见</strong><span>存了什么，能查看也能删除。</span></figcaption>
+      </figure>
+      <figure class="shot">
+        <div class="shot-frame"><span class="shot-tag">设置</span><img src="/site/img/settings.jpg" alt="设置页实拍：账户、模型、搜索与对话入口" width="780" height="1688" loading="lazy"></div>
+        <figcaption><strong>控制权在手</strong><span>模型、搜索与账号都由你掌握。</span></figcaption>
+      </figure>
     </div>
 
     <div class="detail-wall" aria-label="界面细节">
-      <figure class="detail">
-        <img src="/site/img/detail-register.jpg" alt="注册页细节：三道固定找回题" width="740" height="700" loading="lazy">
-        <figcaption><span>01 / 找回</span>三道题，答案自己填。</figcaption>
-      </figure>
-      <figure class="detail">
-        <img src="/site/img/detail-chat.jpg" alt="对话页细节：当前版本的回答与操作按钮" width="740" height="720" loading="lazy">
-        <figcaption><span>02 / 对话</span>当前版本的账号隔离说明。</figcaption>
-      </figure>
-      <figure class="detail">
-        <img src="/site/img/detail-memory.jpg" alt="记忆页细节：搜索与记忆条目" width="740" height="620" loading="lazy">
-        <figcaption><span>03 / 记忆</span>搜索、查看、删除。</figcaption>
-      </figure>
-      <figure class="detail">
-        <img src="/site/img/detail-settings.jpg" alt="设置页细节：模型、搜索与对话入口" width="740" height="640" loading="lazy">
-        <figcaption><span>04 / 控制</span>模型与对话设置。</figcaption>
-      </figure>
+      <figure class="detail"><img src="/site/img/detail-register.jpg" alt="注册页细节：三道固定找回题" width="740" height="700" loading="lazy"><figcaption><span>01 / 找回</span>三道题，答案自己填。</figcaption></figure>
+      <figure class="detail"><img src="/site/img/detail-chat.jpg" alt="对话页细节：当前版本的回答与操作按钮" width="740" height="720" loading="lazy"><figcaption><span>02 / 对话</span>回答与操作保持清晰。</figcaption></figure>
+      <figure class="detail"><img src="/site/img/detail-memory.jpg" alt="记忆页细节：搜索与记忆条目" width="740" height="620" loading="lazy"><figcaption><span>03 / 记忆</span>搜索、查看、删除。</figcaption></figure>
+      <figure class="detail"><img src="/site/img/detail-settings.jpg" alt="设置页细节：模型、搜索与对话入口" width="740" height="640" loading="lazy"><figcaption><span>04 / 控制</span>模型与对话设置。</figcaption></figure>
     </div>
   </section>
 
-  <section id="start">
+  <section id="start" class="reveal">
     <header class="section-head">
-      <p class="section-no">04</p>
-      <h2>三步上手</h2>
+      <p class="section-no">04 / GET STARTED</p>
+      <h2>三步，<br>开始第一句</h2>
       <p>没有安装向导，没有密钥配置。打开网页就能开始。</p>
     </header>
     <ol class="steps" role="list">
-      <li>
-        <span class="step-no">01</span>
-        <strong>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a></strong>
-        <p>安装壳包可直接跳转。</p>
-      </li>
-      <li>
-        <span class="step-no">02</span>
-        <strong>注册账号</strong>
-        <p>填写用户名、密码，设置密保问题用于找回密码。</p>
-      </li>
-      <li>
-        <span class="step-no">03</span>
-        <strong>开始对话</strong>
-        <p>更换设备登录同一账号，聊天记录与记忆可同步。</p>
-      </li>
+      <li><span class="step-no">01</span><strong>打开 Fenver</strong><p>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a>，安卓版可直接跳转。</p></li>
+      <li><span class="step-no">02</span><strong>注册账号</strong><p>填写用户名、密码，设置密保问题用于找回密码。</p></li>
+      <li><span class="step-no">03</span><strong>开始对话</strong><p>更换设备登录同一账号，聊天记录与记忆可同步。</p></li>
     </ol>
     <p class="note">提示：若提示无可用模型，是管理员尚未配置模型，与你的账号无关。</p>
   </section>
 
   <section id="not-now">
     <header class="section-head">
-      <p class="section-no">05</p>
-      <h2>当前未开启</h2>
-      <p>把不能做的写在脸上，比在发布说明里藏一行更有用。</p>
+      <p class="section-no">05 / CLEAR BOUNDARIES</p>
+      <h2>能力边界，<br>也摆在明面上</h2>
+      <p>把不能做的写清楚，比让你试完才发现更尊重时间。</p>
     </header>
     <ul class="boundary-list">
       <li><span aria-hidden="true">×</span><div><h3>代码执行（沙箱）</h3><p>代码里有，但需要宿主机上的 Docker，当前没开。</p></div></li>
@@ -252,33 +243,36 @@
 
   <section id="open-source">
     <header class="section-head">
-      <p class="section-no">06</p>
-      <h2>开源了</h2>
-      <p>后端、网页版、安卓壳，代码全公开，Apache-2.0 协议。</p>
+      <p class="section-no">06 / OPEN SOURCE</p>
+      <h2>代码公开，<br>去留由你</h2>
+      <p>后端、网页版、安卓壳全部公开，Apache-2.0 协议。可以接着用在线版，也可以自己架一份。</p>
     </header>
     <div class="source-grid">
       <div class="terminal" role="group" aria-label="自建命令">
         <p class="terminal-bar"><span></span><span></span><span></span><em>INSTALL / README</em></p>
         <pre><code>git clone https://github.com/abonla599/fenver
 cd fenver
+
 # 两条路：venv 或 Docker
 # 详见 docs/INSTALL.md</code></pre>
+        <p class="terminal-foot">YOUR SERVER. YOUR DATA. YOUR RULES.</p>
       </div>
       <div class="source-copy">
+        <span class="source-badge">Apache-2.0</span>
         <h3>想自己架一份</h3>
         <p>仓库 <span class="plain-url">github.com/abonla599/fenver</span> 里的 docs/INSTALL.md 把 venv 与 Docker 两条路都写全了。开源版默认关闭自助注册：谁装谁就是管理员，建号发给自己想给的人。</p>
         <h3>用着在线的这份</h3>
         <p>不用动任何代码。更新通道已经指向新仓库，老用户照常收更新，不需要重装。</p>
-        <a class="btn" href="/changelog">更新日志 <span aria-hidden="true">↗</span></a>
+        <p class="source-actions"><a class="btn primary" href="/changelog">查看更新日志 <span aria-hidden="true">↗</span></a><a class="btn" href="/site/android.apk" download>下载安卓版</a></p>
       </div>
     </div>
   </section>
 
-  <section id="faq">
+  <section id="faq" class="reveal">
     <header class="section-head">
-      <p class="section-no">07</p>
-      <h2>常见问题</h2>
-      <p>先回答最容易被问到的六件事。</p>
+      <p class="section-no">07 / FAQ</p>
+      <h2>你关心的，<br>先说清楚</h2>
+      <p>账号、数据、设备与可用性，六个最常见的问题。</p>
     </header>
     <div class="faq-list">
       <details><summary><span>01</span>要自己配 API 密钥吗？</summary><p>不用。模型由这台助手的管理员配，普通人什么都不用填。</p></details>
@@ -292,11 +286,16 @@ cd fenver
 </main>
 
 <footer>
-  <div class="footer-top">
-    <p class="label">FENVER / END OF ISSUE</p>
-    <p><a href="/changelog">更新日志</a> <button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  <div class="footer-cta">
+    <p class="label">READY WHEN YOU ARE</p>
+    <h2>和你的 AI，<br>从第一句话开始。</h2>
+    <p>不用配密钥，不用看教程。注册完，直接聊。</p>
+    <p class="cta"><a class="btn primary" href="https://ai.fenever.xyz/app/">打开网页版 <span aria-hidden="true">↗</span></a><a class="btn" href="/site/android.apk" download>安卓版 <span aria-hidden="true">↓</span></a></p>
   </div>
-  <p class="footer-mark" aria-hidden="true">Fenver</p>
+  <div class="footer-top">
+    <a class="brand-link" href="/"><span class="brand">Fenver</span></a>
+    <p><a href="/changelog">更新日志</a><button class="linkbtn" type="button" id="copyBtn" aria-label="复制本网页地址">复制链接</button></p>
+  </div>
   <p class="note" id="copyHint" role="status"></p>
   <p class="note">界面跑在服务器上，没有「更新」这个动作，下次打开就是当前这一版。</p>
 </footer>
@@ -306,6 +305,5 @@ cd fenver
 </button>
 
 <script src="/site/site.js" defer></script>
-
 </body>
 </html>
