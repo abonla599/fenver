@@ -713,6 +713,18 @@ function putBackQueueItem(sessionId, item) {
   renderContextRing();
 }
 
+/* Fix Round 1（Important 二）：forceNext 的失配判据，纯函数——回队动作经 putBack
+ * 注入（streamInto 传自己的落桶闭包，测试传探针），本函数只回答"该不该回队"。
+ * 用户在 A 点「立即插话」后切到 B（哪怕 B 有在途流）：B 的 streamInto 因 sid 不
+ * 匹配不会消费，A 的条目又已从 A 队列摘除——两侧都不接就是悬空丢消息。
+ * 桶键取 forceNext.sid（原队列），绝不取"当前会话"。 */
+function requeueForceNext(forceNext, currentSid, currentUser, putBack) {
+  if (!forceNext) return false;
+  if (currentSid === forceNext.sid && currentUser === forceNext.user) return false;
+  putBack(forceNext.sid, forceNext.item);
+  return true;
+}
+
 function queueCardNode(item) {
   const row = document.createElement("div");
   row.className = "queue-card";
@@ -781,12 +793,23 @@ function queueShowNow(item) {
   renderQueueStrip();
   if (!state.streaming) {
     // 没有在途回答：不用借"停止→终帧"那一拍，直接走同一条发送路；发不出去照旧回队。
+    // Fix Round 1（Important 一）：直发分支同样要过视觉闸——带图条目在没有在途流时
+    // 点「立即插话」直发非视觉模型，同样是白花一轮钱换一个读不到图的回答。
+    // 拦下时条目放回原队列并暂停（点「继续」或换模型后仍在），不调 send。
+    if (relayImageBlocked(item)) {
+      putBackQueueItem(pref.sessionId, item);
+      setStatus("插话这条带图片，当前模型不支持视觉：换视觉模型或移除附件后点「继续」", true);
+      return;
+    }
     state.pending = item.attachments || [];
     send(item.text).then((started) => {
       if (started === false) {
         putBackQueueItem(pref.sessionId, item);
         setStatus("插话未发出：这条已放回队列，队列已暂停", true);
       }
+    }).catch(() => {
+      putBackQueueItem(pref.sessionId, item);
+      setStatus("插话发送出错：这条已放回队列，队列已暂停", true);
     });
     return;
   }
@@ -816,6 +839,11 @@ function maybeRelay(result, sidAtSend, userAtSend) {
         putBackQueueItem(sidAtSend, item);
         setStatus("自动接力没发出去：这条已放回队首，队列已暂停", true);
       }
+    }).catch(() => {
+      // Fix Round 1（顺带三）：send 抛异常同样回队暂停；.finally 照常释放 sendingId，
+      // putBackQueueItem 按 id 去重，then 里已回队的条目不会被塞回两次。
+      putBackQueueItem(sidAtSend, item);
+      setStatus("自动接力发送出错：这条已放回队首，队列已暂停", true);
     }).finally(() => finishQueueItem(sidAtSend, item.id));
   }, 300);
 }
@@ -2764,9 +2792,23 @@ async function streamInto() {
   const result = await runStream(holder);
   if (state.forceNext && state.forceNext.sid === sidAtSend &&
       state.forceNext.user === userAtSend) {
+    // Fix Round 1（Important 二）：run 结束时人已切走会话/身份——这一轮不再替人发
+    // （send 会以"当前" pref 起轮，A 的插话打到 B 头上就是串台花钱）。条目按
+    // forceNext.sid 放回**原会话队列**并暂停，人回来点「继续」或再点插话。
+    const f = state.forceNext;
+    if (requeueForceNext(f, pref.sessionId, pref.userId, (sid, item) => {
+      const back = queueFor(sid);
+      if (!back.items.some((x) => x.id === item.id)) back.items.unshift(item);
+      back.paused = true;
+    })) {
+      state.forceNext = null;
+      setStatus("插话这条没替你发：已切走会话/身份，条目已放回原队列并暂停", true);
+      renderQueueStrip();
+      renderContextRing();
+      return false;
+    }
     // "立即插话"的落点：这条流一终止（stop 已把它收落）就优先发这一条，
     // 剩余队列保持 paused=true（stop() 里已置），由人点「继续」再恢复接力。
-    const f = state.forceNext;
     state.forceNext = null;
     if (relayImageBlocked(f.item)) {
       putBackQueueItem(sidAtSend, f.item);
@@ -2774,7 +2816,8 @@ async function streamInto() {
       return false;
     }
     state.pending = f.item.attachments || [];
-    const started = await send(f.item.text);
+    // Fix Round 1（顺带三）：send 抛异常同样按"没发出去"处理——回队暂停，不留悬空条目。
+    const started = await send(f.item.text).catch(() => false);
     if (started === false) {
       putBackQueueItem(sidAtSend, f.item);
       setStatus("插话未发出：这条已放回队列，队列已暂停", true);

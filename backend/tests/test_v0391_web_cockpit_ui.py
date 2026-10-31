@@ -245,3 +245,75 @@ def test_relay_queue_ui_and_auto_send_guards():
     assert "function clearQueue(" in js, "接口要求的 clearQueue() 不存在"
     # 插话发送失败同样回队暂停（streamInto 的 forceNext 分支）。
     assert "started === false" in into, "forceNext 发送失败没有回队"
+
+
+# ---------------- Task 5 Fix Round 1：插话视觉闸 + forceNext 悬空回队 ----------------
+# 两条 Important：①queueShowNow 的"无在途流直接发"分支不过视觉闸，带图条目在无流时
+# 点「立即插话」会直发非视觉模型；②在 A 点插话后切到 B，forceNext={sid:A} 谁都不消费，
+# 条目从任何排队条上消失。修复口径：失配时按 forceNext.sid 回队原队列并暂停；
+# 三条 promise 链（queueShowNow 直发 / maybeRelay / forceNext 发送）异常一律回队，
+# 不留悬挂 sendingId；#queueCount 补 aria-live。
+
+
+def test_shownow_vision_gate_and_force_next_requeue_guards():
+    js = _js()
+    html = _html()
+    # ①直接发分支的视觉闸：必须排在 send( 之前，闸放在 send 后等于没闸。
+    show = _function_body(js, "queueShowNow")
+    assert "relayImageBlocked(" in show, \
+        "queueShowNow 缺视觉闸：无在途流时带图条目会直发非视觉模型"
+    assert show.index("relayImageBlocked(") < show.index("send("), \
+        "queueShowNow 的视觉闸判在 send 之后：拦不住直发"
+    assert "putBackQueueItem(" in show, "插话被视觉闸拦下时条目没有放回队列并暂停"
+    assert ".catch(" in show, "queueShowNow 直发链没有 catch：异常会静默吞掉条目"
+    # ②forceNext 失配回队：streamInto 里必须引用 forceNext.sid 作回队桶键、经 queueFor 落桶。
+    into = _function_body(js, "streamInto")
+    assert "requeueForceNext(" in into, "streamInto 没有过期 forceNext 的回队闸"
+    assert "forceNext.sid" in into and "queueFor(" in into, \
+        "forceNext 失配分支没有按 forceNext.sid 经 queueFor( 回队"
+    assert ".catch(" in into, "forceNext 发送链没有 catch：异常留下悬空条目"
+    relay = _function_body(js, "maybeRelay")
+    assert ".catch(" in relay, "maybeRelay 发送链没有 catch：异常悬挂 sendingId"
+    # ③待发计数对读屏可播报。
+    assert re.search(r'id="queueCount"[^>]*aria-live="polite"', html), \
+        "#queueCount 没有 aria-live=\"polite\"：待发条数变化不会播报"
+    assert "function requeueForceNext(" in js, "回队判据纯函数 requeueForceNext 不存在"
+
+
+# 行为锁（Task 3 的 Node vm 口径）：requeueForceNext 是注入 putBack 的纯判据——
+# 无 forceNext/锚点仍匹配 → 不动作；会话或身份任一切走 → 按 forceNext.sid 回队一次。
+_REQUEUE_FORCE_NEXT_HARNESS = r"""
+const fs=require("fs"), vm=require("vm");
+const ctx={}; vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2],"utf8"), ctx);
+const calls=[];
+const putBack=(sid,item)=>calls.push(sid+":"+item.id);
+const out={
+  nullCase: ctx.requeueForceNext(null,"s1","u1",putBack),
+  match: ctx.requeueForceNext({sid:"s1",user:"u1",item:{id:"a"}},"s1","u1",putBack),
+  userSwitched: ctx.requeueForceNext({sid:"s1",user:"u1",item:{id:"b"}},"s1","u2",putBack),
+  sessionSwitched: ctx.requeueForceNext({sid:"s1",user:"u1",item:{id:"c"}},"s2","u1",putBack),
+  calls,
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_requeue_force_next_pure_function_requeues_only_on_mismatch():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    src = _fn_text(_js(), "requeueForceNext")
+    d = Path(tempfile.mkdtemp(prefix="model-cockpit-requeue-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(_REQUEUE_FORCE_NEXT_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己跑失败：\n{r.stdout}\n{r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["nullCase"] is False and out["match"] is False, \
+        f"没有 forceNext / 锚点仍成立时不许回队：{out}"
+    assert out["userSwitched"] is True and out["sessionSwitched"] is True, \
+        f"身份或会话任一切走都必须回队：{out}"
+    assert out["calls"] == ["s1:b", "s1:c"], \
+        f"回队桶键必须是 forceNext.sid（原队列），不是当前会话：{out}"
