@@ -22,6 +22,10 @@ import android.os.Environment
  *   不是用户输入直拼——禁用字符在那边就已经换成空格了。
  * - 落点是 App 私有外部目录（M-8 第 5 条）：公共 Downloads 里的对话明码可被
  *   其他应用读到，导出的是整段对话，不能走公共目录。私有目录不需要存储权限。
+ *
+ * 残余：minSdk 24，Android 10 及更早持有 READ_EXTERNAL_STORAGE 的应用仍可能读到
+ * `/Android/data/<pkg>/files/Download`。彻底修需 API<30 写内部 filesDir + FileProvider
+ * 分享；当前接受这条残余，发版说明必须写明。
  */
 object SessionDownloads {
 
