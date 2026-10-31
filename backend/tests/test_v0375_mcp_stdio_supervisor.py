@@ -111,6 +111,19 @@ def _wait_state(supervisor, sid, state, timeout=5.0):
     return _wait_until(lambda: _row(supervisor, sid)["state"] == state, timeout)
 
 
+def _ready_event(supervisor, sid):
+    """记录一次 ready 回调，不靠轮询 state。
+
+    max_life 从 spawn 起算；注入 0.3/0.5s 时，子进程启动本身就可能吃掉整个
+    寿命，ready 设完同一轮监控就会转 stopping。10ms 轮询会随机错过这段零长度
+    窗口（负载越高越容易），但 ready 回调一定会在回收之前发出。
+    """
+    event = threading.Event()
+    supervisor.set_tool_callbacks(
+        on_ready=lambda got, _tools: event.set() if got == sid else None)
+    return event
+
+
 def _make(supervisor_config, tmp_path, **overrides):
     options = {
         "config_reader": supervisor_config,
@@ -439,10 +452,11 @@ def test_bad_entry_keeps_original_enabled_flag(tmp_path):
 def test_max_life_recycles_without_orphans(tmp_path):
     config = _Config(True, [_entry("s_life", "ok")])
     supervisor = _make(config, tmp_path, max_life=0.3)
+    ready = _ready_event(supervisor, "s_life")
     pids = set()
     try:
         supervisor.start()
-        assert _wait_state(supervisor, "s_life", STATE_READY, timeout=5.0), supervisor.status()
+        assert ready.wait(5.0), supervisor.status()
         assert _wait_until(
             lambda: _row(supervisor, "s_life")["restarts"] >= 1, 6.0
         ), supervisor.status()
@@ -498,9 +512,10 @@ def test_max_life_recycle_does_not_record_transport_failure(tmp_path):
         budget=budget,
         audit_fn=audit,
     )
+    ready = _ready_event(supervisor, "s_cycle")
     try:
         supervisor.start()
-        assert _wait_state(supervisor, "s_cycle", STATE_READY, timeout=5.0), supervisor.status()
+        assert ready.wait(5.0), supervisor.status()
         assert _wait_until(
             lambda: _row(supervisor, "s_cycle")["restarts"] >= 1, 6.0
         ), supervisor.status()
