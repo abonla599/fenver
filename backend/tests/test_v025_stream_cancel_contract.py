@@ -262,7 +262,14 @@ def test_new_stream_frames_carry_run_id_and_sequence(client):
 
     run_id = _run_id_from(frames)
     seqs = [d["seq"] for _, d in frames]
-    assert seqs == list(range(1, len(frames) + 1)), f"seq 必须从 1 连续：{seqs}"
+    # v0.39 读时合帧后 seq 不再"从 1 连续"：合并帧继承被合并的最后一帧的 seq，
+    # 中间号整段随这一帧发过。原语（序号单调、可当续播游标）由三条更窄的判据钉：
+    # 严格递增 + id 行 seq 与 payload.seq 一致（下面循环里）+ 末 seq 等于缓冲最大 seq。
+    assert all(b > a for a, b in zip(seqs, seqs[1:])), f"seq 必须严格递增：{seqs}"
+    run = stream_runs.get_run(run_id)
+    assert run is not None and seqs[-1] == run.last_seq, \
+        f"末帧 seq 必须就是缓冲里最大的 seq：{seqs[-1]} vs " \
+        f"{run.last_seq if run else None}"
     for (rid, d) in frames:
         assert rid == f"{run_id}:{d['seq']}", f"id 行与 payload.seq 对不上：{rid}"
         assert d["run_id"] == run_id
@@ -442,8 +449,13 @@ def test_resume_valid_offset_replays_without_rebilling_or_restorage(client, real
     assert res.status_code == 200, res.text
     frames = _frames(res.text)
     run_id = _run_id_from(frames)
-    assert [d["type"] for _, d in frames] == \
-        ["start", "content", "content", "content", "done"]
+    # v0.39 读时合帧：三个上游 chunk 在出口并成一帧（或按到达时序并成几帧）。
+    # 原语"正文一字不少、帧形可解析"改由拼接判据钉住：start + 至少一帧合并
+    # content（拼接文本正确）+ done。
+    types_seen = [d["type"] for _, d in frames]
+    assert types_seen[0] == "start" and types_seen[-1] == "done", types_seen
+    contents = [d["text"] for _, d in frames if d["type"] == "content"]
+    assert len(contents) >= 1 and "".join(contents) == "甲乙丙", types_seen
 
     assert len(completions.calls) == 1
     row = _usage_row("default_user")
@@ -451,13 +463,25 @@ def test_resume_valid_offset_replays_without_rebilling_or_restorage(client, real
     before_rows = _session_rows(client, sid)
     assert [m["role"] for m in before_rows] == ["user", "assistant"]
 
-    # 假装断线：客户端只收到了前两帧（start + 第一块），带着 run:2 来续
-    rejoin = client.post("/v1/chat/stream", headers={"Last-Event-ID": f"{run_id}:2"},
+    # 假装断线两种形态（读时合帧后按"合并帧的末 seq"记账）：
+    # (1) 不丢帧——只收到了 start 就断，续播必须把正文一字不落地补齐；
+    start_seq = frames[0][1]["seq"]
+    rejoin = client.post("/v1/chat/stream", headers={"Last-Event-ID": f"{run_id}:{start_seq}"},
                          json={"messages": []})
     assert rejoin.status_code == 200, rejoin.text
     replayed = _frames(rejoin.text)
-    assert [d["type"] for _, d in replayed] == ["content", "content", "done"], replayed
-    assert [d["text"] for _, d in replayed if d["type"] == "content"] == ["乙", "丙"]
+    assert replayed[-1][1]["type"] == "done", replayed
+    replay_texts = [d["text"] for _, d in replayed if d["type"] == "content"]
+    assert replay_texts and "".join(replay_texts) == "甲乙丙", replay_texts
+    # (2) 不重发——已收到合并 content 帧（游标=其末 seq）再断，续播只剩 done，
+    #     不许把已合并的正文（哪怕只是"甲"）再送一遍。
+    last_content_seq = max(d["seq"] for _, d in frames if d["type"] == "content")
+    rejoin2 = client.post("/v1/chat/stream",
+                          headers={"Last-Event-ID": f"{run_id}:{last_content_seq}"},
+                          json={"messages": []})
+    assert rejoin2.status_code == 200, rejoin2.text
+    replayed2 = _frames(rejoin2.text)
+    assert [d["type"] for _, d in replayed2] == ["done"], replayed2
     # 续播补的 done 与原流的 done 必须是同一条 message_id（反馈要挂在同一条消息上）
     assert replayed[-1][1]["message_id"] == frames[-1][1]["message_id"]
 

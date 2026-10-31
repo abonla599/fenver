@@ -135,7 +135,13 @@ def test_scrub_removes_process_frames_and_keeps_the_skeleton_byte_identical():
     kept_types = _types(scrubbed)
     assert not (set(kept_types) & gone), kept_types
     assert kept_types.count(se.FRAME_START) == 1 and kept_types.count(se.FRAME_DONE) == 1
-    assert kept_types.count(se.FRAME_CONTENT) == 2, kept_types
+    # v0.39 读时合帧：两条相邻 content 在出口并成一帧。原语"正文一条不少"
+    # 改由拼接判据钉：所有 content 帧文本拼接 == 原两段之和，帧数至少 1。
+    kept_content = [json.loads(c.partition("data: ")[2].partition("\n\n")[0])["text"]
+                    for c in scrubbed
+                    if '"type": "' + se.FRAME_CONTENT in c.partition("data: ")[2]]
+    assert len(kept_content) >= 1, kept_types
+    assert "".join(kept_content) == "正文第一句" + "，正文第二句", kept_content
 
     # 骨架帧原样：start/content 两条在两个视图里逐字节相同
     same = [c for c in owner_frames if '"type": "' + se.FRAME_START in c
