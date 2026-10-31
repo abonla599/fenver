@@ -132,6 +132,102 @@ def test_native_ring_and_panel_compose():
     assert "Prefs.migrateContextBudget()" in _block(chat, "suspend fun loadModelsNow()")
 
 
+def test_native_relay_queue_state_and_guards():
+    c = _c("ui/ChatUi.kt")
+    assert "data class QueuedMsg(" in c
+    send = _block(c, "fun sendNow(text: String) {")
+    assert "if (busy) {" in send and "queues[" in send, "忙时发送没入队"
+    assert "queuePaused[" in c and "canRelay" in c, "队列没有暂停/会话/前台闸"
+    assert "maybeRelay(" in c, "流结束没有接力入口"
+    assert "resetQueuesForIdentity" in c or "queues.clear()" in c, "换身份没清队列"
+
+
+def test_native_relay_queue_data_shape_and_limits():
+    c = _c("ui/ChatUi.kt")
+    at = c.index("data class QueuedMsg(")
+    decl = c[at:at + 160]
+    for f in ("val id: String", "val text: String",
+              "val attachments: List<AttItem>", "val k: Int"):
+        assert f in decl, f"QueuedMsg 缺字段：{f}"
+    assert "private const val QUEUE_MAX_ITEMS = 20" in c
+    assert "private const val QUEUE_MAX_CHARS = 20_000" in c
+    assert 'private const val QUEUE_DRAFT_KEY = "__draft__"' in c
+    qk = c[c.index("private fun queueKeyOf("):]
+    assert "sid.ifEmpty { QUEUE_DRAFT_KEY }" in qk[:120], "草稿哨兵没接进 queueKeyOf"
+    # canRelay 是文件级纯函数：六闸一个都不能少（静态测试要能找到它）
+    cr = c[c.index("private fun canRelay("):]
+    expr = cr[:cr.index("\n\n")] if "\n\n" in cr[:400] else cr[:400]
+    for gate in ("normal", "sameSession", "foreground", "!paused", "!busy", "hasItem"):
+        assert gate in expr, f"canRelay 缺闸：{gate}"
+
+
+def test_native_relay_queue_enqueue_stop_and_normal_gates():
+    c = _c("ui/ChatUi.kt")
+    send = _block(c, "fun sendNow(text: String) {")
+    busy_branch = _block(send, "if (busy) {")
+    assert "QUEUE_MAX_ITEMS" in busy_branch and "接力队列已满" in busy_branch, \
+        "队满没提示或没按 20 条上限拦"
+    assert 'queues[' in busy_branch and "QueuedMsg(" in busy_branch
+    st = _block(c, "fun stopNow() {")
+    assert "queuePaused[queueKeyOf(sessionId)] = true" in st, "停止没暂停本会话队列"
+    # streamInto 末尾经 afterStreamEnd 触发接力；normal 必须排除停止/失败/取回
+    assert "var afterStreamEnd: (String, Int, Boolean) -> Unit" in c
+    assert c.index("var afterStreamEnd") < c.index("fun streamInto("), \
+        "局部变量不能前向引用：afterStreamEnd 必须声明在 streamInto 之前"
+    rs = _block(c, "fun streamInto() {")
+    assert "afterStreamEnd(sidAtSend, epochAtSend, normal)" in rs
+    n_at = rs.index("val normal =")
+    n_line = rs[n_at:rs.index("\n", n_at)]
+    assert "!failed" in n_line and "!stopped" in n_line and "!needHistory" in n_line, \
+        "normal 把停止/失败/断线取回也算正常收尾"
+
+
+def test_native_relay_relay_and_force_next():
+    c = _c("ui/ChatUi.kt")
+    mr = _block(c, "fun maybeRelay(")
+    assert "canRelay(" in mr, "maybeRelay 没走那条纯函数"
+    assert "delay(300)" in mr
+    assert "sendingQueueId" in mr and "supports_vision" in mr
+    assert "relayImageBlocked(" in mr, "队首带图没先过视觉闸"
+    assert "currentProvider() != null" in mr, "接力前没同步确认有可用模型"
+    # 立即插话：对不上号的那一条要回队首并暂停，不能丢
+    assert "ForceNext(" in c
+    assert "queueKeyOf(fn.sid)" in c
+    assert "listOf(fn.item) +" in c, "回队不是 unshift 形状：这条会排到最后或丢掉"
+    # 插话前已存在的旧 forceNext 覆盖语义：先占位后停流
+    fn_at = c.index("forceNext = ForceNext(")
+    stop_at = c.index("stopNow()", fn_at)
+    assert fn_at < stop_at, "forceNext 必须在 stopNow 之前落位，否则收尾读不到"
+
+
+def test_native_relay_draft_echo_and_strip_ui():
+    c = _c("ui/ChatUi.kt")
+    send = _block(c, "fun sendNow(text: String) {")
+    assert "val echo = t == input.text.trim()" in send, "没判正文是否就是输入框内容"
+    assert 'if (echo) input = TextFieldValue("")' in send, \
+        "无条件清空输入框：接力发送会抹掉用户新写的草稿"
+    assert "Web" not in _block(c, "private fun QueueStrip("), \
+        "队列条不许 WebView/拼 HTML"
+    strip = _block(c, "private fun QueueStrip(")
+    for needle in ("条待发送", "Text(", "BasicTextField(", "立即插话", "暂停"):
+        assert needle in strip, f"QueueStrip 缺件：{needle}"
+    assert "maxLines = 2" in strip
+    assert "if (queueItems.isNotEmpty())" in c, "空队列整块不该挂"
+
+
+def test_native_relay_identity_and_ring_remember():
+    c = _c("ui/ChatUi.kt")
+    assert "val queues = remember(identityId) { mutableStateMapOf<String, List<QueuedMsg>>() }" in c
+    assert "fun resetQueuesForIdentity()" in c
+    le = _block(c, "LaunchedEffect(identityId)")
+    assert "resetQueuesForIdentity()" in le
+    # Task 6 遗留收口：环读数从每拍组合改 remember，且队列 K 单独一行不进 usedK
+    assert "val ringInfo = remember(messages, input.text" in c
+    assert "queuedK" in c and "待发 +" in c
+    ring_body = _block(c, "fun contextRingInfo(")
+    assert "queues[" not in ring_body, "queuedK 混进了环读数公式：usedK/pct 不许动"
+
+
 def test_settings_ctxrow_writes_per_provider_budget():
     st = _c("ui/SettingsUi.kt")
     assert "Prefs.contextTokensK" not in st, "设置滑杆还在读写旧全局键"

@@ -150,6 +150,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -190,6 +193,32 @@ import xyz.fenever.assistant.nativeapp.theme.text3Color
 /* .att-chip / .msg-atts 的附件条目：网页字段 {id,name,kind,size,url}；
  * 原生没有 blob URL，图片按 id 现取字节解码，取不到退化成 📄 标签（同一降级语义）。 */
 data class AttItem(val id: String, val name: String, val kind: String, val size: Long)
+
+/* v0.39.x 驾驶舱 Task 7「接力队列」：任务执行中继续发送不再被吞，按网页
+ * queueFor/enqueueQueueItem 的语义进按会话分桶的内存队列，流正常收尾后自动接力。
+ * 全部状态住在 remember——跨进程死亡不落盘，这是本版的产品口径，不是遗漏。 */
+data class QueuedMsg(val id: String, val text: String,
+                    val attachments: List<AttItem>, val k: Int)
+
+/** 插话请求：「就现在发这一条」连同出发时的会话坐标——流收尾时对不上号就把它
+ *  放回**原会话**的队列头，绝不改发给中途换上的别的会话。 */
+data class ForceNext(val sid: String, val epoch: Int, val item: QueuedMsg)
+
+private const val QUEUE_MAX_ITEMS = 20
+private const val QUEUE_MAX_CHARS = 20_000
+// 会话还没建出来（sessionId 为空）时队列挂在这枚哨兵桶上：草稿期的待发也不许丢。
+private const val QUEUE_DRAFT_KEY = "__draft__"
+private fun queueKeyOf(sid: String): String = sid.ifEmpty { QUEUE_DRAFT_KEY }
+
+/* 接力资格的闸全在这一个纯函数里，静态可查、双端可对照；
+ * 「异常收尾/对不上号要暂停」的处置留在调用方，这里只回答能不能接力。 */
+private fun canRelay(normal: Boolean, sameSession: Boolean, foreground: Boolean,
+                     paused: Boolean, busy: Boolean, hasItem: Boolean): Boolean =
+    normal && sameSession && foreground && !paused && !busy && hasItem
+
+/* 接力/插话的图片闸：带图那条只许交给支持视觉的模型（网页 relayImageBlocked 同判据）。 */
+private fun relayImageBlocked(atts: List<AttItem>, vision: Boolean): Boolean =
+    atts.any { it.kind == "image" } && !vision
 
 /* ---------------- 过程留痕（v0.29.0） ----------------
  * 步的形状与服务端 core/stream_events.py 的 step_* 同构（kind 分 thinking/tool/
@@ -481,6 +510,40 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     val lastUsageByKey = remember(identityId) { mutableStateMapOf<String, Usage>() }
     val lastClientKByKey = remember(identityId) { mutableStateMapOf<String, Int>() }
     val contextDropBySession = remember(identityId) { mutableStateMapOf<String, Int>() }
+    /* v0.39.x 驾驶舱 Task 7「接力队列」：忙碌时点发送不再吞掉，按会话分桶排队，
+     * 流正常收尾后自动接力。全部住在 remember(identityId)——换账号绝不把上一个
+     * 人的待发替他发出去；列表值用不可变 List，写回 map 才看得见变化。
+     * 内存态、不落盘：跨进程死亡就清空，这是本版口径（网页端同为内存）。 */
+    val queues = remember(identityId) { mutableStateMapOf<String, List<QueuedMsg>>() }
+    val queuePaused = remember(identityId) { mutableStateMapOf<String, Boolean>() }
+    // 接力发送中的那条：防重入的第二道闸（delay 醒来后 sendNow 之前的短窗）
+    var sendingQueueId by remember(identityId) { mutableStateOf<String?>(null) }
+    // 「立即插话」的待发射：随出发时的会话/请求号，收尾时核对坐标再放行
+    var forceNext by remember(identityId) { mutableStateOf<ForceNext?>(null) }
+    var queueNowConfirm by remember(identityId) { mutableStateOf<QueuedMsg?>(null) }
+    // 退后台整条接力链停下：不在用户看不见的地方替他往外发消息
+    var foreground by remember { mutableStateOf(true) }
+
+    fun resetQueuesForIdentity() {
+        queues.clear(); queuePaused.clear(); sendingQueueId = null; forceNext = null
+    }
+    // 首次组合时各表本来就是空，这一枪是 no-op；换身份立刻全清。
+    LaunchedEffect(identityId) { resetQueuesForIdentity() }
+    val lifecycleOwner = ctx as? LifecycleOwner
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, ev ->
+            when (ev) {
+                Lifecycle.Event.ON_START -> foreground = true
+                Lifecycle.Event.ON_STOP -> {
+                    foreground = false
+                    queuePaused[queueKeyOf(sessionId)] = true
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(obs)
+        onDispose { lifecycleOwner?.lifecycle?.removeObserver(obs) }
+    }
     // 预算住在 SharedPreferences（非快照态）：滑杆每写一次手动 +1，环/账本才跟着重画。
     var ringTick by remember { mutableIntStateOf(0) }
     var contextPanelOpen by remember { mutableStateOf(false) }
@@ -1062,6 +1125,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
      * StreamNeedHistoryException → 去会话里取回。**绝不回头 POST /v1/chat 重发整轮**——
      * 老代码 `retryable → Api.chat(payload)` 那一手正是断线/退后台时再付一次钱、再落一条
      * 一样助手消息的病根。停止 = 先打服务端 cancel（run_id 来自 onRun），本地取消只是兜底。 */
+    /* 接力触发槽：Kotlin 局部函数不能前向引用，streamInto 够不到后面才定义的
+     * maybeRelay/sendNow——先声明空槽，sendNow/maybeRelay 全部就位后再接线。 */
+    var afterStreamEnd: (String, Int, Boolean) -> Unit = { _, _, _ -> }
     fun streamInto() {
         if (busy) return
         streamJob = scope.launch {
@@ -1322,6 +1388,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 任务卡读的是「当前身份在等哪一条」：身份级状态、不是这一轮的消息落点，无需守卫
             if (sawSuspend) refreshTaskCard()
             if (mine() && !failed && !stopped) setStatus("")
+            // 收尾同一 job 内触发接力。normal 只认「真的好好说完了」：停止/失败/
+            // 断线取回/服务端 cancelled、cannot_resume 全算异常——异常时不该在用户
+            // 没留神的地方替他接着发消息（maybeRelay 收到 false 会把队列暂停）。
+            val normal = !failed && !stopped && !needHistory && !stopRequested &&
+                doneStatus != "cancelled" && doneStatus != "cannot_resume"
+            afterStreamEnd(sidAtSend, epochAtSend, normal)
         }
     }
 
@@ -1332,6 +1404,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
      * 正常收尾（半句 +「（已停止生成）」照样落本地）。run_id 由 streamInto 的 onRun 抓来落在
      * currentRunId 上。次序钉死：服务端取消在本地取消前面。 */
     fun stopNow() {
+        // 按「停止」=「别再替我自作主张往下发」：本会话队列先暂停，由用户点「继续队列」
+        // 恢复。这一枪排在取消之前——不管 cancel 走哪条分支，接力都不该被这一下点击放行。
+        queuePaused[queueKeyOf(sessionId)] = true
         val rid = currentRunId
         if (rid != null) {
             scope.launch {
@@ -1373,7 +1448,26 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     /* app.js send()：空输入且没有附件 → 什么都不做；清单还没回来先补拉一次；
      * 没有可用模型 → 指路文案（管理员/普通用户两句不一样）并打开「模型服务」。 */
     fun sendNow(text: String) {
-        if (busy) return
+        if (busy) {
+            // 任务执行中点发送不再吞掉（网页 enqueueQueueItem 同语义）：正文+附件
+            // 进当前会话队列，输入框与附件条一起清——用户按的就是"把它发出去"。
+            val t = text.trim()
+            if (t.isEmpty() && pending.isEmpty()) return
+            val key = queueKeyOf(sessionId)
+            val items = queues[key].orEmpty()
+            if (items.size >= QUEUE_MAX_ITEMS ||
+                items.sumOf { it.text.length } + t.length > QUEUE_MAX_CHARS) {
+                setStatus("接力队列已满，先发掉一条或清空", true)
+                return
+            }
+            val k = Math.round(Api.estimateTokens(t) / 1000.0).toInt().coerceAtLeast(1)
+            queues[key] = items +
+                QueuedMsg(java.util.UUID.randomUUID().toString(), t, pending.toList(), k)
+            pending = emptyList()
+            input = TextFieldValue("")
+            setStatus("已加入接力队列")
+            return
+        }
         val t = text.trim()
         if (t.isEmpty() && pending.isEmpty()) return
         streamJob = null
@@ -1396,12 +1490,109 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             val atts = pending.toList()
             pending = emptyList()
             messages = messages + UiMsg("user", t, attachments = atts)
-            input = TextFieldValue("")
+            // 只清「发出去的正是输入框里那段」：按钮/IME/语音传的都成立；接力与插话
+            // 发的是队列里的正文，此时输入框里可能是用户刚起笔的新草稿，绝不能抹。
+            val echo = t == input.text.trim()
+            if (echo) input = TextFieldValue("")
             // v0.30 用户诉求：发完问题键盘自动收起，省掉一次手动收键盘，直接看输出。
             // 用现成的 stashIme（clearFocus + 连发压 IME），不另起一套——单发 hide()
             // 在这 ROM 上会被 show 动画吞掉（第 8/9 轮真机判例）。
             stashIme()
             streamInto()
+        }
+    }
+
+    /* 接力（网页 maybeRelay 的原生对位）：正常收尾且还是出发时那个会话才往下发。
+     * 同步闸先过 canRelay；异常（没好好说完/会话或请求号对不上）不静默吞——把这条
+     * 队列标暂停，让「继续队列」成为用户看得见、点得动的出口。 */
+    fun maybeRelay(sidAtSend: String, epochAtSend: Int, normal: Boolean) {
+        val key = queueKeyOf(sidAtSend)
+        val items = queues[key].orEmpty()
+        val sameSession = epochAtSend == sessionEpoch && sidAtSend == sessionId
+        if (!canRelay(normal, sameSession, foreground, queuePaused[key] == true,
+                busy, items.isNotEmpty())) {
+            if (!normal || !sameSession) queuePaused[key] = true
+            return
+        }
+        scope.launch {
+            // 让 300ms：落定动画与状态行收尾走完再起飞下一条。这 300ms 是竞态窗口
+            // ——用户可能又发了一条/切了会话/退到后台/按了暂停，所以醒来后全量重验。
+            delay(300)
+            val fresh = queues[key].orEmpty()
+            if (!canRelay(true, epochAtSend == sessionEpoch && sidAtSend == sessionId,
+                    foreground, queuePaused[key] == true, busy, fresh.isNotEmpty()) ||
+                sendingQueueId != null) return@launch
+            val item = fresh.first()
+            if (relayImageBlocked(item.attachments,
+                    currentProvider()?.supports_vision == true)) {
+                queuePaused[key] = true
+                setStatus("队首这条带图片，当前模型不支持视觉：换视觉模型或移除附件后点「继续」", true)
+                return@launch
+            }
+            // 从这里到 sendNow 之间不允许任何挂起点：一 suspend，用户就可能在这空档
+            // 又发了一轮，sendNow 的「忙时入队」会把这条重新塞回队列——重复发送。
+            if (currentProvider() != null && sessionId.isNotEmpty()) {
+                sendingQueueId = item.id
+                queues[key] = fresh.drop(1)
+                pending = item.attachments
+                sendNow(item.text)
+                sendingQueueId = null
+            } else {
+                queuePaused[key] = true
+            }
+        }
+    }
+
+    /* 立即插话（队列条上那条确认后走这里）：先过闸再离队——点一下就把消息弄丢不可接受，
+     * 闸不过一律回队首 + 暂停 + 说明原因。忙时的发法是先立 forceNext 靶子再停止：
+     * stopNow 的停是暂停与取消，不是发送信号，那条消息要等这一轮按旧坐标收尾后放行。 */
+    fun sendQueuedNow(item: QueuedMsg) {
+        val key = queueKeyOf(sessionId)
+        val blocked = relayImageBlocked(item.attachments,
+            currentProvider()?.supports_vision == true)
+        if (blocked || currentProvider() == null || sessionId.isEmpty()) {
+            val rest = queues[key].orEmpty()
+            if (rest.none { it.id == item.id }) queues[key] = listOf(item) + rest
+            queuePaused[key] = true
+            setStatus(if (blocked)
+                "这条带图片，当前模型不支持视觉：换视觉模型或移除附件后再插话"
+            else
+                "没有可用模型或会话还没建起来，这条已放回队列并暂停", true)
+            return
+        }
+        queues[key] = queues[key].orEmpty().filter { it.id != item.id }
+        if (busy && streamJob != null) {
+            forceNext = ForceNext(sessionId, sessionEpoch, item)
+            queuePaused[key] = true
+            stopNow()
+        } else {
+            pending = item.attachments
+            sendNow(item.text)
+        }
+    }
+
+    // 接线接力触发槽（streamInto 只认这一个口子）：forceNext 优先——用户点名「就现在
+    // 发这条」的那一条先走，队列暂停与否管不着它；没有插话待发射才轮到常规接力。
+    afterStreamEnd = { sid, epoch, normal ->
+        val fn = forceNext
+        if (fn != null) {
+            if (fn.sid == sid && fn.epoch == epoch) {
+                forceNext = null
+                queuePaused[queueKeyOf(fn.sid)] = true   // 插话吃掉这一轮，剩余等「继续」
+                pending = fn.item.attachments
+                sendNow(fn.item.text)
+            } else {
+                // 插话那轮半途切了会话/换了身份：放回**原会话**队列头并暂停，
+                // 绝不发给中途换上的别的会话；宁可重复也不丢。
+                val fk = queueKeyOf(fn.sid)
+                val rest = queues[fk].orEmpty()
+                if (rest.none { it.id == fn.item.id }) queues[fk] = listOf(fn.item) + rest
+                forceNext = null
+                queuePaused[fk] = true
+                setStatus("插话那轮已切走：这条已放回原会话队列并暂停", true)
+            }
+        } else {
+            maybeRelay(sid, epoch, normal)
         }
     }
 
@@ -1569,9 +1760,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 时长按输入框出复制/粘贴/全选（光标旁）；键盘没起时输入位是占位条，单点不挂框
     // 不冒菜单、长按归语音。语音长按只在键盘收起（或语音模式）时接管，靠 voiceHold
     // 的 enabled 门控分流。
-    // v0.39.x 驾驶舱：环/账本每一拍组合读一次（与网页 renderContextRing 同口径——
-    // 估算只在消息/预算/整理/usage 变更后重画，不在流式逐 token 路径上）。
-    val ringInfo = contextRingInfo()
+    // v0.39.x 驾驶舱：环/账本读数收进 remember——组合每拍都重算一遍全量估算太贵，
+    // 只有影响读数的东西（消息/输入/预算拍/会话/清单/usage/整理/队列）变了才算一次。
+    val ringInfo = remember(messages, input.text, ringTick, sessionId, providers,
+        lastUsageByKey.size, lastClientKByKey.size, contextDropBySession.size,
+        queues[queueKeyOf(sessionId)]) { contextRingInfo() }
+    // 队列的「待发」只在账本里做附注：usedK/pct 是实发口径，还没发出去的不许混进去。
+    val queuedK = queues[queueKeyOf(sessionId)]?.sumOf { it.k } ?: 0
     ModalNavigationDrawer(
         drawerState = drawerState,
         // 第 14 轮（用户真机：按住语音向右滑，整页被抽屉手势拖开、录音卡跟着错位，
@@ -1876,6 +2071,38 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             }
                         }
                     }
+                    // 接力队列条（网页 .queue-strip 对位）：只有待发才挂；暂停态写在
+                    // 头行按钮上——排队的人要看得见「为什么还没发」和出口在哪。
+                    val qKey = queueKeyOf(sessionId)
+                    val queueItems = queues[qKey].orEmpty()
+                    if (queueItems.isNotEmpty())
+                        QueueStrip(
+                            items = queueItems,
+                            paused = queuePaused[qKey] == true,
+                            onTogglePause = {
+                                if (queuePaused[qKey] == true) {
+                                    queuePaused[qKey] = false
+                                    // 空闲时立刻接力（内部还有 300ms 全量重验）；
+                                    // 忙时只解除暂停，等这一轮正常收尾自己接上。
+                                    if (!busy) maybeRelay(sessionId, sessionEpoch, normal = true)
+                                } else {
+                                    queuePaused[qKey] = true
+                                }
+                            },
+                            onEdit = { id, text ->
+                                if (text.isEmpty()) {
+                                    setStatus("改成空的了——想发就补几个字，不想发就删除这条", true)
+                                } else {
+                                    queues[qKey] = queues[qKey].orEmpty()
+                                        .map { if (it.id == id) it.copy(text = text) else it }
+                                }
+                            },
+                            onDelete = { id ->
+                                val rest = queues[qKey].orEmpty().filter { it.id != id }
+                                if (rest.isEmpty()) queues.remove(qKey) else queues[qKey] = rest
+                            },
+                            onShowNow = { item -> queueNowConfirm = item },
+                        )
                     InputCard(
                         input = input, onInput = { input = it },
                         focusRequester = inputFocus,
@@ -2022,11 +2249,45 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 ContextPanel(
                     info = ringInfo,
                     providerId = currentProvider()?.id ?: "",
+                    queuedK = queuedK,
                     onBudgetChanged = { ringTick++ },
                     onTidy = { applyContextTidy() },
                     onReset = { resetContextTidy() },
                     onClose = { contextPanelOpen = false },
                 )
+            }
+            // 「立即插话」确认弹层：忙时这一枪的代价是停掉正在生成的回答，必须说破
+            // 并让用户点一次确认；空闲时就是「别排队，现在发」。
+            queueNowConfirm?.let { item ->
+                Dialog(onDismissRequest = { queueNowConfirm = null }) {
+                    Surface(shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                        Column(Modifier.fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 14.dp)) {
+                            Text("立即插话", fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface)
+                            Text(item.text, fontSize = 13.sp, maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 8.dp))
+                            Text(if (busy)
+                                    "这会停掉正在生成的回答，然后把这条发出去；剩下待发的先暂停。"
+                                else
+                                    "现在没在生成，这条会直接发出去。",
+                                fontSize = 12.sp, color = text3Color())
+                            Row(Modifier.fillMaxWidth().padding(top = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                ActionPill("取消", onClick = { queueNowConfirm = null },
+                                    filled = false)
+                                ActionPill("确认插话", onClick = {
+                                    queueNowConfirm = null
+                                    sendQueuedNow(item)
+                                })
+                            }
+                        }
+                    }
+                }
             }
             // 断网小卡片：顶部居中悬浮，不占布局不推内容；今日静音过就不出
             if (NetMinder.show()) {
@@ -2215,6 +2476,87 @@ private fun EngineRow(name: String, selected: Boolean = false, onClick: () -> Un
         Text(name, fontSize = 14.sp, color = scheme.onSurface,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             modifier = Modifier.weight(1f))
+    }
+}
+
+/* ---------------- 接力队列条（v0.39.x 驾驶舱 Task 7） ----------------
+ * 队列内容全是用户自己刚打的纯文本：一律 Compose Text/BasicTextField 渲染，
+ * 不引入任何内嵌浏览视图、不拼标记语言。空队列由调用方整块不挂；暂停态
+ * 明写在头行（"已暂停"+继续按钮），别让排队的人以为界面卡死。 */
+@Composable
+private fun QueueStrip(items: List<QueuedMsg>, paused: Boolean,
+                       onTogglePause: () -> Unit, onEdit: (String, String) -> Unit,
+                       onDelete: (String) -> Unit, onShowNow: (QueuedMsg) -> Unit) {
+    // 行内编辑的临时态：队列一变（增删改）remember(items) 就重置，不残留旧草稿
+    var editingId by remember(items) { mutableStateOf<String?>(null) }
+    var draft by remember(items) { mutableStateOf("") }
+    val scheme = MaterialTheme.colorScheme
+    FenverSurface(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        color = scheme.surface,
+        border = BorderStroke(1.dp, scheme.outline),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("${items.size} 条待发送", fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold, color = scheme.onSurface,
+                    modifier = Modifier.weight(1f))
+                if (paused) {
+                    Text("已暂停", fontSize = 12.sp, color = text3Color(),
+                        modifier = Modifier.padding(end = 8.dp))
+                    ActionPill("继续队列", onClick = onTogglePause)
+                } else {
+                    ActionPill("暂停", onClick = onTogglePause, filled = false)
+                }
+            }
+            items.forEach { item ->
+                Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    if (editingId == item.id) {
+                        BasicTextField(
+                            value = draft, onValueChange = { draft = it },
+                            textStyle = TextStyle(fontSize = 13.sp, color = scheme.onSurface),
+                            cursorBrush = SolidColor(scheme.primary),
+                            modifier = Modifier.fillMaxWidth()
+                                .background(scheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                .border(BorderStroke(1.dp, scheme.outline),
+                                    RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = {
+                                onEdit(item.id, draft.trim()); editingId = null
+                            }),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(top = 4.dp)) {
+                            ActionPill("保存", onClick = {
+                                onEdit(item.id, draft.trim()); editingId = null
+                            }, filled = false)
+                            ActionPill("取消", onClick = { editingId = null }, filled = false)
+                        }
+                    } else {
+                        Row(Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.text, fontSize = 13.sp, color = scheme.onSurface,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f))
+                            Text("+${item.k}K", fontSize = 11.sp, color = text3Color(),
+                                modifier = Modifier.padding(start = 6.dp))
+                        }
+                        if (item.attachments.isNotEmpty())
+                            Text("带 ${item.attachments.size} 个附件", fontSize = 11.sp,
+                                color = text3Color())
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ActionPill("编辑", onClick = {
+                                editingId = item.id; draft = item.text
+                            }, filled = false)
+                            ActionPill("删除", onClick = { onDelete(item.id) }, filled = false)
+                            ActionPill("立即插话", onClick = { onShowNow(item) })
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2595,7 +2937,7 @@ private fun ContextRing(pct: Int, usedK: Int, budgetK: Int, onClick: () -> Unit)
  * usage 时才说——客户端不猜服务端注入了什么）、预算滑杆（写 Prefs.setContextBudget，
  * 与 outbound 同源）、「轻量整理」「恢复」（写 contextDropBySession，实发真的少）。 */
 @Composable
-private fun ContextPanel(info: ContextRingInfo, providerId: String,
+private fun ContextPanel(info: ContextRingInfo, providerId: String, queuedK: Int,
                          onBudgetChanged: () -> Unit, onTidy: () -> Unit,
                          onReset: () -> Unit, onClose: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
@@ -2645,6 +2987,10 @@ private fun ContextPanel(info: ContextRingInfo, providerId: String,
                     Text("本轮发送已从最早处切掉 ${info.dropped} 条；历史原文未动。",
                         fontSize = 12.sp, color = text3Color(),
                         modifier = Modifier.padding(bottom = 8.dp))
+                    // 待发是附注不是实发：接力队列的 K 不进 usedK/pct 那条公式。
+                    if (queuedK > 0)
+                        Text("待发 +${queuedK}K（接力队列）", fontSize = 12.sp,
+                            color = text3Color(), modifier = Modifier.padding(bottom = 6.dp))
                     Text("预算 $k/${hi}K", fontSize = 13.sp, color = scheme.onSurface,
                         modifier = Modifier.padding(bottom = 2.dp))
                     Slider(value = k.toFloat(),
