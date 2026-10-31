@@ -237,3 +237,79 @@ def test_settings_ctxrow_writes_per_provider_budget():
     assert "Prefs.contextBudgetK(" in row and "Prefs.setContextBudget(" in row
     call = _between(st, "CtxRow(cap", "SetRow(FenverIcon.Export")
     assert "?: Prefs.defaultProviderId" in call, "调用点没给 provider 口径（显示会分叉）"
+
+
+# ---------------- Task 7 修复轮 1（独立审查 Changes requested，2026-10-31） ----------------
+# 每条都是「把对应修法删掉/改回旧形状就会红」的静态形状锁；docstring 里写明
+# 变异操作，报告要求逐条实跑证明会红。
+
+def test_c1_force_next_send_requires_current_session_coordinates():
+    """C-1（Critical）：立即插话立靶后、终帧前切会话，A 的消息会发进 B。
+    变异：删掉 `fn.sid == sessionId` / `fn.epoch == sessionEpoch` 两个当前坐标
+    条件（旧代码正是只剩前两个恒真条件）→ 本测试必须红。"""
+    c = _c("ui/ChatUi.kt")
+    ae = _block(c, "afterStreamEnd = {")
+    # 对号支路：被停流的坐标（与靶同源、恒真）+ 当前屏幕坐标（真判据）缺一不可
+    for needle in ("fn.sid == sid", "fn.epoch == epoch",
+                   "fn.sid == sessionId", "fn.epoch == sessionEpoch"):
+        assert needle in ae, f"插话放行的对号支路缺条件：{needle}"
+    # 对不上当前坐标时必须仍走回队支路：放回**原会话**队列头并暂停
+    assert "queueKeyOf(fn.sid)" in ae
+    assert "listOf(fn.item) + rest" in ae, "回队支路不再 unshift 原会话队列"
+
+
+def test_i1_ring_remember_keys_use_values_not_sizes():
+    """I-1（Important）：环读数的 remember 键按值不入 size。
+    变异：把任一按值键（如 ringDrop）换回 contextDropBySession.size → 本测试必须红
+    （覆写既有键 size 不变，第二次轻量整理/换模型/改预算回来都会吃旧缓存）。"""
+    c = _c("ui/ChatUi.kt")
+    keys = _between(c, "val ringInfo = remember(", ") { contextRingInfo() }")
+    for needle in ("ringProviderId", "ringBudget", "ringPersona", "ringDrop",
+                   "ringUsage", "ringClientK", "ringQueue"):
+        assert needle in keys, f"环 remember 键缺按值项：{needle}"
+    for dead in ("lastUsageByKey.size", "contextDropBySession.size",
+                 "lastClientKByKey.size"):
+        assert dead not in keys, f"环键还挂着假覆盖 {dead}"
+
+
+def test_m2_relay_gate_cleared_only_at_stream_end():
+    """M-2：sendingQueueId 第二道闸的清除从 sendNow 后挪到每轮收尾入口。
+    变异：把 `sendingQueueId = null` 挪回 maybeRelay 的 sendNow(item.text) 之后
+    → tail 断言红；删掉同步段的 sessions.any → 第二条断言红。"""
+    c = _c("ui/ChatUi.kt")
+    ae = _block(c, "afterStreamEnd = {")
+    assert "sendingQueueId = null" in ae, "收尾入口没统一清防重入闸"
+    mr = _block(c, "fun maybeRelay(")
+    # 同步段加纯内存判据：保证 sendNow 里 ensureSession() 立即返回 true，
+    # 不在「闸已清、busy 未置真」的窗口里挂起
+    assert "sessions.any { it.session_id == sessionId }" in mr, \
+        "同步段没确保证 ensureSession 直回：可能走进新建会话的挂起路径"
+    tail = mr[mr.index("sendNow(item.text)"):]
+    assert "sendingQueueId = null" not in tail, \
+        "清闸挪回 sendNow 之后：busy 置真前的窗口又敞开了"
+
+
+def test_m3_afterstream_end_survives_cancellation():
+    """M-3：收尾与接力触发不许被取消态截断。
+    变异：把 afterStreamEnd(...) 挪回 withContext(NonCancellable) 块外 → 第一条红；
+    把 runCatching { refreshTaskCard() } 还原成裸的 refreshTaskCard() → 第二条红。"""
+    c = _c("ui/ChatUi.kt")
+    wc = _block(c, "withContext(NonCancellable)")
+    assert "afterStreamEnd(" in wc, \
+        "收尾在取消态会被 refreshTaskCard 再抛的 CancellationException 截断"
+    assert "runCatching { refreshTaskCard() }" in wc, \
+        "任务卡刷新没包 runCatching：取消态下它自己就是那颗炸雷"
+    assert wc.index("runCatching { refreshTaskCard() }") < wc.index("afterStreamEnd("), \
+        "refreshTaskCard 必须排在 afterStreamEnd 之前（persist 之后顺序不变）"
+
+
+def test_m4_queue_strip_editing_survives_queue_writes():
+    """M-4：编辑态不再被队列写重置。
+    变异：把 editingId/draft 改回挂在 items 键上 → `remember(items)` 重新出现，红；
+    删掉孤儿态回收 → LaunchedEffect(items) 消失，红。"""
+    c = _c("ui/ChatUi.kt")
+    strip = _block(c, "private fun QueueStrip(")
+    assert "remember(items)" not in strip, \
+        "编辑态又挂在队列键上：接力弹出/入队/删除会清掉正在编辑的半句"
+    assert "LaunchedEffect(items)" in strip, \
+        "缺 items 变化后的孤儿编辑态回收（编辑中那条被删掉时要复位）"

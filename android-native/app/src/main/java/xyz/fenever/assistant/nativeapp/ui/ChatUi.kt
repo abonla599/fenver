@@ -1384,16 +1384,19 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 // 服务端真值、与这一轮内容无关，不设守卫照落。
                 if (mine()) persist(messages)
                 runCatching { sessions = Api.listSessions() }
+                // 任务卡读的是「当前身份在等哪一条」：身份级状态、不是这一轮的消息落点，无需守卫。
+                // 取消态下它自己会再抛 CancellationException——必须 runCatching 接住并留在
+                // NonCancellable 块内：裸调一抛，后面的 afterStreamEnd 就被截掉，
+                // forceNext 插话隐身（用户点了「立即插话」却什么都没有）。
+                if (sawSuspend) runCatching { refreshTaskCard() }
+                if (mine() && !failed && !stopped) setStatus("")
+                // 收尾同一 job 内触发接力。normal 只认「真的好好说完了」：停止/失败/
+                // 断线取回/服务端 cancelled、cannot_resume 全算异常——异常时不该在用户
+                // 没留神的地方替他接着发消息（maybeRelay 收到 false 会把队列暂停）。
+                val normal = !failed && !stopped && !needHistory && !stopRequested &&
+                    doneStatus != "cancelled" && doneStatus != "cannot_resume"
+                afterStreamEnd(sidAtSend, epochAtSend, normal)
             }
-            // 任务卡读的是「当前身份在等哪一条」：身份级状态、不是这一轮的消息落点，无需守卫
-            if (sawSuspend) refreshTaskCard()
-            if (mine() && !failed && !stopped) setStatus("")
-            // 收尾同一 job 内触发接力。normal 只认「真的好好说完了」：停止/失败/
-            // 断线取回/服务端 cancelled、cannot_resume 全算异常——异常时不该在用户
-            // 没留神的地方替他接着发消息（maybeRelay 收到 false 会把队列暂停）。
-            val normal = !failed && !stopped && !needHistory && !stopRequested &&
-                doneStatus != "cancelled" && doneStatus != "cannot_resume"
-            afterStreamEnd(sidAtSend, epochAtSend, normal)
         }
     }
 
@@ -1531,12 +1534,17 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             }
             // 从这里到 sendNow 之间不允许任何挂起点：一 suspend，用户就可能在这空档
             // 又发了一轮，sendNow 的「忙时入队」会把这条重新塞回队列——重复发送。
-            if (currentProvider() != null && sessionId.isNotEmpty()) {
+            // sessions.any 是纯内存判断（零 suspend）：补这道判据是为了 sendNow 里的
+            // ensureSession() 走「已在清单」支路立即返回 true，不跌进新建会话的挂起路径。
+            if (currentProvider() != null && sessionId.isNotEmpty() &&
+                sessions.any { it.session_id == sessionId }) {
                 sendingQueueId = item.id
                 queues[key] = fresh.drop(1)
                 pending = item.attachments
+                // 发完就地清闸是假清：sendNow 的 launch 还没跑起来、busy 还没置真时，
+                // 第二道闸已经敞开，下一个 300ms 协程能穿闸重发。清除统一挪到
+                // afterStreamEnd 入口（每轮收尾只清一次，对本轮和接力轮都成立）。
                 sendNow(item.text)
-                sendingQueueId = null
             } else {
                 queuePaused[key] = true
             }
@@ -1574,9 +1582,16 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 接线接力触发槽（streamInto 只认这一个口子）：forceNext 优先——用户点名「就现在
     // 发这条」的那一条先走，队列暂停与否管不着它；没有插话待发射才轮到常规接力。
     afterStreamEnd = { sid, epoch, normal ->
+        // 防重入第二道闸统一在每轮收尾入口清（不再由 maybeRelay 发完就地清）：
+        // sendNow 的 launch 若还在排队，busy 未置真的窗口里闸必须仍立着。
+        sendingQueueId = null
         val fn = forceNext
         if (fn != null) {
-            if (fn.sid == sid && fn.epoch == epoch) {
+            if (fn.sid == sid && fn.epoch == epoch &&
+                fn.sid == sessionId && fn.epoch == sessionEpoch) {
+                // 四个条件缺一不可：前两个对「被停的那条流」恒真（靶就是它立的），
+                // 真判据是后两个——当前屏幕仍是原会话。终帧前切了会话，A 的插话
+                // 绝不能替 B 按下发送；对不上就落回下面的回队支路。
                 forceNext = null
                 queuePaused[queueKeyOf(fn.sid)] = true   // 插话吃掉这一轮，剩余等「继续」
                 pending = fn.item.attachments
@@ -1760,11 +1775,21 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 时长按输入框出复制/粘贴/全选（光标旁）；键盘没起时输入位是占位条，单点不挂框
     // 不冒菜单、长按归语音。语音长按只在键盘收起（或语音模式）时接管，靠 voiceHold
     // 的 enabled 门控分流。
-    // v0.39.x 驾驶舱：环/账本读数收进 remember——组合每拍都重算一遍全量估算太贵，
-    // 只有影响读数的东西（消息/输入/预算拍/会话/清单/usage/整理/队列）变了才算一次。
-    val ringInfo = remember(messages, input.text, ringTick, sessionId, providers,
-        lastUsageByKey.size, lastClientKByKey.size, contextDropBySession.size,
-        queues[queueKeyOf(sessionId)]) { contextRingInfo() }
+    // v0.39.x 驾驶舱：环/账本读数收进 remember——组合每拍都重算一遍全量估算太贵。
+    // 修复轮 I-1：键必须按「值」入，不按 .size——usage/校准/整理都是往既有键上覆写，
+    // size 恒定不变，换默认模型、同一会话第二次轻量整理、设置页改角色/预算回来，
+    // 全都会吃旧缓存。先把 contextRingInfo 读的非快照态取成局部值，逐个入键；
+    // ringTick 保留（预算住在 SharedPreferences，纯非快照写入仍靠它敲拍）。
+    val ringProviderId = currentProvider()?.id ?: Prefs.defaultProviderId
+    val ringBudget = Prefs.contextBudgetK(ringProviderId)
+    val ringPersona = Prefs.persona(sessionId)
+    val ringUsage = lastUsageByKey["$sessionId:$ringProviderId"]
+    val ringClientK = lastClientKByKey["$sessionId:$ringProviderId"]
+    val ringDrop = contextDropBySession[sessionId] ?: 0
+    val ringQueue = queues[queueKeyOf(sessionId)]
+    val ringInfo = remember(messages, input.text, ringTick, sessionId, sessionEpoch,
+        providers, ringProviderId, ringBudget, ringPersona, ringUsage, ringClientK,
+        ringDrop, ringQueue) { contextRingInfo() }
     // 队列的「待发」只在账本里做附注：usedK/pct 是实发口径，还没发出去的不许混进去。
     val queuedK = queues[queueKeyOf(sessionId)]?.sumOf { it.k } ?: 0
     ModalNavigationDrawer(
@@ -2487,9 +2512,18 @@ private fun EngineRow(name: String, selected: Boolean = false, onClick: () -> Un
 private fun QueueStrip(items: List<QueuedMsg>, paused: Boolean,
                        onTogglePause: () -> Unit, onEdit: (String, String) -> Unit,
                        onDelete: (String) -> Unit, onShowNow: (QueuedMsg) -> Unit) {
-    // 行内编辑的临时态：队列一变（增删改）remember(items) 就重置，不残留旧草稿
-    var editingId by remember(items) { mutableStateOf<String?>(null) }
-    var draft by remember(items) { mutableStateOf("") }
+    // 行内编辑的临时态：普通 remember——队列一有写（接力弹出队首/入队/删除）就换
+    // items，若编辑态跟着挂在 items 键上会被重置，半句草稿凭空消失（修复轮 M-4）。
+    // 同 id 的队列写不重置草稿；正在编辑的那条真没了（弹出/删除）才由下面的
+    // LaunchedEffect 回收孤儿编辑态。
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var draft by remember { mutableStateOf("") }
+    LaunchedEffect(items) {
+        val id = editingId
+        if (id != null && items.none { it.id == id }) {
+            editingId = null; draft = ""
+        }
+    }
     val scheme = MaterialTheme.colorScheme
     FenverSurface(
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
