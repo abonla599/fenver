@@ -1636,6 +1636,31 @@ def remove_search_key(source: str, actor: Principal = RequireAdmin):
     audit.log(actor, "search-key.delete", target=source)
     return {"status": "deleted", "source": source}
 
+
+class SearchProxyRequest(BaseModel):
+    source: str
+    query: str = Field(..., min_length=1, max_length=400)
+    max_results: int = Field(default=5, ge=1, le=5)
+
+
+@app.post("/v1/search/source")
+def search_source_proxy(req: SearchProxyRequest, http: Request,
+                        principal: Principal = CurrentPrincipal):
+    """设置页「搜索」那一格的落点（v0.39 L-1）。
+
+    浏览器不再保存任何源站 key：源名走同一份白名单，key 只在服务端由
+    `search_api_sources` 取用。查询经本站代理，所以按一次付费上游记账；
+    返回只有 {rows, reason}，key 一个字符都不回显。
+    """
+    _search_key_gate(req.source)
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="要搜点什么？")
+    _throttle_chat(http, principal)
+    from app.tools import search_api_sources
+    rows, reason = search_api_sources.search_named(req.source, query, req.max_results)
+    return {"rows": rows, "reason": reason}
+
 # ---------- 附件上传 ----------
 @app.post("/v1/uploads")
 def upload_attachment(file: UploadFile = File(...),

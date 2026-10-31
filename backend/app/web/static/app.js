@@ -2544,102 +2544,22 @@ async function sendFeedback(index, rating, btn) {
   } catch (e) { setStatus("反馈失败：" + e.message, true); }
 }
 
-/* ---------------- 搜索源（v0.32 W2）----------------
- * 一页两把 key：服务端那份走 /v1/search-keys（管理员面，响应只有末四位掩码）；
- * 本机直连那份只进这台设备的 localStorage——配好之后这一页的「直连搜索」直接
- * POST 源站，查询与结果都不经本站服务器。key 的三条红线由构造保证：
- * 不进 URL query（唯一出现处是 Authorization 头）、不进 console/日志、
- * 不发给本站任何 /v1 之外的地址（本站侧只有 api.js 那三个不带 key 回显的调用）。
- * 错误分支一律不读响应体：上游可能把请求头原样打印回来，那趟顺风车不能开。
- * 请求形状逐字段对齐后端 search_api_sources（博查 {query,count,freshness,summary}；
- * Tavily {query,max_results}），判空同一条：缺标题或网址的行不给——由
- * tests/test_web_search_direct_contract.py 与后端锁成同构。
- * 聊天里 agent 触发的搜索仍走服务端降级链：这个包没动那个协议，这一页是
- * 「浏览器/WebView 直连」路线的前置阵地，不是它的替身。
+/* ---------------- 搜索源（v0.32 W2；v0.39 L-1）----------------
+ * 浏览器不再保存源站 key：这一页的搜索走 POST /v1/search/source，源名过
+ * core.search_keys.ALLOWED_SOURCES 白名单，key 只在服务端由 search_api_sources
+ * 取用；响应只有 rows/reason，key 一个字符都不回显。
+ * 管理员面仍可登记服务端密钥（/v1/search-keys），页面只显示末四位。
+ * 旧的本机 key 路径已移除；用户侧清理由浏览数据管理负责。
  */
-const SD_LOCAL_PREFIX = "sdkey.";   // localStorage 前缀：本机直连 key，只属于这台设备
-const SD_COUNT = 5;                 // 与后端 web_search.MAX_RESULTS 同值，直连不多要
-const SD_TIMEOUT_MS = 20000;        // 与探测页看门狗同量级：源站 20 秒不回就当不可达
-// 与后端 providers.PLACEHOLDER_HINTS 同一组形状（合同测试对一次数）：
-// 本机这一侧只是提示，真正的闸门在后端与链上。
-const SD_PLACEHOLDER_HINTS = ["your-", "your_", "xxx", "placeholder", "填入", "待填", "changeme"];
+const SD_COUNT = 5;                 // 与后端 web_search.MAX_RESULTS 同值，不多要
 
 function sdEndpoints() {
-  // 源站地址住在 index.html 的 data-search-endpoints（为什么不放 JS 里，注释写在那处）。
-  // 读不出就当场说，不留到按按钮那一刻才静默失败。
+  // 源名→显示名清单住在 index.html 的 data-search-endpoints；读不出就当场说。
   const raw = document.getElementById("paneSearchKeys").dataset.searchEndpoints;
   let eps = null;
   try { eps = JSON.parse(raw); } catch (_) { /* 落到下面那句实话 */ }
   if (!eps || typeof eps !== "object") throw new Error("搜索源配置读不出（data-search-endpoints 坏了）");
   return eps;
-}
-
-function sdLocalKey(source) { return localStorage.getItem(SD_LOCAL_PREFIX + source) || ""; }
-
-function sdMask(key) {
-  // 后端 mask_key 的「末四位」口径，本机展示同样不给全文与长度。
-  if (!key) return "";
-  if (key.length <= 8) return "****";
-  return "末四位 " + key.slice(-4);
-}
-
-function sdLooksPlaceholder(key) {
-  const low = String(key || "").toLowerCase();
-  return SD_PLACEHOLDER_HINTS.some((h) => low.includes(h));
-}
-
-function sdBuildBody(source, query, count) {
-  return source === "tavily"
-    ? { query, max_results: count }
-    : { query, count, freshness: "noLimit", summary: false };
-}
-
-function sdPick(item, fields) {
-  for (const f of fields) {
-    const t = String(item[f] || "").trim();
-    if (t) return t;
-  }
-  return "";
-}
-
-function sdRows(items, titleFields, snippetFields) {
-  const rows = [];
-  for (const item of (Array.isArray(items) ? items : [])) {
-    if (!item || typeof item !== "object") continue;
-    const title = sdPick(item, titleFields);
-    const url = String(item.url || "").trim();
-    if (title && url.startsWith("http")) {
-      rows.push({ title, url, snippet: sdPick(item, snippetFields) });
-    }
-  }
-  return rows;
-}
-
-/** 一次真直连：只朝源站发，key 只进这一个请求的 Authorization 头。 */
-async function searchDirect(source, key, query, count) {
-  const ep = sdEndpoints()[source];
-  if (!ep || !ep.url) throw new Error("没有这个搜索源：" + source);
-  if (!key) throw new Error("本机还没存这个源的 key");
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), SD_TIMEOUT_MS);
-  let data;
-  try {
-    const res = await fetch(ep.url, {
-      method: "POST",
-      credentials: "omit",       // 不带本站 cookie 去敲第三方：跨域就跨域
-      signal: ctrl.signal,
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-      body: JSON.stringify(sdBuildBody(source, query, count)),
-    });
-    if (!res.ok) throw new Error("源站没接住：HTTP " + res.status);
-    data = await res.json();
-  } finally {
-    clearTimeout(timer);
-    try { ctrl.abort(); } catch (_) { /* 放掉连接，手机上一条挂着的请求会一直吃流量 */ }
-  }
-  return source === "tavily"
-    ? sdRows((data && data.results) || [], ["title"], ["content", "snippet"])
-    : sdRows((((data || {}).data || {}).webPages || {}).value || [], ["name", "title"], ["snippet", "summary"]);
 }
 
 function sdSetStatus(text, bad) {
@@ -2659,22 +2579,18 @@ function sdRenderLocal() {
       sel.appendChild(o);
     }
   }
-  $("sdLocalNote").textContent = Object.entries(eps).map(
-    ([name, cfg]) => `${cfg.label || name}：` +
-      (sdLocalKey(name) ? `本机已存（${sdMask(sdLocalKey(name))}）` : "未配"))
-    .join(" · ");
+  $("sdLocalNote").textContent = "查询经本站服务端代理；浏览器不再保存任何搜索源 key。";
 }
 
 function sdSummaryVal() {
-  // 设置列表那一行的小结：管理员看服务端登记数，其他人看本机存了几把。
+  // 设置列表那一行的小结：管理员看服务端登记数；其他人只看到"由管理员维护"。
   const eps = Object.keys(sdEndpoints());
   if (isAdmin()) {
     const n = eps.filter((s) => sdServerState[s]).length;
     $("searchKeysVal").textContent = n ? `服务端 ${n}/${eps.length}` : "";
     return;
   }
-  const n = eps.filter((s) => sdLocalKey(s)).length;
-  $("searchKeysVal").textContent = n ? `本机 ${n}/${eps.length}` : "";
+  $("searchKeysVal").textContent = "由管理员维护";
 }
 let sdServerState = {};   // name -> true，仅管理员面渲染用；来源永远是 /v1/search-keys
 
@@ -2766,25 +2682,6 @@ async function loadSearchKeys() {
   sdSummaryVal();
 }
 
-$("sdSaveBtn").onclick = () => {
-  const source = $("sdSource").value;
-  const key = $("sdKey").value.trim();
-  if (!key) { sdSetStatus("先填 key，空格不算", true); return; }
-  if (sdLooksPlaceholder(key)) { sdSetStatus("这把 key 形如占位符，本机也没存", true); return; }
-  try {
-    localStorage.setItem(SD_LOCAL_PREFIX + source, key);
-    $("sdKey").value = "";
-    sdRenderLocal();
-    sdSummaryVal();
-    sdSetStatus("已存到本机——只有这台设备读得到它");
-  } catch (e) { sdSetStatus("本机存不下：" + e.message, true); }
-};
-$("sdClearBtn").onclick = () => {
-  localStorage.removeItem(SD_LOCAL_PREFIX + $("sdSource").value);
-  sdRenderLocal();
-  sdSummaryVal();
-  sdSetStatus("");
-};
 $("sdSearchForm").onsubmit = async (e) => {
   e.preventDefault();
   const source = $("sdSource").value;
@@ -2793,37 +2690,38 @@ $("sdSearchForm").onsubmit = async (e) => {
   const list = $("sdResults");
   list.innerHTML = "";
   if (!query) { sdSetStatus("要搜点什么？", true); return; }
-  const key = sdLocalKey(source);
-  if (!key) {
-    sdSetStatus(`本机没存${eps.label || source}的 key；聊天里的搜索不受影响（走服务端降级链）`, true);
-    return;
-  }
-  sdSetStatus(`正在直连 ${eps.label || source}…`);
+  sdSetStatus(`正在搜索 ${eps.label || source}…`);
   const started = Date.now();
   try {
-    const rows = await searchDirect(source, key, query, SD_COUNT);
-    if (!rows.length) { sdSetStatus("直连通了，但零命中——别据此断定不存在", true); return; }
+    const data = await API.searchSource(source, query, SD_COUNT);
+    const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+    if (!rows.length) {
+      sdSetStatus(data && data.reason === "not_enabled"
+        ? `${eps.label || source} 还没有服务端密钥；请让管理员在「搜索源」里登记`
+        : "服务端返回零命中——别据此断定不存在", true);
+      return;
+    }
     for (const r of rows) {
+      const title = String((r && r.title) || "").trim();
+      const url = String((r && r.url) || "").trim();
+      if (!title || !url.startsWith("http")) continue;
       const li = document.createElement("li");
       const a = document.createElement("a");
-      a.href = r.url;
+      a.href = url;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = r.title;          // 第三方可控文本：一律 textContent，一个标签不进 DOM
+      a.textContent = title;            // 第三方可控文本：一律 textContent，一个标签不进 DOM
       li.appendChild(a);
       if (r.snippet) {
         const sn = document.createElement("span");
-        sn.textContent = r.snippet;
+        sn.textContent = String(r.snippet);
         li.appendChild(sn);
       }
       list.appendChild(li);
     }
-    sdSetStatus(`直连 ${eps.label || source} · ${rows.length} 条 · ${Date.now() - started}ms`);
+    sdSetStatus(`搜索 ${eps.label || source} · ${list.children.length} 条 · ${Date.now() - started}ms`);
   } catch (e) {
-    // 错误只有两类能如实说：没到源站（网络/CORS）与到了但没接住（HTTP 状态）。
-    sdSetStatus(e.name === "AbortError" || e.message === "Failed to fetch"
-      ? "直连失败：请求没能到源站（网络不通或被 CORS 拦下）"
-      : "直连失败：" + e.message, true);
+    sdSetStatus("搜索失败：" + e.message, true);
   }
 };
 

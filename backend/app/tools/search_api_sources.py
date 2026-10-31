@@ -139,3 +139,21 @@ class TavilySource:
 
     def search(self, query, max_results=None):
         return self.search_with_reason(query, max_results)[0]
+
+
+# 设置页「服务端搜索」那一条只按源名取一个客户端；与 search_chain 的 _REG 各自
+# 持一份实例没有共享状态（两家客户端都只读 key、无连接池常驻），但**源名白名单
+# 仍然是 core.search_keys.ALLOWED_SOURCES 这一份**，路由层会先过那道闸。
+_BY_NAME = {source.name: source for source in (BochaSource(), TavilySource())}
+
+
+def search_named(name: str, query: str, max_results=None):
+    """按源名问一次，返回 (rows, reason)；未知源直接抛 ValueError。
+
+    这条是给设置页的服务端代理用的：它只认同名单里的源名，不接受 URL/请求体，
+    因此不会变成第二个 SSRF 入口。key 的取用、脱敏与判空全部留在各 Source 里。
+    """
+    source = _BY_NAME.get(name)
+    if source is None:
+        raise ValueError(f"未知搜索源：{name!r}")
+    return source.search_with_reason(query, max_results)

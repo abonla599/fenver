@@ -647,6 +647,11 @@ const API = (() => {
       request("/v1/search-keys/" + encodeURIComponent(source), { method: "PUT", body: { api_key } }),
     deleteSearchKey: (source) =>
       request("/v1/search-keys/" + encodeURIComponent(source), { method: "DELETE" }),
+    /* 服务端搜索（v0.39 L-1）：浏览器不再保存源站 key；查询经本站代理，
+     * key 只在服务端由 search_api_sources 取用，响应只有 rows/reason。 */
+    searchSource: (source, query, max_results = 5) =>
+      request("/v1/search/source", { method: "POST",
+        body: { source, query, max_results } }),
 
     /* 日程（v0.23 R3 · T2.6）：一天一份清单。day 留空 = 让服务端说今天是哪天，
      * 客户端自己不猜：手机改了系统时间、或跨天 0 点后才打开这一页，问出的"今天"
