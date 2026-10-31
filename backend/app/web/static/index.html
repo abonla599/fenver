@@ -176,6 +176,15 @@
       <div class="composer">
         <div class="att-row" id="attRow"></div>
         <div class="suggestions" id="suggestions"></div>
+        <!-- v0.39.x 驾驶舱接力队列（Task 5）：忙时发的消息先落这条内存队列，
+             上一条正常结束后自动接力发出。队列只在内存、每标签页一份，
+             条目原文一律 textContent 落 DOM（见 app.js 的 queueCardNode）。 -->
+        <div id="queueStrip" class="queue-strip hidden" aria-label="接力队列">
+          <div class="queue-head"><span id="queueCount">0 条待发送</span>
+            <button type="button" id="queuePauseBtn">暂停</button>
+            <button type="button" id="queueClearBtn">清空</button></div>
+          <div id="queueList"></div>
+        </div>
         <form class="input-card" id="chatForm">
           <textarea id="input" rows="1" placeholder="发消息，Shift + Enter 换行" autocomplete="off"></textarea>
           <div class="input-foot">

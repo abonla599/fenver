@@ -257,6 +257,9 @@ const state = {
   // lastUsageBySession 记上一轮 done.usage 的校准锚点 {prompt_tokens, clientK, providerId}。
   contextDropBySession: {},
   lastUsageBySession: {},
+  // v0.39.x 驾驶舱（Task 5）："立即插话"的待发射件——{sid, user, item}，
+  // 只在出发会话/身份还成立时被 streamInto 消费一次；换身份/清空队列都要归零。
+  forceNext: null,
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -666,11 +669,12 @@ function pauseQueue(sessionId, paused) {
   queueUiRefresh();
 }
 
-/* 队列量一变，环上"待发 +NK"就得跟上（Task 4 接线）。守卫是必需的：
- * Task 3 的纯状态机测试把这些函数单摘进无 DOM 的 vm 里跑，typeof 对未声明
- * 标识符不抛错，无环可刷的环境里这行等于不存在。 */
+/* 队列量一变，环上"待发 +NK"与排队条都得跟上（Task 4 接线 + Task 5 排队条）。
+ * 守卫是必需的：Task 3 的纯状态机测试把这些函数单摘进无 DOM 的 vm 里跑，typeof 对未声明
+ * 标识符不抛错，无环/无条可刷的环境里这两行等于不存在。 */
 function queueUiRefresh() {
   if (typeof renderContextRing === "function") renderContextRing();
+  if (typeof renderQueueStrip === "function") renderQueueStrip();
 }
 
 function canRelay(sessionId, currentSessionId, streaming, visibility) {
@@ -683,6 +687,146 @@ function canRelay(sessionId, currentSessionId, streaming, visibility) {
 function resetQueuesForIdentity() {
   state.queues = {};
 }
+
+/* ---------------- 接力队列：网页排队条与自动发送（Task 5）----------------
+ * 忙时 send 入队；上一条"正常完成"后隔一拍自动发下一条（maybeRelay）。
+ * 任何一条闸（非正常结束 / 换了会话 / 换了身份 / 页面在后台）合上，队列就
+ * 原地暂停并把话说明白——自动发送只能建立在"上一条真的发完了"上，半截流
+ * 后面追发是新付费轮。条目永远只留一份：发不出去（send 回 false）就 unshift
+ * 回队首，绝不静默丢用户的原文。排队条只活在内存：刷新即清空，与 state.queues 同生死。 */
+
+/* 视觉闸：条目带图片附件、而当前（即将实发的）模型没声明 supports_vision，
+ * 就不能自动发——发出去是白花一轮钱换一个读不到图的回答。 */
+function relayImageBlocked(item) {
+  return !!item && (item.attachments || []).some((a) => a && a.kind === "image") &&
+    (currentProvider() || {}).supports_vision !== true;
+}
+
+/* 失败回队：放回队首（保持用户顺序）、暂停、清掉预载的待发附件引用——
+ * 不 revoke：那些 blob url 还挂在条目上，等真发出去那一拍才轮到回收。 */
+function putBackQueueItem(sessionId, item) {
+  const q = queueFor(sessionId);
+  if (!q.items.some((x) => x.id === item.id)) q.items.unshift(item);
+  q.paused = true;
+  state.pending = [];
+  renderQueueStrip();
+  renderContextRing();
+}
+
+function queueCardNode(item) {
+  const row = document.createElement("div");
+  row.className = "queue-card";
+  const text = document.createElement("div");
+  text.className = "queue-text";
+  text.textContent = item.text;          // 用户原文只进 textContent，绝不 innerHTML
+  const meta = document.createElement("div");
+  meta.className = "queue-meta";
+  meta.textContent = `${item.model ? item.model + " · " : ""}+${Number(item.k) || 0}K`;
+  const edit = document.createElement("button");
+  edit.type = "button"; edit.textContent = "编辑";
+  edit.onclick = () => {
+    // 行内 textarea 编辑：不用 window.prompt——MIUI 浏览器的 prompt 实测只收 15 个字符。
+    const ta = document.createElement("textarea");
+    ta.className = "queue-edit";
+    ta.value = item.text;
+    const save = document.createElement("button");
+    save.type = "button"; save.textContent = "保存";
+    save.onclick = () => {
+      item.text = ta.value.trim() || item.text;
+      item.k = Math.round(estimateTokens(item.text) / 1000) + 1;
+      renderQueueStrip(); renderContextRing();
+    };
+    const cancel = document.createElement("button");
+    cancel.type = "button"; cancel.textContent = "取消";
+    cancel.onclick = renderQueueStrip;
+    text.replaceWith(ta);
+    meta.after(save, cancel);
+    ta.focus();
+  };
+  const del = document.createElement("button");
+  del.type = "button"; del.textContent = "删除";
+  del.onclick = () => { const q = queueFor(pref.sessionId); q.items = q.items.filter((x) => x.id !== item.id); renderQueueStrip(); renderContextRing(); };
+  const now = document.createElement("button");
+  now.type = "button"; now.textContent = "立即插话";
+  now.onclick = () => queueShowNow(item);
+  row.append(text, meta, edit, del, now);
+  return row;
+}
+
+function renderQueueStrip() {
+  const strip = $("queueStrip");
+  if (!strip) return;                    // DOM 还没就绪（boot 早期）：没有条可画
+  const q = queueFor(pref.sessionId);
+  strip.classList.toggle("hidden", q.items.length === 0);
+  $("queueCount").textContent = `${q.items.length} 条待发送`;
+  $("queuePauseBtn").textContent = q.paused ? "继续" : "暂停";
+  const host = $("queueList"); host.textContent = "";
+  q.items.forEach((it) => host.appendChild(queueCardNode(it)));
+}
+
+function clearQueue() {
+  const q = queueFor(pref.sessionId);
+  q.items = [];
+  q.sendingId = null;
+  q.paused = false;
+  state.forceNext = null;
+  renderQueueStrip();
+  renderContextRing();
+}
+
+function queueShowNow(item) {
+  if (!window.confirm("会停止当前回答（已生成部分保留），并立即发送这条消息。")) return;
+  const q = queueFor(pref.sessionId);
+  q.items = q.items.filter((x) => x.id !== item.id);
+  renderQueueStrip();
+  if (!state.streaming) {
+    // 没有在途回答：不用借"停止→终帧"那一拍，直接走同一条发送路；发不出去照旧回队。
+    state.pending = item.attachments || [];
+    send(item.text).then((started) => {
+      if (started === false) {
+        putBackQueueItem(pref.sessionId, item);
+        setStatus("插话未发出：这条已放回队列，队列已暂停", true);
+      }
+    });
+    return;
+  }
+  state.forceNext = { sid: pref.sessionId, user: pref.userId, item };
+  stop();
+}
+
+function maybeRelay(result, sidAtSend, userAtSend) {
+  const q = queueFor(sidAtSend);
+  if (!result || !result.normal || pref.sessionId !== sidAtSend ||
+      pref.userId !== userAtSend || document.visibilityState !== "visible") {
+    q.paused = true; renderQueueStrip(); return;
+  }
+  setTimeout(() => {
+    if (state.streaming || pref.sessionId !== sidAtSend || pref.userId !== userAtSend ||
+        !canRelay(sidAtSend, pref.sessionId, state.streaming, document.visibilityState)) return;
+    if (relayImageBlocked(q.items[0])) {
+      q.paused = true; renderQueueStrip();
+      setStatus("队首这条带图片，当前模型不支持视觉：换视觉模型或移除附件后点「继续」", true);
+      return;
+    }
+    const item = nextQueueItem(sidAtSend);
+    if (!item) return;
+    state.pending = item.attachments || [];
+    send(item.text).then((started) => {
+      if (started === false) {
+        putBackQueueItem(sidAtSend, item);
+        setStatus("自动接力没发出去：这条已放回队首，队列已暂停", true);
+      }
+    }).finally(() => finishQueueItem(sidAtSend, item.id));
+  }, 300);
+}
+
+/* 页面切到后台 = 自动发送不再可信（看不见的页面上替你花钱发下一轮）：
+ * 当场暂停当前会话队列，pauseQueue 经 queueUiRefresh 把排队条与环一起刷了。
+ * 回到前台不自动恢复——由人点「继续」，因为后台期间可能已经错过了最佳接力时机。 */
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") return;
+  pauseQueue(pref.sessionId, true);
+});
 
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
  *  - 本机压根没记过任何人：首启，该注册一个账号；
@@ -1700,6 +1844,8 @@ async function switchSession(id) {
   await hydrateImageUrls(state.messages.flatMap((m) => m.attachments || []));
   renderMessages();
   renderSessions();
+  // 队列按会话分桶（Task 5）：换会话必须把排队条换成新会话那一份，绝不串条。
+  renderQueueStrip();
   syncPersonaChip();
 }
 
@@ -1710,6 +1856,7 @@ async function newChat() {
   await ensureSession();
   renderMessages();
   renderSessions();
+  renderQueueStrip();
   syncPersonaChip();
   $("input").focus();
 }
@@ -2610,7 +2757,32 @@ async function streamInto() {
   const holder = { role: "assistant", content: "", trace: [] };
   state.messages.push(holder);
   renderMessages();
-  await runStream(holder);
+  // 出发锚点（Task 5）：接力只认"还在出发时的那个会话、那个人、那个前台状态"。
+  // 流还在途人就切了会话/身份或把页面切后台，这一轮结束后不自动发（见 maybeRelay）。
+  const sidAtSend = pref.sessionId;
+  const userAtSend = pref.userId;
+  const result = await runStream(holder);
+  if (state.forceNext && state.forceNext.sid === sidAtSend &&
+      state.forceNext.user === userAtSend) {
+    // "立即插话"的落点：这条流一终止（stop 已把它收落）就优先发这一条，
+    // 剩余队列保持 paused=true（stop() 里已置），由人点「继续」再恢复接力。
+    const f = state.forceNext;
+    state.forceNext = null;
+    if (relayImageBlocked(f.item)) {
+      putBackQueueItem(sidAtSend, f.item);
+      setStatus("插话这条带图片，当前模型不支持视觉：换视觉模型或移除附件", true);
+      return false;
+    }
+    state.pending = f.item.attachments || [];
+    const started = await send(f.item.text);
+    if (started === false) {
+      putBackQueueItem(sidAtSend, f.item);
+      setStatus("插话未发出：这条已放回队列，队列已暂停", true);
+    }
+    return started;
+  }
+  maybeRelay(result, sidAtSend, userAtSend);
+  return true;
 }
 
 async function replaceMessages(list) {
@@ -2635,10 +2807,26 @@ async function replaceMessages(list) {
   }
 }
 
-/* ---------------- 发送与流式 ---------------- */
+/* ---------------- 发送与流式 ----------------
+ * send 对调用方回布尔："这一轮真的开始了"或"忙时已被队列接住"= true；
+ * 无文本/无 provider/ensureSession 失败/队列满等早退 = false。
+ * 自动接力（maybeRelay / forceNext）拿到 false 必须把条目放回队列——
+ * false 意味着原文哪儿都没去，静默吞掉就是丢用户的消息。 */
 async function send(text) {
   text = (text || "").trim();
-  if ((!text && !state.pending.length) || state.streaming) return;
+  if (!text && !state.pending.length) return false;
+
+  if (state.streaming) {
+    // 忙时不抢当前这一轮流：落进接力队列，等它正常结束后由 maybeRelay 自动发。
+    const item = { id: `q_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+                   text, attachments: state.pending.slice(),
+                   model: (currentProvider() || {}).name || "",
+                   k: Math.round(estimateTokens(text) / 1000) + 1 };
+    if (!enqueueQueueItem(pref.sessionId, item)) { setStatus("接力队列已满，先发掉一条或清空", true); return false; }
+    clearPending(); $("input").value = ""; updateSendEnabled();
+    renderQueueStrip(); renderContextRing(); setStatus("已加入接力队列");
+    return true;
+  }
 
   if (!state.providers.length) {
     // 打开页面就按发送时模型清单还在路上：先拉一次。拉不到才承认"服务端没配"，
@@ -2653,17 +2841,18 @@ async function send(text) {
     } else {
       setStatus("当前没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加模型，或联系管理员配置", true);
     }
-    return;
+    return false;
   }
 
   try { await ensureSession(); }
-  catch (e) { if (!needsAuth(e)) setStatus("会话创建失败：" + e.message, true); return; }
+  catch (e) { if (!needsAuth(e)) setStatus("会话创建失败：" + e.message, true); return false; }
 
   const atts = state.pending.map((a) => ({ id: a.id, name: a.name, kind: a.kind, size: a.size, url: a.url }));
   state.messages.push({ role: "user", content: text, attachments: atts });
   clearPending();
   renderMessages();
   await streamInto();
+  return true;
 }
 
 /* 触屏那一侧发完问题把输入框焦点交出去，软键盘随之收起；桌面留着焦点，下一句直接打字。
@@ -2759,6 +2948,9 @@ async function runStream(holder) {
   const providerAtSend = (currentProvider() || {}).id || null;
   let failed = false;
   let aborted = false;
+  // resumed：这一轮没有从流里真正"跑完"，而是走了断线取回（cannot_resume / 续不上）。
+  // 取回的结果虽然能看，但它不是"模型正常答完"的终帧——接力闸不认它（Task 5 裁定）。
+  let resumed = false;
 
   try {
     const done = await API.streamChat(
@@ -2816,6 +3008,7 @@ async function runStream(holder) {
     } else if (done && done.status === "cannot_resume") {
       // 这条连接追不上服务端缓冲：去会话里取回已落库的结果，不重发生成。
       await pullFromHistory(holder);
+      resumed = true;
     }
   } catch (e) {
     if (e.name === "AbortError") {
@@ -2831,6 +3024,7 @@ async function runStream(holder) {
     } else if (e.needHistory) {
       // 断线续不上 / 试到上限：从会话历史取回这一轮已经落库的结果，不重发生成。
       await pullFromHistory(holder);
+      resumed = true;
     } else {
       // 其余是这一轮请求本身没被服务端接受（如限流）：说句实话，同样不重发整段。
       failed = true;
@@ -2871,6 +3065,9 @@ async function runStream(holder) {
   // 手机上这一句会把刚收起来的键盘又顶出来（用户诉求就是"发完直接看输出"）；
   // 桌面留着焦点，下一句直接打字才对。判据与 stashKeyboardAfterSend 同一把尺子。
   if (!isTouchPrimary()) $("input").focus();
+  // 接力闸读的结局（Task 5）：只有"这一轮从流里正常答完"才算 normal——
+  // 停止、模型/请求报错、cannot_resume 与断线取回都不放行自动发送。
+  return { normal: !failed && !aborted && !resumed };
 }
 
 async function persistCurrent() {
@@ -2883,6 +3080,9 @@ async function persistCurrent() {
  * 没停生产，还把这个动作伪装成了"关页面"。取消成功后不 abort：那条连接会自己收到
  * cancelled→done 终帧并正常收尾。run_id 是 runStream 里从流元数据抓来落在 state 上的。 */
 async function stop() {
+  // 显式停止 = 这一轮的结局不是"答完"：当前会话的接力队列原地暂停（Task 5），
+  // 由人点「继续」再恢复。放在最前面，因为 cancel 成功会提前 return。
+  pauseQueue(pref.sessionId, true);
   const runId = state.currentRunId;
   if (runId) {
     try {
@@ -3783,9 +3983,14 @@ function resetViewForIdentity() {
   state.sessions = [];
   state.pending = [];
   // v0.39.x 驾驶舱两张表（Task 4）：校准锚点与整理 offset 都是"这个人这个会话"的
-  // 内存态。换身份不清，上一个人的用量锚点会校准到新会话头上（队列的清空接线在 Task 5）。
+  // 内存态。换身份不清，上一个人的用量锚点会校准到新会话头上。
   state.contextDropBySession = {};
   state.lastUsageBySession = {};
+  // 接力队列同样随身份清掉（Task 5）：队列只在内存、条目是上一个人的原文，
+  // 待发的"立即插话"也一起作废——绝不带着旧身份/旧会话的落点去发新轮。
+  resetQueuesForIdentity();
+  state.forceNext = null;
+  renderQueueStrip();
   state.memoryQuery = "";
   state.filter = "";
   $("input").value = "";
@@ -4647,6 +4852,14 @@ function bind() {
     send(text);
   };
   $("stopBtn").onclick = stop;
+  // 接力队列头部两键（Task 5）：暂停/继续是同一个键位翻转文案（renderQueueStrip 管），
+  // 清空只动当前会话的桶。
+  $("queuePauseBtn").onclick = () => {
+    const q = queueFor(pref.sessionId);
+    pauseQueue(pref.sessionId, !q.paused);
+    renderQueueStrip();
+  };
+  $("queueClearBtn").onclick = clearQueue;
 
   const input = $("input");
   input.addEventListener("keydown", (e) => {

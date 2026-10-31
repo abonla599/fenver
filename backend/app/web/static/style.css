@@ -508,6 +508,26 @@ a.trace-result-title:hover { text-decoration: underline; }
 }
 .suggestions button:hover { border-color: var(--accent); color: var(--accent); }
 
+/* v0.39.x 驾驶舱接力队列（Task 5）：贴在输入卡上方的窄条。
+   颜色全部复用现成 token（surface-2 / line / text 三档 / accent-soft），
+   不引入新的强调色；队列为空时由 .hidden 整体收起，不占位。 */
+.queue-strip { border: 1px solid var(--line); background: var(--surface);
+  border-radius: var(--fv-radius-md); padding: 6px 10px 4px; margin-bottom: 8px; }
+.queue-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
+.queue-head button { border: 1px solid var(--line); background: transparent; color: var(--text-2);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.queue-head button:hover { border-color: var(--accent); color: var(--accent); }
+.queue-card { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  border-top: 1px dashed var(--line); margin-top: 6px; padding: 6px 0 2px; }
+.queue-text { flex: 1 1 100%; font-size: 13px; color: var(--text); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; max-height: 4.5em; overflow: hidden; }
+.queue-meta { color: var(--text-3); font-size: 11px; margin-right: auto; }
+.queue-card button { border: 1px solid var(--line); background: transparent; color: var(--text-2);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.queue-card button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.queue-edit { flex: 1 1 100%; border: 1px solid var(--accent); border-radius: 10px;
+  padding: 8px 10px; background: var(--bg); color: var(--text); resize: vertical; font-size: 13px; }
+
 .input-card {
   border: 1px solid var(--line); background: var(--surface);
   border-radius: var(--radius); box-shadow: none; padding: 8px 8px 6px;

@@ -196,3 +196,52 @@ def test_budget_provider_id_is_the_single_source_for_ring_outbound_and_send():
     ring = _function_body(js, "renderContextRing")
     assert 'setProperty("--ctx-pct", "0")' in ring and "无可用模型" in ring, \
         "清单为空时环必须归零并如实说'无可用模型'，不许 retain 上一次的填充"
+
+
+# ---------------- Task 5：接力队列 UI 与自动发送 ----------------
+# 队列纯状态机由 test_v0391_web_queue_model.py 真跑钉死（Task 3）；这里锁 UI 接线：
+# 忙时入队、正常完成自动接力、停止/后台/换身份暂停、失败回队不丢条目、带图条目
+# 在没有视觉闸的模型前不发、排队条对用户原文只走 textContent。
+
+
+def test_relay_queue_ui_and_auto_send_guards():
+    html = _html()
+    js = _js()
+    assert 'id="queueStrip"' in html and 'id="queueList"' in html
+    assert 'id="queuePauseBtn"' in html
+    composer = html[html.index('class="composer"'):html.index('id="chatForm"')]
+    assert 'id="queueStrip"' in composer, "排队条没放输入卡上方"
+    send = _function_body(js, "send")
+    assert "enqueueQueueItem(" in send and "已加入接力队列" in send, \
+        "忙时发送没有入队"
+    assert "return false" in send and "return true" in send, \
+        "send 没有把'接住/没接住'回传给调用方（自动接力失败会丢条目）"
+    relay = _function_body(js, "maybeRelay")
+    assert "canRelay(" in relay, "自动接力没有会话/前台/暂停闸"
+    assert "setTimeout(" in relay, "自动接力没有给落定一拍留时间"
+    assert "finishQueueItem(" in relay, "发送中条目没有释放"
+    assert "started === false" in relay, "自动接力发送失败没有把条目放回队列"
+    assert "relayImageBlocked(" in relay, "自动接力缺视觉闸：带图条目会打到非视觉模型"
+    assert "resetQueuesForIdentity()" in _function_body(js, "resetViewForIdentity"), \
+        "换身份没清队列"
+    assert "forceNext" in _function_body(js, "resetViewForIdentity"), \
+        "换身份没清待发的立即插话条目"
+    assert "pauseQueue(" in _function_body(js, "stop"), "停止没有暂停队列"
+    assert re.search(r'addEventListener\("visibilitychange"[\s\S]{0,220}pauseQueue\(', js), \
+        "切后台没有暂停当前会话队列"
+    card = _function_body(js, "queueCardNode")
+    assert "textContent" in card and "innerHTML" not in card, \
+        "队列卡对用户文本拼了 innerHTML"
+    assert "queueShowNow(" in card, "队列卡没挂立即插话"
+    strip = _function_body(js, "renderQueueStrip")
+    assert "renderMessages" not in strip, "排队条刷新里递归重画消息"
+    into = _function_body(js, "streamInto")
+    assert "sidAtSend" in into and "userAtSend" in into, "没捕获出发时的会话/身份锚点"
+    assert "maybeRelay(" in into and "forceNext" in into, "流结束没接接力/立即插话出口"
+    assert "relayImageBlocked(" in into, "立即插话缺视觉闸"
+    rs = _function_body(js, "runStream")
+    assert "return { normal:" in rs, "runStream 没有返回 {normal} 结局"
+    assert re.search(r"\bresumed\b", rs), "断线取回/cannot_resume 没算非正常结束"
+    assert "function clearQueue(" in js, "接口要求的 clearQueue() 不存在"
+    # 插话发送失败同样回队暂停（streamInto 的 forceNext 分支）。
+    assert "started === false" in into, "forceNext 发送失败没有回队"
