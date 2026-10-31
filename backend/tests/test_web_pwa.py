@@ -1401,12 +1401,17 @@ def test_context_length_is_displayed_and_budgeted_in_tokens():
 
     assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
     ob = _function_body(js, "outbound")
-    assert "contextTokensK" in ob and "truncateWithin(" in ob, "发送历史没按 token 预算截"
-    assert "modelCapK()" in ob, "发送预算没对模型上限取 min：界面收敛不是唯一防线"
+    assert "contextBudgetK(" in ob and "truncateWithin(" in ob, "发送历史没按 token 预算截"
+    cbk = _function_body(js, "contextBudgetK")
+    assert "max_context_k" in cbk and "Math.min(cap" in cbk, \
+        "发送预算不再对模型上限取 min：夹逼被从读数路径上拆掉了"
     assert "estimateTokens" in _function_body(js, "truncateWithin")
     boot = _function_body(js, "boot")
     assert "migrateContextPref()" in boot, "老设备的条数设置没在开机时换算"
+    assert "migrateContextBudget()" in boot, "旧全局预算没在开机时落进按模型存的 map"
     assert "contextTokensK" in _function_body(js, "migrateContextPref")
+    assert "contextTokensK" in _function_body(js, "migrateContextBudget"), \
+        "迁移不再沿用旧键的值：8K 缺省成了凭空猜测"
 
 
 def test_context_cap_follows_the_selected_model_end_to_end():
@@ -1431,7 +1436,8 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     assert "max_context_k" in cap and "currentProvider()" in cap, "封顶读的不是当前模型"
     sync = _function_body(js, "syncCtxRow")
     assert "modelCapK()" in sync and 'range.max' in sync and "ctxCap" in sync
-    assert "pref.contextTokensK > cap" in sync, "超限的旧预算没被收敛，显示与实发会分叉"
+    assert "contextBudgetK(" in sync and "setContextBudget(" in sync, \
+        "上下文行的读写与发送预算不同源：显示与实发会分叉"
     assert "state.providers.length" in sync, "清单未就绪就改写 pref：冷启动会误砍大模型的设置"
     assert "syncCtxRow()" in _function_body(js, "renderModelSelect"), \
         "切模型/刷清单没重画上下文行"

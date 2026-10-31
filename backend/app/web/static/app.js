@@ -308,6 +308,80 @@ function migrateContextPref() {
   }
 }
 
+/* v0.39.x 模型驾驶舱：本会话预算按「用户 + provider」存；旧 contextTokensK 只用于迁移。 */
+function contextBudgetStorageKey() {
+  return "fv.contextBudget." + (pref.userId || "anon") + ".v1";
+}
+
+function readContextBudgets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(contextBudgetStorageKey()) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch (_) { return {}; }
+}
+
+function contextBudgetK(providerId) {
+  const p = state.providers.find((x) => x.id === providerId);
+  const cap = Math.max(1, Number(p && p.max_context_k) || 64);
+  const map = readContextBudgets();
+  const raw = map[providerId];
+  const fallback = Number(pref.contextTokensK) || 8;
+  const wanted = Number.isFinite(Number(raw)) ? Number(raw) : fallback;
+  return Math.max(1, Math.min(cap, Math.round(wanted)));
+}
+
+function setContextBudget(providerId, k) {
+  const p = state.providers.find((x) => x.id === providerId);
+  const cap = Math.max(1, Number(p && p.max_context_k) || 64);
+  const map = readContextBudgets();
+  map[providerId] = Math.max(1, Math.min(cap, Math.round(Number(k) || 8)));
+  localStorage.setItem(contextBudgetStorageKey(), JSON.stringify(map));
+}
+
+function migrateContextBudget() {
+  if (localStorage.getItem(contextBudgetStorageKey()) !== null) return;
+  const pid = pref.provider;
+  if (!pid) return;
+  setContextBudget(pid, Number(pref.contextTokensK) || 8);
+  localStorage.removeItem("contextTokensK");
+}
+
+/* 校准：客户端估算与服务端真实 prompt_tokens 的比值夹在 [1,4] 内乘回读数。
+   没有上一轮锚点（首条消息、或服务端没回 usage）时不校准，原样返回。 */
+function calibrateUsedK(clientK, lastPromptK, lastClientK) {
+  const c = Math.max(0, Number(clientK) || 0);
+  const lp = Number(lastPromptK) || 0;
+  const lc = Number(lastClientK) || 0;
+  if (lp <= 0 || lc <= 0) return Math.round(c);
+  const ratio = Math.max(1, Math.min(4, lp / lc));
+  return Math.round(c * ratio);
+}
+
+/* 分段：已知段（persona/history/input，原始估算口径）之外的一切——系统提示、
+   检索注入、校准差额——收进 residual，不在客户端假装认识服务端注入了什么。 */
+function contextSegments(usedK, parts) {
+  const known = Math.max(0, Number(parts.persona) || 0) +
+    Math.max(0, Number(parts.history) || 0) +
+    Math.max(0, Number(parts.input) || 0);
+  const residual = Math.max(0, Math.round(Number(usedK) || 0) - Math.round(known));
+  return { known, residual, parts: { ...parts, residual } };
+}
+
+/* 轻量整理：整段历史按 token 预算从最近一条往回收（truncateWithin 的规则），
+   丢了多少按条数差算——truncateWithin 重建了对象，按引用比对会把每条都数成丢的。
+   下限取 0 不取 500：这是"整理"不是"发送"，小预算（甚至 0）也得真吐出差额，
+   最后一条仍由 truncateWithin 的"必带"规则兜住，行为与 outbound 同一口径。 */
+function dropOldestToBudget(list, budgetTokens) {
+  const before = (list || []).reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
+  const kept = truncateWithin(list || [], Math.max(0, Number(budgetTokens) || 0));
+  const droppedCount = Math.max(0, (list || []).length - kept.length);
+  return {
+    kept, droppedCount,
+    keptRoles: kept.map((m) => m.role),
+    freedK: Math.max(0, Math.round((before - kept.reduce((n, m) => n + estimateTokens(m.content) + 4, 0)) / 1000)),
+  };
+}
+
 /* 当前模型允许把预算拖到多远（K token）：读模型档案的 max_context_k。
    后端 catalog/_public 已过一遍归一，这里拿到的必是数字；清单还没回来
    （冷启动、未登录）时兜到 64，与服务端缺省同一口径。 */
@@ -317,26 +391,28 @@ function modelCapK() {
 }
 
 /* 设置里的「上下文长度」行：滑杆量程、步长与 `预算/上限` 显示随当前模型重画。
-   清单在手才允许把超限的旧预算收敛写回——冷启动时上限还只是兜底值，
-   那时就改写会把 256k 模型的设置误砍成 64。 */
+   读数与写数都走「用户 + provider」预算 map（contextBudgetK/setContextBudget），
+   与 outbound 同源；清单没回来时只读不写，冷启动不会把大模型的设置误砍成 64。 */
 function syncCtxRow() {
   const known = state.providers.length > 0;
   const cap = Math.max(2, modelCapK());
   const range = $("ctxRange");
   range.max = cap;
   range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
-  if (known && pref.contextTokensK > cap) pref.contextTokensK = cap;
-  range.value = pref.contextTokensK;
-  $("ctxVal").textContent = pref.contextTokensK;
+  const budget = contextBudgetK(pref.provider);
+  if (known && budget > cap) setContextBudget(pref.provider, cap);
+  const shown = Math.min(budget, cap);
+  range.value = shown;
+  $("ctxVal").textContent = shown;
   $("ctxCap").textContent = cap;
 }
 
 function outbound() {
   const persona = pref.persona(pref.sessionId);
   const reserve = persona ? estimateTokens(persona) + 4 : 0;
-  // 读数时再对模型上限取一次 min：syncCtxRow 的收敛可能还没跑过（刚切完模型、
-  // 或这份 pref 是别的设备带来的大值），别指望界面刷新当唯一防线。
-  const budgetK = Math.min(pref.contextTokensK, modelCapK());
+  // 读数时再对模型上限取一次 min：这层夹逼现在住在 contextBudgetK 里
+  // （按 provider 档案的 max_context_k），别指望界面刷新当唯一防线。
+  const budgetK = contextBudgetK(pref.provider);
   const msgs = truncateWithin(
     state.messages.filter((m) => m.content && !m.transient),
     Math.max(500, budgetK * 1000 - reserve));
@@ -4380,8 +4456,8 @@ function bind() {
   $("provCancelBtn").onclick = closeProviderForm;
 
   $("ctxRange").oninput = (e) => {
-    pref.contextTokensK = e.target.value;
-    $("ctxVal").textContent = pref.contextTokensK;
+    setContextBudget(pref.provider, e.target.value);
+    $("ctxVal").textContent = contextBudgetK(pref.provider);
   };
 
   $("memoryAddForm").onsubmit = async (e) => {
@@ -4599,6 +4675,7 @@ async function boot() {
   SHELL.onEvent(onShellEvent);
   updateSendEnabled();
   migrateContextPref();
+  migrateContextBudget();   // 旧全局 8K 只在这一跳进「用户 + provider」map，之后不再被读作运行时口径
   syncCtxRow();   // 量程/上限先按兜底画一版，loadModels 后 renderModelSelect 会再校准
   $("connInfo").textContent = location.host;   // 这一页生命周期内的常量，不必等人进账户页才写
 
