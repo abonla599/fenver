@@ -183,8 +183,13 @@
             <span class="hint" id="statusHint"></span>
             <!-- 快速切换模型芯片：点开就是可用模型清单，选一个立刻生效并同步
                  服务端「我的默认」。hidden 是默认值——模型清单要等 /v1/models
-                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。 -->
-            <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
+                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。
+                 v0.39.x 驾驶舱：芯片外面包一层 cockpit，环（用量+账本入口）排到
+                 芯片前——点环开账本，点芯片仍开模型菜单，两套控件不各建一份。 -->
+            <span class="model-cockpit" id="modelCockpit">
+              <button type="button" id="ctxRingBtn" class="ctx-ring-btn" aria-label="上下文用量"></button>
+              <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
+            </span>
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
             <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
@@ -207,6 +212,20 @@
         <!-- 模型快切弹单：条目由 app.js 的 renderModelMenu 从 state.providers
              现渲染。和附件菜单同款"让位层"：相机、附件打开时它自动收起。 -->
         <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="选择模型"></div>
+
+        <!-- v0.39.x 驾驶舱账本：点上下文环展开。动态内容一律由 app.js 用
+             createElement/textContent 落进 #ctxPanelBody（模型名/消息预览都是
+             服务端或用户文本，不拼 innerHTML）；滑杆与两颗按钮是静态骨架。
+             层开合走 Layers，与模型弹单同一套返回键纪律。 -->
+        <div class="context-panel hidden" id="contextPanel" role="dialog" aria-label="上下文账本">
+          <div id="ctxPanelBody"></div>
+          <label class="ctx-panel-row" for="ctxBudgetRange">本模型预算（k）
+            <input type="range" id="ctxBudgetRange" min="1" max="64" step="1" value="8" aria-label="本模型上下文预算（k）"></label>
+          <div class="ctx-panel-actions">
+            <button type="button" class="fv-btn" id="ctxTidyBtn">轻量整理</button>
+            <button type="button" class="fv-btn" id="ctxResetBtn">恢复完整发送</button>
+          </div>
+        </div>
 
         <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
              accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->

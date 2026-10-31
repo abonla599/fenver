@@ -252,6 +252,11 @@ const state = {
   taskOpenId: "",
   taskAnswering: false,
   taskEpoch: 0,           // 换身份 +1：在途那一枪回来时认不认这个页面，看它还是不是出发时那一个
+  // v0.39.x 驾驶舱（Task 4）：环与账本的两张按会话表，都是内存态、随换身份清空。
+  // contextDropBySession 是"轻量整理后本轮发送从最早切掉几条"（只影响发送，不动历史原文）；
+  // lastUsageBySession 记上一轮 done.usage 的校准锚点 {prompt_tokens, clientK, providerId}。
+  contextDropBySession: {},
+  lastUsageBySession: {},
 };
 
 /* ---------------- 小工具 ---------------- */
@@ -405,6 +410,7 @@ function syncCtxRow() {
   range.value = shown;
   $("ctxVal").textContent = shown;
   $("ctxCap").textContent = cap;
+  renderContextRing();   // 预算/上限变了环的分母就变了，不刷等于画一张旧账
 }
 
 function outbound() {
@@ -413,11 +419,192 @@ function outbound() {
   // 读数时再对模型上限取一次 min：这层夹逼现在住在 contextBudgetK 里
   // （按 provider 档案的 max_context_k），别指望界面刷新当唯一防线。
   const budgetK = contextBudgetK(pref.provider);
+  // v0.39.x 驾驶舱：轻量整理过的条数在这里真的生效——先按 drop 从最早处切掉，
+  // 再走原有的过滤/截断。环上的读数（clientContextK）用的是同一个 offset，
+  // "显示降了、实发也降"才是整理，只改显示是假功能。
+  const drop = state.contextDropBySession[pref.sessionId] || 0;
   const msgs = truncateWithin(
-    state.messages.filter((m) => m.content && !m.transient),
+    state.messages.slice(drop).filter((m) => m.content && !m.transient),
     Math.max(500, budgetK * 1000 - reserve));
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
+}
+
+/* ---------------- 驾驶舱：上下文环与账本（Task 4） ----------------
+ * 环的读数口径与 outbound 同源：clientContextK 里那条 slice(drop) 就是
+ * outbound 的 drop，两边各自维护一套 offset 迟早分叉。校准锚点取
+ * lastUsageBySession（done.usage 落账那份），预算取 contextBudgetK（按模型）。
+ * renderContextRing 只做环自己的样式/无障碍标签，绝不回调 renderMessages——
+ * 它挂在 renderMessages 的尾巴上，回调就是递归。 */
+function clientContextK() {
+  const drop = state.contextDropBySession[pref.sessionId] || 0;
+  const msgs = state.messages.slice(drop).filter((m) => m.content && !m.transient);
+  const persona = pref.persona(pref.sessionId) || "";
+  const known = (persona ? estimateTokens(persona) + 4 : 0) +
+    msgs.reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
+  return { known, msgs, persona };
+}
+
+function sessionQueueK() {
+  const q = (state.queues && state.queues[queueKey(pref.sessionId)]) || { items: [] };
+  return q.items.reduce((n, x) => n + (Number(x.k) || 0), 0);
+}
+
+function renderContextRing() {
+  const cm = currentProvider();
+  if (!cm) return;
+  const btn = $("ctxRingBtn");
+  if (!btn) return;
+  const { known } = clientContextK();
+  const last = state.lastUsageBySession[pref.sessionId];
+  const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
+  const budget = contextBudgetK(cm.id);
+  const budgetTokens = Math.max(1, budget * 1000);
+  const pct = Math.min(100, used / budgetTokens * 100);
+  const over = used > budgetTokens;
+  const qK = sessionQueueK();
+  // --fv-warn 目前是空头支票（本版没有第三强调色），兜到既有 --danger；
+  // 将来补 warn token 时这里与 style.css 一并生效，不加新色。
+  const color = over ? "var(--danger)"
+    : pct >= 70 ? "var(--fv-warn, var(--danger))" : "var(--accent)";
+  btn.style.setProperty("--ctx-pct", String(pct));
+  btn.style.setProperty("--ctx-color", color);
+  btn.setAttribute("aria-label",
+    `上下文 ${pct.toFixed(1)}%，${Math.round(used / 1000)}K / ${budget}K；待发 +${qK}K`);
+  btn.classList.toggle("warn", pct >= 70 || over);
+  btn.classList.toggle("danger", over);
+}
+
+function renderContextPanel() {
+  const body = $("ctxPanelBody");
+  if (!body) return;
+  // 清空用 removeChild，不用字符串赋值：动态内容全是 createElement + textContent，
+  // 模型名/消息预览都可能是服务端或用户原文，innerHTML 等于给他们开门。
+  while (body.firstChild) body.removeChild(body.firstChild);
+  const cm = currentProvider();
+  if (!cm) {
+    const none = document.createElement("p");
+    none.className = "ctx-note";
+    none.textContent = "还没有可用模型，上下文用量暂无从算起。";
+    body.appendChild(none);
+    return;
+  }
+  const { known, msgs, persona } = clientContextK();
+  const last = state.lastUsageBySession[pref.sessionId];
+  const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
+  const budget = contextBudgetK(cm.id);
+  const pct = Math.min(100, used / Math.max(1, budget * 1000) * 100);
+
+  const head = document.createElement("p");
+  head.className = "ctx-head";
+  head.setAttribute("aria-label", "当前模型与用量");
+  head.textContent = `${cm.name} · ${Math.round(used / 1000)}K / ${budget}K（${pct.toFixed(1)}%）`;
+  body.appendChild(head);
+
+  const personaTokens = persona ? estimateTokens(persona) + 4 : 0;
+  const historyTokens = msgs.reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
+  const inputTokens = estimateTokens($("input").value || "");
+  const segs = contextSegments(used, {
+    persona: personaTokens, history: historyTokens, input: inputTokens,
+  });
+  const bar = document.createElement("div");
+  bar.className = "ctx-seg-bar";
+  bar.setAttribute("aria-label", "上下文构成：角色 / 历史 / 输入 / 其余");
+  [["persona", "ctx-seg-persona", segs.parts.persona],
+   ["history", "ctx-seg-history", segs.parts.history],
+   ["input", "ctx-seg-input", segs.parts.input],
+   ["residual", "ctx-seg-residual", segs.parts.residual]].forEach(([label, cls, tokens]) => {
+    const seg = document.createElement("i");
+    seg.className = "ctx-seg " + cls;
+    seg.style.width = Math.max(0, Math.min(100,
+      Number(tokens) / Math.max(1, used) * 100)) + "%";
+    seg.setAttribute("aria-label", `${label} ${Math.round(Number(tokens) / 100) / 10}K`);
+    bar.appendChild(seg);
+  });
+  body.appendChild(bar);
+
+  const legend = document.createElement("p");
+  legend.className = "ctx-note";
+  legend.textContent = "其余 = 系统提示/检索注入/校准差额，客户端不猜服务端注入了什么。";
+  body.appendChild(legend);
+
+  const ledger = document.createElement("p");
+  ledger.className = "ctx-note";
+  ledger.setAttribute("aria-label", "上轮服务端用量");
+  ledger.textContent = last
+    ? `上轮实报 prompt ${Math.round((Number(last.prompt_tokens) || 0) / 1000)}K`
+      + `（当时客户端估 ${Math.round((Number(last.clientK) || 0) / 1000)}K，模型 ${last.providerId || "未知"}）`
+    : "还没收到服务端 usage：当前读数全是客户端估算，首轮回账后自动校准。";
+  body.appendChild(ledger);
+
+  const drop = state.contextDropBySession[pref.sessionId] || 0;
+  const meta = document.createElement("p");
+  meta.className = "ctx-note";
+  meta.textContent = `本轮发送已从最早处切掉 ${drop} 条；待发队列 +${sessionQueueK()}K。历史原文未动。`;
+  body.appendChild(meta);
+
+  const list = document.createElement("div");
+  list.className = "ctx-preview";
+  list.setAttribute("aria-label", "本轮将发送的消息预览");
+  msgs.slice(-6).forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "ctx-preview-row";
+    const role = document.createElement("span");
+    role.className = "ctx-preview-role";
+    role.textContent = m.role === "user" ? "我"
+      : m.role === "assistant" ? "模型" : m.role;
+    const prev = document.createElement("span");
+    prev.className = "ctx-preview-text";
+    prev.textContent = String(m.content || "").slice(0, 40);
+    row.append(role, prev);
+    list.appendChild(row);
+  });
+  if (!msgs.length) {
+    const empty = document.createElement("p");
+    empty.className = "ctx-note";
+    empty.textContent = "本轮没有携带历史消息。";
+    list.appendChild(empty);
+  }
+  body.appendChild(list);
+
+  const range = $("ctxBudgetRange");
+  const cap = Math.max(1, Number(cm.max_context_k) || 64);
+  range.max = String(cap);
+  range.value = String(budget);
+}
+
+function openContextPanel() {
+  renderContextPanel();
+  $("contextPanel").classList.remove("hidden");
+  Layers.open("contextPanel", hideContextPanel);
+}
+
+function closeContextPanel() {
+  Layers.close("contextPanel");
+}
+
+function hideContextPanel() {
+  $("contextPanel").classList.add("hidden");
+}
+
+/* 轻量整理：按当前预算算出要丢几条，累加进 contextDropBySession——
+ * outbound 与 clientContextK 都读这一张表，所以省下来的每一 K 都是真不发出去的。
+ * 只改这张表，绝不删 state.messages：历史原文是用户资产。 */
+function applyContextTidy() {
+  const cm = currentProvider();
+  if (!cm) return;
+  const { msgs } = clientContextK();
+  const plan = dropOldestToBudget(msgs, contextBudgetK(cm.id) * 1000);
+  if (!plan.droppedCount) {
+    setStatus("已在预算内，无需整理", false);
+    renderContextPanel();
+    return;
+  }
+  state.contextDropBySession[pref.sessionId] =
+    (state.contextDropBySession[pref.sessionId] || 0) + plan.droppedCount;
+  renderContextPanel();
+  renderContextRing();
+  setStatus(`已从本轮发送移除最早 ${plan.droppedCount} 条：省 ${plan.freedK}K；历史原文未动`, false);
 }
 
 /* ---------------- 接力队列：内存状态机 ----------------
@@ -445,6 +632,7 @@ function enqueueQueueItem(sessionId, item) {
   if (q.items.length >= 20 || chars + String(item.text || "").length > 20000) return false;
   q.items.push(item);
   q.paused = false;
+  queueUiRefresh();
   return true;
 }
 
@@ -454,16 +642,26 @@ function nextQueueItem(sessionId) {
   if (q.sendingId !== null) return null;
   const item = q.items.shift() || null;
   if (item) q.sendingId = item.id;
+  queueUiRefresh();
   return item;
 }
 
 function finishQueueItem(sessionId, id) {
   const q = queueFor(sessionId);
   if (q.sendingId === id) q.sendingId = null;
+  queueUiRefresh();
 }
 
 function pauseQueue(sessionId, paused) {
   queueFor(sessionId).paused = !!paused;
+  queueUiRefresh();
+}
+
+/* 队列量一变，环上"待发 +NK"就得跟上（Task 4 接线）。守卫是必需的：
+ * Task 3 的纯状态机测试把这些函数单摘进无 DOM 的 vm 里跑，typeof 对未声明
+ * 标识符不抛错，无环可刷的环境里这行等于不存在。 */
+function queueUiRefresh() {
+  if (typeof renderContextRing === "function") renderContextRing();
 }
 
 function canRelay(sessionId, currentSessionId, streaming, visibility) {
@@ -1026,6 +1224,7 @@ function renderModelChip() {
   if (!usable.length) {
     hideModelMenu();
     chip.classList.add("hidden");
+    renderContextRing();   // 清单空了环也要跟上（无可用模型时 renderContextRing 自己判空）
     return;
   }
   chip.classList.remove("hidden");
@@ -1048,6 +1247,7 @@ function renderModelChip() {
     b.onclick = () => switchModel(p.id);
     menu.appendChild(b);
   });
+  renderContextRing();   // 换模型/刷清单：预算与上限都跟着当前模型走，环同步重画
 }
 
 function switchModel(id) {
@@ -1512,11 +1712,13 @@ function renderMessages() {
   if (!state.messages.length) {
     inner.appendChild(emptyState());
     renderSuggestions(true);
+    renderContextRing();
     return;
   }
   renderSuggestions(false);
   state.messages.forEach((m, i) => inner.appendChild(messageNode(m, i)));
   host.scrollTop = host.scrollHeight;
+  renderContextRing();   // 消息增减（含切会话/发送/回落）是环读数最频繁的变化源
 }
 
 function emptyState() {
@@ -2529,6 +2731,12 @@ async function runStream(holder) {
   const sent = outbound();
   const attachments = (lastUser.attachments || []).map((a) => a.id);
   const providerId = pref.provider;
+  // v0.39.x 驾驶舱账本锚点：这一轮"发出去时"的会话、客户端估算与所用模型。
+  // done.usage 回来时只写给出发时那个会话（下面 pref.sessionId === sidAtSend 那道闸）——
+  // 流还在途人就切了会话/换了模型的话，把 A 轮的用量记到 B 头上，校准就成系统性偏差。
+  const sidAtSend = pref.sessionId;
+  const clientKAtSend = clientContextK().known;
+  const providerAtSend = (currentProvider() || {}).id || null;
   let failed = false;
   let aborted = false;
 
@@ -2567,6 +2775,16 @@ async function runStream(holder) {
       });
     if (done && done.message_id) holder.message_id = done.message_id;
     if (done && done.model) holder.model = done.model;
+    // done 带回的 usage 落账（含 cancelled 终帧——Task 1 已钉住它也带 billed 部分）。
+    // 闸：会话仍是出发时那一个才写；切走了这一轮就不落账，别让用量记到新会话头上。
+    if (done && done.usage && pref.sessionId === sidAtSend) {
+      state.lastUsageBySession[sidAtSend] = {
+        prompt_tokens: Number(done.usage.prompt_tokens) || 0,
+        clientK: clientKAtSend,
+        providerId: providerAtSend,
+      };
+      renderContextRing();
+    }
     // done 带回来的那一份 trace 是服务端裁过的权威步序（含 omitted），也是马上要落盘的
     // 形状——拿它覆盖本地累积的那份，屏幕上的过程与重开会话后看到的过程才是同一份。
     if (done && Array.isArray(done.trace) && done.trace.length) holder.trace = done.trace;
@@ -3544,6 +3762,10 @@ function resetViewForIdentity() {
   state.messages = [];
   state.sessions = [];
   state.pending = [];
+  // v0.39.x 驾驶舱两张表（Task 4）：校准锚点与整理 offset 都是"这个人这个会话"的
+  // 内存态。换身份不清，上一个人的用量锚点会校准到新会话头上（队列的清空接线在 Task 5）。
+  state.contextDropBySession = {};
+  state.lastUsageBySession = {};
   state.memoryQuery = "";
   state.filter = "";
   $("input").value = "";
@@ -4444,6 +4666,35 @@ function bind() {
       setModelMenu(false);
     }
   });
+  // v0.39.x 驾驶舱环：点环开/收账本（stopPropagation 与芯片同款纪律，防"开完
+  // 立刻被同一次点击的冒泡收掉"）；点面板外任意处收起，走 closeContextPanel
+  // 回 Layers，返回键与历史条目不漂。模型菜单那侧一个字没动：点芯片仍开模型菜单。
+  $("ctxRingBtn").onclick = (e) => {
+    e.stopPropagation();
+    if ($("contextPanel").classList.contains("hidden")) openContextPanel();
+    else closeContextPanel();
+  };
+  document.addEventListener("click", (e) => {
+    const panel = $("contextPanel");
+    if (!panel.classList.contains("hidden") && !panel.contains(e.target)
+        && e.target !== $("ctxRingBtn")) {
+      closeContextPanel();
+    }
+  });
+  $("ctxBudgetRange").oninput = (e) => {
+    const cm = currentProvider();
+    if (!cm) return;
+    setContextBudget(cm.id, e.target.value);
+    syncCtxRow();            // 设置页那行与环都从同一口径重读，不各写各的
+    renderContextPanel();
+  };
+  $("ctxTidyBtn").onclick = applyContextTidy;
+  $("ctxResetBtn").onclick = () => {
+    state.contextDropBySession[pref.sessionId] = 0;
+    renderContextPanel();
+    renderContextRing();
+    setStatus("本轮发送已恢复完整历史：整理只切发送范围，历史原文从未改过", false);
+  };
   $("imageInput").onchange = (e) => pickFiles(e.target);
   $("fileInput").onchange = (e) => pickFiles(e.target);
 
@@ -4515,6 +4766,7 @@ function bind() {
   $("ctxRange").oninput = (e) => {
     setContextBudget(pref.provider, e.target.value);
     $("ctxVal").textContent = contextBudgetK(pref.provider);
+    renderContextRing();   // 设置页滑杆拖一格，环的分母就得跟一格（Task 9 才迁移这一行）
   };
 
   $("memoryAddForm").onsubmit = async (e) => {

@@ -593,6 +593,43 @@ a.trace-result-title:hover { text-decoration: underline; }
 .model-menu button:hover { background: var(--bg-hover); }
 .model-menu button.current { color: var(--accent); font-weight: 600; }
 .model-menu .mm-sub { font-size: 12px; opacity: .65; flex: none; }
+
+/* v0.39.x 驾驶舱：上下文环 + 账本。环 24dp，conic-gradient 由 app.js 写的
+   --ctx-pct/--ctx-color 两个自定义属性直接驱动（--fv-warn 是留给未来警示色的
+   空位，本版没有第三强调色，兜到 --fv-danger）；账本沿用卡面/线/圆角同一套 token。 */
+.model-cockpit { display: inline-flex; align-items: center; gap: 6px;
+  flex: none; margin-left: auto; max-width: 56vw; }
+.model-cockpit .model-chip { margin-left: 0; }
+.ctx-ring-btn { width: 24px; height: 24px; border-radius: 50%; position: relative;
+  padding: 0; border: 0; flex: none; cursor: pointer;
+  background: conic-gradient(var(--ctx-color, var(--fv-accent)) calc(var(--ctx-pct, 0) * 1%),
+                             var(--fv-surface-3) 0); }
+.ctx-ring-btn::after { content: ""; position: absolute; inset: 4px; border-radius: 50%;
+  background: var(--fv-surface); }
+.ctx-ring-btn.warn { --ctx-color: var(--fv-warn, var(--fv-danger)); }
+.ctx-ring-btn.danger { --ctx-color: var(--fv-danger); }
+.context-panel { display: flex; flex-direction: column; gap: 8px;
+  max-width: 780px; margin: 0 auto 8px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: pop var(--fv-dur-standard) var(--fv-ease); font-size: 13px; }
+.ctx-head { margin: 0; font-weight: 600; }
+.ctx-note { margin: 0; font-size: 12px; color: var(--text-3, var(--text)); opacity: .8; }
+.ctx-seg-bar { display: flex; gap: 2px; height: 10px; border-radius: 5px;
+  overflow: hidden; background: var(--fv-surface-3); }
+.ctx-seg { display: block; height: 100%; min-width: 0; }
+.ctx-seg-persona { background: var(--accent-soft); }
+.ctx-seg-history { background: var(--accent); }
+.ctx-seg-input { background: var(--bg-hover); }
+.ctx-seg-residual { background: var(--danger); opacity: .55; }
+.ctx-panel-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.ctx-panel-row input[type="range"] { flex: 1; min-width: 0; }
+.ctx-panel-actions { display: flex; gap: 8px; }
+.ctx-preview { display: flex; flex-direction: column; gap: 4px; }
+.ctx-preview-row { display: flex; gap: 8px; align-items: baseline; }
+.ctx-preview-role { flex: none; font-size: 11.5px; opacity: .6; }
+.ctx-preview-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; }
 .attach-tile {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);

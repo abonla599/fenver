@@ -4,8 +4,11 @@ from pathlib import Path
 import pytest
 from tests.test_web_pwa import _fn_text, _js
 
+# queueUiRefresh 是 Task 4 给四个变更函数加的刷新出口（typeof 守卫，无 DOM 环境
+# 里等于不存在）：它现在是状态机的一部分，摘函数必须一起摘，否则 vm 里 ReferenceError。
 FUNCS = ("queueKey", "queueFor", "enqueueQueueItem", "nextQueueItem",
-         "finishQueueItem", "pauseQueue", "canRelay", "resetQueuesForIdentity")
+         "finishQueueItem", "pauseQueue", "canRelay", "resetQueuesForIdentity",
+         "queueUiRefresh")
 
 HARNESS = r"""
 const fs=require("fs"), vm=require("vm");
