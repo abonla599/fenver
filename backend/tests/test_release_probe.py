@@ -890,10 +890,12 @@ def test_expired_ticket_detail_is_the_same_sentence_on_both_sides():
 
 
 def test_the_expired_ticket_gets_exactly_one_reissue():
-    """过期 → 自动重签一次；再败才报错。预算按会话记，且重签走的是签票端点。
+    """失败 → 自动重签一次；重签后改走票据自取，不再交给同一台 ROM 下载器。
 
     PRD 的原话是"票据 5 分钟过期未兑换 → 自动重新签一次，仍失败则报错"。
     两次签发之间没有别的凭据面可钻：预算 set 加过一次就不再进重签分支。
+    真机（MIUI）实测 DownloadManager 会在入队后以 590 失败，重入队只是复现
+    同一次故障，所以重签后的落盘点是 savePrivateCopy。
     """
     from pathlib import Path
     from tests.test_apk_release_discipline import _code
@@ -903,8 +905,12 @@ def test_the_expired_ticket_gets_exactly_one_reissue():
                / "ExportTracker.kt")
     body = _code(tracker)
     assert "Api.exportTicket(sid)" in body, "重签没有回到签票端点？"
-    assert "retriedSids.add(sid)" in body and "SessionDownloads.enqueue" in body, \
-        "过期之后没有『重签→重新入队』这一拍"
+    assert "retriedSids.add(sid)" in body and "savePrivateCopy(ctx, ticket.path" in body, \
+        "失败之后没有『重签→私有目录自取』这一拍"
+    assert "SessionDownloads.enqueue" not in body, \
+        "重签后仍把票据交回同一台 ROM 下载器，同一次故障会再演一遍"
+    assert '"导出完成：文件已保存在应用私有目录"' in body, \
+        "自取成功后没有告诉用户文件已经落盘"
     assert "ExportRedeem.looksExpired" in body, "没有先认服务端那句 detail 再决定重签？"
     assert "retriedSids" in body, "重签预算的记账不见了——套娃重签就回来了"
     # DownloadManager 压根没有 ERROR_HTTP 这个常量（第一次 CI 构建就是这么红的）：
@@ -912,6 +918,23 @@ def test_the_expired_ticket_gets_exactly_one_reissue():
     # （空间不足/取消/重试过多，都落在 1xx~3xx）不许白占重签预算。
     assert "ERROR_HTTP" not in body, "DownloadManager 不导出 ERROR_HTTP，别再引回去"
     assert "reason in 400..599" in body, "读不出失败体时的 HTTP 判据不见了"
+
+
+def test_the_native_export_note_does_not_claim_success_before_the_file_lands():
+    """入队成功 ≠ 已落盘：MIUI 下载器会在入队后失败，文案必须先说"已开始"。
+
+    真机证据：点击后界面显示"已导出到应用私有目录"，文件却直到第二次点击
+    才出现。`queued` 这一位就是区分"系统下载器接下任务"与"票据字节已写完"。
+    """
+    from tests.test_apk_release_discipline import _code
+
+    ui = _code(_repo_root() / "android-native" / "app" / "src" / "main" / "java"
+               / "xyz" / "fenever" / "assistant" / "nativeapp" / "ui" / "SettingsUi.kt")
+    assert "queued = true" in ui, "入队与直接落盘没有分开记账"
+    assert 'if (queued) "已开始导出到应用私有目录 $dest"' in ui, \
+        "入队成功仍报成已完成"
+    assert '"已导出到应用私有目录 $dest"' in ui, \
+        "直接落盘（真的写完了）的完成文案不见了"
 
 
 def test_the_permission_denied_fallback_names_the_private_path():

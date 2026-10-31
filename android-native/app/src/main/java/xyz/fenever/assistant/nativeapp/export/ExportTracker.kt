@@ -12,7 +12,6 @@ import kotlinx.coroutines.launch
 import xyz.fenever.assistant.core.ExportName
 import xyz.fenever.assistant.core.ExportRedeem
 import xyz.fenever.assistant.nativeapp.Api
-import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.ReminderChannels
 import java.io.File
 import java.io.FileInputStream
@@ -77,18 +76,20 @@ object ExportTracker {
                 val reason = reasonOf(ctx, downloadId)
                 val httpish = expired || (reason != null && reason in 400..599)
                 if (httpish && retriedSids.add(sid)) {
+                    // 重签之后不再交给同一个 DownloadManager：真机（MIUI）实测它会
+                    // 在入队后以 590 失败，重入队等于把同一次故障再演一遍。票据自取
+                    // 走 App 自己的 OkHttp，既避开了 ROM 的下载器，也少给系统下载
+                    // 队列留一份可被其他进程看到的票据 URL。
                     val again = runCatching {
                         val title = Api.getSession(sid).title
                         val ticket = Api.exportTicket(sid)
                         if (!ExportName.isTicketPath(ticket.path)) {
                             error("服务端给的票据形状不对")
                         }
-                        SessionDownloads.enqueue(ctx,
-                            Prefs.baseUrl.trimEnd('/') + ticket.path,
-                            ExportName.exportFileName(title))
+                        savePrivateCopy(ctx, ticket.path, ExportName.exportFileName(title))
                     }
                     if (again.isSuccess) {
-                        watch(ctx, again.getOrThrow(), sid)   // 新票据新下载，重新盯
+                        notify(ctx, sid, "导出完成：文件已保存在应用私有目录")
                         return
                     }
                 }

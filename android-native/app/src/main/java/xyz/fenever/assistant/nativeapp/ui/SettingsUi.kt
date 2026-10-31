@@ -560,18 +560,24 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
                 if (!ExportName.isTicketPath(ticket.path))
                     throw IllegalStateException("服务端给的票据形状不对")
                 val fileName = ExportName.exportFileName(title)
+                var queued = false
                 val dest = try {
                     SessionDownloads.enqueue(ctx,
                         Prefs.baseUrl.trimEnd('/') + ticket.path, fileName)
                         .also { ExportTracker.watch(ctx, it, sid) }
+                    queued = true
                     "Download/$fileName"
                 } catch (e: Exception) {
                     // 系统下载队列偶尔会被 ROM 拒（或同名目录不可写）：退回票据自取。
                     ExportTracker.savePrivateCopy(ctx, ticket.path, fileName)
                 }
-                dest
-            }.onSuccess { dest ->
-                onNote("已导出到应用私有目录 $dest", false)
+                dest to queued
+            }.onSuccess { (dest, queued) ->
+                // 入队只代表系统下载器接下了任务，不代表已经落盘；落盘结果由
+                // ExportTracker 在失败时兜底。真机实测 MIUI 下载器会在入队后
+                // 以 590 失败——这里若报"已导出"，用户会去找一个不存在的文件。
+                onNote(if (queued) "已开始导出到应用私有目录 $dest"
+                       else "已导出到应用私有目录 $dest", false)
             }.onFailure { onNote(exportClickFailure(it), true) }
         }
     }
