@@ -88,6 +88,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -148,6 +149,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -336,6 +338,15 @@ private const val MAX_SCROLL_OFFSET = Int.MAX_VALUE / 2
  * 不许把它改大，更不许借它复活 24 帧循环——那正是 v0.36.1 首帧批砍掉的东西。 */
 private const val MAX_BOTTOM_CORRECTIONS = 3
 
+/* v0.39 性能 A 包：流式发布与跟随的两个节拍（判据见 test_v0390_native_stream_perf.py）。
+ * STREAM_PUBLISH_MS——ticker 把 acc 的最新快照发布到 streamText 的窗口：content 帧
+ * 到达频率远高于刷新率，逐 token 写 state 会让整棵消息列表逐 token 重组；40ms 一更
+ * 在观感上是"连贯打字"，在成本上是每帧最多一次的有界功。批准区间 30..50，锁会红。
+ * STREAM_FOLLOW_MS——流式跟随环的判定周期：近底才贴、每轮先 delay 不忙等；
+ * 80 与网页 paint 的 50ms 节流同族，慢半拍是因为原生这侧还要量 layoutInfo。 */
+private const val STREAM_PUBLISH_MS = 40L
+private const val STREAM_FOLLOW_MS = 80L
+
 /* v0.36.1 动效批：会话切换的「挤入卡片」（方案 A）节拍与缓动。
  * 只动消息区这一张卡：新卡从抽屉侧（左）轻微滑入 + 缩放淡入，旧卡向右轻微滑出，
  * 像从牌堆里把下一张顶出来。进入 260ms、退出 220ms——先走的不许比进来的慢，
@@ -405,6 +416,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var statusErr by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var streamText by remember { mutableStateOf<String?>(null) }
+    // v0.39 性能 A 包：组合期不再逐 token 读 streamText 的字符串——streamActive 是
+    // "这一轮在流式"的开关（起流置真、finally 置假），streamVisible 只回答
+    // "有没有正文"；streamText 的真实读取挪进 item 体内（StreamingBubble 要字）
+    // 与两条 effect 的协程内（落定判据、跟随退出条件），父级条件全吃派生量。
+    var streamActive by remember { mutableStateOf(false) }
+    val streamVisible by remember { derivedStateOf { streamText != null } }
     // v0.29.0 过程面板：流式期间累积的过程步 + 面板开合。流式期间默认展开、落定自动
     // 折叠（网页 plan §7 同一判据）；用户点过头（touched）就把他的选择带进落定态，
     // 任何自动逻辑不再替他改主意。
@@ -680,8 +697,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 一步的（30 个分片不许变 30 行），列表身份不变，那样 key 永不触发，等于没修。
     // 贴底/夹边界的判据一个字没动（test_settled_bottom_and_title_ink 钉的就是那部分），
     // 生成中分支的近底闸门继续挡住"每个 token 把上翻阅读的人拽回底部"。
+    // v0.39 性能 A 包再改判：跟随的一半拆出去独立成 LaunchedEffect(streamActive) 的
+    // 80ms 环（下面紧跟着那条），这里的 key 从 streamText 换成 streamActive——
+    // 组合期逐 token 读正文本身就是病根，面板变化量（步数 + 思考总字数）留在 key 里
+    // 继续叫醒"落定"那一支的判据重估；落定分支照旧在协程内读 streamText == null。
     val streamTraceChars = streamTrace.sumOf { it.text.length }
-    LaunchedEffect(messages.size, streamText, streamTrace.size, streamTraceChars) {
+    LaunchedEffect(messages.size, streamActive, streamTrace.size, streamTraceChars) {
         val first = listState.layoutInfo
         val total = first.totalItemsCount
         if (total == 0) return@LaunchedEffect
@@ -711,9 +732,23 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 if (last.offset + last.size <= now.viewportEndOffset) return@LaunchedEffect
                 listState.scrollToItem(t - 1, MAX_SCROLL_OFFSET)
             }
-        } else {
-            val lastVisible = first.visibleItemsInfo.lastOrNull()?.index ?: -1
-            if (lastVisible < total - 2) return@LaunchedEffect
+        }
+    }
+
+    // v0.39 性能 A 包：流式跟随独立环——起流（streamActive=true）时开跑，每轮先
+    // delay(STREAM_FOLLOW_MS) 再判"近底"：只有本来就在底部附近（lastVisible >=
+    // total-2，与搬走前同一道闸）才把列表顶到滚动边界。streamText 在这里是
+    // **协程内**读取（退出条件），不是组合期 key；收尾那拍 streamActive 翻假，
+    // LaunchedEffect 重入、循环条件不成立即退——面板长高的"只想不说"阶段由这环
+    // 覆盖（streamText 是空串而非 null，条件成立），不再借落定效果的顺风车。
+    LaunchedEffect(streamActive) {
+        while (streamActive && streamText != null) {
+            delay(STREAM_FOLLOW_MS)
+            val info = listState.layoutInfo
+            val total = info.totalItemsCount
+            if (total == 0) continue
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            if (lastVisible < total - 2) continue
             listState.scrollToItem(total - 1, MAX_SCROLL_OFFSET)
         }
     }
@@ -887,6 +922,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             busy = true; stopRequested = false
             currentRunId = null
             streamText = ""
+            // 顺序有讲究：streamActive 在 streamText 落好之后翻——跟随环的退出条件
+            // 读 streamText != null，先翻表会让环在"槽位还是 null"的那一拍直接空转退出。
+            streamActive = true
             streamTrace = emptyList(); streamTraceOpen = true; streamTraceTouched = false
             streamApproval = null
             setStatus("生成中…")
@@ -913,6 +951,8 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             var needHistory = false
             // 错帧只扫一次屏：孤儿流的临时气泡不必每帧都清一遍
             var staleSwept = false
+            // v0.39 性能 A 包：发布 ticker（try 内启动、finally 先 cancel 再清槽）。
+            var publishJob: Job? = null
             // v0.35 #99：流上出现挂起前缀 = "去读一次任务"。它只是触发器，不是状态；
             // 帧上没有任务身份，真正在等哪一条由列表 + 详情两个 GET 回答。
             var sawSuspend = false
@@ -921,6 +961,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 ?.map { it.id } ?: emptyList()
             val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
             try {
+                // v0.39 性能 A 包：content 帧不再逐条写 streamText——只进 acc；屏上由
+                // 这条 40ms 的 ticker 发布最新快照（无变化不写，省一次整页重组）。
+                // mine() 为假立刻停笔：A 的孤儿流不许把字画到 B 的卡上——守卫比"照发"
+                // 多花的这一行，正是会话切换竞态的旧账（v0.36.1 审查批同一判据）。
+                publishJob = launch {
+                    while (isActive) {
+                        delay(STREAM_PUBLISH_MS)
+                        if (!mine()) break
+                        val snapshot = acc.toString()
+                        if (snapshot != streamText) streamText = snapshot
+                    }
+                }
                 Api.streamChat(payload,
                     // 断线重连那句人话直接落状态条——但只对号的那一拍才落，
                     // 切了会话就不许再占用 B 屏幕上的状态行。
@@ -944,7 +996,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     if (stopRequested) throw CancellationException("stop")
                     when (ev) {
                         is ChatEvent.Start -> if (ev.runId.isNotEmpty()) currentRunId = ev.runId
-                        is ChatEvent.Content -> { acc.append(ev.text); streamText = acc.toString() }
+                        is ChatEvent.Content -> acc.append(ev.text)
                         // v0.29.0 过程帧：与网页 accumulateTrace 同规则 —— 连续 thinking
                         // 并进最后一步（30 个分片不许变 30 行）、tool_result 按 id 认领它的
                         // tool_call（id 对不上就退化成配最近的 pending）、search 一步一行。
@@ -1074,7 +1126,10 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 // 终局时清掉它对任何会话都是事实；反过来若守卫掉不清，B 会被
                 // busy=true 永久卡死发不出消息。这里只清临时显示态，不碰 messages、
                 // 不 persist——那两样全在上面的对号分支里。
-                streamText = null; busy = false; streamJob = null
+                // v0.39 性能 A 包：先撤 ticker 再清槽——反过来的话，被撤的那一拍
+                // 可能把一份孤儿快照写回刚清空的 streamText。
+                publishJob?.cancel()
+                streamText = null; streamActive = false; busy = false; streamJob = null
                 // 过程已经随 UiMsg 落地，流上的临时累积就地清空（面板不会双倍挂两份）
                 streamTrace = emptyList()
             }
@@ -1471,7 +1526,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             state = areaListState,
                             contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                            if (card.msgs.isEmpty() && (!live || (!busy && streamText == null))) {
+                            if (card.msgs.isEmpty() && (!live || (!busy && !streamVisible))) {
                                 if (card.loading) item {
                                     // v0.36.1 读取中：旧消息已清、空态英雄不画——一行了无负担的
                                     // 提示顶着；数据回来后 key 没变，在同一次转场里填上，
@@ -1486,9 +1541,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                 MessageRow(
                                     m = m,
                                     isLastAssistant = m.role == "assistant" &&
-                                        index == card.msgs.lastIndex && (!live || streamText == null),
+                                        index == card.msgs.lastIndex && (!live || !streamVisible),
                                     editing = live && editingIndex == index,
-                                    streaming = live && (busy || streamText != null),
+                                    streaming = live && (busy || streamVisible),
                                     seedDraft = if (live) editingDraft else null,
                                     copyTip = if (live) copyTip?.takeIf { it.first == index }?.second else null,
                                     onStartEdit = { if (live) { editingDraft = null; editingIndex = index } },
@@ -1570,11 +1625,13 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                     onOpenUrl = onOpenUrl,
                                 )
                             }
-                            if (live) streamText?.let { s ->
-                                item {
+                            // v0.39 性能 A 包：挂载条件吃派生量 streamVisible（组合期
+                            // 只读"有没有正文"这一个布尔），streamText 的字符串读取
+                            // 挪进 item 体内——StreamingBubble 拿最新快照重画它自己。
+                            if (live && streamVisible) item {
                                     // 流式气泡属于"当下这张卡"：旧卡退场 220ms 里若新会话
                                     // 恰好在流式，不许把这轮的字画到旧卡上。
-                                    StreamingBubble(s, streamTrace, streamTraceOpen,
+                                    StreamingBubble(streamText.orEmpty(), streamTrace, streamTraceOpen,
                                         onToggleTrace = {
                                     streamTraceTouched = true
                                     streamTraceOpen = !streamTraceOpen
@@ -1596,7 +1653,6 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                         streamApproval = cur.copy(resolved = true, decision = decision)
                                     }
                                 })
-                                }
                             }
                             // v0.35 #99：卡片挂在消息与流式气泡之后。它是"这一轮停下来等你"，
                             // 不该夹在历史中间；状态住在 ChatScreen 层，滚出视口再回来还是同一份。
@@ -1626,7 +1682,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     .padding(top = 4.dp, bottom = 12.dp)) {
                     if (pending.isNotEmpty())
                         AttRow(pending) { a -> pending = pending.filter { it.id != a.id } }
-                    if (messages.isEmpty() && !busy && streamText == null) {
+                    if (messages.isEmpty() && !busy && !streamVisible) {
                         // 网页 .suggestions 是 flex-wrap：换行摊开、每条都看得见读得完。
                         // 原来是横滑一行——第二条起就被屏幕切半，既看不清也懒得滑
                         //（2026-09-28 真机反馈"横向排列不够直观"）。
@@ -2562,7 +2618,9 @@ private fun StreamingBubble(text: String, trace: List<TraceItem>, traceExpanded:
             if (approval != null)
                 ApprovalCard(approval, onApprovalDecision)
             if (text.isEmpty()) BlinkCursor()
-            else { RichText(text, scheme.onSurface); BlinkCursor() }
+            // v0.39 性能 A 包：流式期显示原始 Markdown（早退不吃解析），落定后
+            // 消息行仍走完整解析恢复排版——取舍与网页流式同一句话。
+            else { RichText(text, scheme.onSurface, streaming = true); BlinkCursor() }
         }
     }
 }
@@ -3029,8 +3087,17 @@ internal fun parseRichTextParts(text: String): List<Pair<String, Boolean>> {
     return parts
 }
 
+/** 正文渲染。streaming=true（流式期）时**早退**：一条裸 Text 直接上屏——
+ *  半截围栏、半截加粗都还没定形，逐 token 重切全文就是"每帧整页重组"的 CPU 大头；
+ *  代价是流式期屏幕上看得到原始 Markdown 标记（`**`、``` ），终稿落进 messages 后
+ *  消息行按默认 streaming=false 走完整解析恢复排版。判据见
+ *  test_v0390_native_stream_perf.py 与 test_native_bold_markdown_v0292.py。 */
 @Composable
-internal fun RichText(text: String, color: Color) {
+internal fun RichText(text: String, color: Color, streaming: Boolean = false) {
+    if (streaming) {
+        Text(text, fontSize = 16.sp, lineHeight = 24.sp, color = color)
+        return
+    }
     val parts = remember(text) { parseRichTextParts(text) }
     Column {
         parts.forEach { (seg, code) ->
