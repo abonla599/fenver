@@ -4,7 +4,10 @@
 别人拿到后可以直接改配置/开 MCP stdio"，不是替代登录——登录仍然决定"你是谁"，
 这张票只决定"这次高危动作是不是本人刚点头"。
 
-Cookie 路径收在 `/v1/admin`，HttpOnly + SameSite=Strict；前端拿到 428 后弹一次
+Cookie 路径必须是 `/v1`：高危管理写口不只在 `/v1/admin/` 前缀下，管理员专属的
+provider / search-key / memory-decay 写口也要同一张票；收在 `/v1/admin` 会让这些
+端点永远收不到票，等于留一条绕过路。票据只活 5 分钟、HttpOnly + SameSite=Strict，
+且单独一张票不构成任何身份，没它会话 Cookie 也做不了写操作。前端拿到 428 后弹一次
 口令框，换到 Cookie 再重试原请求。票据与 user_id 绑定，换身份不会继承。
 """
 import hashlib
@@ -14,7 +17,7 @@ import time
 
 TICKET_TTL_SECONDS = 300
 COOKIE_NAME = "admin_reauth"
-COOKIE_PATH = "/v1/admin"
+COOKIE_PATH = "/v1"
 _MAX_TICKETS = 4096
 
 _TICKETS = {}                       # digest -> (user_id, expires_monotonic)

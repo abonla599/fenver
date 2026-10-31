@@ -42,6 +42,7 @@ SEC_TYPES = (
 )
 SEC_DETAILS = (
     "login.failed", "register.rejected", "reset.rejected", "reauth.denied",
+    "reauth.required", "admin.reauth.denied",
     "limit.login", "limit.register", "limit.reset", "limit.reauth", "limit.chat",
     "limit.orchestrate", "limit.admin", "token.unknown", "csrf.missing", "unspecified",
 )

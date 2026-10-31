@@ -182,6 +182,34 @@ MAX_REAUTH_FAILURES_PER_WINDOW = 10
 _REAUTH_FAILS = _Ledger("reauth_fails")
 _REAUTH_BY_SECRET = _Ledger("reauth_by_secret")
 
+# 管理员二次验证的口令失败账（H-1 复核 2026-10-31）：持管理员会话的人可以无限次
+# 试口令，真实 admin 账号走 bcrypt，弱口令会被在线爆破。键是 user+IP：换 IP 的人
+# 对同一账号仍受同一格预算；同一 IP 上的其他管理员不互相挡。窗口/上限沿用
+# FAILURE_WINDOW_SECONDS / MAX_FAILURES_PER_WINDOW（10 次/10 分钟）。
+_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW = 10
+_ADMIN_REAUTH_FAILS = _Ledger("admin_reauth_fails")
+
+
+def _admin_reauth_key(user_id: str, ip: str) -> str:
+    return f"{user_id or 'anon'}|{ip or 'unknown'}"
+
+
+def _admin_reauth_throttled(user_id: str, ip: str) -> bool:
+    moment = _now()
+    _prune(moment)
+    return (len(_recent(_ADMIN_REAUTH_FAILS,
+                        _admin_reauth_key(user_id, ip),
+                        FAILURE_WINDOW_SECONDS, moment))
+            >= _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW)
+
+
+def _note_admin_reauth_failure(user_id: str, ip: str) -> None:
+    _note(_ADMIN_REAUTH_FAILS, _admin_reauth_key(user_id, ip))
+
+
+def reset_admin_reauth_throttle_for_tests() -> None:
+    _ADMIN_REAUTH_FAILS.clear()
+
 
 def _reauth_secret_key(digest: str) -> str:
     """账本键取摘要前 16 位：够区分（sha256 前 64 bit 碰撞概率可忽略），
@@ -217,7 +245,8 @@ _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_CHATS, CHAT_WINDOW_SECONDS),
             (_ORCHESTRATE_ATTEMPTS, ORCHESTRATE_ATTEMPT_WINDOW_SECONDS),
             (_REAUTH_FAILS, FAILURE_WINDOW_SECONDS),
-            (_REAUTH_BY_SECRET, FAILURE_WINDOW_SECONDS))
+            (_REAUTH_BY_SECRET, FAILURE_WINDOW_SECONDS),
+            (_ADMIN_REAUTH_FAILS, FAILURE_WINDOW_SECONDS))
 
 
 def _store():
@@ -750,6 +779,10 @@ def admin_reauth_endpoint(request: Request, response: Response,
     """
     if principal.role != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
+    ip = _client_ip(request)
+    if _admin_reauth_throttled(principal.user_id, ip):
+        _note_rate_limited(request, ip, principal.user_id, "limit.reauth")
+        raise _too_many(FAILURE_WINDOW_SECONDS)
     password = (req.password or "").strip()
     if principal.user_id == authz.BOOTSTRAP_PRINCIPAL.user_id:
         ok = bool(password) and bool(authz._bootstrap_token()) \
@@ -757,8 +790,9 @@ def admin_reauth_endpoint(request: Request, response: Response,
     else:
         ok = _store().verify_password(principal.user_id, password)
     if not ok:
+        _note_admin_reauth_failure(principal.user_id, ip)
         audit.log(principal, "admin.reauth.denied", target=principal.user_id)
-        security_log.record("auth.fail", request=request, ip=_client_ip(request),
+        security_log.record("auth.fail", request=request, ip=ip,
                             account=principal.user_id, status=401,
                             detail="admin.reauth.denied")
         raise HTTPException(status_code=401, detail="口令不对")

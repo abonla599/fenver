@@ -233,6 +233,21 @@
           </div>
         </div>
 
+        <!-- H-1 管理员二次验证：与 admin.js 同一套页内输入，避免移动浏览器
+             对 window.prompt 的长口令截断。 -->
+        <div class="modal hidden" id="reauthModal" role="dialog" aria-modal="true" aria-label="管理员二次验证">
+          <div class="modal-card pw-card">
+            <p class="pw-title">二次验证</p>
+            <p class="pw-note">这是高危操作，请重新输入管理员口令（5 分钟内有效）：</p>
+            <input id="reauthPw" type="password" placeholder="管理员口令" autocomplete="current-password">
+            <p class="pw-hint" id="reauthHint"></p>
+            <div class="pw-actions">
+              <button type="button" class="btn" id="reauthCancel">取消</button>
+              <button type="button" class="btn btn-primary" id="reauthGo">确定</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 网页内取景拍照：不走系统文件选择器，因此不会被替换成"相机/文件"面板 -->
         <div class="modal hidden" id="cameraModal" role="dialog" aria-modal="true" aria-label="拍照">
           <div class="cam-card">

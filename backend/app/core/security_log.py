@@ -48,6 +48,7 @@ SEVERITY_BY_TYPE = {"auth.fail": "warn", "auth.rate_limited": "warn",
                     "provider.error": "warn", "system.anomaly": "alert"}
 DETAILS = frozenset({
     "login.failed", "register.rejected", "reset.rejected", "reauth.denied",
+    "reauth.required", "admin.reauth.denied",
     "limit.login", "limit.register", "limit.reset", "limit.reauth", "limit.chat",
     "limit.orchestrate", "limit.admin",
     "token.unknown", "csrf.missing", "unspecified",

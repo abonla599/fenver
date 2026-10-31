@@ -477,8 +477,7 @@ def install_auth(app) -> None:
         # 默认开；测试用 ADMIN_REAUTH_REQUIRED=0 关掉，免得每条老用例都先领票。
         if (request.method in _UNSAFE_METHODS and path.startswith("/v1/admin/")
                 and os.getenv(ADMIN_REAUTH_ENV, "1").strip() != "0"):
-            ticket = request.cookies.get(admin_reauth.COOKIE_NAME, "")
-            if not admin_reauth.valid(ticket, principal.user_id):
+            if not _admin_reauth_valid(request, principal):
                 security_log.record("auth.blocked", request=request, ip=ip,
                                     status=428, detail="reauth.required")
                 return JSONResponse(status_code=428,
@@ -511,5 +510,30 @@ def require_admin(request: Request) -> Principal:
     return principal
 
 
+def _admin_reauth_valid(request: Request, principal: Principal) -> bool:
+    ticket = request.cookies.get(admin_reauth.COOKIE_NAME, "")
+    return admin_reauth.valid(ticket, principal.user_id)
+
+
+def require_admin_reauth(request: Request,
+                         principal: Principal = Depends(require_admin)) -> Principal:
+    """管理员高危写口的依赖层门槛：与中间件同一个判据，供 `/v1/admin/` 之外的路由接线。
+
+    为什么要有这一层：H-1 的中间件只拦 `/v1/admin/` 前缀，而 provider / search-key /
+    memory-decay 这些管理员专属写口在别的前缀；只靠一条路径前缀，下一次新增路由就会
+    再漏一次。接线到具体路由 + 路由契约测试枚举“前缀外的管理员写口”两件一起做，
+    漏接线会在测试里红，而不是等人想起来。
+    """
+    if (request.method in _UNSAFE_METHODS
+            and os.getenv(ADMIN_REAUTH_ENV, "1").strip() != "0"
+            and not _admin_reauth_valid(request, principal)):
+        security_log.record("auth.blocked", request=request,
+                            ip=client_ip(request), account=principal.user_id,
+                            status=428, detail="reauth.required")
+        raise HTTPException(status_code=428, detail=ADMIN_REAUTH_DETAIL)
+    return principal
+
+
 CurrentPrincipal = Depends(current_principal)
 RequireAdmin = Depends(require_admin)
+RequireAdminReauth = Depends(require_admin_reauth)

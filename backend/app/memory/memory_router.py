@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import uuid
-from app.core.authz import CurrentPrincipal, Principal, RequireAdmin
+from app.core.authz import CurrentPrincipal, Principal, RequireAdmin, RequireAdminReauth
 from app.core.auth_router import throttle_paid_upstream
 from app.core.providers import scrub_secrets
 from app.memory.memory_manager import MemoryManager
@@ -394,7 +394,7 @@ def update_memory(req: UpdateMemoryRequest, http: Request, principal: Principal 
 
 @router.post("/decay")
 def decay_memories(decay_factor: float = Query(0.95, gt=0.0, le=1.0),
-                         principal: Principal = RequireAdmin):
+                         principal: Principal = RequireAdminReauth):
     """衰减调用者本人的记忆权重。
 
     两处变化：一是仅管理员可用（这是会整体改写一个记忆池的维护动作），二是

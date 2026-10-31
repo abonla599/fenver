@@ -611,6 +611,7 @@ a.trace-result-title:hover { text-decoration: underline; }
 
 /* ---------- 设置弹窗 ---------- */
 .modal { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .6); display: flex; align-items: center; justify-content: center; padding: 16px; }
+#reauthModal { z-index: 80; }
 .modal-card { width: min(720px, 100%); max-height: 88vh; display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
 /* 老 WebView 没有 backdrop-filter 时的实心回退。现在表面本来就是实心，

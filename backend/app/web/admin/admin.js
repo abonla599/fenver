@@ -1183,6 +1183,8 @@
     "register.rejected": "注册被拒",
     "reset.rejected": "重置口令被拒",
     "reauth.denied": "二次验证被拒",
+    "reauth.required": "要求二次验证",
+    "admin.reauth.denied": "管理员二次验证被拒",
     "limit.login": "登录频率超限",
     "limit.register": "注册频率超限",
     "limit.reset": "重置频率超限",

@@ -297,7 +297,38 @@ const API = (() => {
   const HEAL_EXEMPT_PATHS = new Set(["/v1/auth/login", "/v1/auth/register",
     "/v1/auth/reset", "/v1/auth/change-password"]);
 
-  async function request(path, { method = "GET", body, signal } = {}, healed = false) {
+  /* H-1 二次验证：页内 password input。移动浏览器对 window.prompt 的输入框
+     有长度上限（MIUI 实测 15 字），32 位 ACCESS_TOKEN 会被无声截断。 */
+  function askAdminReauth() {
+    return new Promise((resolve) => {
+      const modal = document.getElementById("reauthModal");
+      const input = document.getElementById("reauthPw");
+      const go = document.getElementById("reauthGo");
+      const cancel = document.getElementById("reauthCancel");
+      const hint = document.getElementById("reauthHint");
+      if (!modal || !input || !go || !cancel) { resolve(null); return; }
+      const done = (value) => {
+        modal.classList.add("hidden");
+        go.onclick = null;
+        cancel.onclick = null;
+        input.onkeydown = null;
+        resolve(value);
+      };
+      input.value = "";
+      if (hint) hint.textContent = "";
+      modal.classList.remove("hidden");
+      setTimeout(() => input.focus(), 0);
+      go.onclick = () => done(input.value.trim());
+      cancel.onclick = () => done(null);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); done(input.value.trim()); }
+        if (e.key === "Escape") { e.preventDefault(); done(null); }
+      };
+    });
+  }
+
+  async function request(path, { method = "GET", body, signal } = {}, healed = false,
+                         reauthTried = false) {
     let res;
     try {
       res = await fetch(path, {
@@ -312,6 +343,26 @@ const API = (() => {
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (e) { NetMinder.note(e); throw e; }
+    if (res.status === 428) {
+      if (reauthTried) throw await parseError(res);
+      const pw = await askAdminReauth();
+      if (!pw) throw new Error("已取消二次验证");
+      const rr = await fetch("/v1/auth/admin-reauth", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...csrfHeaders("POST") },
+        body: JSON.stringify({ password: pw }),
+      });
+      if (!rr.ok) {
+        let detail = "HTTP " + rr.status;
+        try {
+          const data = await rr.json();
+          if (data && data.detail) detail = data.detail;
+        } catch (e) { /* 空响应体 */ }
+        throw new Error("二次验证失败：" + detail);
+      }
+      return request(path, { method, body, signal }, healed, true);
+    }
     if (res.status === 401 && !healed && !HEAL_EXEMPT_PATHS.has(path)) {
       /* 绝对上限到点的那一次 401：先试阶梯第三层，成了就把原来这一枪原样重打一次。
        * `healed` 是递归闸门——重打那一枪再 401 就照老路抛给 needsAuth 落登录页，

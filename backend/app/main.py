@@ -196,7 +196,8 @@ from app.web.web_router import mount_admin, mount_pwa
 # 身份与文档开关的规则都在 app/core/authz.py，这里只负责装上。
 # 模式仍由 authz 现读 env：本模块不自带 AUTH_MODE 默认值，免得两处默认不一致。
 from app.core.authz import (_auth_mode, CurrentPrincipal, docs_kwargs_for_mode,
-                            install_auth, Principal, RequireAdmin)
+                            install_auth, Principal, RequireAdmin,
+                            RequireAdminReauth)
 # 用户可见的异常文案统一过路径网：校验类 ValueError 里偶尔会带上绝对路径，
 # 原样回显等于把本机目录结构交给调用者（审计 L-5）。
 from app.core.pathmask import hide_paths
@@ -1423,7 +1424,7 @@ def list_providers(_: Principal = RequireAdmin):
     return {"providers": provider_store.public_list(), "presets": PRESETS}
 
 @app.post("/v1/providers")
-def add_provider(req: ProviderRequest, actor: Principal = RequireAdmin):
+def add_provider(req: ProviderRequest, actor: Principal = RequireAdminReauth):
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
@@ -1435,7 +1436,7 @@ def add_provider(req: ProviderRequest, actor: Principal = RequireAdmin):
 
 @app.put("/v1/providers/{provider_id}")
 def update_provider(provider_id: str, req: ProviderRequest,
-                          actor: Principal = RequireAdmin):
+                          actor: Principal = RequireAdminReauth):
     existing = _owner_gate(provider_id, "", require_own=False)
     # exclude_none：请求里没带的字段 = "这次没动它"，不是"把它清空"。
     # pricing 与 paid_by 同一条纪律——旧表单不认识单价，一次普通改名
@@ -1466,7 +1467,7 @@ def _audit_pricing_change(actor, provider_id: str, existing: dict, saved: dict) 
               detail=credits.describe_pricing_change(before, after))
 
 @app.delete("/v1/providers/{provider_id}")
-def remove_provider(provider_id: str, actor: Principal = RequireAdmin):
+def remove_provider(provider_id: str, actor: Principal = RequireAdminReauth):
     _owner_gate(provider_id, "", require_own=False)
     if provider_store.delete(provider_id):
         audit.log(actor, "provider.delete", target=provider_id)
@@ -1474,7 +1475,7 @@ def remove_provider(provider_id: str, actor: Principal = RequireAdmin):
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/default")
-def set_default_provider(provider_id: str, actor: Principal = RequireAdmin):
+def set_default_provider(provider_id: str, actor: Principal = RequireAdminReauth):
     _owner_gate(provider_id, "", require_own=False)
     if provider_store.set_default(provider_id):
         audit.log(actor, "provider.set-default", target=provider_id)
@@ -1482,7 +1483,7 @@ def set_default_provider(provider_id: str, actor: Principal = RequireAdmin):
     raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/providers/{provider_id}/test")
-def test_provider(provider_id: str, _: Principal = RequireAdmin):
+def test_provider(provider_id: str, _: Principal = RequireAdminReauth):
     """对已保存的配置真实发一次请求，用于验证密钥与地址是否可用。
 
     必须是同步 def：ping 是一次 timeout=20 的阻塞模型调用，留在 async 里就是
@@ -1513,7 +1514,7 @@ def _test_draft(req: ProviderRequest) -> dict:
         return {"ok": False, "detail": scrub_secrets(_fail_reason(e))}
 
 @app.post("/v1/providers/test")
-def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdmin):
+def test_provider_draft(req: ProviderRequest, _: Principal = RequireAdminReauth):
     return _test_draft(req)
 
 # ---------- 个人模型服务（用户自带 API） ----------
@@ -1619,7 +1620,7 @@ def list_search_keys(_: Principal = RequireAdmin):
             "order": [s.name for s in search_chain.SOURCES]}
 
 @app.put("/v1/search-keys/{source}")
-def set_search_key(source: str, req: SearchKeyRequest, actor: Principal = RequireAdmin):
+def set_search_key(source: str, req: SearchKeyRequest, actor: Principal = RequireAdminReauth):
     _search_key_gate(source)
     try:
         masked = search_keys.set_key(source, req.api_key)
@@ -1629,7 +1630,7 @@ def set_search_key(source: str, req: SearchKeyRequest, actor: Principal = Requir
     return {"status": "saved", "source": source, "configured": True, "masked": masked}
 
 @app.delete("/v1/search-keys/{source}")
-def remove_search_key(source: str, actor: Principal = RequireAdmin):
+def remove_search_key(source: str, actor: Principal = RequireAdminReauth):
     _search_key_gate(source)
     if not search_keys.delete_key(source):
         raise HTTPException(status_code=404, detail="该搜索源没有登记过密钥")
