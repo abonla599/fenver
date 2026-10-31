@@ -103,7 +103,18 @@ summary {
 }
 /* 热区下限写一次字面量：共享的静态锁与人工检查都读这一条。 */
 #panel .btn, #gate .btn, .sheet .btn, .nav-btn { min-height: 44px; }
-#panel input, #gate input, #panel textarea, #panel select { min-height: 44px; }
+#panel input, #gate input, #panel textarea, #panel select, #reauth input { min-height: 44px; }
+#reauth input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0 14px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--fv-radius-sm);
+  background: var(--bg-soft);
+  color: var(--text);
+  font: inherit;
+}
 
 #panel input[type="text"],
 #panel input[type="search"],

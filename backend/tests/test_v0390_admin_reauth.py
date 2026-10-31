@@ -54,6 +54,22 @@ def test_ticket_is_bound_to_the_user_and_expires(monkeypatch):
     assert not admin_reauth.valid(token, "u_admin")
 
 
+def test_admin_ui_uses_in_page_reauth_input_not_window_prompt():
+    """MIUI 浏览器的 window.prompt 输入框实测只收 15 个字符，长口令会被无声截断。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    js = (root / "backend" / "app" / "web" / "admin" / "admin.js").read_text(encoding="utf-8")
+    html = (root / "backend" / "app" / "web" / "admin" / "index.html").read_text(encoding="utf-8")
+    css = (root / "backend" / "app" / "web" / "admin" / "admin.css").read_text(encoding="utf-8")
+    assert "window.prompt(" not in js
+    assert "askAdminPassword" in js and "await askAdminPassword()" in js
+    assert 'id="reauthPw" type="password"' in html
+    assert 'id="reauth"' in html and 'id="reauthOk"' in html
+    assert "#reauth input" in css
+    assert "/v1/auth/admin-reauth" in js
+
+
 def test_offline_tool_path_can_create_a_real_admin(tmp_path):
     from app.core.auth import AuthStore, AuthError
 

@@ -175,6 +175,34 @@
 
   const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+  /* 高危操作的口令输入。不用 window.prompt：MIUI 浏览器给原生 prompt 的输入框
+     限了长度（实测 15 个字符），管理员口令/ACCESS_TOKEN 都比它长，输入会在
+     无声处被截断，表现为“口令不对”。页内输入框沿用本页已有的 sheet 骨架。 */
+  function askAdminPassword() {
+    return new Promise((resolve) => {
+      const sheet = document.getElementById("reauth");
+      const input = document.getElementById("reauthPw");
+      const ok = document.getElementById("reauthOk");
+      const cancel = document.getElementById("reauthCancel");
+      const done = (value) => {
+        sheet.classList.add("hidden");
+        ok.onclick = null;
+        cancel.onclick = null;
+        input.onkeydown = null;
+        resolve(value);
+      };
+      input.value = "";
+      sheet.classList.remove("hidden");
+      setTimeout(() => input.focus(), 0);
+      ok.onclick = () => done(input.value);
+      cancel.onclick = () => done(null);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); done(input.value); }
+        if (e.key === "Escape") { e.preventDefault(); done(null); }
+      };
+    });
+  }
+
   async function req(path, opts, retried) {
     const method = (opts && opts.method) || "GET";
     const headers = { "Content-Type": "application/json" };
@@ -198,7 +226,7 @@
     if (res.status === 428) {
       // H-1：高危写操作要一次二次验证；票只活 5 分钟，换到 Cookie 后重试一次。
       if (retried) throw new Error("二次验证仍未通过，请重新登录后再试");
-      const pw = window.prompt("这是高危操作，请重新输入管理员口令（5 分钟内有效）：");
+      const pw = await askAdminPassword();
       if (!pw) throw new Error("已取消二次验证");
       const rr = await fetch("/v1/auth/admin-reauth", {
         method: "POST",

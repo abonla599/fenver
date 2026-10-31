@@ -434,6 +434,19 @@
   </div>
 </div>
 
+<!-- H-1 二次验证：页内输入框，不用 window.prompt（移动端浏览器会截断长口令）。 -->
+<div id="reauth" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="reauthTitle">
+  <div class="card">
+    <h2 id="reauthTitle">二次验证</h2>
+    <p>这是高危操作，请重新输入管理员口令（5 分钟内有效）：</p>
+    <input id="reauthPw" type="password" autocomplete="current-password" placeholder="管理员口令">
+    <div class="foot">
+      <button id="reauthCancel" class="btn btn-ghost btn-small" type="button" data-icon="close" data-label="取消"></button>
+      <button id="reauthOk" class="btn btn-small" type="button" data-icon="check" data-label="确定"></button>
+    </div>
+  </div>
+</div>
+
 <div id="detail" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
   <div class="card">
     <h2 id="detailTitle">任务</h2>
