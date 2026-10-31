@@ -880,6 +880,9 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     status = "failed"
     full_text = ""
     trace: list = []
+    # 引擎在 finally 里把 billed 结进这个字典：cancelled 分支的 done 也要带 usage，
+    # 所以它必须在 try: 之前定义（半截消耗同样是真花出去的钱）。
+    usage_out: dict = {}
 
     begin_trace()
     try:
@@ -906,7 +909,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                                         user_id=principal.user_id,        # 账本要落在人头上
                                         cancel_event=run.cancel_event,    # 停止的主判据
                                         on_upstream_start=run.attach_upstream,  # 供当场关闭
-                                        before_round=before_round):       # R3b 轮次边界的钱闸
+                                        before_round=before_round,       # R3b 轮次边界的钱闸
+                                        usage_out=usage_out):             # done 帧回传 usage
             if frame.get("type") == se.FRAME_CONTENT:
                 full_text += frame.get("text") or ""
             run.append(frame)
@@ -929,7 +933,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                       file=sys.stderr, flush=True)
 
         run.append({**se.done_frame(full_text, run.message_id, provider["model"],
-                                    trace or None),
+                                    trace or None, usage=usage_out or None),
                     "status": "completed", "resumable": False})
         status = "completed"
     except StreamCancelled:
@@ -954,7 +958,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         # R3b-3 的收尾 done：旧客户端从 cancelled 身上得不到"结束"，必须给一条
         # 它今天就认的 done；停的信息只加新字段，不改旧骨架。
         run.append({**se.done_frame(full_text, run.message_id, provider["model"],
-                                    trace or None),
+                                    trace or None, usage=usage_out or None),
                     "status": "cancelled",
                     "stopped_reason": run.stop_cause or "user_cancel",
                     "resumable": False})

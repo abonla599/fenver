@@ -195,16 +195,22 @@ def start_frame(message_id: str, model: str) -> Dict[str, Any]:
 
 
 def done_frame(full_text: str, message_id: str, model: str,
-               trace: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+               trace: Optional[List[Dict[str, Any]]] = None,
+               usage: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """done 多带一个可选 trace：既有字段一个不动，老客户端照旧忽略新键。
 
     带上它是因为「过程」只有在客户端中途断掉之后还有用，而客户端只能从 done
     拿回整份留痕，否则刷新一次就变成了一段没有来历的正文。
+
+    usage 与 trace 同一个先例：不给就不出现这个键。它是本轮计费口径的结算值
+    （streaming.billed），网页/原生的上下文环靠它画"这轮烧了多少"。
     """
     frame: Dict[str, Any] = {"type": FRAME_DONE, "full_text": full_text,
                              "message_id": message_id, "model": model}
     if trace:
         frame["trace"] = trace
+    if usage:
+        frame["usage"] = {k: int(v or 0) for k, v in usage.items()}
     return frame
 
 

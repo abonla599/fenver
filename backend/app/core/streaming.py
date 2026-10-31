@@ -175,6 +175,7 @@ def stream_chat_events(
     on_upstream_start=None,
     before_round=None,
     trace_out: Optional[List[Dict[str, Any]]] = None,
+    usage_out: Optional[Dict[str, int]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """唯一的流式引擎：产出**帧 dict**（类型一律来自 stream_events，绝不在这里手写字面量）。
 
@@ -524,6 +525,8 @@ def stream_chat_events(
         # v0.25 R3 起这条路上的"读者断开"不再终结生成（生产线程抽干为止），
         # 落到 failed 的成因改为取消与真故障。半截消耗同样要记账：那一半的 token
         # 是真花出去了，只记跑完的那一次会系统性低估，也永远看不见故障率。
+        if usage_out is not None:
+            usage_out.update(billed)
         usage.record_call(user_id=user_id or "unattributed",
                           provider_id=provider["id"],
                           paid_by=provider.get("paid_by") or "operator",

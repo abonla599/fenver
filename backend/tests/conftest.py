@@ -181,7 +181,10 @@ def text_as_events(text_fn):
 
     def events(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
                tools=None, max_tool_turns=5, user_id=None,
-               cancel_event=None, on_upstream_start=None, before_round=None):
+               cancel_event=None, on_upstream_start=None, before_round=None,
+               usage_out=None):
+        # usage_out 与真签名同步：端点的 producer 会传它，这里收下并忽略——
+        # 纯文本桩不结 usage，done 帧自然不带（判据见 test_v0391_done_usage.py）。
         for piece in text_fn(model, messages, provider_id=provider_id,
                              temperature=temperature, max_tokens=max_tokens,
                              tools=tools, max_tool_turns=max_tool_turns,
