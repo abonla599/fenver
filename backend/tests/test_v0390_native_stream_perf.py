@@ -153,6 +153,58 @@ def test_follow_loop_is_standalone_eighty_ms_with_same_gate():
         "跟随不再是顶到滚动边界：v0.28 的贴底手段被换掉了"
 
 
+def test_follow_loop_only_scrolls_when_snapshot_actually_changed():
+    """v0.39 修复批：跟随环只在"这一拍真的变了"时才滚。
+
+    病是什么：用户从 A 切到 B 后，A 的孤儿流可能长时间静默（没有帧触发孤儿清扫，
+    streamText 仍是 A 的旧串、streamActive 仍真）——没有本判据时环会每 80ms 在
+    B 的会话上滚一次底，把用户的滚动位置劫走。判据是环记住上一拍的
+    （正文长度, 过程步数, 思考总字数），三者都没变就 continue；变了才更新标记、
+    再走近底闸门。两个形状细节同样被钉住：
+    - 初值取环启动那一刻的 streamText?.length ?: -1 / streamTrace.size /
+      streamTrace.sumOf { it.text.length }，保证起流第一拍不白滚一次；
+    - 标记更新放在近底判断**之前**——用户上翻时也算"已看见这次变化"，
+      不在他回到底部后突然补滚。
+
+    锁的牙（变异实验实测记录）：删掉"没变就 continue"那三行，本判据当场红；
+    还原后文件 sha256 与变异前逐字节一致。
+    """
+    code = _chat()
+    body = _block(code, "LaunchedEffect(streamActive) {")
+    for marker in ("lastTextLen", "lastTraceSize", "lastTraceChars"):
+        assert marker in body, f"跟随环没有变化标记 {marker}：回到每 80ms 无条件滚底"
+    assert "if (text.length == lastTextLen && traceSize == lastTraceSize &&" in body, \
+        "跟随环不再先比对正文长度/过程步数：孤儿流静默期照样滚"
+    assert "traceChars == lastTraceChars)" in body, \
+        "思考总字数没进合取：面板长高对判据不可见"
+    assert "continue" in body, "没有'没变就 continue'：三枚标记成了摆设"
+    assert "streamText?.length ?: -1" in body, \
+        "初值没取 streamText?.length ?: -1：起流第一拍会白滚一次"
+    assert "streamTrace.sumOf { it.text.length }" in body, \
+        "思考总字数不是从 streamTrace.sumOf 算的：变化判据的另一条腿断了"
+
+
+def test_payload_construction_inside_try_so_finally_always_runs():
+    """v0.39 修复批：streamInto 里 payload 的构造三行必须在 try 内的第一段。
+
+    为什么是契约：pid/atts/payload 任一在 try 外抛错（provider 恰好被删、消息体
+    形状意外、chatPayload 自身出错），都会绕过 catch/finally——busy、streamText、
+    streamActive 永久卡在真值上。busy 是发消息的闸，streamActive 是跟随环的循环
+    条件，本批新增的跟随环会被这一下钉死在真值上，UI 再也发不出第二条消息。
+    判据（结构定位，不靠行号）：streamInto 体内 `try {` 的位置必须早于
+    `Api.chatPayload(`，且构造仍排在 `publishJob = launch` 之前（ticker 不许在
+    payload 可能抛错之前就起来）。
+    """
+    code = _chat()
+    body = _block(code, "fun streamInto() {")
+    at_try = body.index("try {")
+    at_payload = body.index("Api.chatPayload(")
+    assert at_try < at_payload, \
+        "payload 构造挪回 try 外了：抛错会绕过 finally，busy/streamActive 永久卡住"
+    assert at_try < body.index("publishJob = launch"), \
+        "payload 构造不在 try 内第一段：ticker 先起来，抛错时 orphan 快照风险回来了"
+
+
 # ------------------------------------------------ RichText 流式早退与终稿 --
 
 def test_rich_text_streaming_early_exit_skips_parsing():

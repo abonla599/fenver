@@ -737,13 +737,33 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
     // v0.39 性能 A 包：流式跟随独立环——起流（streamActive=true）时开跑，每轮先
     // delay(STREAM_FOLLOW_MS) 再判"近底"：只有本来就在底部附近（lastVisible >=
-    // total-2，与搬走前同一道闸）才把列表顶到滚动边界。streamText 在这里是
+    // total-2，与搬走前同一道闸）才把列表顶到滚动边界；**无变化不滚**（见下）。
+    // streamText 在这里是
     // **协程内**读取（退出条件），不是组合期 key；收尾那拍 streamActive 翻假，
     // LaunchedEffect 重入、循环条件不成立即退——面板长高的"只想不说"阶段由这环
     // 覆盖（streamText 是空串而非 null，条件成立），不再借落定效果的顺风车。
+    // v0.39 修复批：环只在"这一拍真的变了"时才滚。孤儿流场景——用户从 A 切到 B
+    // 后 A 的流静默（没有帧触发孤儿清扫，streamText 仍是 A 的旧串、streamActive
+    // 仍真），没有这道比较时环会在 B 上每 80ms 滚一次底、劫走用户的滚动位置。
+    // 判据是记住上一拍的（正文长度, 过程步数, 思考总字数），三者都没变就
+    // continue；变了才更新标记、再走近底闸门。两个形状细节：初值取环启动那一刻
+    // （streamText 此刻可能是 null，故 ?: -1），起流第一拍不白滚；标记更新排在
+    // 近底判断**之前**——用户上翻时也算"已看见这次变化"，不在他回到底部后补滚。
     LaunchedEffect(streamActive) {
+        var lastTextLen = streamText?.length ?: -1
+        var lastTraceSize = streamTrace.size
+        var lastTraceChars = streamTrace.sumOf { it.text.length }
         while (streamActive && streamText != null) {
             delay(STREAM_FOLLOW_MS)
+            val text = streamText.orEmpty()
+            val traceSize = streamTrace.size
+            val traceChars = streamTrace.sumOf { it.text.length }
+            if (text.length == lastTextLen && traceSize == lastTraceSize &&
+                traceChars == lastTraceChars)
+                continue
+            lastTextLen = text.length
+            lastTraceSize = traceSize
+            lastTraceChars = traceChars
             val info = listState.layoutInfo
             val total = info.totalItemsCount
             if (total == 0) continue
@@ -956,11 +976,16 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // v0.35 #99：流上出现挂起前缀 = "去读一次任务"。它只是触发器，不是状态；
             // 帧上没有任务身份，真正在等哪一条由列表 + 详情两个 GET 回答。
             var sawSuspend = false
-            val pid = currentProvider()?.id
-            val atts = messages.lastOrNull { it.role == "user" }?.attachments
-                ?.map { it.id } ?: emptyList()
-            val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
+            // v0.39 修复批：pid/atts/payload 的构造三行整体挪进 try 内的第一段。
+            // 留在 try 外时任一抛错（provider 恰好被删、消息体形状意外）都会绕过
+            // catch/finally——busy、streamText、streamActive 永久卡在真值上：busy
+            // 是发消息的闸，streamActive 还把上面的跟随环钉死在空转。构造仍排在
+            // publishJob = launch 之前：payload 抛错时 ticker 还没起来，不会留下孤儿快照。
             try {
+                val pid = currentProvider()?.id
+                val atts = messages.lastOrNull { it.role == "user" }?.attachments
+                    ?.map { it.id } ?: emptyList()
+                val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
                 // v0.39 性能 A 包：content 帧不再逐条写 streamText——只进 acc；屏上由
                 // 这条 40ms 的 ticker 发布最新快照（无变化不写，省一次整页重组）。
                 // mine() 为假立刻停笔：A 的孤儿流不许把字画到 B 的卡上——守卫比"照发"

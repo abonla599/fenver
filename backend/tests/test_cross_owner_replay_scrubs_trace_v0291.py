@@ -140,7 +140,11 @@ def test_scrub_removes_process_frames_and_keeps_the_skeleton_byte_identical():
     kept_content = [json.loads(c.partition("data: ")[2].partition("\n\n")[0])["text"]
                     for c in scrubbed
                     if '"type": "' + se.FRAME_CONTENT in c.partition("data: ")[2]]
-    assert len(kept_content) >= 1, kept_types
+    # v0.39 修复批补上界：原始缓冲里只有两条相邻 content，读时合帧最多并成
+    # 一帧、最松也只剩这两条——条数必须落在 1..2，且每段非空（空段会把
+    # "拼接相等"退化成假绿）。拼接判据与脱敏/seq 判据照旧。
+    assert 1 <= len(kept_content) <= 2, kept_content
+    assert all(c for c in kept_content), kept_content
     assert "".join(kept_content) == "正文第一句" + "，正文第二句", kept_content
 
     # 骨架帧原样：start/content 两条在两个视图里逐字节相同

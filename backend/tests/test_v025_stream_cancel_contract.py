@@ -452,8 +452,15 @@ def test_resume_valid_offset_replays_without_rebilling_or_restorage(client, real
     # v0.39 读时合帧：三个上游 chunk 在出口并成一帧（或按到达时序并成几帧）。
     # 原语"正文一字不少、帧形可解析"改由拼接判据钉住：start + 至少一帧合并
     # content（拼接文本正确）+ done。
+    # v0.39 修复批收紧原语的两条：这一轮只该有**一个** start、**一个** done，
+    # 且 fake provider 只产 content —— 除 start/content/done 外不许出现别的帧型。
+    # （合帧数量仍不设上界，由下面的拼接判据钉；这是"首尾恰好一次"的原意，
+    # 不是放宽成"任意帧都行"。）
     types_seen = [d["type"] for _, d in frames]
     assert types_seen[0] == "start" and types_seen[-1] == "done", types_seen
+    assert types_seen.count("start") == 1, types_seen
+    assert types_seen.count("done") == 1, types_seen
+    assert set(types_seen) <= {"start", "content", "done"}, types_seen
     contents = [d["text"] for _, d in frames if d["type"] == "content"]
     assert len(contents) >= 1 and "".join(contents) == "甲乙丙", types_seen
 
