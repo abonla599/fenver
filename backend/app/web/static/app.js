@@ -420,6 +420,53 @@ function outbound() {
   return msgs;
 }
 
+/* ---------------- 接力队列：内存状态机 ----------------
+   首版队列只在内存：state.queues[sessionId] = {items, paused, sendingId}。
+   不落 localStorage；每标签页一份；切身份由 resetQueuesForIdentity 清空。
+   queueFor 惰性建桶——不假设页面启动时已经建好，draft/旧会话都从这一句进。 */
+function queueFor(sessionId) {
+  const key = sessionId || "draft";
+  if (!state.queues) state.queues = {};
+  if (!state.queues[key]) state.queues[key] = { items: [], paused: false, sendingId: null };
+  return state.queues[key];
+}
+
+function enqueueQueueItem(sessionId, item) {
+  const q = queueFor(sessionId);
+  const chars = q.items.reduce((n, x) => n + String(x.text || "").length, 0);
+  if (q.items.length >= 20 || chars + String(item.text || "").length > 20000) return false;
+  q.items.push(item);
+  q.paused = false;
+  return true;
+}
+
+function nextQueueItem(sessionId) {
+  const q = queueFor(sessionId);
+  if (q.sendingId) return null;
+  const item = q.items.shift() || null;
+  if (item) q.sendingId = item.id;
+  return item;
+}
+
+function finishQueueItem(sessionId, id) {
+  const q = queueFor(sessionId);
+  if (q.sendingId === id) q.sendingId = null;
+}
+
+function pauseQueue(sessionId, paused) {
+  queueFor(sessionId).paused = !!paused;
+}
+
+function canRelay(sessionId, currentSessionId, streaming, visibility) {
+  const q = queueFor(sessionId);
+  return !!q.items.length && !q.paused && !streaming &&
+    sessionId === currentSessionId && visibility === "visible";
+}
+
+function resetQueuesForIdentity() {
+  state.queues = {};
+}
+
 /** 401 有两种，糊成一句话会把人支使去填一个已经填对的框。
  *  - 本机压根没记过任何人：首启，该注册一个账号；
  *  - 记着人却被服务端拒：管理员撤销或轮换过会话，或这台机器换了人。
