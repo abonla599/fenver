@@ -423,9 +423,17 @@ function outbound() {
 /* ---------------- 接力队列：内存状态机 ----------------
    首版队列只在内存：state.queues[sessionId] = {items, paused, sendingId}。
    不落 localStorage；每标签页一份；切身份由 resetQueuesForIdentity 清空。
+   queueKey 是桶键的唯一归一点：空会话（""/null/undefined）落哨兵 "__draft__"，
+   调用方混用 ""/null/"draft" 不再出现"同桶不同键"；真 id 恰为 "__draft__" 时
+   与空会话同桶，是"真 id 用 String()"口径的固有局限，现网会话 id 非此形状。
    queueFor 惰性建桶——不假设页面启动时已经建好，draft/旧会话都从这一句进。 */
+function queueKey(sessionId) {
+  if (sessionId === null || sessionId === undefined || sessionId === "") return "__draft__";
+  return String(sessionId);
+}
+
 function queueFor(sessionId) {
-  const key = sessionId || "draft";
+  const key = queueKey(sessionId);
   if (!state.queues) state.queues = {};
   if (!state.queues[key]) state.queues[key] = { items: [], paused: false, sendingId: null };
   return state.queues[key];
@@ -442,7 +450,8 @@ function enqueueQueueItem(sessionId, item) {
 
 function nextQueueItem(sessionId) {
   const q = queueFor(sessionId);
-  if (q.sendingId) return null;
+  /* 锁判据用 !== null，不用真值：条目 id 可能是 0 或 ""，真值判据会把锁漏掉。 */
+  if (q.sendingId !== null) return null;
   const item = q.items.shift() || null;
   if (item) q.sendingId = item.id;
   return item;
@@ -458,9 +467,10 @@ function pauseQueue(sessionId, paused) {
 }
 
 function canRelay(sessionId, currentSessionId, streaming, visibility) {
-  const q = queueFor(sessionId);
-  return !!q.items.length && !q.paused && !streaming &&
-    sessionId === currentSessionId && visibility === "visible";
+  /* 纯读：查询不许顺手建空桶（建桶是 queueFor 的写侧职责）。 */
+  const q = state.queues && state.queues[queueKey(sessionId)];
+  return !!q && q.items.length > 0 && !q.paused && !streaming &&
+    queueKey(sessionId) === queueKey(currentSessionId) && visibility === "visible";
 }
 
 function resetQueuesForIdentity() {
