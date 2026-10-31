@@ -687,7 +687,8 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         identityTick
         SetValText(if (Prefs.persona(Prefs.lastSessionId).trim().isNotEmpty()) "已填写" else "")
     }) { onOpenPage("persona") }
-    CtxRow(cap, providersKnown = providers.isNotEmpty())
+    CtxRow(cap, providersKnown = providers.isNotEmpty(),
+        providerId = current?.id ?: Prefs.defaultProviderId)
     SetRow(FenverIcon.Export, "导出本次对话", divider = false) {
         // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
         // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
@@ -899,14 +900,19 @@ private fun ModelPickRow(providers: List<ModelInfo>, current: ModelInfo?,
 }
 
 /* 上下文长度行（网页 #ctxRange + 「8/64k」）：滑杆量程=当前模型上限，
-   步长 cap≤64→2 / ≤256→8 / 其余 32；清单在手才把超限的旧预算收敛（syncCtxRow 原注释）。 */
+   步长 cap≤64→2 / ≤256→8 / 其余 32；清单在手才把超限的旧预算收敛（syncCtxRow 原注释）。
+   v0.39.x Task 6：读写改走 Prefs.contextBudgetK/setContextBudget（按模型，发送与环
+   同源的那张 map），不再碰旧全局键——ChatUi 已不读 contextTokensK，这里再写旧键
+   就是滑杆失效；Task 10 迁进模型卡后整行删除。 */
 @Composable
-private fun CtxRow(cap: Int, providersKnown: Boolean) {
-    var k by remember(cap) { mutableIntStateOf(Prefs.contextTokensK.coerceIn(2, cap)) }
-    LaunchedEffect(cap, providersKnown) {
+private fun CtxRow(cap: Int, providersKnown: Boolean, providerId: String) {
+    var k by remember(cap, providerId) {
+        mutableIntStateOf(Prefs.contextBudgetK(providerId).coerceIn(2, cap))
+    }
+    LaunchedEffect(cap, providersKnown, providerId) {
         val v = if (providersKnown) k.coerceAtMost(cap) else k
         if (v != k) k = v
-        if (Prefs.contextTokensK != v) Prefs.contextTokensK = v
+        if (Prefs.contextBudgetK(providerId) != v) Prefs.setContextBudget(providerId, v)
     }
     val step = if (cap <= 64) 2 else if (cap <= 256) 8 else 32
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
@@ -927,7 +933,7 @@ private fun CtxRow(cap: Int, providersKnown: Boolean) {
                 k = raw.coerceIn(2, cap)
             },
             valueRange = 2f..cap.toFloat(),
-            onValueChangeFinished = { Prefs.contextTokensK = k })
+            onValueChangeFinished = { Prefs.setContextBudget(providerId, k) })
     }
     Box(Modifier.fillMaxWidth().height(1.dp)
         .background(MaterialTheme.colorScheme.outline))

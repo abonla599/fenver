@@ -37,6 +37,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -81,6 +82,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
@@ -91,6 +93,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -110,9 +113,13 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
@@ -167,6 +174,7 @@ import xyz.fenever.assistant.nativeapp.Prefs
 import xyz.fenever.assistant.nativeapp.SessionSummary
 import xyz.fenever.assistant.nativeapp.StoredMessage
 import xyz.fenever.assistant.nativeapp.StreamNeedHistoryException
+import xyz.fenever.assistant.nativeapp.Usage
 import xyz.fenever.assistant.core.TaskCard
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.FenverTokens
@@ -317,6 +325,38 @@ data class UiMsg(val role: String, val content: String,
                  val traceExpanded: Boolean = false,
                  val localId: Long = nextLocalMsgSeq())
 
+/* ---------------- v0.39.x 驾驶舱 Task 6：环与账本的读数快照 ----------------
+ * 单位在字段名里写死：*Tokens 一律是 estimateTokens 的 token 原值，*K 一律是
+ * 千 token（显示口径）；两者之间只许在显式 ×1000 / 除 1000.0 处换算——Task 4 网页侧
+ * 那个 "叫 K 存的是 token" 的命名坑不复制（Api.calibrateUsedK 的名字是沿用网页
+ * 公式的例外，语义与注释都以 token 为准）。 */
+internal data class ContextRingInfo(
+    val available: Boolean,
+    val modelName: String,
+    val providerId: String,
+    val personaTokens: Int,
+    val historyTokens: Int,
+    val inputTokens: Int,
+    val knownTokens: Int,
+    val usedTokens: Int,
+    val usedK: Int,
+    val residualTokens: Int,
+    val budgetK: Int,
+    val capK: Int,
+    val pct: Int,
+    val hasUsage: Boolean,
+    val lastPromptTokens: Int,
+    val lastClientTokens: Int,
+    val dropped: Int,
+)
+
+/** clientCtx 的打包：发送截断与环读数吃同一份（同一条 .drop(drop)）。 */
+private data class ClientCtx(val personaTokens: Int, val historyTokens: Int,
+                             val msgs: List<ChatMessageDto>, val persona: String)
+
+/** token 原值 → K（四舍五入，与网页 Math.round(used/1000) 同一口径）。 */
+private fun roundK(tokens: Int): Int = Math.round(tokens / 1000.0).toInt()
+
 /* 网页 .suggestions 的四枚 chips（app.js SUGGESTIONS 逐字）。点击只填输入框、不发送。
  * 2026-09-28 真机反馈：原来四条偏"技术演示"，换成日常真会问的事。 */
 val CHAT_SUGGESTIONS = listOf(
@@ -433,6 +473,17 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // v0.35 #99 任务卡片：当前在 waiting_user 的那一条（由 GET /v1/tasks 找到、详情由
     // GET /v1/tasks/{id} 现读）。流上的挂起前缀只触发"去读一次"，从不当卡片状态用。
     var taskCard by remember(identityId) { mutableStateOf<TaskCardUi?>(null) }
+    /* v0.39.x 驾驶舱 Task 6 的三张表（都随身份 remember——换账号不能把上一个人的
+     * 用量/整理画到新会话头上，网页 resetViewForIdentity 的本机对位）：
+     * - lastUsageByKey / lastClientKByKey：done.usage 落账与校准锚点，键「会话:模型」；
+     * - contextDropBySession：轻量整理按会话记「从最早处切掉 N 条」，outboundMsgs 与
+     *   clientCtx 读同一张表——只改显示不改发送的整理是假功能。历史 messages 永不动。 */
+    val lastUsageByKey = remember(identityId) { mutableStateMapOf<String, Usage>() }
+    val lastClientKByKey = remember(identityId) { mutableStateMapOf<String, Int>() }
+    val contextDropBySession = remember(identityId) { mutableStateMapOf<String, Int>() }
+    // 预算住在 SharedPreferences（非快照态）：滑杆每写一次手动 +1，环/账本才跟着重画。
+    var ringTick by remember { mutableIntStateOf(0) }
+    var contextPanelOpen by remember { mutableStateOf(false) }
     var attachOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
     var drawerTick by remember { mutableStateOf(0) }
@@ -614,6 +665,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             serverDefault = r.default
             if (providers.none { it.id == Prefs.defaultProviderId && it.usable })
                 serverDefaultProvider()?.let { Prefs.defaultProviderId = it.id }
+            // 预算迁移的挂点：清单回来才真正确定「那一位默认模型」——旧全局滑杆键
+            // 只在这一刻被搬进按模型存的 map（map 已存在时是 no-op，见 Prefs）。
+            Prefs.migrateContextBudget()
             if (providers.any { it.usable }) setStatus("")
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
     }
@@ -857,10 +911,92 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         }
     }
 
-    fun outboundMsgs(): List<ChatMessageDto> =
-        Api.outbound(messages.filter { it.content.isNotEmpty() && !it.transient }
+    /* 轻量整理与发送的同一份切片：先按本会话的 drop 从最早处切掉，再滤空/瞬时条。
+     * clientCtx 与 outboundMsgs 各自 .drop( 同一张 contextDropBySession 的同一个数——
+     * 两边各维护一套 offset 迟早分叉（网页 Task 4 的同一教训）。 */
+    fun clientCtx(): ClientCtx {
+        val drop = contextDropBySession[sessionId] ?: 0
+        val msgs = messages.drop(drop).filter { it.content.isNotEmpty() && !it.transient }
+            .map { ChatMessageDto(it.role, it.content) }
+        val persona = Prefs.persona(sessionId)
+        val personaTokens = if (persona.isNotEmpty()) Api.estimateTokens(persona) + 4 else 0
+        val historyTokens = msgs.sumOf { Api.estimateTokens(it.content) + 4 }
+        return ClientCtx(personaTokens, historyTokens, msgs, persona)
+    }
+
+    /** 实发组装：drop 之后按「这个模型的」预算截断（Prefs.contextBudgetK(pid)），
+     *  读数侧对模型上限的 min 由 Api.outbound 那层防线兜住。K→token 的 ×1000 在 Api 内。 */
+    fun outboundMsgs(providerId: String): List<ChatMessageDto> {
+        val drop = contextDropBySession[sessionId] ?: 0
+        return Api.outbound(messages.drop(drop)
+            .filter { it.content.isNotEmpty() && !it.transient }
             .map { ChatMessageDto(it.role, it.content) },
-            Prefs.persona(sessionId), Prefs.contextTokensK, modelCapK())
+            Prefs.persona(sessionId), Prefs.contextBudgetK(providerId), modelCapK())
+    }
+
+    /** 环与账本的读数（token 原值算，K 只为显示）：与 outboundMsgs 同一条 drop、
+     *  同一个 pid（currentProvider 是唯一来源）；校准锚点吃「会话:模型」那一份 usage。 */
+    fun contextRingInfo(): ContextRingInfo {
+        ringTick   // 预算写在 SharedPreferences 里，快照看不见：每次落笔手动敲一拍
+        val cm = currentProvider()
+        val pid = cm?.id ?: Prefs.defaultProviderId
+        val ctx = clientCtx()
+        val known = ctx.personaTokens + ctx.historyTokens          // token 原值
+        val last = lastUsageByKey["$sessionId:$pid"]
+        val lastClient = lastClientKByKey["$sessionId:$pid"] ?: 0
+        val used = Api.calibrateUsedK(known, last?.prompt_tokens ?: 0, lastClient)
+        val capK = modelCapK()
+        val budgetK = if (cm != null) minOf(Prefs.contextBudgetK(pid), capK) else 0
+        val budgetTokens = maxOf(1, budgetK * 1000)                // K → token：显式换算
+        val pct = if (cm == null) 0 else minOf(100, used * 100 / budgetTokens)
+        val inputTokens = Api.estimateTokens(input.text)
+        return ContextRingInfo(
+            available = cm != null,
+            modelName = cm?.name ?: "",
+            providerId = pid,
+            personaTokens = ctx.personaTokens,
+            historyTokens = ctx.historyTokens,
+            inputTokens = inputTokens,
+            knownTokens = known,
+            usedTokens = used,
+            usedK = Math.round(used / 1000.0).toInt(),  // token → K：显示口径显式换算
+            residualTokens = Api.contextSegments(used, ctx.personaTokens,
+                ctx.historyTokens, inputTokens),
+            budgetK = budgetK,
+            capK = capK,
+            pct = pct,
+            hasUsage = last != null,
+            lastPromptTokens = last?.prompt_tokens ?: 0,
+            lastClientTokens = lastClient,
+            dropped = contextDropBySession[sessionId] ?: 0,
+        )
+    }
+
+    /* 轻量整理：按当前模型的预算算出要吐掉几条最早的历史，条数累加进本会话的 drop。
+     * 只改这张表，绝不删 messages——历史原文是用户资产；outboundMsgs/clientCtx 都读
+     * 同一张表，所以省下来的每一 K 都是真不发出去的。 */
+    fun applyContextTidy() {
+        val cm = currentProvider() ?: return
+        val ctx = clientCtx()
+        val kept = Api.dropOldestToBudget(ctx.msgs, Prefs.contextBudgetK(cm.id) * 1000)
+        val dropped = maxOf(0, ctx.msgs.size - kept.size)
+        if (dropped <= 0) {
+            setStatus("已在预算内，无需整理")
+            return
+        }
+        contextDropBySession[sessionId] = (contextDropBySession[sessionId] ?: 0) + dropped
+        setStatus("已从本轮发送移除最早 $dropped 条；历史原文未动")
+    }
+
+    /** 恢复：本会话的整理清零，下一轮发送重新带上全部历史。 */
+    fun resetContextTidy() {
+        if ((contextDropBySession[sessionId] ?: 0) == 0) {
+            setStatus("本轮没有整理过，无需恢复")
+            return
+        }
+        contextDropBySession.remove(sessionId)
+        setStatus("已恢复本轮全部历史")
+    }
 
     /* app.js ensureSession：会话不在清单里（或压根还没有）才建一条，model 记当前 provider。 */
     suspend fun ensureSession(): Boolean {
@@ -983,9 +1119,14 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // publishJob = launch 之前：payload 抛错时 ticker 还没起来，不会留下孤儿快照。
             try {
                 val pid = currentProvider()?.id
+                // v0.39.x 驾驶舱：出发锚点——usage 与校准 clientK 都只写给「出发时那个
+                // 会话+模型」的账（Done 分支过 mine() 闸才落）；预算与 payload 的 provider
+                // 同源（currentProvider 是唯一来源），各读各的必分叉。
+                val usageKey = "$sidAtSend:${pid.orEmpty()}"
+                val clientKAtSend = clientCtx().let { it.personaTokens + it.historyTokens }
                 val atts = messages.lastOrNull { it.role == "user" }?.attachments
                     ?.map { it.id } ?: emptyList()
-                val payload = Api.chatPayload(pid, pid, outboundMsgs(), atts, sessionId)
+                val payload = Api.chatPayload(pid, pid, outboundMsgs(pid.orEmpty()), atts, sessionId)
                 // v0.39 性能 A 包：content 帧不再逐条写 streamText——只进 acc；屏上由
                 // 这条 40ms 的 ticker 发布最新快照（无变化不写，省一次整页重组）。
                 // mine() 为假立刻停笔：A 的孤儿流不许把字画到 B 的卡上——守卫比"照发"
@@ -1087,6 +1228,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                             doneStatus = ev.status
                             if (ev.fullText.isNotEmpty()) doneFullText = ev.fullText
                             if (ev.trace.isNotEmpty()) doneTrace = ev.trace
+                            // done.usage 落账（含 cancelled 终帧——服务端 billed 照发）：
+                            // mine() 为假（切了会话）就不落，别让这一轮的用量记到新会话
+                            // 头上；环读数吃快照 map，落账即自动跟上，不另起刷新链。
+                            // 老服务端没有 usage 键 → null，这里什么都不做，收尾链路不依赖它。
+                            val u = ev.usage
+                            if (u != null && mine()) {
+                                lastUsageByKey[usageKey] = u
+                                lastClientKByKey[usageKey] = clientKAtSend
+                            }
                         }
                         is ChatEvent.Failed -> { failed = true; failMsg = ev.message }
                         // 认不出的帧：不静默丢——内核已落 ChatEvent.Unknown，这里不打断正常收尾。
@@ -1419,6 +1569,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 时长按输入框出复制/粘贴/全选（光标旁）；键盘没起时输入位是占位条，单点不挂框
     // 不冒菜单、长按归语音。语音长按只在键盘收起（或语音模式）时接管，靠 voiceHold
     // 的 enabled 门控分流。
+    // v0.39.x 驾驶舱：环/账本每一拍组合读一次（与网页 renderContextRing 同口径——
+    // 估算只在消息/预算/整理/usage 变更后重画，不在流式逐 token 路径上）。
+    val ringInfo = contextRingInfo()
     ModalNavigationDrawer(
         drawerState = drawerState,
         // 第 14 轮（用户真机：按住语音向右滑，整页被抽屉手势拖开、录音卡跟着错位，
@@ -1733,6 +1886,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         chipModel = currentProvider()?.name ?: "选择模型",
                         chipVisible = providers.any { it.usable },
                         onToggleChip = { modelMenuOpen = true; attachOpen = false },
+                        ringPct = ringInfo.pct, ringUsedK = ringInfo.usedK,
+                        ringBudgetK = ringInfo.budgetK,
+                        onRingClick = { contextPanelOpen = true },
                         onStop = { stopNow() },
                         onSend = { sendNow(input.text) },
                         canSend = input.text.isNotBlank() || pending.isNotEmpty(),
@@ -1858,6 +2014,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         scope.launch { runCatching { Api.setMyDefaultProvider(id) } }
                         setStatus("")
                     },
+                )
+            }
+            // v0.39.x 驾驶舱：点上下文环开账本（弹层）。整理/恢复写 contextDropBySession，
+            // 滑杆写 Prefs.setContextBudget——都落在发送真正吃得到的那张表上。
+            if (contextPanelOpen) {
+                ContextPanel(
+                    info = ringInfo,
+                    providerId = currentProvider()?.id ?: "",
+                    onBudgetChanged = { ringTick++ },
+                    onTidy = { applyContextTidy() },
+                    onReset = { resetContextTidy() },
+                    onClose = { contextPanelOpen = false },
                 )
             }
             // 断网小卡片：顶部居中悬浮，不占布局不推内容；今日静音过就不出
@@ -2058,7 +2226,10 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                       attachOpen: Boolean, onToggleAttach: () -> Unit,
                       status: String, statusErr: Boolean, busy: Boolean,
                       chipModel: String, chipVisible: Boolean,
-                      onToggleChip: () -> Unit, onStop: () -> Unit, onSend: () -> Unit,
+                      onToggleChip: () -> Unit,
+                      ringPct: Int, ringUsedK: Int, ringBudgetK: Int,
+                      onRingClick: () -> Unit,
+                      onStop: () -> Unit, onSend: () -> Unit,
                       canSend: Boolean, voiceMod: Modifier,
                       voiceMode: Boolean, onToggleVoice: () -> Unit,
                       keyboardUp: Boolean,
@@ -2163,9 +2334,13 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                         }
                     }
                 }
+                // 第 13 轮（用户点名「模型切换放到加号旁边，不然我进去了怎么
+                // 找到」）：收起态也在 ＋ 左边挂模型钮，不展开输入框也能换模型。
+                // v0.39.x 驾驶舱：环钉在模型钮左边（与网页同序）——点环开账本、点钮仍开
+                // 模型清单，两个手势互不抢。（这两行各自保持 `if (chipVisible) X(...)` 单句
+                // 形状——v02312/v02313/v02314 的静态锁按原文吃这段的间距与整句，别折叠。）
                 if (!expanded) {
-                    // 第 13 轮（用户点名「模型切换放到加号旁边，不然我进去了怎么
-                    // 找到」）：收起态也在 ＋ 左边挂模型钮，不展开输入框也能换模型。
+                    if (chipVisible) ContextRing(ringPct, ringUsedK, ringBudgetK, onRingClick)
                     if (chipVisible) ModelChip(chipModel, onToggleChip)
                     // 收起右钮：＋附件面板开关；open 态整枚旋转 45° 变「×」语义
                     GhostCircleButton(onClick = onToggleAttach,
@@ -2189,7 +2364,9 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                         if (voiceMode) FenverIcon(FenverIcon.Keyboard, scheme.primary, Modifier.size(19.dp))
                         else FenverIcon(FenverIcon.VoiceWave, scheme.onSurfaceVariant, Modifier.size(19.dp))
                     }
-                    // 模型钮（对标图 2 的 Auto）：点开全屏「选择模型」页（见 ChatScreen 根层）
+                    // 模型钮（对标图 2 的 Auto）：点开全屏「选择模型」页（见 ChatScreen 根层）；
+                    // 环排它左边（v0.39.x 驾驶舱，同网页 #ctxRingBtn 在 #modelChip 前）。
+                    if (chipVisible) ContextRing(ringPct, ringUsedK, ringBudgetK, onRingClick)
                     if (chipVisible) ModelChip(chipModel, onToggleChip)
                     Spacer(Modifier.weight(1f))
                     if (busy) {
@@ -2390,6 +2567,109 @@ private fun readClipText(ctx: android.content.Context): String? {
     val t = clip.getItemAt(0).coerceToText(ctx)?.toString()?.trim() ?: return null
     if (t.isEmpty() || t.startsWith("content://") || t.startsWith("file://")) return null
     return t
+}
+
+/* ---------------- v0.39.x 驾驶舱 Task 6：上下文环与账本（原生 Compose） ----------------
+ * 网页版是 conic-gradient + aria-label；Compose 这边用 Canvas 画弧 + semantics 标签，
+ * 颜色全部吃既有 colorScheme（≥70% error / 其余 primary，网页的 --fv-warn 本来就是
+ * 空头支票落到 --danger，这里不新增 token）。动态文本一律 Text/semantics 字面量——
+ * 模型名、账本读数是服务端或本机原文，绝不拼 HTML/注解字符串往界面里塞。 */
+@Composable
+private fun ContextRing(pct: Int, usedK: Int, budgetK: Int, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val ink = if (pct >= 70) scheme.error else scheme.primary
+    val track = scheme.surfaceVariant
+    val frac = pct.coerceIn(0, 100) / 100f
+    Canvas(modifier = Modifier.size(24.dp)
+        .semantics { contentDescription = "上下文用量 $pct%，${usedK}K / ${budgetK}K" }
+        .clickable(onClick = onClick)) {
+        val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+        drawArc(color = track, startAngle = -90f, sweepAngle = 360f,
+            useCenter = false, style = stroke)
+        drawArc(color = ink, startAngle = -90f, sweepAngle = 360f * frac,
+            useCenter = false, style = stroke)
+    }
+}
+
+/* 账本弹层：used/budget、模型上限、分段（角色/历史/输入；服务端注入差额只在收到过
+ * usage 时才说——客户端不猜服务端注入了什么）、预算滑杆（写 Prefs.setContextBudget，
+ * 与 outbound 同源）、「轻量整理」「恢复」（写 contextDropBySession，实发真的少）。 */
+@Composable
+private fun ContextPanel(info: ContextRingInfo, providerId: String,
+                         onBudgetChanged: () -> Unit, onTidy: () -> Unit,
+                         onReset: () -> Unit, onClose: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val hi = maxOf(4, info.capK)
+    val step = if (hi <= 64) 2 else if (hi <= 256) 8 else 32
+    var k by remember(info.budgetK, hi) { mutableIntStateOf(info.budgetK.coerceIn(2, hi)) }
+    Dialog(onDismissRequest = onClose) {
+        Surface(shape = RoundedCornerShape(20.dp), color = scheme.surface,
+            border = BorderStroke(1.dp, scheme.outline)) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 14.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("上下文账本", fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                        color = scheme.onSurface, modifier = Modifier.weight(1f))
+                    Box(Modifier.size(32.dp).clip(CircleShape)
+                        .clickable(onClick = onClose), contentAlignment = Alignment.Center) {
+                        FenverIcon(FenverIcon.Close, scheme.onSurfaceVariant, Modifier.size(18.dp))
+                    }
+                }
+                if (!info.available) {
+                    // 清单为空/没有可用模型：如实说没有账可算，不画旧账。
+                    Text("还没有可用模型，上下文用量暂无从算起。", fontSize = 13.sp,
+                        color = text3Color(),
+                        modifier = Modifier.padding(vertical = 10.dp))
+                } else {
+                    Text("${info.modelName} · ${info.usedK}K / ${info.budgetK}K（${info.pct}%）",
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = scheme.onSurface,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+                    Text("模型上限 ${info.capK}K · 发送按本模型预算截断", fontSize = 12.sp,
+                        color = text3Color(), modifier = Modifier.padding(bottom = 6.dp))
+                    Text("分段（估算）：角色 ${roundK(info.personaTokens)}K · " +
+                        "历史 ${roundK(info.historyTokens)}K · 输入 ${roundK(info.inputTokens)}K",
+                        fontSize = 12.sp, color = scheme.onSurface,
+                        modifier = Modifier.padding(bottom = 4.dp))
+                    if (info.hasUsage) {
+                        Text("其余 ${roundK(info.residualTokens)}K = 系统提示/检索注入/校准差额；" +
+                            "上轮实报 prompt ${roundK(info.lastPromptTokens)}K（当时客户端估 " +
+                            "${roundK(info.lastClientTokens)}K，模型 ${info.providerId}）",
+                            fontSize = 12.sp, color = text3Color(),
+                            modifier = Modifier.padding(bottom = 4.dp))
+                    } else {
+                        Text("还没收到服务端 usage：当前读数全是客户端估算，首轮回账后自动校准。",
+                            fontSize = 12.sp, color = text3Color(),
+                            modifier = Modifier.padding(bottom = 4.dp))
+                    }
+                    Text("本轮发送已从最早处切掉 ${info.dropped} 条；历史原文未动。",
+                        fontSize = 12.sp, color = text3Color(),
+                        modifier = Modifier.padding(bottom = 8.dp))
+                    Text("预算 $k/${hi}K", fontSize = 13.sp, color = scheme.onSurface,
+                        modifier = Modifier.padding(bottom = 2.dp))
+                    Slider(value = k.toFloat(),
+                        onValueChange = { v ->
+                            val raw = ((v - 2) / step).toInt() * step + 2
+                            k = raw.coerceIn(2, hi)
+                        },
+                        valueRange = 2f..hi.toFloat(),
+                        onValueChangeFinished = {
+                            // 与 outbound 同源的同一次落笔：K 值进按模型存的 map。
+                            if (providerId.isNotEmpty())
+                                Prefs.setContextBudget(providerId, k)
+                            onBudgetChanged()
+                        })
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ActionPill("轻量整理", onClick = onTidy)
+                        ActionPill("恢复", filled = false, onClick = onReset)
+                    }
+                    Text("轻量整理只影响本轮发送带哪几条，历史不删不改。", fontSize = 11.sp,
+                        color = text3Color())
+                }
+            }
+        }
+    }
 }
 
 /* 模型切换钮（ⒶAuto）：第 13 轮起收起态也挂——用户点名「不然我进去了怎么找到」，

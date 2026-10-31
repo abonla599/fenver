@@ -3,6 +3,7 @@ package xyz.fenever.assistant.nativeapp
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -35,6 +36,8 @@ object Prefs {
         // 续命凭据与会话令牌都进 Keystore 加密区（v0.39 M-8）
         SecretStore.init(ctx)
         migrateLegacyTokens()
+        // 旧全局预算键只搬给「已选定默认模型」的那一位；没选定就留到 loadModelsNow 后再搬。
+        migrateContextBudget()
         // 冷启动第一帧就带上外观，不闪一下深色
         xyz.fenever.assistant.nativeapp.theme.ThemeMode.value = themeMode
     }
@@ -71,10 +74,45 @@ object Prefs {
         get() = sp.getBoolean("haptics_enabled", true)
         set(value) = sp.edit().putBoolean("haptics_enabled", value).apply()
 
-    /* 上下文预算（k token），聊天发送前按它截断历史。 */
+    /* 上下文预算（k token），聊天发送前按它截断历史。
+     * v0.39.x 驾驶舱起降级为「迁移来源」：新读取一律走 contextBudgetK(providerId)，
+     * 本键只在 migrateContextBudget() 里被搬进按模型存的 map，之后不再写。 */
     var contextTokensK: Int
         get() = sp.getInt("context_tokens_k", 8)
         set(value) = sp.edit().putInt("context_tokens_k", value.coerceIn(2, 10000)).apply()
+
+    /* v0.39.x 模型驾驶舱：上下文预算按「模型（provider id）」存一份 K 值（网页端
+     * 「用户+provider」map 的本机对位——原生一台机一个登录态概念，键只到 provider）。
+     * 值一律是 K token；对模型档案 max_context_k 的 min 由读数侧再夹一次
+     *（Api.outbound 那层防线保留），这里只管存储与兜底夹逼。 */
+    private fun budgetMapKey(): String = "context_budget_map"
+
+    private fun budgetMap(): MutableMap<String, Int> =
+        runCatching {
+            json.decodeFromString<Map<String, Int>>(sp.getString(budgetMapKey(), "{}") ?: "{}")
+        }.getOrNull()?.toMutableMap() ?: mutableMapOf()
+
+    fun contextBudgetK(providerId: String): Int {
+        val cap = 10000 // 硬兜底上限：真实上限由调用方与 ModelInfo.max_context_k 取 min
+        return budgetMap()[providerId]?.coerceIn(1, cap) ?: contextTokensK.coerceIn(1, cap)
+    }
+
+    fun setContextBudget(providerId: String, k: Int) {
+        if (providerId.isEmpty()) return
+        val map = budgetMap()
+        map[providerId] = k.coerceIn(1, 10000)
+        sp.edit().putString(budgetMapKey(), json.encodeToString(map)).apply()
+    }
+
+    /** 旧全局滑杆键只搬一次：map 已存在就直接收工；还没选过模型就先留着旧键，
+     *  下次（loadModelsNow 定出默认 provider 后）再搬——不丢用户调过的预算。 */
+    fun migrateContextBudget() {
+        if (sp.contains(budgetMapKey())) return
+        val pid = defaultProviderId
+        if (pid.isEmpty()) return
+        setContextBudget(pid, contextTokensK)
+        sp.edit().remove("context_tokens_k").apply()
+    }
 
     /* 断网提醒「今日不再显示」：存静音当天日期（yyyy-MM-dd），隔天自动失效。 */
     var offlineMuteDate: String
