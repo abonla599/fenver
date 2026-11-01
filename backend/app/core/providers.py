@@ -291,6 +291,82 @@ def normalize_max_context_k(value) -> int:
         return DEFAULT_MAX_CONTEXT_K
     return max(1, min(MAX_CONTEXT_K_CEIL, k))
 
+
+# ---------- 思考能力（v0.39.1 Task 8）----------
+# "这个模型能不能思考"和"选了某档之后到底往上游发什么参数"是两件事。本版只解决
+# 第一件：P0b 的白名单里只有 `none`（不带任何思考参数），所以 supports=True 的条目
+# 状态只能是 unverified——界面据此显示"支持思考（参数未核实）"，而不是假装已配好。
+# P0c（Task 12）核实完真实配方后才往 THINKING_PROFILES 里加已验证的 profile，
+# _thinking_status 的 verified 一支届时才可达。
+DEFAULT_THINKING_PROFILE = "none"
+THINKING_PROFILES = {"none": {"label": "不使用思考", "verified": True}}
+MAX_THINKING_LEVELS = 3
+THINKING_LEVEL_LABEL_MAX = 16
+
+
+def _clean_levels(value) -> list:
+    """把任意输入洗成思考档位标签列表：去空白、去空、去重，**不截断**。
+
+    截不截断是两个职责，不在这里判：写路径（`_validate`）清洗后看到 >3 个必须拒收，
+    读路径（`catalog`/`_public`）才自己 `[:3]` 兜老数据。悄悄截掉第 4 档等于把
+    "没配上"演成"配上了"；读的时候报错则会让畸形老记录在界面上凭空消失。
+    """
+    if value is None:
+        return []
+    seq = value if isinstance(value, (list, tuple)) else []
+    out = []
+    for x in seq:
+        t = str(x or "").strip()[:THINKING_LEVEL_LABEL_MAX]
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _thinking_status(supports: bool, profile: str) -> str:
+    """给前端的三态结论：不支持 / 支持但参数未核实 / 支持且参数已核实。
+
+    不重新判 supports 的来源，只把"supports + profile"这两格合成一句人话——
+    合成口径只在这一个函数里，两个展示面共用，别各写一份。
+    """
+    if not supports:
+        return "unsupported"
+    return "unverified" if profile == DEFAULT_THINKING_PROFILE else "verified"
+
+
+def _thinking_fields(record: dict) -> dict:
+    """写路径的思考四格：清洗 + 拒收非法组合，返回库里该存的那一份。
+
+    判序是刻意的：先 `profile` 白名单、再 `supports` 与参数的组合。一个不认识的值
+    摆在面前时，第一句该说的是"这个值我不认"，而不是"你不支持思考"。
+
+    关掉思考（显式 `supports_thinking=False`）时档位与默认**清空**而不是报错：
+    "我不再用这个模型的思考"是一次真实的用户动作，不该因为表单里还留着上一次的
+    候选而被挡住；但带着非 `none` 的参数配方就被关掉思考是矛盾输入，拒收。
+    """
+    supports = bool(record.get("supports_thinking"))
+    profile = str(record.get("thinking_profile") or DEFAULT_THINKING_PROFILE).strip()
+    if profile not in THINKING_PROFILES:
+        raise ProviderError("未知的思考参数配置")
+    levels = _clean_levels(record.get("thinking_levels"))
+    if len(levels) > MAX_THINKING_LEVELS:
+        raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
+    default = str(record.get("thinking_default") or "").strip()
+    if not supports:
+        levels, default = [], ""
+        if profile != DEFAULT_THINKING_PROFILE:
+            raise ProviderError("不支持思考的模型不能配置思考参数")
+    elif default and default not in levels:
+        raise ProviderError("思考默认档位不在候选里")
+    elif not default:
+        default = levels[0] if levels else ""
+    return {
+        "supports_thinking": supports,
+        "thinking_levels": levels,
+        "thinking_default": default,
+        "thinking_profile": profile,
+    }
+
+
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改
 PRESETS = {
     "deepseek": {"label": "DeepSeek", "base_url": "https://api.deepseek.com/v1",
@@ -562,8 +638,42 @@ class ProviderStore:
         return provider
 
     # ---- 变更 ----
+    _THINKING_KEYS = ("supports_thinking", "thinking_levels",
+                      "thinking_default", "thinking_profile")
+
+    def _pending(self, record: dict) -> dict:
+        """更新已有条目时，把请求里没带的思考四格从库里那份补进**待校验的 dict**。
+
+        位置就是这条实现的全部理由（裁决 A）：必须在 `_validate` 之前。放在校验之后
+        （brief 的原写法）会造出非法组合——一条 `supports_thinking=True,
+        thinking_profile=verified_x` 的老记录，被一次只带 `supports_thinking=False`
+        的 PUT 更新时，请求里 profile 是缺的，于是先以 `none` 通过了组合校验，
+        随后旧 profile 才被补回来，库里就此存下"不支持思考却带思考参数"。
+
+        只有**键缺失或值为 None** 才算"这次没动它"（与 pricing / paid_by 同一条纪
+        律；PUT 路由因此必须走 `model_dump(exclude_none=True)`，否则旧客户端把
+        Optional 字段序列化成 None 之外的形状时这条保留会被绕过）。显式 False /
+        [] / "" 是用户确实这么填，不覆盖。
+
+        锁只用来取那一份旧记录的拷贝：`_validate` 里有 DNS 解析，绝不能挪进锁里
+        （持锁解析会把所有 provider 的读写串成一条队伍）。
+        """
+        provider_id = str(record.get("id") or "")
+        if not provider_id:
+            return record
+        with self._lock:
+            existing = next((p for p in self._items if p["id"] == provider_id), None)
+            old = dict(existing) if existing is not None else None
+        if old is None:
+            return record
+        pending = dict(record)
+        for key in self._THINKING_KEYS:
+            if pending.get(key) is None:
+                pending[key] = old.get(key)
+        return pending
+
     def upsert(self, record: dict) -> dict:
-        cleaned = self._validate(record)
+        cleaned = self._validate(self._pending(record))
         with self._lock:
             existing = next((i for i, p in enumerate(self._items) if p["id"] == cleaned["id"]), None)
             if existing is None:
@@ -687,6 +797,7 @@ class ProviderStore:
             "paid_by": paid_by,
             "owner": owner,
             "pricing": pricing,
+            **_thinking_fields(record),
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
@@ -719,6 +830,16 @@ class ProviderStore:
                 # 直觉"（卡片 §2.3b），不是合同价；未定价 = "?x"，绝不显示 0.00x。
                 "priced": p.get("pricing") is not None,
                 "multiplier": credits.multiplier_label(p.get("pricing")),
+                # 思考能力。四格里这里**不给** thinking_profile：那是"怎么调参"的内部
+                # 配方，模型清单（下拉、卡片）用不上，而管理表单要的那一面是 _public。
+                "supports_thinking": bool(p.get("supports_thinking")),
+                # 读路径才截断：盘上可能有别的版本/手工写坏的畸形老记录，这里报错会
+                # 让那些模型在界面上凭空消失；拒收是写路径（_thinking_fields）的职责。
+                "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
+                "thinking_default": str(p.get("thinking_default") or "").strip(),
+                "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
+                                                    str(p.get("thinking_profile")
+                                                        or DEFAULT_THINKING_PROFILE)),
             })
         return items
 
@@ -740,6 +861,16 @@ class ProviderStore:
             "pricing": pricing,
             "priced": pricing is not None,
             "multiplier": credits.multiplier_label(pricing),
+            # 思考四格。管理表单要比 /v1/models 多拿一格 thinking_profile——
+            # 保存时得把这一格原样回传，否则一次编辑就把配方洗回 none。
+            # 与 catalog 同一口径：读路径防御性截断，写路径拒收。
+            "supports_thinking": bool(p.get("supports_thinking")),
+            "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
+            "thinking_default": str(p.get("thinking_default") or "").strip(),
+            "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
+                                                str(p.get("thinking_profile")
+                                                    or DEFAULT_THINKING_PROFILE)),
+            "thinking_profile": str(p.get("thinking_profile") or DEFAULT_THINKING_PROFILE),
         }
 
     # ---- 探活 ----

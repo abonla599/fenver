@@ -1353,6 +1353,17 @@ def redeem_export_ticket(ticket_id: str):
 from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
+def _can_edit_provider(principal, item) -> bool:
+    """这条模型在这个人手里能不能改。
+
+    判据只有归属，没有角色之外的例外：共享条目是全站的上游与账本，改它等于改
+    所有人的对话（所以只有管理员能改）；私有条目本来就是主人自己的 key 和自己的
+    上游，属主永远能改。这一格是给模型清单的消费端（网页/安卓后续接）决定编辑
+    入口亮不亮用的，但界面从来不是边界——真正的门在 /v1/providers（RequireAdmin）
+    与 /v1/me/providers（属主闸）。
+    """
+    return principal.role == "admin" or not item.get("shared")
+
 @app.get("/v1/models")
 def list_models(principal: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
@@ -1369,9 +1380,16 @@ def list_models(principal: Principal = CurrentPrincipal):
     （tests/test_route_auth_contract.py）不接受没有身份的 /v1 端点，且这是中间件
     之外多出来的一把锁。完整理由见下面 providers 段那段注释。
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
+
+    can_edit 在这一层现算而不是塞进 catalog()：归属是"这个人能不能改"，是请求方
+    的身份属性，存储层那份清单里没有 principal，也不该有。
     """
+    models = []
+    for item in provider_store.catalog(principal.user_id):
+        item["can_edit"] = _can_edit_provider(principal, item)
+        models.append(item)
     return {
-        "models": provider_store.catalog(principal.user_id),
+        "models": models,
         "default": (provider_store.default_for(principal.user_id) or {}).get("id"),
         "presets": PRESETS,
     }
@@ -1401,6 +1419,14 @@ class ProviderRequest(BaseModel):
     # 这里只开一格传送。None（没填）= 不改（与 paid_by 同一条"旧表单不许洗值"
     # 纪律，见 update 路由的 exclude_none）；显式 {} = 主动取消定价（回到未定价）。
     pricing: Optional[dict] = None
+    # v0.39.1 Task 8：思考能力四格。四格全 Optional=None 是这条设计的要害——
+    # "这次请求没提到它" 与 "用户把它关掉了" 必须是两种可区分的输入，否则一次
+    # 普通的改名保存就会把思考配置洗成默认值。清洗/拒收的判据一律在
+    # providers._thinking_fields，这里只开传送（与 pricing 同一个分工）。
+    supports_thinking: Optional[bool] = None
+    thinking_levels: Optional[list[str]] = None
+    thinking_default: Optional[str] = None
+    thinking_profile: Optional[str] = None
 
 def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
     """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
