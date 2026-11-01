@@ -394,15 +394,17 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
   transition: transform var(--dur-2) var(--ease-out), border-color var(--dur-2), box-shadow var(--dur-2);
 }
 .feature:hover { transform: translateY(-5px); border-color: color-mix(in srgb, var(--brand) 38%, var(--line)); box-shadow: 0 18px 40px rgba(10, 11, 14, .08); }
-.feature-lead { background: var(--brand-soft); border-color: color-mix(in srgb, var(--brand) 20%, var(--line)); }
+/* 六张能力卡是并列的，不给首张换底色：以前只有「多模型切换」铺淡绿，
+   卡内图标块还得反过来改成白色，于是那张卡是"白块压在绿底上"、其余是"绿块压在白底上"，
+   同一套零件两种读法。强调留给边框，底色一律走 --surface。 */
+.feature-lead { border-color: color-mix(in srgb, var(--brand) 24%, var(--line)); }
 .feature-icon { display: grid; place-items: center; width: 43px; height: 43px; margin-bottom: 30px; color: var(--brand); background: var(--brand-soft); border: 1px solid color-mix(in srgb, var(--brand) 13%, transparent); border-radius: 13px; }
-.feature-lead .feature-icon { background: var(--surface); }
 .feature-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .feature-no { position: absolute; top: 28px; right: 25px; color: var(--ink-faint); font: 500 .65rem/1 var(--mono); }
 .feature h3 { font-size: 1.18rem; letter-spacing: -.025em; }
 .feature p { margin-top: 11px; color: var(--ink-soft); font-size: .82rem; line-height: 1.78; }
 .model-pills { display: flex; gap: 6px; margin-top: 17px; }
-.model-pills span { padding: 4px 9px; color: var(--brand); background: var(--surface); border: 1px solid color-mix(in srgb, var(--brand) 15%, transparent); border-radius: var(--radius-pill); font-size: .62rem; }
+.model-pills span { padding: 4px 9px; color: var(--brand); background: var(--brand-soft); border: 1px solid color-mix(in srgb, var(--brand) 13%, transparent); border-radius: var(--radius-pill); font-size: .62rem; }
 
 /* 安卓 */
 #shell-only {
