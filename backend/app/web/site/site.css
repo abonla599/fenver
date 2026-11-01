@@ -20,23 +20,26 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --display: "Helvetica Neue", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-  /* 全站只有这一套配色，没有日间/夜间切换：底色取带一点绿意的炭黑，与首屏那块
-     产品示意同色系（明度差一档，不作孤岛）；强调绿刻意压过饱和度，黑底上不发荧光。 */
-  --bg: #0b0f0e;
-  --surface: #121816;
-  --surface-2: #172220;
-  --surface-3: #1d2a26;
-  --line: #223230;
-  --line-strong: #33463f;
-  --ink: #e9efec;
-  --ink-soft: #9fb0a9;
-  --ink-faint: #6f8179;
+  /* 全站只有这一套配色，没有日间/夜间切换。
+     底色是带绿意的深墨灰，不是黑：第一版取 #0b0f0e，跟旧深色 #0a0b0e 只差一两个
+     色阶，屏幕上根本看不出换过——而且纯黑托着 #shots 里的浅色实拍，对比拉到最满，
+     白卡像贴在黑洞上。现在整条阶梯上移一档：底色明度提到能看出"这是个颜色"，
+     白卡与底之间只隔一层，不刺眼。强调绿压过饱和度，深底上不发荧光。 */
+  --bg: #151c19;
+  --surface: #1c2522;
+  --surface-2: #222d29;
+  --surface-3: #283530;
+  --line: #2d3d38;
+  --line-strong: #3f5750;
+  --ink: #edf2f0;
+  --ink-soft: #a9bbb4;
+  --ink-faint: #7d908a;
   --brand: #4bb98d;
   --brand-bright: #63c9a0;
-  --brand-soft: #13241d;
+  --brand-soft: #1a2f27;
   --brand-ink: #06150f;
   --ai: #8b8ff5;
-  --ai-soft: #1a1b33;
+  --ai-soft: #20223c;
   --danger: #f07171;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .28), 0 8px 24px rgba(0, 0, 0, .2);
   --shadow-lg: 0 30px 80px rgba(0, 0, 0, .5), 0 8px 24px rgba(0, 0, 0, .3);
