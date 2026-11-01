@@ -179,15 +179,14 @@ strong { font-weight: 650; }
   border-radius: var(--radius-pill); font-size: .76rem; font-weight: 650;
 }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 12%, transparent); }
-.hero h1 {
-  margin-bottom: 14px; color: var(--ink);
-  font-family: var(--display); font-size: clamp(3rem, 7.4vw, 6rem);
-  font-weight: 800; line-height: 1; letter-spacing: -.065em;
-}
+/* 首屏只有这一个主标题。品牌名在导航栏已经有了，再拿 96px 在首屏写一遍，等于用最贵
+   的一行去说一件读者已经知道的事；标语接过来当 h1，语义也更对（页面讲的是"数据不出门"，
+   不是"这个软件叫 Fenver"）。
+   不再给 .hero h1 单开规则：`.hero h1` 的特异性高于 `.hero-title`，留着就会盖掉这里的字号。 */
 .hero-title {
-  max-width: 9.5em;
-  font-family: var(--display); font-size: clamp(2.4rem, 4.6vw, 4rem);
-  font-weight: 720; line-height: 1.08; letter-spacing: -.065em;
+  max-width: 9.5em; margin-bottom: 14px; color: var(--ink);
+  font-family: var(--display); font-size: clamp(2.5rem, 5vw, 4.5rem);
+  font-weight: 720; line-height: 1.04; letter-spacing: -.055em;
 }
 .hero-title em { color: var(--brand); font-style: normal; }
 .lede { max-width: 33em; margin-top: 24px; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.75; }
@@ -272,13 +271,6 @@ strong { font-weight: 650; }
 .model-float { right: 12px; bottom: 94px; transform: rotate(3deg); }
 .model-float span { color: #7c83ff; }
 .stage-note { position: absolute; left: 0; right: 0; bottom: 19px; color: var(--ink-faint); font: 500 .55rem/1 var(--mono); letter-spacing: .12em; text-align: center; }
-
-/* 能力索引 */
-.index-strip { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--gutter); }
-.index-strip ul { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); list-style: none; margin: 0; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.index-strip li { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 4px 10px; color: var(--ink-soft); border-right: 1px solid var(--line); font-size: .76rem; white-space: nowrap; }
-.index-strip li:last-child { border-right: 0; }
-.index-strip span { color: var(--brand); font: 500 .62rem/1 var(--mono); }
 
 /* 通用区块 */
 main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9vw, 124px) var(--gutter); }
@@ -522,8 +514,6 @@ footer > .note { margin-top: 12px; }
   .hero-main { max-width: 680px; }
   .hero-title { max-width: 10em; }
   .product-stage { width: min(100%, 600px); min-height: 590px; margin: 12px auto 0; }
-  .index-strip ul { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 0; }
-  .index-strip li:nth-child(3) { border-right: 0; }
   .section-head { grid-template-columns: minmax(0, 1fr); grid-template-areas: "no" "h2" "desc"; }
   .section-head > p:not(.section-no) { max-width: 36em; margin-top: 16px; }
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -545,7 +535,6 @@ footer > .note { margin-top: 12px; }
   .hero { padding-top: 40px; padding-bottom: 56px; }
   .hero-kicker { margin-bottom: 22px; font-size: .7rem; }
   .hero-title { font-size: clamp(2.1rem, 9vw, 2.9rem); }
-  .hero h1 { margin-bottom: 12px; font-size: clamp(2.6rem, 12vw, 3.6rem); }
   .lede { margin-top: 20px; font-size: 1rem; }
   .cta { margin-top: 25px; }
   .btn { min-height: 48px; padding-inline: 16px; }
@@ -557,8 +546,6 @@ footer > .note { margin-top: 12px; }
   .floating-card { padding: 9px 11px; }
   .memory-float { left: 5px; top: 62px; }
   .model-float { right: 4px; bottom: 77px; }
-  .index-strip ul { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 14px 0; }
-  .index-strip li { justify-content: flex-start; border-right: 0; font-size: .72rem; }
   main > section { padding-top: 74px; padding-bottom: 74px; }
   .section-head { grid-template-areas: "no" "h2" "desc"; margin-bottom: 32px; }
   .section-head > p:not(.section-no) { margin-top: 14px; }

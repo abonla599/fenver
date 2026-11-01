@@ -260,12 +260,21 @@ def test_the_android_button_downloads_through_our_own_endpoint():
 
 
 def test_the_brand_says_fenver():
-    """v0.24 定名落地：品牌位（标题、导航、首屏 h1）都得是 Fenver，
-    而描述性词「AI 智能助手」留在 title/lede 里——test_api 与 test_integration
-    还在拿它钉根路径，两处说的必须是同一件事。"""
+    """v0.24 定名落地：品牌位都得是 Fenver，描述性词「AI 智能助手」留在 title 里——
+    test_api 与 test_integration 还在拿它钉根路径，两处说的必须是同一件事。
+
+    2026-11-01 首屏 h1 从品牌名换成标语（「自己的服务器，数据不出门。」）：导航栏
+    已经有品牌名，首屏再拿 96px 写一遍，等于用最贵的一行说读者已经知道的事；页面
+    真正要讲的是"数据不出门"，那句才该是 h1。判据因此从「h1 里必须是 Fenver」
+    换成「品牌位（title / 导航）必须是 Fenver，且首屏主标题确实存在」——真正要防的
+    一直是"品牌被改成别的名字"，不是"h1 这一格必须叫 Fenver"。
+    """
     page = _page()
-    assert "<h1>Fenver</h1>" in page, "首屏大标题还没换名"
+    title = re.search(r"<title>([^<]+)</title>", page)
+    assert title and title.group(1).startswith("Fenver"), \
+        f"页面标题的品牌位变了：{title.group(1) if title else '（没有 title）'}"
     assert 'class="brand">Fenver<' in page, "导航品牌位还没换名"
+    assert '<h1 class="hero-title">' in page, "首屏主标题不见了"
     assert "AI 智能助手" in page, "描述词不该被品牌名顶掉——它还是这个产品是什么的答案"
 
 
