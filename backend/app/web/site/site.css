@@ -21,28 +21,29 @@
   --display: "Helvetica Neue", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   /* 全站只有这一套配色，没有日间/夜间切换。
-     底色是带绿意的深墨灰，不是黑：第一版取 #0b0f0e，跟旧深色 #0a0b0e 只差一两个
-     色阶，屏幕上根本看不出换过——而且纯黑托着 #shots 里的浅色实拍，对比拉到最满，
-     白卡像贴在黑洞上。现在整条阶梯上移一档：底色明度提到能看出"这是个颜色"，
-     白卡与底之间只隔一层，不刺眼。强调绿压过饱和度，深底上不发荧光。 */
-  --bg: #151c19;
-  --surface: #1c2522;
-  --surface-2: #222d29;
-  --surface-3: #283530;
-  --line: #2d3d38;
-  --line-strong: #3f5750;
-  --ink: #edf2f0;
-  --ink-soft: #a9bbb4;
-  --ink-faint: #7d908a;
-  --brand: #4bb98d;
-  --brand-bright: #63c9a0;
-  --brand-soft: #1a2f27;
+     底色是偏浅的墨绿，不是黑：第一版取 #0b0f0e，跟旧深色 #0a0b0e 只差一两个色阶，
+     屏幕上看不出换过；第二版提到 #151c19 仍然偏黑。这一版把明度再抬一档、绿意也
+     加足（G 通道明显高于 R/B），底色本身是个看得见的颜色，而不是"黑得发绿"。
+     白卡与底之间只隔一层，四张浅色实拍不再是黑洞上的白纸。 */
+  --bg: #2b3d34;
+  --surface: #344940;
+  --surface-2: #3b5247;
+  --surface-3: #435c50;
+  --line: #4d6859;
+  --line-strong: #628471;
+  --ink: #f0f5f2;
+  --ink-soft: #b3c7be;
+  --ink-faint: #9aafa6;
+  /* 底变亮，主色与 AI 紫要跟着提，否则小字和描边掉到 4.5:1 以下。 */
+  --brand: #5cc79b;
+  --brand-bright: #74d9b2;
+  --brand-soft: #32493e;
   --brand-ink: #06150f;
-  --ai: #8b8ff5;
-  --ai-soft: #20223c;
-  --danger: #f07171;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .28), 0 8px 24px rgba(0, 0, 0, .2);
-  --shadow-lg: 0 30px 80px rgba(0, 0, 0, .5), 0 8px 24px rgba(0, 0, 0, .3);
+  --ai: #a3a7ff;
+  --ai-soft: #33365a;
+  --danger: #ff8f8f;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .18), 0 8px 24px rgba(0, 0, 0, .12);
+  --shadow-lg: 0 30px 80px rgba(0, 0, 0, .34), 0 8px 24px rgba(0, 0, 0, .18);
   color-scheme: dark;
 }
 
