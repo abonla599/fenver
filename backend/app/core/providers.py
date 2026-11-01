@@ -303,13 +303,27 @@ THINKING_PROFILES = {"none": {"label": "不使用思考", "verified": True}}
 MAX_THINKING_LEVELS = 3
 THINKING_LEVEL_LABEL_MAX = 16
 
+# 写路径合并与校验之间唯一的名单：这四格「这次没带」与「这次填了个空值」必须可区分。
+_THINKING_KEYS = ("supports_thinking", "thinking_levels",
+                  "thinking_default", "thinking_profile")
+
+
+def _requested_thinking_keys(record: dict) -> set:
+    """请求里**真正带来**的那几格思考键。
+
+    判据与 `_pending` 的合并判据是同一条（键缺失或值为 None = 这次没动它），所以
+    只写一处：显式 `False` / `[]` / `""` 都是用户真填的值，照样算"带来了"。
+    """
+    return {k for k in _THINKING_KEYS if record.get(k) is not None}
+
 
 def _clean_levels(value) -> list:
     """把任意输入洗成思考档位标签列表：去空白、去空、去重，**不截断**。
 
-    截不截断是两个职责，不在这里判：写路径（`_validate`）清洗后看到 >3 个必须拒收，
-    读路径（`catalog`/`_public`）才自己 `[:3]` 兜老数据。悄悄截掉第 4 档等于把
-    "没配上"演成"配上了"；读的时候报错则会让畸形老记录在界面上凭空消失。
+    截不截断是两个职责，不在这里判：写路径（`_thinking_fields`）清洗后看到 >3 个
+    且那 4 个是请求带来的必须拒收，读路径（`_thinking_view`）才 `[:3]` 兜老数据。
+    悄悄截掉第 4 档等于把"没配上"演成"配上了"；读的时候报错则会让畸形老记录在
+    界面上凭空消失。
     """
     if value is None:
         return []
@@ -327,37 +341,93 @@ def _thinking_status(supports: bool, profile: str) -> str:
 
     不重新判 supports 的来源，只把"supports + profile"这两格合成一句人话——
     合成口径只在这一个函数里，两个展示面共用，别各写一份。
+
+    "核实"这个结论只认白名单那一格自己说的 `verified`，别把"profile 不是 none"
+    当成核实：盘上/历史里出现过一个谁都没验过的 profile 时，界面会说谎。
+    `DEFAULT_THINKING_PROFILE` 必须先单独排除——`none` 在白名单里也标了
+    verified: True（"不带参数"这件事本身是确定的），但它不等于"思考参数已核实"。
     """
     if not supports:
         return "unsupported"
-    return "unverified" if profile == DEFAULT_THINKING_PROFILE else "verified"
+    if profile == DEFAULT_THINKING_PROFILE:
+        return "unverified"
+    entry = THINKING_PROFILES.get(profile)
+    if entry is not None and entry.get("verified"):
+        return "verified"
+    return "unverified"
 
 
-def _thinking_fields(record: dict) -> dict:
+def _thinking_view(p: dict) -> dict:
+    """读路径的思考视图四格（supports/levels/default/status）——单源，两个出口都走它。
+
+    与写路径的分工照旧：这里只做防御性兜底，拒收是 `_thinking_fields` 的职责。
+    抄两份的下场见上面 `normalize_max_context_k` 那段：两处数字对不上时没人会报错，
+    只有界面和实际预算悄悄分叉。
+    """
+    view = {
+        "supports_thinking": bool(p.get("supports_thinking")),
+        # 读路径才截断：盘上可能有别的版本/手工写坏的畸形老记录，这里报错会让那些
+        # 模型在界面上凭空消失。
+        "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
+        # default 与 levels 用同一把尺子量（同一个 20 字串不该当档位收、当默认档拒）
+        "thinking_default": str(p.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX],
+        "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
+                                            str(p.get("thinking_profile")
+                                                or DEFAULT_THINKING_PROFILE)),
+    }
+    if not view["supports_thinking"]:
+        # 库里自洽的那一份必然空着；读到"关着思考却带着候选"说明是手工写坏的，
+        # 界面照画就成一个永远点不动的选项。
+        view["thinking_levels"] = []
+        view["thinking_default"] = ""
+    elif view["thinking_default"] not in view["thinking_levels"]:
+        # 截掉第 4 档、或 default 本来就指着不存在的那一档：归回候选，
+        # 别把"选中值不在候选里"甩给界面去兜。
+        view["thinking_default"] = view["thinking_levels"][0] if view["thinking_levels"] else ""
+    return view
+
+
+def _thinking_fields(record: dict, requested=None) -> dict:
     """写路径的思考四格：清洗 + 拒收非法组合，返回库里该存的那一份。
 
-    判序是刻意的：先 `profile` 白名单、再 `supports` 与参数的组合。一个不认识的值
-    摆在面前时，第一句该说的是"这个值我不认"，而不是"你不支持思考"。
+    `requested` 是**这次请求真正带来的那几格**（由 `ProviderStore._pending` 一并交出来）。
+    严格判据只打在请求带的值上，从库里补进来的继承值只做宽容归一、永不 raise：
+    补进来的那份不是用户此刻的意图，拿它判越界等于让一次改名、一次显式关思考
+    统统存不下去。宽容也不等于丢掉不变式——归一之后的结果照样自洽，库里存的
+    那一份永远合法。
+
+    判序是刻意的：先 `profile` 白名单、再档位条数、最后 supports 与参数的组合。
+    一个不认识的值摆在面前时，第一句该说的是"这个值我不认"，而不是"你不支持思考"。
 
     关掉思考（显式 `supports_thinking=False`）时档位与默认**清空**而不是报错：
     "我不再用这个模型的思考"是一次真实的用户动作，不该因为表单里还留着上一次的
-    候选而被挡住；但带着非 `none` 的参数配方就被关掉思考是矛盾输入，拒收。
+    候选而被挡住；但这次请求亲手带着非 `none` 的参数配方还要关掉思考才是矛盾输入，
+    拒收。
     """
+    brought = _requested_thinking_keys(record) if requested is None else set(requested)
     supports = bool(record.get("supports_thinking"))
     profile = str(record.get("thinking_profile") or DEFAULT_THINKING_PROFILE).strip()
     if profile not in THINKING_PROFILES:
-        raise ProviderError("未知的思考参数配置")
+        if "thinking_profile" in brought:
+            raise ProviderError("未知的思考参数配置")
+        profile = DEFAULT_THINKING_PROFILE        # 继承来的野值：归一，不挡保存
     levels = _clean_levels(record.get("thinking_levels"))
     if len(levels) > MAX_THINKING_LEVELS:
-        raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
-    default = str(record.get("thinking_default") or "").strip()
+        if "thinking_levels" in brought:
+            raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
+        levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
+    default = str(record.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX]
     if not supports:
         levels, default = [], ""
         if profile != DEFAULT_THINKING_PROFILE:
-            raise ProviderError("不支持思考的模型不能配置思考参数")
-    elif default and default not in levels:
-        raise ProviderError("思考默认档位不在候选里")
-    elif not default:
+            if "thinking_profile" in brought:
+                raise ProviderError("不支持思考的模型不能配置思考参数")
+            profile = DEFAULT_THINKING_PROFILE
+    elif default not in levels:
+        # 只有用户此刻亲笔填的那个值才配得上一句拒收；空 default（没填或主动清空）
+        # 和继承来的旧默认越界一样，归到候选第一个，没有候选就是空串。
+        if default and "thinking_default" in brought:
+            raise ProviderError("思考默认档位不在候选里")
         default = levels[0] if levels else ""
     return {
         "supports_thinking": supports,
@@ -638,11 +708,12 @@ class ProviderStore:
         return provider
 
     # ---- 变更 ----
-    _THINKING_KEYS = ("supports_thinking", "thinking_levels",
-                      "thinking_default", "thinking_profile")
-
-    def _pending(self, record: dict) -> dict:
+    def _pending(self, record: dict) -> tuple:
         """更新已有条目时，把请求里没带的思考四格从库里那份补进**待校验的 dict**。
+
+        返回 `(pending, requested)`：requested 是这次请求真正带来的那几格键名。
+        这半边和合并同等重要——校验层要靠它分清"用户填的"和"我们替他补的"，
+        严格拒收只配作用于前者（判据见 `_thinking_fields`）。
 
         位置就是这条实现的全部理由（裁决 A）：必须在 `_validate` 之前。放在校验之后
         （brief 的原写法）会造出非法组合——一条 `supports_thinking=True,
@@ -653,27 +724,31 @@ class ProviderStore:
         只有**键缺失或值为 None** 才算"这次没动它"（与 pricing / paid_by 同一条纪
         律；PUT 路由因此必须走 `model_dump(exclude_none=True)`，否则旧客户端把
         Optional 字段序列化成 None 之外的形状时这条保留会被绕过）。显式 False /
-        [] / "" 是用户确实这么填，不覆盖。
+        [] / "" 是用户确实这么填，算 requested、不覆盖。
 
         锁只用来取那一份旧记录的拷贝：`_validate` 里有 DNS 解析，绝不能挪进锁里
         （持锁解析会把所有 provider 的读写串成一条队伍）。
         """
         provider_id = str(record.get("id") or "")
         if not provider_id:
-            return record
+            return record, _requested_thinking_keys(record)
         with self._lock:
             existing = next((p for p in self._items if p["id"] == provider_id), None)
             old = dict(existing) if existing is not None else None
         if old is None:
-            return record
+            return record, _requested_thinking_keys(record)
         pending = dict(record)
-        for key in self._THINKING_KEYS:
+        requested = set()
+        for key in _THINKING_KEYS:
             if pending.get(key) is None:
                 pending[key] = old.get(key)
-        return pending
+            else:
+                requested.add(key)
+        return pending, requested
 
     def upsert(self, record: dict) -> dict:
-        cleaned = self._validate(self._pending(record))
+        pending, requested = self._pending(record)
+        cleaned = self._validate(pending, thinking_requested=requested)
         with self._lock:
             existing = next((i for i, p in enumerate(self._items) if p["id"] == cleaned["id"]), None)
             if existing is None:
@@ -750,7 +825,7 @@ class ProviderStore:
             p["is_default"] = (p["id"] == keep_id)
 
     @staticmethod
-    def _validate(record: dict) -> dict:
+    def _validate(record: dict, thinking_requested=None) -> dict:
         label = str(record.get("label") or "").strip()
         base_url = str(record.get("base_url") or "").strip()
         model = str(record.get("model") or "").strip()
@@ -797,7 +872,10 @@ class ProviderStore:
             "paid_by": paid_by,
             "owner": owner,
             "pricing": pricing,
-            **_thinking_fields(record),
+            # 思考四格。thinking_requested=None 只可能来自直接调 `_validate` 的调用方
+            # （没经过 `_pending` 那一步合并，也就没有"继承来的值"要宽容）：那时
+            # dict 里非 None 的那几格就是带来的值，照旧逐格严格判。
+            **_thinking_fields(record, thinking_requested),
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
@@ -830,16 +908,11 @@ class ProviderStore:
                 # 直觉"（卡片 §2.3b），不是合同价；未定价 = "?x"，绝不显示 0.00x。
                 "priced": p.get("pricing") is not None,
                 "multiplier": credits.multiplier_label(p.get("pricing")),
-                # 思考能力。四格里这里**不给** thinking_profile：那是"怎么调参"的内部
+                # 思考视图四格。这里**不给** thinking_profile：那是"怎么调参"的内部
                 # 配方，模型清单（下拉、卡片）用不上，而管理表单要的那一面是 _public。
-                "supports_thinking": bool(p.get("supports_thinking")),
-                # 读路径才截断：盘上可能有别的版本/手工写坏的畸形老记录，这里报错会
-                # 让那些模型在界面上凭空消失；拒收是写路径（_thinking_fields）的职责。
-                "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
-                "thinking_default": str(p.get("thinking_default") or "").strip(),
-                "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
-                                                    str(p.get("thinking_profile")
-                                                        or DEFAULT_THINKING_PROFILE)),
+                # 读路径的兜底口径（截 3 档、default 归回候选）在 _thinking_view 一处，
+                # 与 _public 同一份，别在这里再抄一遍。
+                **_thinking_view(p),
             })
         return items
 
@@ -861,15 +934,10 @@ class ProviderStore:
             "pricing": pricing,
             "priced": pricing is not None,
             "multiplier": credits.multiplier_label(pricing),
-            # 思考四格。管理表单要比 /v1/models 多拿一格 thinking_profile——
-            # 保存时得把这一格原样回传，否则一次编辑就把配方洗回 none。
-            # 与 catalog 同一口径：读路径防御性截断，写路径拒收。
-            "supports_thinking": bool(p.get("supports_thinking")),
-            "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
-            "thinking_default": str(p.get("thinking_default") or "").strip(),
-            "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
-                                                str(p.get("thinking_profile")
-                                                    or DEFAULT_THINKING_PROFILE)),
+            # 思考视图：与 catalog 同一份 `_thinking_view`，这一面只多给一格
+            # thinking_profile——管理表单保存时得把它原样回传，否则一次编辑就把
+            # 配方洗回 none。（共享条目对普通用户不给这一格，见 main.my_providers。）
+            **_thinking_view(p),
             "thinking_profile": str(p.get("thinking_profile") or DEFAULT_THINKING_PROFILE),
         }
 

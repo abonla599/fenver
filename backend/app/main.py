@@ -1558,9 +1558,18 @@ class ProviderDefaultRequest(BaseModel):
 
 @app.get("/v1/me/providers")
 def my_providers(principal: Principal = CurrentPrincipal):
-    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。"""
+    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。
+
+    shared 段剥掉 thinking_profile：那一格是"选了某档之后往上游发什么参数"的内部
+    配方，而共享条目在这个面上根本写不动（`_can_edit_provider` 与 RequireAdmin 双重
+    挡着）——把配方发给只读的人只会让人以为改得动。思考结论本身照给
+    （thinking_status，界面要显示"支持思考（参数未核实）"）。
+    mine 段保留：那几格是他自己的 provider，PUT 回传时缺了它就把配方洗回 none。
+    """
+    shared = [{k: v for k, v in item.items() if k != "thinking_profile"}
+              for item in provider_store.public_list(None)]
     return {
-        "shared": provider_store.public_list(None),
+        "shared": shared,
         "mine": provider_store.mine_public(principal.user_id),
         "default": provider_store.get_pref(principal.user_id),
         "presets": PRESETS,
