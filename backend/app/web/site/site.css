@@ -156,21 +156,22 @@ strong { font-weight: 650; }
 }
 
 /* 首屏 */
+/* 首屏借鉴的是"克制"这件事，不是某段代码：一列窄内容、大留白、宽字距的标题，
+   装饰降到接近零。原来左右两栏把注意力劈成两半，读者不知道先看哪边；现在全部居中，
+   从上到下只有一条线：这是谁 → 它解决什么 → 怎么开始。 */
 .hero {
   position: relative; overflow: hidden;
   max-width: var(--maxw); margin: 0 auto;
-  padding: clamp(46px, 7vw, 88px) var(--gutter) clamp(58px, 8vw, 96px);
+  padding: clamp(44px, 5.6vw, 72px) var(--gutter) clamp(52px, 7vw, 84px);
+  text-align: center;
 }
 .hero::before {
   content: ""; position: absolute; z-index: -1;
-  width: 420px; height: 420px; right: -100px; top: 10px;
+  width: 420px; height: 420px; left: 50%; top: -60px; margin-left: -210px;
   border-radius: 50%; background: var(--brand-soft); filter: blur(30px); opacity: .72;
 }
-.hero-grid {
-  display: grid; grid-template-columns: minmax(0, 1.02fr) minmax(430px, .98fr);
-  gap: clamp(38px, 6vw, 78px); align-items: center;
-}
-.hero-main { min-width: 0; }
+/* 46rem ≈ 736px：一行 7 个中文字放在 70px 字号下正好不挤，再宽就显得散。 */
+.hero-inner { max-width: 46rem; margin: 0 auto; }
 .hero-kicker {
   display: inline-flex; align-items: center; gap: 9px;
   margin-bottom: 26px; padding: 7px 12px;
@@ -179,18 +180,25 @@ strong { font-weight: 650; }
   border-radius: var(--radius-pill); font-size: .76rem; font-weight: 650;
 }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 12%, transparent); }
-/* 首屏只有这一个主标题。品牌名在导航栏已经有了，再拿 96px 在首屏写一遍，等于用最贵
-   的一行去说一件读者已经知道的事；标语接过来当 h1，语义也更对（页面讲的是"数据不出门"，
-   不是"这个软件叫 Fenver"）。
-   不再给 .hero h1 单开规则：`.hero h1` 的特异性高于 `.hero-title`，留着就会盖掉这里的字号。 */
+/* 参考站的主标题是 46px / 字重 400 / 字距 18.4px（0.4em）。中文拉到 0.4em 会散成
+   单个字，收在 .1em；字重取 500，再细在墨绿底上就发虚了。
+   inline-block + 负 margin-right 是为了抵消末字后面那段字距——块级居中时它会让人
+   看着整体偏左半个字距。 */
 .hero-title {
-  max-width: 9.5em; margin-bottom: 14px; color: var(--ink);
-  font-family: var(--display); font-size: clamp(2.5rem, 5vw, 4.5rem);
-  font-weight: 720; line-height: 1.04; letter-spacing: -.055em;
+  display: inline-block; margin: 6px -.1em 24px 0;
+  color: var(--ink);
+  font-family: var(--display); font-size: clamp(2.4rem, 5.6vw, 4.4rem);
+  font-weight: 500; line-height: 1.3; letter-spacing: .1em;
 }
 .hero-title em { color: var(--brand); font-style: normal; }
-.lede { max-width: 33em; margin-top: 24px; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.75; }
-.cta { display: flex; flex-wrap: wrap; gap: 11px; margin: 30px 0 18px; }
+/* 38em 是试出来的：第一行（到"联网查。"为止）36 个字，留两字余量刚好不折。
+   再窄，那行会自己断，br 就白写了。 */
+.lede { max-width: 38em; margin: 0 auto; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.8; }
+/* 中文没有词边界，浏览器按字符断行会把"会 / 话"拆开。宽屏用这个 br 强制在句号后
+   换行；窄屏藏起来，让文字自己流。 */
+.br-wide { display: none; }
+@media (min-width: 760px) { .br-wide { display: inline; } }
+.cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 11px; margin: 28px 0 18px; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 10px;
   min-height: 50px; padding: 12px 19px;
@@ -204,14 +212,15 @@ strong { font-weight: 650; }
 .btn:active { transform: translateY(0); }
 .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); box-shadow: 0 8px 22px color-mix(in srgb, var(--brand) 20%, transparent); }
 .btn.primary:hover { background: color-mix(in srgb, var(--brand) 88%, var(--ink)); box-shadow: 0 12px 28px color-mix(in srgb, var(--brand) 26%, transparent); }
-.hero-assurances { display: flex; flex-wrap: wrap; gap: 8px 18px; list-style: none; margin: 0; padding: 0; color: var(--ink-soft); font-size: .78rem; }
+.hero-assurances { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; list-style: none; margin: 0; padding: 0; color: var(--ink-soft); font-size: .78rem; }
 .hero-assurances li { display: inline-flex; align-items: center; gap: 7px; }
 .hero-assurances li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--brand); }
 
 /* 首屏产品示意 */
 .product-stage {
-  position: relative; overflow: hidden; min-width: 0; min-height: 580px;
-  display: grid; place-items: center; padding: 42px 34px 54px;
+  position: relative; overflow: hidden; min-width: 0;
+  width: min(100%, 620px); min-height: 540px; margin: clamp(30px, 4vw, 52px) auto 0;
+  display: grid; place-items: center; padding: 40px 32px 52px;
   border: 1px solid color-mix(in srgb, var(--brand) 14%, var(--line)); border-radius: 32px;
   background: var(--brand-soft); box-shadow: var(--shadow-sm); isolation: isolate;
 }
@@ -220,9 +229,6 @@ strong { font-weight: 650; }
   top: -40px; right: -20px; border-radius: 50%; background: var(--brand-bright);
   filter: blur(110px); opacity: .09;
 }
-.stage-orbit { position: absolute; z-index: -1; border: 1px solid color-mix(in srgb, var(--brand) 18%, transparent); border-radius: 50%; pointer-events: none; }
-.orbit-one { width: 440px; height: 440px; right: -210px; top: -170px; }
-.orbit-two { width: 330px; height: 330px; left: -190px; bottom: -180px; }
 /* 产品示意窗按软件默认（跟随系统的浅色）主题画：与 #shots 里四张真实截图同一套
    颜色，都是白底 + 薄荷绿强调色。这里刻意写死浅色而不是取 --surface 这类主题变量
    ——四张截图本身不会跟着主题变，示意窗要是跟着变，深色主题下就会出现"黑示意窗
@@ -234,8 +240,7 @@ strong { font-weight: 650; }
      反色处理——一旦被强制反转，就会出现"黑示意窗配白截图"的割裂。 */
   color-scheme: light;
   border: 1px solid #e3e6eb; border-radius: 23px;
-  background: #f7f8fa; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
-  transform: rotate(1.2deg);
+  background: #f7f8fa; box-shadow: 0 22px 54px rgba(0, 0, 0, .32);
 }
 .window-bar { display: flex; align-items: center; justify-content: space-between; padding: 15px 17px; border-bottom: 1px solid #e3e6eb; }
 .window-brand { display: flex; align-items: center; gap: 8px; color: #16181d; font-size: .78rem; }
@@ -267,8 +272,10 @@ strong { font-weight: 650; }
 .floating-card { position: absolute; display: grid; gap: 3px; padding: 11px 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow-sm); }
 .floating-card span { color: var(--brand); font: 550 .53rem/1 var(--mono); letter-spacing: .12em; }
 .floating-card strong { color: var(--ink); font-size: .66rem; letter-spacing: 0; }
-.memory-float { left: 15px; top: 86px; transform: rotate(-4deg); }
-.model-float { right: 12px; bottom: 94px; transform: rotate(3deg); }
+/* 浮动标签去掉旋转：转过之后左边缘会顶出 .product-stage 的 overflow 裁切线，
+   手机那档直接削掉一个圆角。极简的版面里，多这两度倾斜也只是噪音。 */
+.memory-float { left: 24px; top: 76px; }
+.model-float { right: 22px; bottom: 84px; }
 .model-float span { color: #7c83ff; }
 .stage-note { position: absolute; left: 0; right: 0; bottom: 19px; color: var(--ink-faint); font: 500 .55rem/1 var(--mono); letter-spacing: .12em; text-align: center; }
 
@@ -497,7 +504,6 @@ footer > .note { margin-top: 12px; }
 @media (max-width: 1100px) {
   .issue { display: none; }
   .topbar { grid-template-columns: auto 1fr auto; }
-  .hero-grid { grid-template-columns: minmax(0, 1fr) minmax(390px, .9fr); gap: 34px; }
   .product-stage { min-height: 550px; padding-inline: 24px; }
   .memory-float { left: 8px; }
   .model-float { right: 8px; }
@@ -510,10 +516,7 @@ footer > .note { margin-top: 12px; }
   .navlinks { display: none; position: absolute; left: var(--gutter); right: var(--gutter); top: calc(100% + 8px); flex-direction: column; align-items: stretch; gap: 3px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-lg); }
   .navlinks.is-open { display: flex; }
   .navlinks a { min-height: 46px; padding-inline: 14px; }
-  .hero-grid { grid-template-columns: 1fr; }
-  .hero-main { max-width: 680px; }
-  .hero-title { max-width: 10em; }
-  .product-stage { width: min(100%, 600px); min-height: 590px; margin: 12px auto 0; }
+  .product-stage { min-height: 500px; margin-top: 36px; padding-inline: 16px; }
   .section-head { grid-template-columns: minmax(0, 1fr); grid-template-areas: "no" "h2" "desc"; }
   .section-head > p:not(.section-no) { max-width: 36em; margin-top: 16px; }
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
