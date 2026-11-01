@@ -709,9 +709,10 @@ class ProviderStore:
 
     # ---- 变更 ----
     def _pending(self, record: dict) -> tuple:
-        """更新已有条目时，把请求里没带的思考四格从库里那份补进**待校验的 dict**。
+        """更新已有条目时，把请求里没带的思考四格 + 模型上限从库里那份补进**待校验的 dict**。
 
-        返回 `(pending, requested)`：requested 是这次请求真正带来的那几格键名。
+        返回 `(pending, requested)`：requested 是这次请求真正带来的那几格**思考**键名
+        （上限不在里面，它的判据只有归一一条，见下面那段注释）。
         这半边和合并同等重要——校验层要靠它分清"用户填的"和"我们替他补的"，
         严格拒收只配作用于前者（判据见 `_thinking_fields`）。
 
@@ -744,6 +745,16 @@ class ProviderStore:
                 pending[key] = old.get(key)
             else:
                 requested.add(key)
+        # 模型上限（max_context_k）走同一条纪律（v0.39.1 Task 9）：这一格从
+        # 「设置 → 模型服务」的表单搬进了模型卡，而表单那次 PUT 从此**不带**它。
+        # 不接回来的话，`_validate` 会按缺失兜底成 64、`upsert` 又是整条替换——
+        # 「改一次模型名字 = 把 1000K 的 DeepSeek 洗成 64K」，全站预算跟着塌，
+        # 而且一句错误都不说。显式给值仍走 normalize_max_context_k（越界钳制，
+        # 不在这里新增 raise）；新建路径没有"库里那一份"可保留，行为不变。
+        # 不进 requested：思考四格的"严格只判带来的值"是给 `_thinking_fields` 的，
+        # 上限的判据从头到尾只有归一这一条。
+        if pending.get("max_context_k") is None:
+            pending["max_context_k"] = old.get("max_context_k")
         return pending, requested
 
     def upsert(self, record: dict) -> dict:

@@ -52,6 +52,35 @@ def test_old_records_get_safe_defaults_and_unverified_status(tmp_path):
     assert e["thinking_default"] == "" and e["thinking_status"] == "unsupported"
 
 
+def test_update_without_max_context_k_keeps_the_stored_cap(tmp_path):
+    """Task 9 的写侧前提：「上下文上限」从设置页表单搬进模型卡后，PUT 不再带这一格。
+
+    `_validate` 对缺失键兜底成 64，而 `upsert` 是整条替换——不保留的话"改一次模型
+    名字"就会把 1000K 的 DeepSeek 洗成 64K，全站预算跟着塌。保留口径与
+    pricing/paid_by/思考四格是同一条纪律：更新已有条目时，请求里缺失或为 None 的
+    那一格用库里那份；显式给值仍走 normalize_max_context_k（越界**钳制**，这里不
+    新增 raise——上限的判据只有一处）。新建路径不受这条影响（库里没有"上一份"）。
+    """
+    s = _store(tmp_path, [_old(max_context_k=1000)])
+    s.upsert({**_old(), "label": "只改个名"})
+    assert s.get("p1")["max_context_k"] == 1000, "改名把模型上限洗成了缺省 64"
+
+    # 显式 None 与"没带这一格"是同一种输入（PUT 路由走 exclude_none，直接调 store
+    # 的调用方可能给出 None）：都保留库里那份
+    s.upsert({**_old(), "label": "还是改名", "max_context_k": None})
+    assert s.get("p1")["max_context_k"] == 1000
+
+    # 显式给值照旧落库，越界只钳不拒
+    s.upsert({**_old(), "max_context_k": 256})
+    assert s.get("p1")["max_context_k"] == 256
+    s.upsert({**_old(), "max_context_k": 99999})
+    assert s.get("p1")["max_context_k"] == providers.MAX_CONTEXT_K_CEIL
+
+    # 新建（库里没有这一条）不受保留影响：没带就是缺省 64
+    s.upsert({**_old(), "id": "p_new", "label": "新建"})
+    assert s.get("p_new")["max_context_k"] == providers.DEFAULT_MAX_CONTEXT_K
+
+
 def test_thinking_fields_validate_and_old_client_put_preserves_them(tmp_path):
     s = _store(tmp_path, [_old()])
     s.upsert({**_old(), "supports_thinking": True,
@@ -395,11 +424,14 @@ def test_models_endpoint_can_edit_and_hides_profile(client, enforced):
     assert next(m for m in admin_models if m["shared"] is True)["can_edit"] is True
 
 
-def test_me_providers_shared_section_hides_profile(client, enforced):
-    """Minor-4：/v1/me/providers 的 shared 段剥掉 thinking_profile（内部配方）。
+def test_me_providers_shared_section_hides_profile_for_writers_only(client, enforced):
+    """Minor-4 + Task 9：/v1/me/providers 的 shared 段按角色剥 thinking_profile。
 
-    共享条目对普通用户根本不可写，把"怎么调参"发过去只会让人以为改得动；
-    mine 段是本人自己的 provider，回传那一格是"改完保存别把配方洗成 none"的根据。
+    共享条目对普通用户根本不可写（`_can_edit_provider` 与 /v1/providers 的
+    RequireAdmin 双重挡着），把"怎么调参"发过去只会让人以为改得动；而**管理员**
+    要在模型卡里改共享模型的 cap/能力，profile 必须能回显——少这一格，模型卡那次
+    PUT 就把已核实的配方洗回 none（和 mine 段同一个理由）。
+    mine 段永远是自己的 provider，回传那一格是"改完保存别把配方洗成 none"的根据。
     """
     hdr = enforced("cap-owner")
     body = client.get("/v1/me/providers", headers=hdr).json()
@@ -422,3 +454,11 @@ def test_me_providers_shared_section_hides_profile(client, enforced):
         assert mine["thinking_levels"] == ["快速"]
     finally:
         assert client.delete(f"/v1/me/providers/{pid}", headers=hdr).status_code == 200
+
+    # 管理员（本机 bootstrap 令牌）在同一个面上要拿得到共享条目的 profile
+    admin = client.get("/v1/me/providers",
+                       headers={"Authorization": "Bearer boot-token"}).json()
+    assert admin["shared"], "管理员面同样看得见共享条目"
+    for item in admin["shared"]:
+        assert "thinking_profile" in item
+        assert "thinking_status" in item

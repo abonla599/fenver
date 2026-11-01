@@ -1560,14 +1560,18 @@ class ProviderDefaultRequest(BaseModel):
 def my_providers(principal: Principal = CurrentPrincipal):
     """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。
 
-    shared 段剥掉 thinking_profile：那一格是"选了某档之后往上游发什么参数"的内部
-    配方，而共享条目在这个面上根本写不动（`_can_edit_provider` 与 RequireAdmin 双重
-    挡着）——把配方发给只读的人只会让人以为改得动。思考结论本身照给
-    （thinking_status，界面要显示"支持思考（参数未核实）"）。
+    shared 段**只在调用者不是管理员时**剥掉 thinking_profile：那一格是"选了某档之后
+    往上游发什么参数"的内部配方，普通用户在模型卡里对共享条目既看不到也改不动
+    （`can_edit=false`，真门在 /v1/providers 的 RequireAdmin），把配方发过去只会让人
+    以为改得动。管理员要在模型卡里改共享模型的能力/上限，PUT 是全量语义——少了这一格
+    回显，一次保存就把已核实的配方洗回 none（与 mine 段同一个理由）。
+    思考结论本身照给（thinking_status，界面要显示"支持思考（参数未核实）"）。
     mine 段保留：那几格是他自己的 provider，PUT 回传时缺了它就把配方洗回 none。
     """
-    shared = [{k: v for k, v in item.items() if k != "thinking_profile"}
-              for item in provider_store.public_list(None)]
+    shared = provider_store.public_list(None)
+    if principal.role != "admin":
+        shared = [{k: v for k, v in item.items() if k != "thinking_profile"}
+                  for item in shared]
     return {
         "shared": shared,
         "mine": provider_store.mine_public(principal.user_id),
