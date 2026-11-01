@@ -39,6 +39,14 @@
   --brand-bright: #74d9b2;
   --brand-soft: #32493e;
   --brand-ink: #06150f;
+  /* 应用图标三色：与 android-native 的 tools/render-app-icon.ps1 同源
+     （Surface #121317 / Text #F2F3F5 / Mint #3DD598）。导航里的那枚标记画的
+     就是手机桌面上的图标本身，所以这三色**不跟页面令牌走**——跟着走就会变成
+     "官网一个绿方块、手机一个深方块"，那正是它看起来不像同一个软件的原因。
+     改这里必须同步改 render-app-icon.ps1 并重渲染 mipmap。 */
+  --icon-surface: #121317;
+  --icon-text: #f2f3f5;
+  --icon-mint: #3dd598;
   --ai: #a3a7ff;
   --ai-soft: #33365a;
   --danger: #ff8f8f;
@@ -109,13 +117,23 @@ strong { font-weight: 650; }
   transition: border-color var(--dur-2), box-shadow var(--dur-2);
 }
 .topbar.is-stuck { border-bottom-color: var(--line); box-shadow: 0 8px 24px rgba(10, 11, 14, .035); }
-.brand-link { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); }
-.brand { font-family: var(--display); font-size: 1.5rem; font-weight: 780; line-height: 1; letter-spacing: -.05em; }
-.brand-symbol {
-  width: 31px; height: 31px; padding: 5px;
-  color: var(--brand-ink); background: var(--brand); border-radius: 9px;
-  fill: none; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round;
+.brand-link { display: inline-flex; align-items: center; gap: 11px; color: var(--ink); }
+/* 字重收到 700、字距从 -.05em 放到 -.015em：780 在多数系统字体上会走合成加粗，
+   笔画糊成一团；字距压太狠，"F" 和 "e" 会粘在一起。 */
+.brand {
+  font-family: "Segoe UI Variable Display", "Segoe UI", "Helvetica Neue", Inter, Arial,
+               "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 1.42rem; font-weight: 700; line-height: 1; letter-spacing: -.015em;
 }
+/* 导航里这枚 = 手机桌面上的那枚：深底、白描边、mint 轨迹。圆角取 16.4%，
+   与 render-app-icon.ps1 的 CornerPct 0.16 同比例。 */
+.brand-symbol {
+  width: 32px; height: 32px; padding: 5.5px;
+  color: var(--icon-text); background: var(--icon-surface); border-radius: 5.2px;
+  fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round;
+}
+.brand-symbol .brand-mint { fill: var(--icon-mint); stroke: none; }
+.brand-symbol .brand-trace { fill: none; stroke: var(--icon-mint); }
 .issue {
   justify-self: start; margin-left: 24px; padding-left: 24px;
   color: var(--ink-faint); border-left: 1px solid var(--line);
