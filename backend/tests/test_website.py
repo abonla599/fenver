@@ -354,17 +354,15 @@ def test_landing_page_has_the_six_sections():
 # ---------- 4. 实拍图：存在、被引用、不许把页面压垮 ----------
 
 def test_four_real_screenshots_are_present_and_small():
-    """四张实拍 + 四张细节裁切都在，且合计仍守移动网络的预算。
+    """四张实拍都在，且合计仍守移动网络的预算。
 
-    裁切不是新拍的假图：它们由四张原图按固定区域裁出，只用来把同一份证据放大。
-    总预算不跟着视觉单元数量翻倍，仍按 600 KB 守。
+    这四张就是全部的视觉证据：一次全铺、没有额外的放大裁切。
+    总预算仍按 600 KB 守。
     """
     import os
     from app.web.web_router import SITE_DIR
     shots = (
         "img/register.jpg", "img/chat.jpg", "img/memory.jpg", "img/settings.jpg",
-        "img/detail-register.jpg", "img/detail-chat.jpg",
-        "img/detail-memory.jpg", "img/detail-settings.jpg",
     )
     total = 0
     for name in shots:
@@ -375,7 +373,7 @@ def test_four_real_screenshots_are_present_and_small():
     for name in shots:
         assert name in page, f"{name} 没被页面引用"
     budget = 600 * 1024
-    assert total < budget, f"实拍与裁切合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
+    assert total < budget, f"实拍合计 {total} 字节,超了 {budget}:朋友用移动网络也要能打开"
 
 
 def test_the_site_uses_no_gradients():
@@ -384,14 +382,13 @@ def test_the_site_uses_no_gradients():
 
 
 def test_only_the_first_screenshot_loads_eagerly():
-    """八张视觉单元里只让首屏那张抢带宽。
+    """四个视觉单元里只让首屏那张抢带宽。
 
-    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余七张 `loading="lazy"`。
-    四张原图之外的四张细节裁切也是真实图片文件；它们都在证据墙里，滚动到才下载。
+    第一张 `fetchpriority="high"`（它是这一页的 LCP），其余三张 `loading="lazy"`。
     """
     import re
     imgs = re.findall(r"<img\b[^>]*>", _page())
-    assert len(imgs) == 8, f"截图 <img> 数量变了，这条的假设要一起改：{len(imgs)}"
+    assert len(imgs) == 4, f"截图 <img> 数量变了，这条的假设要一起改：{len(imgs)}"
     assert 'fetchpriority="high"' in imgs[0], \
         f"首屏那张没有提到高优先：{imgs[0][:70]}"
     for tag in imgs[1:]:
