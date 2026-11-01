@@ -120,6 +120,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.layout.ContentScale
@@ -571,6 +572,18 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var modelSaved by remember { mutableStateOf<Pair<String, String>?>(null) }
     var modelCardError by remember { mutableStateOf("") }
     var budgetClamped by remember(identityId) { mutableStateOf<Triple<String, Int, Int>?>(null) }
+    /* 关弹单的收尾**只有一份**（修复轮 Minor 1 + 6）：右上角 ×、卡里的「设为这条」、
+     * 系统返回键三个出口都走这里。从前 onPick 只关了 modelMenuOpen，卡片展开态与那三句
+     * 提示都没消化 ⇒ 换个模型再打开，还是那张卡展开着、还可能重印上一轮那句。
+     * modelManage 仍然**不清**（收起弹单 ≠ 退出管理，与网页 hideModelMenu 同一判据）。
+     * 清的都是本机快照态，不写 SharedPreferences，所以组合外调用是安全的。 */
+    fun closeModelMenu() {
+        modelMenuOpen = false
+        modelCardOpen = ""
+        budgetClamped = null
+        modelSaved = null
+        modelCardError = ""
+    }
     var drawerTick by remember { mutableStateOf(0) }
     var settingsPage by remember { mutableStateOf<String?>(null) }  // null=关；""=一级列表
     var streamJob by remember { mutableStateOf<Job?>(null) }
@@ -744,12 +757,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     fun modelCapK(): Int = currentProvider()?.max_context_k?.takeIf { it > 0 } ?: 64
 
     /* v0.39.x Task 10：上限比本机记着的预算小了（管理员/属主把这一格调小），当场把它
-     * 夹回上限并记一笔该说的那句话——判据取 map 里的**原始**值：contextBudgetK 读数时
-     * 已经夹过，拿夹过的数比上限，这条分支恒不成立，"夹到新上限"就只发生在显示层，
-     * 本机那份越界值一直躺着（spec §3.2 禁的正是这种静默，网页 Task 9 踩过同一脚）。
-     * 弹单没开着时这句话进状态条：手机上"要先点开模型卡才看得见"等于没说。 */
-    fun reconcileBudgetCap(pid: String, capK: Int) {
-        if (pid.isEmpty() || capK <= 0) return
+     * 夹回上限并记一笔该说的那句话。
+     * 判据取 map 里的**原始**那一份（contextBudgetWantedK）。原生这边的理由是：它能把
+     * 「这台设备从没为这条记过」（返回 0，没什么可夹）与「记过且越界」分开——
+     * contextBudgetK 是读数口，只夹 1..10000（Prefs 那一对函数一字未动），**不夹模型上限**，
+     * 所以网页那句"拿夹过的数比上限恒不成立"在这边并不成立，别把它的理由照抄过来。
+     * 返回值（修复轮 I-2）：本轮这句话是不是由状态条说了。调用方那句清状态必须给它让路，
+     * 否则同一帧两次写状态条、只有最后一次可见，这句话用户永远看不见。 */
+    fun reconcileBudgetCap(pid: String, capK: Int): Boolean {
+        if (pid.isEmpty() || capK <= 0) return false
         val stored = Prefs.contextBudgetWantedK(pid)
         if (stored > capK) {
             Prefs.setContextBudget(pid, capK)
@@ -758,8 +774,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             if (!modelMenuOpen) {
                 val name = providers.firstOrNull { it.id == pid }?.name ?: "这条模型"
                 setStatus(budgetClampNote(name, stored, capK))
+                // 手机上"要先点开模型卡才看得见"等于没说，所以这一句落状态条；
+                // 回报 true 是给 loadModelsNow 看的：别在同一帧把它抹掉。
+                return true
             }
         }
+        return false
     }
 
     /* 全量 PUT 的原料：/v1/me/providers 的 shared + mine 两段按 id 建一份缓存。
@@ -790,8 +810,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 只在这一刻被搬进按模型存的 map（map 已存在时是 no-op，见 Prefs）。
             Prefs.migrateContextBudget()
             // 清单到手即核对一次：服务端把某条上限调小过，本机预算跟着夹下来并说一声
-            reconcileBudgetCap(currentProvider()?.id ?: "", modelCapK())
-            if (providers.any { it.usable }) setStatus("")
+            val clampedNow = reconcileBudgetCap(currentProvider()?.id ?: "", modelCapK())
+            // 修复轮 I-2：这句清状态**不能无条件**。上一版这里是"同帧两次写"——
+            // 上面 reconcileBudgetCap 刚把「上限降到了…」写进状态条，这里立刻写回空串，
+            // 只有最后一次可见，那句提示等于从没说过。本轮它说过话就让它留在屏上
+            // （状态条自己 6 秒收，见上面那条 LaunchedEffect(status)）。
+            if (providers.any { it.usable } && !clampedNow) setStatus("")
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
     }
 
@@ -2347,6 +2371,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 VoiceScreen(voice.heard, voice.level, voiceCancel,
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
             }
+            // 修复轮 Minor 6：这层全屏弹层从前只有右上角 × 一个出口——本文件唯一的
+            // BackHandler 属于设置弹层（下面那枚），modelMenuOpen 从来没接返回键，
+            // 真机上按返回可能直接退到会话外面。enabled 必须绑 modelMenuOpen：不绑就是
+            // 常驻吃返回键。收尾走 closeModelMenu()，与 × 同一条路（两份收体会漂移）。
+            BackHandler(enabled = modelMenuOpen) { closeModelMenu() }
             // 点模型钮弹出全屏「选择模型」页（对标图 3）：标题 + 右上 × + 模型清单，当前项 ✓。
             if (modelMenuOpen) {
                 ModelPickerScreen(
@@ -2378,16 +2407,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                     },
                     onSaveCaps = { id, patch -> saveModelCapabilities(id, patch) },
                     onClose = {
-                        modelMenuOpen = false
-                        // 关掉弹单：卡片收起、提示消化掉；管理区**不**清（收起≠退出管理，
+                        // 关掉弹单：卡片收起、三句提示消化掉；管理区**不**清（收起≠退出管理，
                         // 与网页 hideModelMenu 同一判据，注释与代码不许再打反向）
-                        modelCardOpen = ""
-                        budgetClamped = null
-                        modelSaved = null
-                        modelCardError = ""
+                        closeModelMenu()
                     },
                     onPick = { id ->
-                        modelMenuOpen = false
+                        // 修复轮 Minor 1：换模型走**同一套**收尾。旧代码这里只关了
+                        // modelMenuOpen ⇒ 换个模型再打开，还是那张卡展开着、
+                        // 还可能重印上一轮那句「已保存/夹小了/失败」。
+                        closeModelMenu()
                         // switchModel：选择即生效；服务端「我的默认」写失败不反悔
                         Prefs.defaultProviderId = id
                         scope.launch { runCatching { Api.setMyDefaultProvider(id) } }
@@ -3286,10 +3314,14 @@ private data class ModelCardUi(
 )
 
 /* 卡上的小胶囊钮：禁用态必须**真的**点不动（clickable(enabled=false)），
- * 不是把颜色调淡骗人；选中态吃 primary 描边。一族钮同一只手筋，与 ActionPill 同源。 */
+ * 不是把颜色调淡骗人；选中态吃 primary 描边。一族钮同一只手筋，与 ActionPill 同源。
+ * 修复轮 Minor 5：读屏念不出"颜色变淡了"，所以禁用态要念得出「不可用：原因」。
+ * 原因由调用方给 `disabledHint`——这里至少有三种"为什么点不动"（思考参数未核实 /
+ * 完整记录还没读回来 / 共享模型要管理员二次验证），写死一句通用的等于又造一个假实话。
+ * 名字不另加 contentDescription：钮上的 Text 本身就是可读标签，再加一份就是双读。 */
 @Composable
 private fun ModelMiniPill(text: String, enabled: Boolean, selected: Boolean = false,
-                          onClick: () -> Unit) {
+                          disabledHint: String = "", onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val ink = when {
         !enabled -> scheme.onSurfaceVariant.copy(alpha = 0.5f)
@@ -3297,6 +3329,13 @@ private fun ModelMiniPill(text: String, enabled: Boolean, selected: Boolean = fa
         else -> scheme.onSurface
     }
     Box(Modifier.heightIn(min = 32.dp)
+        .semantics {
+            stateDescription = when {
+                !enabled -> if (disabledHint.isEmpty()) "不可用" else "不可用：$disabledHint"
+                selected -> "已选中"
+                else -> "未选中"
+            }
+        }
         .background(if (selected) scheme.primaryContainer else scheme.surfaceVariant,
             CircleShape)
         .border(BorderStroke(1.dp, if (selected) scheme.primary else scheme.outline),
@@ -3361,7 +3400,9 @@ private fun ModelPickerScreen(models: List<ModelInfo>, currentId: String?, card:
                                 color = statusInk)
                             Text("${if (m.shared) "共享" else "我的"} · " +
                                 "${if (m.max_context_k > 0) m.max_context_k else 64}K · " +
-                                "${if (m.priced) m.multiplier.ifEmpty { "?x" } else "未定价"}",
+                                // 修复轮 I-1：multiplier 是可空（服务端对 per_call 定价回
+                                // null），兜底写法与网页同串（app.js 的 `item.multiplier || "?x"`）
+                                "${if (m.priced) (m.multiplier ?: "?x") else "未定价"}",
                                 fontSize = 11.5.sp, color = text3Color(), maxLines = 1,
                                 overflow = TextOverflow.Ellipsis)
                         }
@@ -3390,6 +3431,23 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
     val scheme = MaterialTheme.colorScheme
     val rec = card.records[item.id]
     val canEdit = item.can_edit
+    /* 修复轮 I-3（说实话，不补 CookieJar）：管理员改**共享**条目的能力字段，服务端那道门
+     * 是 RequireAdmin + RequireAdminReauth，而它判的是 `request.cookies` 里那张二次验证票
+     * （authz.py 的 `_admin_reauth_valid`）。原生这条通路**结构上没有**：两个 OkHttpClient
+     * 都没设 cookieJar（OkHttp 默认 NO_COOKIES），`Api.request()` 只加 Authorization: Bearer
+     * ——所以这一格按下去必回 428。网页那边真有那条链（api.js 收到 428 弹 #reauthModal、
+     * POST /v1/auth/admin-reauth 换票再重打）。真正的接线另立 **#228**，本单不做，
+     * 只做两件事：把这句实话写在管理区里 + 把那颗必失败的「保存能力」钮禁用。
+     * 判据取 `canEdit && item.shared`：can_edit 服务端已经算过角色，只有管理员才为 true，
+     * 再放宽成只看 shared 就会把这句话印到根本没管理区的用户卡上。 */
+    val reauthBlocked = canEdit && item.shared
+    // Minor 5：管理区这几颗钮至少有三种"为什么点不动"，原因在这里一次算清给读屏念
+    val capsHint = when {
+        reauthBlocked -> "共享模型要管理员二次验证，本版没接"
+        rec == null -> "这条模型的完整记录还没读回来"
+        card.saving -> "正在保存"
+        else -> ""
+    }
     val ctlEnabled = item.thinking_status == "verified"
     val capK = if (item.max_context_k > 0) item.max_context_k else 64
     val hi = maxOf(4, capK)
@@ -3424,7 +3482,7 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
             Text(item.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                 color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("上游 ${item.model.ifEmpty { "未填" }} · ${if (item.shared) "共享模型" else "我的模型"} · " +
-                "${if (item.priced) item.multiplier.ifEmpty { "?x" } else "未定价"}",
+                "${if (item.priced) (item.multiplier ?: "?x") else "未定价"}",
                 fontSize = 12.sp, color = text3Color(), maxLines = 2,
                 overflow = TextOverflow.Ellipsis)
             Text("${thinkingStatusLabel(item.thinking_status)} · 模型上限 $capK K · " +
@@ -3443,6 +3501,12 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                 onValueChangeFinished = {
                     Prefs.setContextBudget(item.id, budgetK)
                     onBudgetTouched()
+                },
+                // 修复轮 Minor 5：滑杆自己不带文字，读屏只能念出"滑块"——给它名字和当前格。
+                // 既有的 ContextPanel 那只同缺，按审查口径不在本单范围，已登记进报告。
+                modifier = Modifier.semantics {
+                    contentDescription = "本会话预算"
+                    stateDescription = "$budgetK / $hi K"
                 })
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ModelMiniPill("用满 $hi K", enabled = true,
@@ -3465,7 +3529,9 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                     color = if (ctlEnabled) scheme.onSurface else scheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f), maxLines = 2)
                 ModelMiniPill(if (thinkingOn) "开" else "关", enabled = ctlEnabled,
-                    selected = ctlEnabled && thinkingOn) {
+                    selected = ctlEnabled && thinkingOn,
+                    // Minor 5：禁用态要念得出原因，这里的原因就是那一枚三态标签本身
+                    disabledHint = if (ctlEnabled) "" else thinkingStatusLabel(item.thinking_status)) {
                     thinkingOn = !thinkingOn
                     Prefs.setThinkingEnabled(item.id, thinkingOn)
                 }
@@ -3473,14 +3539,17 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
             levels.forEach { lv ->
                 // 档位候选同样只在 verified 才给点：未核实点了也只是存一个发不出去的值
                 ModelMiniPill(lv, enabled = ctlEnabled,
-                    selected = ctlEnabled && thinkingOn && levelPick == lv) {
+                    selected = ctlEnabled && thinkingOn && levelPick == lv,
+                    disabledHint = if (ctlEnabled) "" else thinkingStatusLabel(item.thinking_status)) {
                     levelPick = lv
                     Prefs.setThinkingLevel(item.id, lv)
                 }
             }
             Text(if (ctlEnabled)
                     "本轮会带上「${if (thinkingOn) levelPick.ifEmpty { "默认档" } else "不带上思考参数"}」：" +
-                        "开关与档位是这台设备自己的偏好，服务端不存、换设备不同步；" +
+                        // 修复轮 Minor 8：这一段与网页 app.js 逐字对齐（上一版这里是顿号，
+                        // 网页是逗号；按网页为准改原生）。同锁跨端抠串比对。
+                        "开关与档位是这台设备自己的偏好，服务端不存，换设备不同步；" +
                         "这一档今天还没接进请求体（Task 12/13），界面不声称已经生效。"
                 else thinkingStateReason(item.thinking_status),
                 fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
@@ -3494,6 +3563,13 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                         fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
                         color = scheme.onSurface)
                     if (card.manage) {
+                        // 修复轮 I-3：管理员改共享条目今天必 428（原生没有 Cookie 通道接
+                        // 二次验证票），这条实话要在动手前说，别等失败那句英文令牌冒出来。
+                        if (reauthBlocked) {
+                            Text("共享模型的这项改动需要管理员二次验证，手机本版没接，" +
+                                "请到网页管理台改（这条改动只有网页那条路今天走得通）。",
+                                fontSize = 12.sp, color = scheme.error, maxLines = 3)
+                        }
                         FenverTextField(value = capDraft, onValueChange = { capDraft = it },
                             placeholder = "模型上限（K token）：1..10000，越界由服务端钳住",
                             keyboardType = KeyboardType.Number,
@@ -3501,7 +3577,8 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                         Row(verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             ModelMiniPill(if (supDraft) "支持思考：开" else "支持思考：关",
-                                enabled = rec != null && !card.saving, selected = supDraft) {
+                                enabled = rec != null && !card.saving, selected = supDraft,
+                                disabledHint = capsHint) {
                                 supDraft = !supDraft
                             }
                         }
@@ -3512,15 +3589,19 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                         val candidates = parseThinkingLevels(levelsDraft)
                         candidates.forEach { c ->
                             ModelMiniPill("默认档：$c", enabled = rec != null && !card.saving,
-                                selected = defaultDraft == c) { defaultDraft = c }
+                                selected = defaultDraft == c, disabledHint = capsHint) { defaultDraft = c }
                         }
                         if (candidates.isNotEmpty() && !candidates.contains(defaultDraft)) {
                             Text("默认档只能是候选之一：现在保存会落「${candidates.first()}」。",
                                 fontSize = 11.5.sp, color = text3Color())
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // 修复轮 I-3：`!reauthBlocked` 这一枚是这一格唯一"按下去只会拿到
+                            // 428"的钮，禁用它并在上面写清为什么；草稿输入框照旧能填
+                            // （它们不发请求，最小改动只收这颗必失败的按钮）。
                             ModelMiniPill(if (card.saving) "保存中…" else "保存能力",
-                                enabled = rec != null && !card.saving) {
+                                enabled = rec != null && !card.saving && !reauthBlocked,
+                                disabledHint = capsHint) {
                                 val patch = buildJsonObject {
                                     val k = capDraft.trim().toIntOrNull()
                                     if (k != null && k > 0) put("max_context_k", k)

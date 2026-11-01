@@ -25,6 +25,9 @@ from tests.test_apk_release_discipline import _code
 
 REPO = Path(__file__).resolve().parents[2]
 NATIVE = REPO / "android-native/app/src/main/java/xyz/fenever/assistant/nativeapp"
+# 跨端逐字比对用的两头原料（本单只读不改）：网页那份文案与后端倍率标签的出处。
+WEB_JS = REPO / "backend/app/web/static/app.js"
+CREDITS_PY = REPO / "backend/app/core/credits.py"
 
 
 def _t(rel):
@@ -53,6 +56,27 @@ def _between(code, a, b):
     i = code.index(a)
     j = code.index(b, i)
     return code[i:j]
+
+
+def _call(code, anchor):
+    """取 `anchor(` 的**圆括号**实参区间。
+
+    为什么要有第二个切片器：`_block` 从锚点往后找第一个 `{`，而 `Slider(value = …,
+    onValueChange = { v -> … })` 的第一个花括号是它自己 lambda 的——配对括号抓到 lambda
+    结尾就收手，实参尾巴（`modifier = Modifier.semantics { … }`）落在尺子外面。
+    绕法与 `_block` 同族：把目标实参挪到别的调用里、或让锚点先出现一次，这把尺看不见。
+    """
+    at = code.index(anchor)
+    i = code.index("(", at)
+    d = 0
+    for j in range(i, len(code)):
+        if code[j] == "(":
+            d += 1
+        elif code[j] == ")":
+            d -= 1
+            if d == 0:
+                return code[i:j + 1]
+    raise AssertionError(anchor)
 
 
 def test_prefs_budget_map_and_migration():
@@ -331,7 +355,8 @@ def test_picker_rows_and_card_render_thinking_tri_state_and_disable_branch():
 
     变异：① 把 'unverified' 那句文案改成「可切换思考强度」→ 第一条红（界面替服务端
     拔高）；② 删掉 `clickable(enabled = ctlEnabled`（禁用态改成永远可点）→ 第三条红；
-    ③ 把 reason 那一句撤掉 → 第四条红（禁用不说为什么就是"控件坏了"）。
+    ③ 把 reason 那一句撤掉 → 第四条红（禁用不说为什么就是"控件坏了"）；
+    ④ 把「本机偏好」那句里的逗号改回顿号（上一版的实测形状）→ 最后一条红（跨端逐字比对）。
     射程：只判"这些字符串与这道门在代码里"，不判运行时真的点不动——真机点按留在手测
     清单；把 enabled 判据换成 `status != "unsupported"` 这种"未核实也能点"的写法，
     本锁看不见字符串以外的等价物，所以同锁钉住 `ctlEnabled` 只能是 `== "verified"`。
@@ -357,6 +382,14 @@ def test_picker_rows_and_card_render_thinking_tri_state_and_disable_branch():
     assert "Prefs.thinkingLevel(" in card and "Prefs.setThinkingLevel(" in card
     # 今天不落进请求体（Task 12/13 的活）：界面不许出现"已生效/已发送"那种话
     assert "本轮会带上" in card, "verified 那一支的措辞必须与网页同句（今天不可达）"
+    # 修复轮 1 的 Minor 8：报告 §2 写的是"同句"，实测差一个标点（原生用顿号、网页用逗号）。
+    # 这句改成**跨端逐字比对**：串从 app.js 里抠出来再要求原生卡里出现同一串，
+    # 以后任何一端改措辞、改标点，这一枚先红，不必再靠人来对眼。
+    js = WEB_JS.read_text(encoding="utf-8")
+    at = js.index("开关与档位是这台设备自己的偏好")
+    shared_sentence = js[at:js.index("换设备不同步", at) + len("换设备不同步")]
+    assert shared_sentence in card, \
+        "「本机偏好」这句两端逐字不同（按网页为准改原生，网页那边别动）"
 
 
 def test_card_budget_slider_shares_the_panel_map_and_can_edit_gates_cap_only():
@@ -391,8 +424,11 @@ def test_cap_lowering_clamps_budget_and_says_so_once():
     变异：① 把判据 `stored > capK` 换成用读数比（读数已夹过，恒不成立）→ 第一条红
     （这正是网页 Task 9 踩过的坑，这里钉的是"取原始值"那个函数名）；
     ② 删掉那句提示 → 第二/三条红；③ 夹了不写回 map → 第四条红。
-    射程：提示"一次"清在 onClose/换身份两处，静态只判"这两句都存在"；渲染时机与
-    真的只印一次要靠真机手测（清单在报告里）。
+    射程：提示"一次"清在 onClose/换身份两处（修复轮起这三处出口共用 closeModelMenu），
+    静态只判"这两句都存在"；渲染时机与真的只印一次要靠真机手测（清单在报告里）。
+    **"这句提示到底能不能被用户看见"不由本锁管**——上一版就是在这里以为"进了状态条
+    就一定看得见"，实际同帧被 `setStatus("")` 冲掉；那一条由
+    `test_i2_clamp_note_survives_the_status_clear` 钉住。
     """
     chat = _c("ui/ChatUi.kt")
     rec = _block(chat, "fun reconcileBudgetCap(")
@@ -499,7 +535,9 @@ def test_native_preset_cap_travels_only_with_a_new_draft():
     assert "fCtxK" not in st, "表单还留着能改上限的输入框"
     assert "上下文上限（K token）" not in st, "上限输入项没撤干净"
     form = _block(st, "fun openForm(")
-    assert "presetCtxK = " in form, "开单没复位预置上限：上一单的数会跟着下一单发"
+    # 修复轮 1 的 Minor 3：`presetCtxK = ` 这种前缀判据把 `presetCtxK = 1000` 也算复位，
+    # 而那正是这条锁该拦的形状（编辑态带着上一个人的预置数发出去）。钉**置空**这个动作本身。
+    assert "presetCtxK = null" in form, "开单没把预置上限置空：上一单的数会跟着下一单发"
     assert "ps.ctxK" in _c("ui/SettingsUi.kt"), "预置那份上限的取数被删了（新建会落空）"
 
 
@@ -591,3 +629,223 @@ def test_m4_queue_strip_editing_survives_queue_writes():
         "编辑态又挂在队列键上：接力弹出/入队/删除会清掉正在编辑的半句"
     assert "LaunchedEffect(items)" in strip, \
         "缺 items 变化后的孤儿编辑态回收（编辑中那条被删掉时要复位）"
+
+
+# ---------------- Task 10 修复轮 1（独立审查 Changes requested，2026-11-01） ----------------
+# 三条 Important + 一批 Minor。这一轮的锁与上一轮同族：全部 source-shape（Kotlin 侧没有
+# 真跑宿主，也没有 kotlinx 的单测运行时）。每条 docstring 里写清「改坏什么会红」和
+# 「哪些形状绕得过」——绕得过的一律不写成已覆盖，只登记进 task-10-fix1-report.md 的
+# 未跑清单（真机 / 单测 / 服务端联调）。
+
+def test_i1_modelinfo_nullable_cells_declare_null():
+    """I-1：`ModelInfo.multiplier` 必须是可空。服务端 `credits.multiplier_label` 对
+    `per_call` 定价**返回 None**，而 `Api.json` 只开了 `ignoreUnknownKeys`、没开
+    `coerceInputValues` ⇒ 显式 null 撞非空 `String` 抛 JsonDecodingException ⇒
+    整份 `/v1/models` 解不开 ⇒ 手机端「没有可用的模型」，选模型与预算全废。
+
+    变异：① 把 `String? = null` 改回 `String = ""` → 第一条红；② 界面把兜底写成
+    `.ifEmpty { … }`（对 null 根本不成立）→ 第四/五条红；③ 把 `priced` 也顺手改成可空 →
+    第三条红（服务端恒给布尔，那格没有 null 的形状，改窄了是替服务端编造不确定性）；
+    ④ 删掉 credits.py 里那条 `return None`（前提变了）→ 第六条红，届时重议这条纪律，
+    不许就地删断言。
+    射程：**这是形状锁**。它钉的是"那一格声明成可空 + 两处读数各自兜底"，
+    **不**证明"服务端回 null 时真解得开"——那需要 kotlinx 解码的单测运行时，本仓没有，
+    列进真机/单测待办。开 `coerceInputValues` 能一并绕过（但它会改全站所有 DTO 的 null
+    语义，需另票，本单明确不开，故同锁钉住 json 构造体没有这个开关）。
+    """
+    api = _c("Api.kt")
+    mi = _between(api, "data class ModelInfo(", "data class ModelsResult(")
+    assert "val multiplier: String? = null" in mi, \
+        "multiplier 非空：服务端对 per_call 定价回 null，整份 /v1/models 会解崩"
+    assert "val multiplier: String =" not in mi, "multiplier 又变回非空 String"
+    assert "val priced: Boolean = false" in mi, "priced 不会是 null，保持非空 + 默认值"
+    # 同一条容错纪律在本文件的其它落点（防止只修被点名的那一格）
+    mr = _between(api, "data class ModelsResult(", "data class UploadInfo(")
+    assert "val default: String? = null" in mr, "ModelsResult.default 的可空形状被改了"
+    assert "coerceInputValues" not in _block(api, "private val json = Json {"), \
+        "不许用 coerceInputValues 一把糊：那会改全站所有 DTO 的 null 语义（另票）"
+    chat = _c("ui/ChatUi.kt")
+    assert "multiplier.ifEmpty" not in chat, "对可空格用 ifEmpty：null 那一路没兜住"
+    assert '(m.multiplier ?: "?x")' in chat and '(item.multiplier ?: "?x")' in chat, \
+        "两处读数（模型行 / 卡内副标题）没各自兜底"
+    credits = CREDITS_PY.read_text(encoding="utf-8")
+    at = credits.index("def multiplier_label(")
+    assert "return None" in credits[at:credits.index("\ndef ", at)], \
+        "前提变了（倍率标签不再回 None）：重议 DTO 可空这条纪律，别删这条断言"
+
+
+def test_i2_clamp_note_survives_the_status_clear():
+    """I-2：「上限调小把本机预算夹下来了」那句必须活过同一帧的 `setStatus("")`。
+
+    旧形状（b47d62f2 的 ChatUi.kt:793-794）：`reconcileBudgetCap(...)` 在弹单没开着时
+    往状态条写了一句，**紧接着**无条件 `if (providers.any { it.usable }) setStatus("")`
+    ——同一帧两次写，只有最后一次可见，那句话被就地冲掉；另两个调用点（保存能力后 /
+    拖预算后）都发生在弹单开着时，走不到那条分支。所以上一轮报告 §5.4 那句补救实测零效果。
+    现在 `reconcileBudgetCap` 回报 Boolean（本轮这句话由状态条说了），清状态那一句让路。
+
+    变异：① 清状态改回无条件 `if (providers.any { it.usable }) setStatus("")` → 第五条红；
+    ② 去掉 `return true`（说过话不回报）→ 第四条红；③ 把签名/记账退回 Unit → 第一条红；
+    ④ 把顺序倒过来（先清状态再核对夹紧）→ 第六条红；⑤ 判据从 `!clampedNow` 换成别的名字
+    （例如 `budgetClamped == null`）→ 第五条红（字符串判据找不到那一枚）。
+    射程：**形状锁**。钉的是"这一句不再无条件 + 记账排在清状态之前"，不钉"用户肉眼看见
+    了那句话"——弹单没开、清单回来看得见的状态条要真机（6 秒自动收那条 LaunchedEffect
+    也没被这把尺量过），列进未跑清单。
+    """
+    chat = _c("ui/ChatUi.kt")
+    assert "fun reconcileBudgetCap(pid: String, capK: Int): Boolean" in chat, \
+        "夹紧函数不回报「本轮我说过话」，调用方只能盲清"
+    rec = _block(chat, "fun reconcileBudgetCap(")
+    spoken = _block(rec, "if (!modelMenuOpen) {")
+    assert "setStatus(budgetClampNote(" in spoken and "return true" in spoken, \
+        "状态条说了这句话却没回报：下一次清状态照样把它抹掉"
+    lm = _block(chat, "suspend fun loadModelsNow()")
+    at = lm.index('setStatus("")')
+    line = lm[lm.rindex("\n", 0, at) + 1:lm.index("\n", at)]
+    assert "providers.any { it.usable }" in line and "!clampedNow" in line, \
+        "清状态那句又是无条件的（或没把本轮夹紧记账算进条件）：提示被就地冲掉"
+    assert "val clampedNow = reconcileBudgetCap(" in lm, "没接返回值记账，条件就是空头支票"
+    assert lm.index("val clampedNow = reconcileBudgetCap(") < at, "顺序反了：先清后记账"
+
+
+def test_i3_shared_capability_edit_says_the_reauth_gap_and_disables_the_save_pill():
+    """I-3：原生**没有 Cookie 通道**，管理员改共享模型的能力字段结构上必 428。
+    证据链：`authz.py` 的 `require_admin_reauth` 判 `request.cookies.get(admin_reauth.COOKIE_NAME)`，
+    `ADMIN_REAUTH_REQUIRED` 默认开；原生两个 OkHttpClient 都没设 `cookieJar`（OkHttp 默认
+    NO_COOKIES），`request()` 只加 `Authorization: Bearer`。网页那边真有这条链
+    （api.js 428 → #reauthModal → POST /v1/auth/admin-reauth → 带票重试）。
+    本单**不补 CookieJar**（接线另立 #228），只把话说实话 + 禁用那颗必失败的钮。
+
+    变异：① 删掉那句实话 → 第一/二条红；② 把 `!reauthBlocked` 从「保存能力」的 enabled
+    摘掉 → 第三条红（留一个按下去只会拿到 428 的按钮）；③ 判据从 `canEdit && item.shared`
+    放宽成只看 `item.shared` → 第四条红（普通用户根本没有管理区，说明会到处乱印）；
+    ④ 把说明改成「与网页一致」→ 第五条红（那正是这一轮改掉的那句错判）。
+    射程：形状锁。它钉"这句话在这个分支里 + 这颗钮在这种情形下禁用 + 票号登记在注释"，
+    不钉"真机上读屏念得出、那颗钮真的点不动"，更不钉 428 从此不会发生（要 #228 接线）。
+    """
+    raw = _t("ui/ChatUi.kt")
+    card = _block(_c("ui/ChatUi.kt"), "private fun ModelCard(")
+    assert "val reauthBlocked = canEdit && item.shared" in card, \
+        "「只有管理员能按、按了必失败」这一格没单独记账"
+    assert "需要管理员二次验证" in card and "手机本版没接" in card, \
+        "共享模型的这项改动没说实话（上一版写「与网页一致」是错判）"
+    assert "请到网页管理台" in card, "只说不接没给出路"
+    at = card.index('ModelMiniPill(if (card.saving) "保存中…" else "保存能力"')
+    assert "!reauthBlocked" in card[at:at + 260], \
+        "保存能力钮在必失败的情形下还 enabled：按下去只会拿到 428"
+    assert "与网页一致" not in card, "卡里不许再声称这条通路「与网页一致」"
+    assert "#228" in raw, "这段实话必须在注释里登记另票号（真正的接线是 #228）"
+
+
+def test_m1_picking_a_model_and_closing_share_one_teardown():
+    """Minor 1：换完模型的收尾与关弹单同一套（旧 onPick 只关了 modelMenuOpen ⇒
+    下次打开还是那张卡展开、还可能重印上一轮那句）。
+    Minor 6 的另一半也在这里：收尾只有一份，三个出口都走它。
+
+    变异：① 从 closeModelMenu 里删掉任意一行收尾 → 对应 needle 红；
+    ② 让 onPick 自己另写一套（不叫 closeModelMenu）→ 第三条红；
+    ③ 把 `modelManage = false` 塞进收尾 → 第二条红（收起弹单 ≠ 退出管理，既有判据）。
+    射程：只判"收尾只有一份、三个出口都调它、里面那五行都在"，不判真机视觉次序。
+    """
+    chat = _c("ui/ChatUi.kt")
+    teardown = _block(chat, "fun closeModelMenu(")
+    for needle in ("modelMenuOpen = false", 'modelCardOpen = ""', "budgetClamped = null",
+                   "modelSaved = null", 'modelCardError = ""'):
+        assert needle in teardown, f"公共收尾缺这一行：{needle}"
+    assert "modelManage" not in teardown, "清掉了 modelManage：与 hideModelMenu 的判据反向"
+    assert "closeModelMenu()" in _block(chat, "onPick = {"), "换模型没走同一套收尾"
+    assert "closeModelMenu()" in _between(chat, "onClose = {\n", "onPick = {"), \
+        "× 关单没走同一套收尾：两份收体会漂移"
+
+
+def test_m6_model_menu_has_a_back_handler():
+    """Minor 6：`modelMenuOpen` 一直没有 BackHandler（本文件唯一的 BackHandler 属于
+    设置弹层），全屏弹层在真机上可能只能靠右上角 × 关。补一枚与 onClose 同一套收尾的。
+
+    变异：① 删掉 BackHandler → 第一条红；② enabled 漏掉（改成常驻 `BackHandler {}`）→
+    第二条红（那样弹单没开时也会吃掉返回键）；③ 里面另写一套收尾 → 第三条红（与 ①
+    的关单行为漂移，两个出口各清各的）。
+    射程：形状锁。真机按返回键到底关没关，本机没有宿主，列进未跑清单；与设置弹层那枚
+    BackHandler 的组合先后（同屏都开着时谁赢）这把尺也不判——实测两条路互斥（全屏弹层
+    盖住抽屉，开不了设置页），报告里记这条前提。
+    """
+    chat = _c("ui/ChatUi.kt")
+    assert "BackHandler(enabled = modelMenuOpen)" in chat, "模型弹单没有返回键出口"
+    bh = _block(chat, "BackHandler(enabled = modelMenuOpen)")
+    assert "closeModelMenu()" in bh, "返回键自己另写一套收尾：两个出口会漂移"
+    assert "import androidx.activity.compose.BackHandler" in _t("ui/ChatUi.kt")
+
+
+def test_m4_capability_body_applies_the_patch_after_reading_the_record():
+    """Minor 4（审查员变异 F）：`capabilityBody` 里 patch 的覆盖必须排在"从完整记录取值"
+    **之后**。上一轮这件事没有任何锁：把 `patch.forEach` 挪到那一串 put 之前，每次保存都
+    把用户刚改的新值洗回旧值，而 28 枚锁全绿（rc=0）。
+
+    变异：把 `patch.forEach { (key, value) -> put(key, value) }` 上移到任意一格 rec 取值
+    之前 → 对应 needle 红；把覆盖整行删掉（改成写死值）→ 第七条红（保存的能力永远不生效）。
+    射程：只判**字面顺序**与"覆盖只有一处"。空 patch 时两种顺序等价，这把尺与那个 bug
+    都看不见它；真实"改上限 → 保存 → 卡片读回 256"要登录态与服务端，本单没跑。
+    """
+    chat = _c("ui/ChatUi.kt")
+    body = _block(chat, "private fun capabilityBody(")
+    at = body.index("patch.forEach")
+    for needle in ('put("label", str("label"))', 'put("base_url", str("base_url"))',
+                   'put("model", str("model"))', 'put("api_key", "")',
+                   'put("supports_vision", flag("supports_vision"))',
+                   'put("is_default", flag("is_default"))', 'put("max_context_k"',
+                   'put("supports_thinking"', 'put("thinking_levels"',
+                   'put("thinking_default"', 'put("thinking_profile"', 'put("pricing"'):
+        assert needle in body[:at], f"这一格排到了 patch 覆盖之后：保存会把新值洗回旧值 → {needle}"
+    assert body[at:].count("put(") == 1, "覆盖之后还有第二处 put：谁赢说不清"
+    # 覆盖本身必须在（挪没了等于"保存的能力永远不生效"）
+    assert 'patch.forEach { (key, value) -> put(key, value) }' in body
+
+
+def test_m5_new_controls_carry_minimal_accessibility_semantics():
+    """Minor 5：本轮新增的控件补最小无障碍语义——卡内预算滑杆要有 contentDescription +
+    stateDescription；ModelMiniPill 的禁用态要让读屏念得出「不可用：…（原因）」，
+    而不是只把颜色调淡。原因由调用方给（`disabledHint`），因为这里至少有三种"为什么不可用"。
+
+    变异：① 删掉 `import …semantics.stateDescription` → 第一条红；② 把 disabledHint 形参
+    去掉、里面写死一句通用话 → 第二条红；③ 删掉 ModelMiniPill 的 semantics 块 → 第三条红；
+    ④ 滑杆的 modifier 整行删掉 → 第四/五条红；⑤ 只给 contentDescription 不给
+    stateDescription → 第五条红（念得出名字念不出当前值）；⑥ 调用方不传原因 → 第六条红。
+    射程：形状锁 + import 在位。TalkBack 实际念什么、禁用态是否真被读成"不可用"，
+    本仓没有宿主，列进未跑清单。**既有的 ContextPanel 那只滑杆同缺**，按审查口径不在
+    本单范围，已登记进报告（Task 6 那把环带百分比的锁 :3087 一字未动）。
+    """
+    raw = _c("ui/ChatUi.kt")
+    assert "import androidx.compose.ui.semantics.stateDescription" in _t("ui/ChatUi.kt"), \
+        "语义没 import（_c 也会保留 import 行，这里按原文钉，防止有人只在注释里提它）"
+    # 形参在**签名**里，`_block` 只给函数体（从第一个 `{` 起），所以这一段用 _between：
+    # 锚点从函数名到函数体第一行。写成 _block 会恒找不到 disabledHint —— 那不是变异，是尺子。
+    sig = _between(raw, "private fun ModelMiniPill(", "\n    val scheme = MaterialTheme.colorScheme")
+    assert 'disabledHint: String = ""' in sig, "禁用原因没由调用方给，只能念一句通用的"
+    pill = _block(raw, "private fun ModelMiniPill(")
+    assert "stateDescription" in pill and "不可用：" in pill, "禁用态只把颜色调淡，读屏念不出原因"
+    card = _block(raw, "private fun ModelCard(")
+    slider = _call(card, "Slider(")
+    assert "contentDescription" in slider, "预算滑杆没有名字"
+    assert "stateDescription" in slider, "预算滑杆没有当前值语义"
+    assert "disabledHint = " in card, "卡上被禁的钮没把原因传给读屏"
+
+
+def test_m2_clamp_comment_states_the_native_reason_not_the_web_one():
+    """Minor 2：那段注释的理由是**网页的**。原生 `Prefs.contextBudgetK` 只夹 `1..10000`，
+    **不夹模型上限**，所以"拿夹过的读数比上限恒不成立"在这边不成立；取
+    `contextBudgetWantedK` 依然是对的，但真理由是"区分这台设备从没为这条记过（0）
+    与记过且越界"。注释按实测改口径（代码一行不动）。
+
+    判据吃的是**未剥注释**的原文（`_t`）——`_c` 会把注释剥掉，用 `_c` 写这条锁等于恒真。
+    变异：把注释改回"恒不成立"那句网页理由 → 第一条红；把注释整段删掉 → 第二条红
+    （下一个读代码的人会以为 `wanted` 与 `contextBudgetK` 等价，把它换回去）。
+    射程：这条只钉"注释说了可核实的理由"，它不是行为锁；判据会被"照抄这段注释到别处"
+    绕过（本文件里这一句只该出现一次，故同锁钉计数）。
+    """
+    raw = _t("ui/ChatUi.kt")
+    at = raw.index("fun reconcileBudgetCap(")
+    doc = raw[max(0, at - 900):at]
+    assert "从没为这条记过" in doc, "没写原生取 wanted 的真理由"
+    assert "不夹模型上限" in doc and "1..10000" in doc, "没交代原生 contextBudgetK 夹的是什么"
+    assert raw.count("恒不成立") == 1, \
+        "「恒不成立」这句网页理由又被抄开了：原生读数不夹模型上限，这条不成立"
+

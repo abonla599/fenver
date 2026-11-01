@@ -70,7 +70,18 @@ private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
  * 替服务端说话：默认态只能是「不支持思考 + 改不动」。这与 Done.usage 同一容错纪律
  * （锁：backend/tests/test_v0391_native_cockpit.py 逐格钉 `= 默认值`）。
  * priced/multiplier 是 v0.25 R4b 就在目录里的两格，本单只是把它们接进模型行
- * （选模型时真正比的两个数：能带多少历史、花多少）。 */
+ * （选模型时真正比的两个数：能带多少历史、花多少）。
+ *
+ * 修复轮 1（I-1）：`multiplier` 必须是**可空** `String? = null`。服务端那一格出自
+ * `credits.multiplier_label`，它对 `per_call` 定价**返回 None**（`credits.py` 里明写
+ * "per_call → None（不显示倍率，D24）"），而下面的 `json` 只开了 `ignoreUnknownKeys`、
+ * **没有**开 `coerceInputValues` ⇒ 显式 `null` 撞非空 `String` 会抛 JsonDecodingException
+ * ⇒ 整份 `/v1/models` 解不开 ⇒ 手机端「没有可用的模型」，选模型与预算全废。
+ * 现网两条今天都是 `priced=false, multiplier="?x"`，所以这颗雷还没被踩到，但只要有
+ * 人建一条 per_call 定价就会炸。同一纪律的既有落点：`ModelsResult.default`、
+ * `StoredMessage.message_id/model`、`Done.usage`——它们正是为这条规则才写成可空。
+ * 不在这里开 `coerceInputValues`：那会一次性改掉全站所有 DTO 的"null 当缺省值"语义，
+ * 需要单独一票（本单只把这一格的形状钉对）。 */
 @Serializable data class ModelInfo(val id: String = "", val name: String = "",
                                    val model: String = "", val supports_vision: Boolean = false,
                                    val usable: Boolean = true, val default: Boolean = false,
@@ -82,7 +93,7 @@ private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
                                    val thinking_status: String = "unsupported",
                                    val can_edit: Boolean = false,
                                    val priced: Boolean = false,
-                                   val multiplier: String = "")
+                                   val multiplier: String? = null)
 @Serializable data class ModelsResult(val models: List<ModelInfo> = emptyList(),
                                       val default: String? = null)
 @Serializable data class UploadInfo(val id: String = "", val name: String = "",
