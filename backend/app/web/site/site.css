@@ -254,7 +254,7 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 }
 .product-stage::before {
   content: ""; position: absolute; z-index: -1; width: 240px; height: 240px;
-  top: -40px; right: -20px; border-radius: 50%; background: #3dd598;
+  top: -40px; right: -20px; border-radius: 50%; background: var(--brand-bright);
   filter: blur(110px); opacity: .13;
 }
 .stage-orbit { position: absolute; z-index: -1; border: 1px solid color-mix(in srgb, var(--brand) 18%, transparent); border-radius: 50%; pointer-events: none; }
@@ -314,20 +314,23 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 
 /* 通用区块 */
 main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9vw, 124px) var(--gutter); }
-.section-head { position: relative; border-top: 2px solid var(--brand); padding-top: 15px; display: grid; grid-template-columns: minmax(110px, 1.2fr) minmax(0, 4.5fr) minmax(240px, 3.3fr); gap: clamp(20px, 4vw, 50px); align-items: start; margin-bottom: clamp(34px, 5vw, 58px); }
-.section-no { color: var(--brand); font: 550 .66rem/1.2 var(--mono); letter-spacing: .1em; }
+/* 每个区块头只认一个强调色：横带、编号、右端刻度全部由 --sec 派生。
+   深色卡片里的区块头把 --sec 换成 inverse-accent，其余什么都不用改——
+   从前是横带一条色、刻度另一条色，暗底上还会露出深绿，看着就不是一台机器。 */
+.section-head { --sec: var(--brand); position: relative; border-top: 2px solid var(--sec); padding-top: 15px; display: grid; grid-template-columns: minmax(110px, 1.2fr) minmax(0, 4.5fr) minmax(240px, 3.3fr); gap: clamp(20px, 4vw, 50px); align-items: start; margin-bottom: clamp(34px, 5vw, 58px); }
+.section-no { color: var(--sec); font: 550 .66rem/1.2 var(--mono); letter-spacing: .1em; }
 .section-head h2 { font-size: clamp(2.15rem, 4.2vw, 3.8rem); line-height: 1.08; letter-spacing: -.06em; }
-.section-head > p:last-child { color: var(--ink-soft); font-size: .94rem; line-height: 1.85; }
+.section-head > p:not(.section-no) { color: var(--ink-soft); font-size: .94rem; line-height: 1.85; }
 /* 每一章的品牌色带上，右端立一组"信号刻度"：所有区块共用同一套记号，
    既替掉各区块右上角的空当，也让整页读起来是同一台机器上的读数。 */
 .sig-strip {
   position: absolute; right: 0; bottom: 100%;
   display: flex; align-items: flex-end; gap: 5px; height: 24px; margin-bottom: 6px;
 }
-.sig-strip b { display: block; width: 1px; height: 6px; background: var(--line-strong); }
-.sig-strip b:nth-child(2n) { height: 11px; background: color-mix(in srgb, var(--brand) 26%, transparent); }
-.sig-strip b:nth-child(3n) { height: 17px; background: color-mix(in srgb, var(--brand) 38%, transparent); }
-.sig-strip b:nth-child(5n + 1) { height: 24px; background: var(--brand-bright); }
+.sig-strip b { display: block; width: 1px; height: 6px; background: color-mix(in srgb, var(--sec) 26%, transparent); }
+.sig-strip b:nth-child(2n) { height: 11px; background: color-mix(in srgb, var(--sec) 44%, transparent); }
+.sig-strip b:nth-child(3n) { height: 17px; background: color-mix(in srgb, var(--sec) 66%, transparent); }
+.sig-strip b:nth-child(5n + 1) { height: 24px; background: var(--sec); }
 .section-head-narrow { display: block; }
 .section-head-narrow .section-no { display: inline-block; min-width: 130px; margin-bottom: 20px; }
 .section-head-narrow h2 { margin-bottom: 20px; }
@@ -404,11 +407,10 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
   color: var(--inverse-ink); background: var(--inverse-bg);
   border: 1px solid var(--inverse-line); border-radius: 30px;
 }
-#shell-only .section-no { color: var(--inverse-accent); border-top-color: var(--inverse-accent); }
-#shell-only .section-head { margin: 0; }
-#shell-only .section-head > p:last-of-type { color: var(--inverse-soft); }
-.inverse-btn { margin-top: 26px; color: #061b12; background: #3dd598; border-color: #3dd598; }
-.inverse-btn:hover { color: #061b12; border-color: #65e2ad; background: #65e2ad; }
+#shell-only .section-head { --sec: var(--inverse-accent); margin: 0; }
+#shell-only .section-head > p:not(.section-no) { color: var(--inverse-soft); }
+.inverse-btn { margin-top: 26px; color: var(--inverse-bg); background: var(--inverse-accent); border-color: var(--inverse-accent); }
+.inverse-btn:hover { color: var(--inverse-bg); border-color: color-mix(in srgb, var(--inverse-accent) 84%, white); background: color-mix(in srgb, var(--inverse-accent) 84%, white); }
 .mobile-list { display: grid; align-content: center; list-style: none; margin: 0; padding: 0; }
 .mobile-list li { display: grid; grid-template-columns: 42px 1fr; gap: 16px; padding: 25px 0; border-bottom: 1px solid var(--inverse-line); }
 .mobile-list li:first-child { border-top: 1px solid var(--inverse-line); }
@@ -428,7 +430,7 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
 }
 .shot:hover .shot-frame { transform: translateY(-5px); box-shadow: 0 18px 40px rgba(10, 11, 14, .1); }
 .shot-frame img { display: block; width: 100%; height: clamp(310px, 32vw, 410px); object-fit: cover; object-position: top center; border-radius: 15px; background: var(--surface-2); }
-.shot-tag { position: absolute; z-index: 2; top: 18px; left: 18px; padding: 5px 9px; color: #fff; background: var(--brand); border-radius: var(--radius-pill); font-size: .62rem; font-weight: 700; }
+.shot-tag { position: absolute; z-index: 2; top: 18px; left: 18px; padding: 5px 9px; color: var(--brand-ink); background: var(--brand); border-radius: var(--radius-pill); font-size: .62rem; font-weight: 700; }
 .shot figcaption { display: grid; gap: 5px; padding: 15px 5px 0; }
 .shot figcaption strong { color: var(--ink); font-size: .91rem; }
 .shot figcaption span { color: var(--ink-soft); font-size: .74rem; line-height: 1.6; }
@@ -446,9 +448,9 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
   max-width: none; margin: 0; padding-inline: max(var(--gutter), calc((100vw - var(--maxw)) / 2 + var(--gutter)));
   color: var(--inverse-ink); background: var(--inverse-bg); border-top: 1px solid var(--inverse-line); border-bottom: 1px solid var(--inverse-line);
 }
-#not-now .section-no { color: var(--inverse-accent); border-top-color: var(--inverse-accent); }
+#not-now .section-head { --sec: var(--inverse-accent); }
 #not-now .section-head h2 { color: var(--inverse-ink); }
-#not-now .section-head > p:last-child { color: var(--inverse-soft); }
+#not-now .section-head > p:not(.section-no) { color: var(--inverse-soft); }
 .boundary-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; list-style: none; margin: 0; padding: 0; }
 .boundary-list li { display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding: 24px; background: var(--inverse-surface); border: 1px solid var(--inverse-line); border-radius: 17px; }
 .boundary-list li > span { display: grid; place-items: center; width: 29px; height: 29px; color: var(--inverse-accent); border: 1px solid color-mix(in srgb, var(--inverse-accent) 32%, transparent); border-radius: 50%; font-size: 1rem; line-height: 1; }
@@ -457,15 +459,15 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
 
 /* 开源 */
 .source-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: clamp(24px, 5vw, 60px); align-items: stretch; }
-.terminal { display: flex; flex-direction: column; min-width: 0; margin: 0; overflow: hidden; color: #f2f3f5; background: #0a0b0e; border: 1px solid #262a31; border-radius: 22px; box-shadow: var(--shadow-lg); }
-.terminal-bar { display: flex; align-items: center; gap: 7px; padding: 16px 18px; border-bottom: 1px solid #262a31; }
-.terminal-bar span { width: 8px; height: 8px; border-radius: 50%; background: #3dd598; }
+.terminal { display: flex; flex-direction: column; min-width: 0; margin: 0; overflow: hidden; color: var(--inverse-ink); background: var(--inverse-bg); border: 1px solid var(--inverse-line); border-radius: 22px; box-shadow: var(--shadow-lg); }
+.terminal-bar { display: flex; align-items: center; gap: 7px; padding: 16px 18px; border-bottom: 1px solid var(--inverse-line); }
+.terminal-bar span { width: 8px; height: 8px; border-radius: 50%; background: var(--inverse-accent); }
 .terminal-bar span:nth-child(2) { background: #7c83ff; }
-.terminal-bar span:nth-child(3) { background: #3a404b; }
-.terminal-bar em { margin-left: auto; color: #6f747e; font: 500 .61rem/1 var(--mono); letter-spacing: .1em; }
+.terminal-bar span:nth-child(3) { background: color-mix(in srgb, var(--inverse-ink) 24%, transparent); }
+.terminal-bar em { margin-left: auto; color: var(--inverse-soft); font: 500 .61rem/1 var(--mono); letter-spacing: .1em; }
 .terminal pre { flex: 1; margin: 0; padding: clamp(25px, 4vw, 42px) 22px; overflow-x: auto; }
-.terminal code { color: #e5e8ed; font: 500 .8rem/2 var(--mono); white-space: pre; }
-.terminal-foot { padding: 15px 20px; color: #3dd598; border-top: 1px solid #262a31; font: 500 .6rem/1.4 var(--mono); letter-spacing: .12em; }
+.terminal code { color: var(--inverse-ink); font: 500 .8rem/2 var(--mono); white-space: pre; }
+.terminal-foot { padding: 15px 20px; color: var(--inverse-accent); border-top: 1px solid var(--inverse-line); font: 500 .6rem/1.4 var(--mono); letter-spacing: .12em; }
 .source-copy { padding: clamp(8px, 2vw, 20px) 0; }
 .source-badge { display: inline-flex; margin-bottom: 24px; padding: 6px 10px; color: var(--ai); background: var(--ai-soft); border: 1px solid color-mix(in srgb, var(--ai) 16%, transparent); border-radius: var(--radius-pill); font: 550 .66rem/1 var(--mono); }
 .source-copy h3 { font-size: 1.2rem; letter-spacing: -.025em; }
@@ -556,7 +558,7 @@ footer > .note { margin-top: 12px; }
   .index-strip ul { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 0; }
   .index-strip li:nth-child(3) { border-right: 0; }
   .section-head { grid-template-columns: 110px 1fr; }
-  .section-head > p:last-child { grid-column: 2; }
+  .section-head > p:not(.section-no) { grid-column: 2; }
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature { min-height: 260px; }
   #shell-only { grid-template-columns: 1fr; }
@@ -596,7 +598,7 @@ footer > .note { margin-top: 12px; }
   .index-strip li { justify-content: flex-start; border-right: 0; font-size: .72rem; }
   main > section { padding-top: 74px; padding-bottom: 74px; }
   .section-head { grid-template-columns: 1fr; gap: 16px; margin-bottom: 32px; }
-  .section-head > p:last-child { grid-column: 1; }
+  .section-head > p:not(.section-no) { grid-column: 1; }
   .section-no { width: 118px; }
   .section-head h2 { font-size: clamp(2.1rem, 10vw, 3rem); }
   .feature-grid { grid-template-columns: 1fr; gap: 11px; }
