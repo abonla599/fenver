@@ -22,6 +22,12 @@ data class Identity(val userId: String, val username: String = "", val role: Str
                     val token: String = "", val lastSessionId: String = "",
                     val providerId: String = "", val addedAt: String = "")
 
+/* 思考偏好的每格值（Task 10）：enabled 的默认值必须是 false——服务端今天还没有
+ * thinking_level 这一格（Task 12/13 的活），默认开就等于界面在承诺一件发不出去的事。
+ * 两格都带默认值：旧版本机 JSON 里缺任何一格都解得开，不炸启动。 */
+@Serializable
+private data class ThinkingPref(val enabled: Boolean = false, val level: String = "")
+
 object Prefs {
     private const val PREF_NAME = "ai_native_prefs"
     private const val IDENTITY_CAP = 5
@@ -97,6 +103,12 @@ object Prefs {
         return budgetMap()[providerId]?.coerceIn(1, cap) ?: contextTokensK.coerceIn(1, cap)
     }
 
+    /** map 里**原始**那一份（没夹过）：上限调小时"存着的预算越过了新上限"这件事
+     *  只有拿它比才看得出来——`contextBudgetK` 读数时已经夹过，拿夹过的数比上限，
+     *  那条分支恒不成立，本机那份越界值就一直躺着（spec §3.2 禁的正是这个）。
+     *  没记过返回 0，调用方按"没什么可夹"处理。与网页 contextBudgetWantedK 同一判据。 */
+    fun contextBudgetWantedK(providerId: String): Int = budgetMap()[providerId] ?: 0
+
     fun setContextBudget(providerId: String, k: Int) {
         if (providerId.isEmpty()) return
         val map = budgetMap()
@@ -112,6 +124,54 @@ object Prefs {
         if (pid.isEmpty()) return
         setContextBudget(pid, contextTokensK)
         sp.edit().remove("context_tokens_k").apply()
+    }
+
+    /* v0.39.x 驾驶舱 Task 10：思考偏好（这台设备自己的开关与档位）。
+     * 与预算同一族写法——一个 JSON map 键 + 复合内键，内键形状照 usage 表的 "sid:pid"
+     * 改成 "userId:providerId"：换身份读的是自己那一格，上一个人的开关不会跟着
+     * provider id 回来（网页端 fv.thinking.<userId>.v1 的本机对位）。
+     * 三条纪律：① 只在本机，不发服务端；② enabled 默认 **false**（不给全站悄悄改
+     * 计费行为）；③ 档位归一只有这一处——本机存的值不在候选里就落「服务端默认档」，
+     * 默认档也不在候选里就落第一档，界面上不存在"有档位但默认档为空"那种存不下的状态。 */
+    private fun thinkingMapKey(): String = "thinking_prefs_map"
+
+    private fun thinkingSlot(providerId: String): String {
+        val uid = currentEntry()?.userId ?: ""
+        return "$uid:$providerId"
+    }
+
+    private fun thinkingMap(): MutableMap<String, ThinkingPref> =
+        runCatching {
+            json.decodeFromString<Map<String, ThinkingPref>>(
+                sp.getString(thinkingMapKey(), "{}") ?: "{}")
+        }.getOrNull()?.toMutableMap() ?: mutableMapOf()
+
+    fun thinkingEnabled(providerId: String): Boolean =
+        thinkingMap()[thinkingSlot(providerId)]?.enabled ?: false
+
+    /** 当前会用的档位：候选为空给空串（"这个模型没有档位"是事实，不编一个假的）。 */
+    fun thinkingLevel(providerId: String, levels: List<String>,
+                      thinkingDefault: String): String {
+        if (levels.isEmpty()) return ""
+        val saved = thinkingMap()[thinkingSlot(providerId)]?.level.orEmpty()
+        if (levels.contains(saved)) return saved
+        return if (levels.contains(thinkingDefault)) thinkingDefault else levels.first()
+    }
+
+    fun setThinkingEnabled(providerId: String, enabled: Boolean) {
+        if (providerId.isEmpty()) return
+        val map = thinkingMap()
+        val slot = thinkingSlot(providerId)
+        map[slot] = (map[slot] ?: ThinkingPref()).copy(enabled = enabled)
+        sp.edit().putString(thinkingMapKey(), json.encodeToString(map)).apply()
+    }
+
+    fun setThinkingLevel(providerId: String, level: String) {
+        if (providerId.isEmpty()) return
+        val map = thinkingMap()
+        val slot = thinkingSlot(providerId)
+        map[slot] = (map[slot] ?: ThinkingPref()).copy(level = level)
+        sp.edit().putString(thinkingMapKey(), json.encodeToString(map)).apply()
     }
 
     /* 断网提醒「今日不再显示」：存静音当天日期（yyyy-MM-dd），隔天自动失效。 */

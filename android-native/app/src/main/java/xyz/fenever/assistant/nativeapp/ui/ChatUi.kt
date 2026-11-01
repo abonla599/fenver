@@ -121,6 +121,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -165,8 +166,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import xyz.fenever.assistant.nativeapp.Api
 import xyz.fenever.assistant.nativeapp.ApiException
@@ -549,6 +553,24 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     var contextPanelOpen by remember { mutableStateOf(false) }
     var attachOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
+    /* v0.39.x 驾驶舱 Task 10「模型卡」的四格本机态 + 一条记录缓存：
+     * - providerRecords：/v1/me/providers 那份**完整**记录（含 base_url/api_key_masked/
+     *   is_default/thinking_profile）。全量 PUT 的 body 只能从它取——/v1/models 的目录项
+     *   没有 base_url，拿目录项凑等于把上游地址洗掉。随身份 remember：换账号绝不能
+     *   拿着上一个人的记录往新账号的门里 PUT（网页 resetViewForIdentity 的同一条）。
+     * - modelCardOpen：窄屏一次只展开一张卡（点行展开/收起，同网页 toggleModelDetail 触屏支）。
+     * - modelManage：能力编辑区开关。关掉弹单**不清**它（收起弹单≠退出管理，
+     *   管理员中途去看清单再回来还得接着改）——与网页 hideModelMenu 同一判据。
+     * - budgetClamped：上限被调小后把本机预算夹下来的那一笔（id/夹前/夹后），
+     *   模型卡据此说一句人话；弹单关掉即消化（网页是渲染一次即清，Compose 不许在
+     *   组合期写状态，所以收口点放在 onClose——差在哪已写进 Task 10 报告）。 */
+    var providerRecords by remember(identityId) { mutableStateOf(mapOf<String, JsonObject>()) }
+    var modelCardOpen by remember { mutableStateOf("") }
+    var modelManage by remember { mutableStateOf(false) }
+    var modelSaving by remember { mutableStateOf(false) }
+    var modelSaved by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var modelCardError by remember { mutableStateOf("") }
+    var budgetClamped by remember(identityId) { mutableStateOf<Triple<String, Int, Int>?>(null) }
     var drawerTick by remember { mutableStateOf(0) }
     var settingsPage by remember { mutableStateOf<String?>(null) }  // null=关；""=一级列表
     var streamJob by remember { mutableStateOf<Job?>(null) }
@@ -721,6 +743,42 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
 
     fun modelCapK(): Int = currentProvider()?.max_context_k?.takeIf { it > 0 } ?: 64
 
+    /* v0.39.x Task 10：上限比本机记着的预算小了（管理员/属主把这一格调小），当场把它
+     * 夹回上限并记一笔该说的那句话——判据取 map 里的**原始**值：contextBudgetK 读数时
+     * 已经夹过，拿夹过的数比上限，这条分支恒不成立，"夹到新上限"就只发生在显示层，
+     * 本机那份越界值一直躺着（spec §3.2 禁的正是这种静默，网页 Task 9 踩过同一脚）。
+     * 弹单没开着时这句话进状态条：手机上"要先点开模型卡才看得见"等于没说。 */
+    fun reconcileBudgetCap(pid: String, capK: Int) {
+        if (pid.isEmpty() || capK <= 0) return
+        val stored = Prefs.contextBudgetWantedK(pid)
+        if (stored > capK) {
+            Prefs.setContextBudget(pid, capK)
+            budgetClamped = Triple(pid, stored, capK)
+            ringTick++
+            if (!modelMenuOpen) {
+                val name = providers.firstOrNull { it.id == pid }?.name ?: "这条模型"
+                setStatus(budgetClampNote(name, stored, capK))
+            }
+        }
+    }
+
+    /* 全量 PUT 的原料：/v1/me/providers 的 shared + mine 两段按 id 建一份缓存。
+     * 只在需要编辑时读一次（缓存为空才发这一枪），读不到就让保存键禁用并在卡上明说。 */
+    suspend fun loadProviderRecordsNow() {
+        runCatching { Api.myProviders() }.onSuccess { data ->
+            val out = mutableMapOf<String, JsonObject>()
+            for (section in listOf("shared", "mine")) {
+                ((data[section] as? JsonArray) ?: JsonArray(emptyList())).forEach { el ->
+                    val o = el as? JsonObject ?: return@forEach
+                    val rid = o["id"]?.jsonPrimitive?.contentOrNull ?: ""
+                    if (rid.isNotEmpty()) out[rid] = o
+                }
+            }
+            providerRecords = out
+        }
+    }
+    fun loadProviderRecords() { scope.launch { loadProviderRecordsNow() } }
+
     // ---------- 冷启动：模型清单 + 会话列表（网页 boot 的 loadModels/loadSessions） ----------
     suspend fun loadModelsNow() {
         runCatching { Api.models() }.onSuccess { r ->
@@ -731,8 +789,44 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 预算迁移的挂点：清单回来才真正确定「那一位默认模型」——旧全局滑杆键
             // 只在这一刻被搬进按模型存的 map（map 已存在时是 no-op，见 Prefs）。
             Prefs.migrateContextBudget()
+            // 清单到手即核对一次：服务端把某条上限调小过，本机预算跟着夹下来并说一声
+            reconcileBudgetCap(currentProvider()?.id ?: "", modelCapK())
             if (providers.any { it.usable }) setStatus("")
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
+    }
+
+    /* 模型卡的唯一写口（网页 saveModelCapabilities 的本机对位）：
+     * PUT 是全量语义 ⇒ body 必须来自那条完整记录 + 这次要改的那几格；打哪扇门只由
+     * 归属决定（shared → 管理员面 /v1/providers，否则自助面），can_edit=false 时界面
+     * 只读、服务端仍二次校验，两边都不许省。
+     * 成功后按「先记录、后清单」重读：反过来的话卡片会在新缓存落地之前自己再发一枪。 */
+    fun saveModelCapabilities(id: String, patch: JsonObject) {
+        val rec = providerRecords[id]
+        if (rec == null) {
+            modelCardError = "没拿到这条模型的完整记录，保存已禁用：模型目录里没有 base_url，" +
+                "拿它 PUT 等于把上游地址洗掉。请先开一次「设置 → 模型服务」再回来。"
+            return
+        }
+        modelSaving = true
+        scope.launch {
+            runCatching {
+                val body = capabilityBody(rec, patch)
+                if (providerCapabilityScope(rec) == "admin") Api.updateProvider(id, body)
+                else Api.updateMyProvider(id, body)
+            }.onSuccess {
+                modelCardError = ""
+                val label = rec["label"]?.jsonPrimitive?.contentOrNull ?: "这条模型"
+                modelSaved = id to "$label 的能力已保存"
+                loadProviderRecordsNow()
+                loadModelsNow()
+                reconcileBudgetCap(id, providers.firstOrNull { it.id == id }?.max_context_k ?: 0)
+            }.onFailure {
+                // 服务端那句人话原样落在卡上（428 二次验证的 detail 也走这一条：
+                // 原生设置页今天就是把 ApiException.message 直接显示出来，卡片不另起一套）
+                modelCardError = it.message ?: "保存失败：服务端没给理由"
+            }
+            modelSaving = false
+        }
     }
     suspend fun refreshSessionsNow(): String? =
         try {
@@ -2256,9 +2350,42 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 点模型钮弹出全屏「选择模型」页（对标图 3）：标题 + 右上 × + 模型清单，当前项 ✓。
             if (modelMenuOpen) {
                 ModelPickerScreen(
-                    models = providers.filter { it.usable }.map { it.id to it.name },
+                    models = providers.filter { it.usable },
                     currentId = currentProvider()?.id,
-                    onClose = { modelMenuOpen = false },
+                    card = ModelCardUi(providerRecords, modelCardOpen, modelManage,
+                        modelSaving, modelSaved?.first ?: "", modelSaved?.second ?: "",
+                        modelCardError, budgetClamped?.first ?: "",
+                        budgetClamped?.second ?: 0, budgetClamped?.third ?: 0),
+                    onOpenCard = { id ->
+                        // 点行展开/收起同一张卡（窄屏一次只开一张，同网页 toggleModelDetail
+                        // 的触屏支）；要改能力的那一条才去读完整记录，别白打一枪。
+                        val next = if (modelCardOpen == id) "" else id
+                        modelCardOpen = next
+                        if (next.isNotEmpty()) {
+                            // 成功那句**不在这里清**：它绑着"我保存的是哪一张"（savedId），
+                            // 由打印它的那张卡消化（网页 Task 9 修复轮 Minor 3 同一判据——
+                            // 切出去看一眼再回来，"已保存"不该凭空消失）。错误那句切卡就清。
+                            modelCardError = ""
+                            val hit = providers.firstOrNull { it.id == next }
+                            if (hit != null && hit.can_edit && providerRecords.isEmpty())
+                                loadProviderRecords()
+                        }
+                    },
+                    onToggleManage = { on -> modelManage = on },
+                    onBudgetTouched = {
+                        ringTick++
+                        reconcileBudgetCap(currentProvider()?.id ?: "", modelCapK())
+                    },
+                    onSaveCaps = { id, patch -> saveModelCapabilities(id, patch) },
+                    onClose = {
+                        modelMenuOpen = false
+                        // 关掉弹单：卡片收起、提示消化掉；管理区**不**清（收起≠退出管理，
+                        // 与网页 hideModelMenu 同一判据，注释与代码不许再打反向）
+                        modelCardOpen = ""
+                        budgetClamped = null
+                        modelSaved = null
+                        modelCardError = ""
+                    },
                     onPick = { id ->
                         modelMenuOpen = false
                         // switchModel：选择即生效；服务端「我的默认」写失败不反悔
@@ -3066,13 +3193,125 @@ private fun ModelChip(chipModel: String, onToggleChip: () -> Unit) {
     )
 }
 
-/* ---------------- 全屏「选择模型」页（第 12 轮，对标豆包图 3） ----------------
- * 点输入卡下行的模型钮整屏盖上来：标题居中 + 右上 ×，下面模型清单——每行
- * 圆角方块头像 + 名字，当前项主色 + ✓。整页吃掉点击，底下的聊天页摸不到。
- * （豆包页上的折扣横幅/价格倍率/默认·自定义分组是它自己的运营数据，本 App
- * 没有对应字段，不造假数据硬凑，只对齐结构与交互。） */
+/* ---------------- v0.39.x 驾驶舱 Task 10：模型卡 / 模型管理（与网页 Task 9 同一把尺） ----------------
+ * 三态只认服务端派生的 thinking_status（providers._thinking_status），界面不按模型名猜；
+ * 本版白名单只有 none ⇒ 所有 supports_thinking=true 的条目结构上都是 unverified，
+ * 卡上没有任何「已开启」的说法，verified 一支今天不可达但代码路径要在（P0c 补 verified
+ * 旗标后自动可用）。预算与思考偏好都只在本机（Prefs 那两张 map），与上下文面板同一份，
+ * 卡片绝不另存一份真相。能力 PUT 是全量语义：body 每一格来自 /v1/me/providers。
+ * 窄屏纪律：整页 fillMaxSize + 一列 verticalScroll，卡贴在行下面跟着滚，不开第二层弹窗、
+ * 也不给固定高度（本 App 是 adjustResize，键盘与导航条会挤，写死高度就是撑破视口）。 */
+
+/** 三态文案（与网页 thinkingStatusLabel 逐字同值）：verified 说的是「参数形状已核实」，
+ *  不是「这个模型一定支持思考」，所以措辞落在"可切换强度"。 */
+private fun thinkingStatusLabel(status: String): String = when (status) {
+    "verified" -> "可切换思考强度"
+    "unverified" -> "支持思考（参数未核实，暂时不能开）"
+    else -> "不支持思考"
+}
+
+/** 禁用必须给原因（不给原因就是"控件坏了"）；enabled 的那一支返回空串。 */
+private fun thinkingStateReason(status: String): String = when (status) {
+    "unsupported" -> "这个模型没有思考能力，所以开关不给点。"
+    "unverified" -> "这个模型标了支持思考，但参数配方还未核实（本版服务端白名单只有 none）：" +
+        "现在把开关打开也发不出去，所以这里禁用，核实通过后（P0c）这一栏自动能用。"
+    else -> ""
+}
+
+/* 档位标签：只清洗（去空/去重）**不截断**——界面悄悄砍掉第 4 档等于把"没配上"演成
+ * "配上了"，长度上限由服务端拒收并把那句理由写在卡上。分隔符与后端 _clean_levels 同尺：
+ * 后端拿到的已经是列表、对每项只 strip，从不按空格劈开一项，所以这里也不能把 \s 当分隔符
+ * （网页 Task 9 的 Minor 7：「快速 思考」被劈成两档，管理员填两个、库里存四个）。 */
+private fun parseThinkingLevels(text: String): List<String> {
+    val out = mutableListOf<String>()
+    text.split(Regex("[,，、;；]+")).forEach { raw ->
+        val t = raw.trim()
+        if (t.isNotEmpty() && out.none { it == t }) out.add(t)
+    }
+    return out
+}
+
+/** 上限夹小的那句人话（与网页 budgetClampNoteK 同一件事，措辞按手机重排）。
+ *  写成块体而不是表达式体：本仓那把剥注释尺子配的是"锚点到第一个 `{`"，
+ *  表达式体里的 `${to}` 会被当成函数体抓走（锁 test_cap_lowering_... 读的就是这块）。 */
+private fun budgetClampNote(modelName: String, from: Int, to: Int): String {
+    return "$modelName 的上限降到了 ${to}K：这台设备上原本记着的预算是 ${from}K，" +
+        "已经按上限夹小，多出来的那部分不会带上。要把窗口放大，先把上限调回去、" +
+        "再拖这只滑杆（原来那个数已经被夹掉，不会自己回来）。"
+}
+
+/* 打哪扇门只由归属决定（服务端那份 can_edit 已经算过角色，这里不再猜第二次）：
+ * 共享条目 → 管理员面 /v1/providers（真门是 RequireAdmin + 二次验证），
+ * 自己的条目 → 自助面 /v1/me/providers（真门是属主闸）。 */
+private fun providerCapabilityScope(rec: JsonObject): String {
+    val shared = rec["shared"]?.jsonPrimitive?.booleanOrNull == true
+    return if (shared) "admin" else "mine"
+}
+
+/* 全量 PUT 的 body：每一格都从 /v1/me/providers 那条**完整记录**里取——/v1/models 的
+ * 目录项没有 base_url，拿它凑等于把上游地址洗掉。三格不许省：
+ *   api_key 传空串 → 服务端按占位符保留原密钥（掩码永不出服务端，回显不了）；
+ *   is_default 原样带上 → 否则一次改上限就把全站那颗 ★ 洗掉；
+ *   thinking_profile 原样带上 → 否则已核实的配方被洗回 none。
+ * pricing 缺席（未定价）时不发这一格：没带=保留，显式 null=主动取消定价。
+ * 这里**没有** paid_by，也不是遗漏：main.ProviderRequest 就没这一格，客户端发了也会被
+ * Pydantic 丢掉，写进 body 只会让下一个读代码的人以为"计费归属是界面改得动的"；真正
+ * 保住它的是 providers.ProviderStore.upsert 那份"请求没带就沿用库里"的保留。
+ * 也不发 id——路由按 path 钉这一条。 */
+private fun capabilityBody(rec: JsonObject, patch: JsonObject): JsonObject {
+    fun str(key: String) = rec[key]?.jsonPrimitive?.contentOrNull ?: ""
+    fun flag(key: String) = rec[key]?.jsonPrimitive?.booleanOrNull ?: false
+    return buildJsonObject {
+        put("label", str("label"))
+        put("base_url", str("base_url"))
+        put("model", str("model"))
+        put("api_key", "")
+        put("supports_vision", flag("supports_vision"))
+        put("is_default", flag("is_default"))
+        put("max_context_k", rec["max_context_k"]?.jsonPrimitive?.intOrNull ?: 64)
+        put("supports_thinking", flag("supports_thinking"))
+        put("thinking_levels", rec["thinking_levels"] ?: JsonArray(emptyList()))
+        put("thinking_default", str("thinking_default"))
+        put("thinking_profile", str("thinking_profile").ifEmpty { "none" })
+        (rec["pricing"] as? JsonObject)?.let { put("pricing", it) }
+        patch.forEach { (key, value) -> put(key, value) }
+    }
+}
+
+/** 模型卡的画布态：一次最多一张卡展开（窄屏），加上写口/提示的四格外部状态。 */
+private data class ModelCardUi(
+    val records: Map<String, JsonObject>, val openId: String, val manage: Boolean,
+    val saving: Boolean, val savedId: String, val savedText: String, val error: String,
+    val clampId: String, val clampFrom: Int, val clampTo: Int,
+)
+
+/* 卡上的小胶囊钮：禁用态必须**真的**点不动（clickable(enabled=false)），
+ * 不是把颜色调淡骗人；选中态吃 primary 描边。一族钮同一只手筋，与 ActionPill 同源。 */
 @Composable
-private fun ModelPickerScreen(models: List<Pair<String, String>>, currentId: String?,
+private fun ModelMiniPill(text: String, enabled: Boolean, selected: Boolean = false,
+                          onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val ink = when {
+        !enabled -> scheme.onSurfaceVariant.copy(alpha = 0.5f)
+        selected -> scheme.primary
+        else -> scheme.onSurface
+    }
+    Box(Modifier.heightIn(min = 32.dp)
+        .background(if (selected) scheme.primaryContainer else scheme.surfaceVariant,
+            CircleShape)
+        .border(BorderStroke(1.dp, if (selected) scheme.primary else scheme.outline),
+            CircleShape)
+        .clickable(enabled = enabled, onClick = onClick)
+        .padding(horizontal = 11.dp, vertical = 6.dp)) {
+        Text(text, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = ink)
+    }
+}
+
+@Composable
+private fun ModelPickerScreen(models: List<ModelInfo>, currentId: String?, card: ModelCardUi,
+                              onOpenCard: (String) -> Unit, onToggleManage: (Boolean) -> Unit,
+                              onBudgetTouched: () -> Unit,
+                              onSaveCaps: (String, JsonObject) -> Unit,
                               onClose: () -> Unit, onPick: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Column(Modifier.fillMaxSize().background(scheme.background).statusBarsPadding()
@@ -3086,30 +3325,245 @@ private fun ModelPickerScreen(models: List<Pair<String, String>>, currentId: Str
                 FenverIcon(FenverIcon.Close, scheme.onSurface, Modifier.size(22.dp))
             }
         }
+        // 清单 + 展开的卡都在这一列里滚：卡片撑不破视口，靠的就是"不给它固定高度"。
         Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
-            models.forEach { (id, name) ->
-                val cur = id == currentId
-                Row(Modifier.fillMaxWidth().clickable { onPick(id) }
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Box(Modifier.size(40.dp).background(scheme.surfaceVariant,
-                        RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
-                        Text(name.trim().take(1).ifEmpty { "?" }.uppercase(),
-                            fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            color = scheme.onSurfaceVariant)
+            models.forEach { m ->
+                val cur = m.id == currentId
+                val open = m.id == card.openId
+                val status = m.thinking_status
+                val statusInk = when (status) {
+                    "verified" -> scheme.primary
+                    "unverified" -> scheme.onSurfaceVariant
+                    else -> text3Color()
+                }
+                Column(Modifier.fillMaxWidth()
+                    .background(if (open) hoverBg() else scheme.background,
+                        RoundedCornerShape(14.dp))) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .clickable { onOpenCard(m.id) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(Modifier.size(40.dp).background(scheme.surfaceVariant,
+                            RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                            Text(m.name.trim().take(1).ifEmpty { "?" }.uppercase(),
+                                fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                                color = scheme.onSurfaceVariant)
+                        }
+                        // 一行装不下五件事（名/归属/三态/上限/倍率），窄屏改两行、各自省略
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(m.name, fontSize = 15.sp, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = if (cur) scheme.primary else scheme.onSurface,
+                                fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal)
+                            Text(thinkingStatusLabel(status), fontSize = 11.5.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                color = statusInk)
+                            Text("${if (m.shared) "共享" else "我的"} · " +
+                                "${if (m.max_context_k > 0) m.max_context_k else 64}K · " +
+                                "${if (m.priced) m.multiplier.ifEmpty { "?x" } else "未定价"}",
+                                fontSize = 11.5.sp, color = text3Color(), maxLines = 1,
+                                overflow = TextOverflow.Ellipsis)
+                        }
+                        if (cur) FenverIcon(FenverIcon.Check, scheme.primary, Modifier.size(18.dp))
                     }
-                    Text(name, fontSize = 15.sp, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        color = if (cur) scheme.primary else scheme.onSurface,
-                        fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal,
-                        modifier = Modifier.weight(1f))
-                    if (cur) FenverIcon(FenverIcon.Check, scheme.primary, Modifier.size(18.dp))
+                    if (open) ModelCard(item = m, card = card, onToggleManage = onToggleManage,
+                        onBudgetTouched = onBudgetTouched, onSaveCaps = onSaveCaps, onPick = onPick)
                 }
             }
             if (models.isEmpty())
                 Text("没有可用的模型", fontSize = 13.sp, color = text3Color(),
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+        }
+    }
+}
+
+/* 模型卡：能力读数 + 本会话预算 + 思考三态 + 上限（can_edit 才给写口）+ 设为这条。
+ * 顺序有理由：预算那栏排在 can_edit 那道门**之前**——它是这台设备的设置，共享模型
+ * 的用户照样能改（spec §4.2「can_edit 只约束能力字段与上限」），把门开在它前面
+ * 就是"改不动别人的配置，连自己的窗口也调不了"。
+ * 动态文本全走 Text(：模型名、档位标签、服务端报错原文都可能是别人写的字。 */
+@Composable
+private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boolean) -> Unit,
+                      onBudgetTouched: () -> Unit,
+                      onSaveCaps: (String, JsonObject) -> Unit, onPick: (String) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val rec = card.records[item.id]
+    val canEdit = item.can_edit
+    val ctlEnabled = item.thinking_status == "verified"
+    val capK = if (item.max_context_k > 0) item.max_context_k else 64
+    val hi = maxOf(4, capK)
+    val step = if (hi <= 64) 2 else if (hi <= 256) 8 else 32
+    val budgetNow = Prefs.contextBudgetK(item.id)
+    var budgetK by remember(item.id, budgetNow, hi) {
+        mutableIntStateOf(budgetNow.coerceIn(2, hi))
+    }
+    val levels = item.thinking_levels
+    var thinkingOn by remember(item.id, item.thinking_status) {
+        mutableStateOf(Prefs.thinkingEnabled(item.id))
+    }
+    var levelPick by remember(item.id, item.thinking_default, levels.joinToString("|")) {
+        mutableStateOf(Prefs.thinkingLevel(item.id, levels, item.thinking_default))
+    }
+    // 能力编辑草稿：初值只吃服务端那份记录（本机偏好不是能力字段，别混当原料）
+    val levelsText = levels.joinToString("，")
+    var capDraft by remember(item.id, card.manage, capK) { mutableStateOf(capK.toString()) }
+    var supDraft by remember(item.id, card.manage, item.supports_thinking) {
+        mutableStateOf(item.supports_thinking)
+    }
+    var levelsDraft by remember(item.id, card.manage, levelsText) { mutableStateOf(levelsText) }
+    var defaultDraft by remember(item.id, card.manage, levelsText, item.thinking_default) {
+        mutableStateOf(item.thinking_default)
+    }
+
+    Surface(shape = RoundedCornerShape(16.dp), color = scheme.surface,
+        border = BorderStroke(1.dp, scheme.outline),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(item.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("上游 ${item.model.ifEmpty { "未填" }} · ${if (item.shared) "共享模型" else "我的模型"} · " +
+                "${if (item.priced) item.multiplier.ifEmpty { "?x" } else "未定价"}",
+                fontSize = 12.sp, color = text3Color(), maxLines = 2,
+                overflow = TextOverflow.Ellipsis)
+            Text("${thinkingStatusLabel(item.thinking_status)} · 模型上限 $capK K · " +
+                "${if (item.supports_vision) "支持图片" else "只收文字"}",
+                fontSize = 12.sp, color = scheme.onSurface, maxLines = 2,
+                overflow = TextOverflow.Ellipsis)
+
+            // 本会话预算：与上下文账本那只滑杆读写同一份 map（Prefs，卡片不另存）
+            Text("本会话预算 $budgetK/$hi K", fontSize = 13.sp, color = scheme.onSurface)
+            Slider(value = budgetK.toFloat(),
+                onValueChange = { v ->
+                    val raw = ((v - 2) / step).toInt() * step + 2
+                    budgetK = raw.coerceIn(2, hi)
+                },
+                valueRange = 2f..hi.toFloat(),
+                onValueChangeFinished = {
+                    Prefs.setContextBudget(item.id, budgetK)
+                    onBudgetTouched()
+                })
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModelMiniPill("用满 $hi K", enabled = true,
+                    selected = budgetK >= hi) {
+                    budgetK = hi
+                    Prefs.setContextBudget(item.id, hi)
+                    onBudgetTouched()
+                }
+            }
+            // 上限被调小、这一格的预算因此被夹下来：说一句人话（提示绑着那张卡）
+            if (card.clampId == item.id && card.clampFrom > card.clampTo) {
+                Text(budgetClampNote(item.name, card.clampFrom, card.clampTo),
+                    fontSize = 12.sp, color = scheme.error)
+            }
+
+            // 思考：本机偏好开关 + 档位。三态里只有 verified 给点，其余禁用并说明原因。
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("思考（这台设备自己的偏好）", fontSize = 12.sp,
+                    color = if (ctlEnabled) scheme.onSurface else scheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f), maxLines = 2)
+                ModelMiniPill(if (thinkingOn) "开" else "关", enabled = ctlEnabled,
+                    selected = ctlEnabled && thinkingOn) {
+                    thinkingOn = !thinkingOn
+                    Prefs.setThinkingEnabled(item.id, thinkingOn)
+                }
+            }
+            levels.forEach { lv ->
+                // 档位候选同样只在 verified 才给点：未核实点了也只是存一个发不出去的值
+                ModelMiniPill(lv, enabled = ctlEnabled,
+                    selected = ctlEnabled && thinkingOn && levelPick == lv) {
+                    levelPick = lv
+                    Prefs.setThinkingLevel(item.id, lv)
+                }
+            }
+            Text(if (ctlEnabled)
+                    "本轮会带上「${if (thinkingOn) levelPick.ifEmpty { "默认档" } else "不带上思考参数"}」：" +
+                        "开关与档位是这台设备自己的偏好，服务端不存、换设备不同步；" +
+                        "这一档今天还没接进请求体（Task 12/13），界面不声称已经生效。"
+                else thinkingStateReason(item.thinking_status),
+                fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
+
+            Text("模型上限 $capK K · 发送按本会话预算截断（预算是本机设置，上限由服务端存）",
+                fontSize = 11.5.sp, color = text3Color(), maxLines = 3)
+
+            if (canEdit) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (card.manage) "模型上限与思考能力（保存到服务端）" else "",
+                        fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold,
+                        color = scheme.onSurface)
+                    if (card.manage) {
+                        FenverTextField(value = capDraft, onValueChange = { capDraft = it },
+                            placeholder = "模型上限（K token）：1..10000，越界由服务端钳住",
+                            keyboardType = KeyboardType.Number,
+                            enabled = rec != null && !card.saving)
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ModelMiniPill(if (supDraft) "支持思考：开" else "支持思考：关",
+                                enabled = rec != null && !card.saving, selected = supDraft) {
+                                supDraft = !supDraft
+                            }
+                        }
+                        FenverTextField(value = levelsDraft,
+                            onValueChange = { levelsDraft = it },
+                            placeholder = "档位标签，最多 3 个，用逗号分开",
+                            enabled = rec != null && !card.saving)
+                        val candidates = parseThinkingLevels(levelsDraft)
+                        candidates.forEach { c ->
+                            ModelMiniPill("默认档：$c", enabled = rec != null && !card.saving,
+                                selected = defaultDraft == c) { defaultDraft = c }
+                        }
+                        if (candidates.isNotEmpty() && !candidates.contains(defaultDraft)) {
+                            Text("默认档只能是候选之一：现在保存会落「${candidates.first()}」。",
+                                fontSize = 11.5.sp, color = text3Color())
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ModelMiniPill(if (card.saving) "保存中…" else "保存能力",
+                                enabled = rec != null && !card.saving) {
+                                val patch = buildJsonObject {
+                                    val k = capDraft.trim().toIntOrNull()
+                                    if (k != null && k > 0) put("max_context_k", k)
+                                    put("supports_thinking", supDraft)
+                                    put("thinking_levels",
+                                        JsonArray(candidates.map { JsonPrimitive(it) }))
+                                    put("thinking_default",
+                                        if (candidates.contains(defaultDraft)) defaultDraft
+                                        else candidates.firstOrNull() ?: "")
+                                }
+                                onSaveCaps(item.id, patch)
+                            }
+                            ModelMiniPill("收起管理", enabled = true) { onToggleManage(false) }
+                        }
+                        Text("参数配方保持「${rec?.get("thinking_profile")
+                            ?.jsonPrimitive?.contentOrNull ?: "none"}」：本版服务端白名单只有 none，" +
+                            "没有可选项，所以能力改完思考状态仍是「未核实」。越界与超限由服务端判" +
+                            "（钳 1..10000、档位最多 3 个），那句理由会写在这里。",
+                            fontSize = 11.5.sp, color = text3Color(), maxLines = 5)
+                        if (rec == null) {
+                            Text("这条模型的完整记录还没读回来，保存键是禁用的：" +
+                                "全量 PUT 缺了 base_url 会洗掉上游地址。",
+                                fontSize = 12.sp, color = scheme.error, maxLines = 3)
+                        }
+                    } else {
+                        ModelMiniPill("管理此模型", enabled = true) { onToggleManage(true) }
+                    }
+                }
+            } else {
+                // 只读要说清谁能改、以及"你自己那一栏照样归你改"——不然是白挂一个禁用的控件
+                Text("这一条是共享模型：思考能力与模型上限由管理员维护，你这里只能读。" +
+                    "上面那栏的本会话预算仍然归你改——那是这台设备自己的设置，不动别人的配置。",
+                    fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModelMiniPill("设为这条", enabled = true) { onPick(item.id) }
+            }
+            if (card.error.isNotEmpty()) {
+                Text(card.error, fontSize = 12.sp, color = scheme.error, maxLines = 5)
+            } else if (card.savedId == item.id && card.savedText.isNotEmpty()) {
+                Text(card.savedText, fontSize = 12.sp, color = scheme.primary, maxLines = 2)
+            }
         }
     }
 }

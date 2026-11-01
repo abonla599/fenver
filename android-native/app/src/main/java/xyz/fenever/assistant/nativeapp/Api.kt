@@ -65,11 +65,24 @@ private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
 @Serializable data class SessionDetail(val session_id: String = "", val title: String = "新对话",
                                        val created_at: String = "", val model: String = "",
                                        val messages: List<StoredMessage> = emptyList())
+/* v0.39.x 驾驶舱 Task 10：模型卡的原料。新增的思考五格全部带默认值——旧服务端
+ * （Task 8/9 之前构建的包）的 /v1/models 根本没有这些键，缺省必须解得开、且不能
+ * 替服务端说话：默认态只能是「不支持思考 + 改不动」。这与 Done.usage 同一容错纪律
+ * （锁：backend/tests/test_v0391_native_cockpit.py 逐格钉 `= 默认值`）。
+ * priced/multiplier 是 v0.25 R4b 就在目录里的两格，本单只是把它们接进模型行
+ * （选模型时真正比的两个数：能带多少历史、花多少）。 */
 @Serializable data class ModelInfo(val id: String = "", val name: String = "",
                                    val model: String = "", val supports_vision: Boolean = false,
                                    val usable: Boolean = true, val default: Boolean = false,
                                    val shared: Boolean = true, val reason: String = "",
-                                   val max_context_k: Int = 0)
+                                   val max_context_k: Int = 0,
+                                   val supports_thinking: Boolean = false,
+                                   val thinking_levels: List<String> = emptyList(),
+                                   val thinking_default: String = "",
+                                   val thinking_status: String = "unsupported",
+                                   val can_edit: Boolean = false,
+                                   val priced: Boolean = false,
+                                   val multiplier: String = "")
 @Serializable data class ModelsResult(val models: List<ModelInfo> = emptyList(),
                                       val default: String? = null)
 @Serializable data class UploadInfo(val id: String = "", val name: String = "",

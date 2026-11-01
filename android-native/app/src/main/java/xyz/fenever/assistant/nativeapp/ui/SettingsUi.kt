@@ -37,7 +37,6 @@ import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
@@ -62,8 +61,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,7 +68,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,8 +111,10 @@ import java.io.File
  * → .set-group/.set-card/.set-row → 二级页 .set-view#setPages）的原生化。
  * 一级列表 + 五个二级页在同一张弹层里换 view（网页原话：谁都不该是第二个弹窗），
  * 行序、文案、值槽、›/⇅/↗ 后缀、按钮集合与 app.js 的渲染函数逐处对齐：
- * - 一级：syncSetIdentity/renderModelSelect+chatNote/syncPersonaChip/syncCtxRow/
+ * - 一级：syncSetIdentity/renderModelSelect+chatNote/syncPersonaChip/
  *   exportCurrent/loadRemindersVal/renderAboutRows/applyTheme/connInfo/logoutCurrent
+ *   （syncCtxRow 那一行 v0.39.x Task 10 起不在这里了：预算与上限搬到「选择模型」的模型卡，
+ *   设置页再放一份就是两个真相）
  * - accounts=renderAccounts　providers=loadProviders+providerRow+provForm
  * - persona/memory=loadMemories　reminders=renderReminders+reminderStatusCard
  * 数值走向极简原生：一级列表为 52dp 行 + 1px 发丝线，二级页用统一顶栏与表面卡；
@@ -599,7 +597,6 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         providers.firstOrNull { it.id == Prefs.defaultProviderId && it.usable }
             ?: providers.firstOrNull { it.id == serverDefaultOf(providers) && it.usable }
     }
-    val cap = ((current?.max_context_k ?: 0).let { if (it > 0) it else 64 }).coerceAtLeast(2)
 
     // —— 「通用」组的三样：通知授权要能从系统页回来后重画（与提醒页同一个 ON_RESUME 路子），
     //    缓存大小在 IO 线程数一次、清完再数一次。
@@ -680,6 +677,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     SetRow(FenverIcon.ModelService, "模型服务", divider = false, valSlot = { SetValText(chatNote) }) {
         onOpenPage("providers")
     }
+    // v0.39.x Task 10：模型上限与本会话预算都不再是这一页的输入项（模型卡是它们唯一的
+    // 入口）。这一行只是指路，不放第二个控件——两处都能改就两处都可能不一样。
+    SetNote("模型上限与思考能力在「选择模型」里管理；这里只留连接配置。")
 
     // —— 对话 ——
     SetGroup("对话")
@@ -687,8 +687,6 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         identityTick
         SetValText(if (Prefs.persona(Prefs.lastSessionId).trim().isNotEmpty()) "已填写" else "")
     }) { onOpenPage("persona") }
-    CtxRow(cap, providersKnown = providers.isNotEmpty(),
-        providerId = current?.id ?: Prefs.defaultProviderId)
     SetRow(FenverIcon.Export, "导出本次对话", divider = false) {
         // v0.23 T2.4：逐条对齐网页 exportCurrent（app.js:2672）——空会话守卫 →
         // 签票 → 兑换。网页把 location.href 指过去、文件名由 Content-Disposition
@@ -899,56 +897,11 @@ private fun ModelPickRow(providers: List<ModelInfo>, current: ModelInfo?,
     }
 }
 
-/* 上下文长度行（网页 #ctxRange + 「8/64k」）：滑杆量程=当前模型上限，
-   步长 cap≤64→2 / ≤256→8 / 其余 32；清单在手才把超限的旧预算收敛（syncCtxRow 原注释）。
-   v0.39.x Task 6：读写改走 Prefs.contextBudgetK/setContextBudget（按模型，发送与环
-   同源的那张 map），不再碰旧全局键——ChatUi 已不读 contextTokensK，这里再写旧键
-   就是滑杆失效；Task 10 迁进模型卡后整行删除。 */
-@Composable
-private fun CtxRow(cap: Int, providersKnown: Boolean, providerId: String) {
-    var k by remember(cap, providerId) {
-        mutableIntStateOf(Prefs.contextBudgetK(providerId).coerceIn(2, cap))
-    }
-    LaunchedEffect(cap, providersKnown, providerId) {
-        val v = if (providersKnown) k.coerceAtMost(cap) else k
-        if (v != k) k = v
-        if (Prefs.contextBudgetK(providerId) != v) Prefs.setContextBudget(providerId, v)
-    }
-    val step = if (cap <= 64) 2 else if (cap <= 256) 8 else 32
-    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            FenverIcon(FenverIcon.Context, MaterialTheme.colorScheme.onSurfaceVariant,
-                Modifier.size(20.dp))
-        }
-        Text("上下文长度", style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1, modifier = Modifier.weight(1f))
-        CtxValue(k, cap)
-        Slider(modifier = Modifier.width(110.dp),
-            value = k.toFloat(),
-            onValueChange = { v ->
-                val raw = ((v - 2) / step).toInt() * step + 2
-                k = raw.coerceIn(2, cap)
-            },
-            valueRange = 2f..cap.toFloat(),
-            onValueChangeFinished = { Prefs.setContextBudget(providerId, k) })
-    }
-    Box(Modifier.fillMaxWidth().height(1.dp)
-        .background(MaterialTheme.colorScheme.outline))
-}
-
-/** 「8/64k」：加粗那截吃强调色（网页 <b>ctxVal</b>/ctxCap k）。 */
-@Composable
-private fun CtxValue(k: Int, cap: Int) {
-    val styled = buildAnnotatedString {
-        withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold)) { append(k.toString()) }
-        withStyle(SpanStyle(color = text3Color())) { append("/$cap" + "k") }
-    }
-    Text(styled, fontSize = 14.sp, maxLines = 1)
-}
+/* v0.39.x Task 10：这里原来住着 CtxRow（上下文长度滑杆）与它的读数件 CtxValue。
+   它们与网页 #ctxRange 同源，读写的是 Prefs 那张按模型存的 map——与本 App 的模型卡、
+   上下文账本是同一份真相。三个入口能改同一个值，漂移只是时间问题，所以入口撤到
+   「选择模型」那一处（ChatUi 的 ModelCard 与 ContextPanel），Prefs 里那两个函数原样
+   留着：撤的是入口，不是真相。 */
 
 private fun hostOf(url: String): String = runCatching {
     val u = Uri.parse(url)
@@ -1400,9 +1353,12 @@ private fun memoryListErrorText(e: Throwable): String {
 
 /* ---------------- 模型服务页（loadProviders + providerRow + provForm） ---------------- */
 
+/* 模型服务页的一行（连接配置）。v0.39.x Task 10 起不再带 ctxK：上限的输入项撤到了
+   模型卡，这一页连读数都不留，免得看着像"这里也能改"。Preset 那边仍留着预置上限，
+   理由见 presetCtxK 那段（新建时那一份只走一次）。 */
 private data class ProvRow(val id: String, val label: String, val baseUrl: String,
                            val model: String, val keyMasked: String, val hasKey: Boolean,
-                           val vision: Boolean, val isDefault: Boolean, val ctxK: Int)
+                           val vision: Boolean, val isDefault: Boolean)
 
 private fun parseProv(el: JsonElement?): ProvRow? {
     val o = el as? JsonObject ?: return null
@@ -1411,8 +1367,7 @@ private fun parseProv(el: JsonElement?): ProvRow? {
         model = str("model"), keyMasked = str("api_key_masked"),
         hasKey = o["has_key"]?.jsonPrimitive?.booleanOrNull ?: false,
         vision = o["supports_vision"]?.jsonPrimitive?.booleanOrNull ?: false,
-        isDefault = o["is_default"]?.jsonPrimitive?.booleanOrNull ?: false,
-        ctxK = o["max_context_k"]?.jsonPrimitive?.intOrNull ?: 0)
+        isDefault = o["is_default"]?.jsonPrimitive?.booleanOrNull ?: false)
 }
 
 private data class Preset(val label: String, val baseUrl: String, val model: String,
@@ -1442,7 +1397,13 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
     var fBase by remember { mutableStateOf("") }
     var fKey by remember { mutableStateOf("") }
     var fModel by remember { mutableStateOf("") }
-    var fCtxK by remember { mutableStateOf("") }
+    /* v0.39.x Task 10：这一页不再有「上下文上限」输入框（fCtxK 已撤，上限归模型卡）。
+       presetCtxK 不是漏撤的第二个输入框，也不是能改上限的口子：它是**预置自带的那个数**。
+       网页 Task 9 的 I-2 教训——表单不发这一格时，「选 DeepSeek 预置新建」的 1000K 会被
+       服务端缺省洗成 64K（_pending 的保留只保护更新路径，新建没带就是 64）。所以这一格
+       只在新建时随草稿走一次，编辑态一律不发（编辑由模型卡 + 服务端保留单源持有）。
+       界面上没有任何地方能改它：它只能被"点一颗预置"赋值，开单/换单即清零。 */
+    var presetCtxK by remember { mutableStateOf<Int?>(null) }
     var fVision by remember { mutableStateOf(false) }
     var keyPh by remember { mutableStateOf("填入 API Key") }
     var result by remember { mutableStateOf("") }
@@ -1490,7 +1451,8 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
         if (editingId.isNotEmpty()) put("id", editingId)
         put("label", fLabel.trim()); put("base_url", fBase.trim())
         put("api_key", fKey.trim()); put("model", fModel.trim())
-        fCtxK.trim().toIntOrNull()?.let { if (it > 0) put("max_context_k", it) }
+        // 上限只跟「新建 + 点过预置」这一条路走一次：编辑态不发，服务端保留库里那份
+        if (editingId.isEmpty() && presetCtxK != null) presetCtxK?.let { put("max_context_k", it) }
         put("supports_vision", fVision); put("is_default", false)
     }
     fun testBox(t: String) { result = t }
@@ -1499,7 +1461,8 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
         formScope = scopeName
         fLabel = p?.label ?: ""; fBase = p?.baseUrl ?: ""
         fModel = p?.model ?: ""
-        fCtxK = if (p != null && p.ctxK > 0) p.ctxK.toString() else ""
+        // 编辑态不复显上限（这一页改不了它），预置上限也清零：上一单的数不许跟着发
+        presetCtxK = null
         fVision = p?.vision ?: false
         fKey = ""
         keyPh = if (p != null && p.keyMasked.isNotEmpty())
@@ -1589,7 +1552,8 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
                             .clickable {
                                 if (editingId.isEmpty()) fLabel = ps.label
                                 fBase = ps.baseUrl; fModel = ps.model
-                                ps.ctxK?.let { fCtxK = it.toString() }
+                                // 预置自带的上限只在这一次进草稿（新建才发；编辑态点开也发不出去）
+                                presetCtxK = ps.ctxK?.takeIf { it > 0 }
                                 fVision = ps.vision
                             }.padding(horizontal = 11.dp, vertical = 4.dp)) {
                             Text(ps.label, fontSize = 12.5.sp,
@@ -1599,12 +1563,24 @@ private fun ProvidersPage(onChanged: () -> Unit, onAdopted: () -> Unit = onChang
                 }
                 Spacer(Modifier.height(12.dp))
             }
+            // 上限不再由这张表单收发，但预置那一份得让新单看得见（不然 1000K 落回 64K
+            // 而用户毫无察觉）——这句就是那一次的出口，用 Text 印，不拼 HTML。
+            presetCtxK?.let { pc ->
+                if (editingId.isEmpty()) {
+                    Text("这条预置的初始上限 ${pc}K（保存后到「选择模型」里改上限与思考能力）",
+                        fontSize = 12.sp, color = text3Color(),
+                        modifier = Modifier.padding(bottom = 10.dp))
+                }
+            }
             Field("显示名称", "例如 DeepSeek Chat", fLabel, { fLabel = it })
             Field("Base URL", "https://api.deepseek.com/v1", fBase, { fBase = it })
             Field("API Key", keyPh, fKey, { fKey = it }, password = true)
             Field("模型名", "deepseek-flash / qwen-vl-max", fModel, { fModel = it })
-            Field("上下文上限（K token）", "留空按 64，例如 256 或 1000", fCtxK,
-                { fCtxK = it }, keyboardType = KeyboardType.Number)
+            // v0.39.x Task 10：这里原来是 Field("上下文上限（K token）"…)——上限的输入项
+            // 撤到模型卡（两处都能改 = 两个真相），这一页只留连接配置。
+            Text("模型上限与思考能力在「选择模型」里管理；这一页只放连接配置。",
+                fontSize = 12.sp, color = text3Color(),
+                modifier = Modifier.padding(bottom = 12.dp))
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(bottom = 14.dp)) {
                 Checkbox(fVision, { fVision = it })

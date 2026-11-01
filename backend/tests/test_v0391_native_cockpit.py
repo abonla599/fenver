@@ -1,4 +1,6 @@
 # v0.39.x 模型驾驶舱 Task 6：原生 per-provider 预算、done usage、上下文环 + 账本的形状锁。
+# Task 7 追加接力队列的闸与状态机；Task 10 追加模型卡（思考三态 / 上限与预算 / 能力写口）
+# 与设置页迁移的锁——见下面那两段分隔注释。
 #
 # 分工沿用 Task 4/5 的口径：预算/校准/分段/整理的**算式**由 Api.kt 里那几个与网页
 # app.js 同一公式的纯函数承载（网页侧的行为真跑锁在 test_v0391_web_cockpit_ui.py，
@@ -12,6 +14,11 @@
 # 注：brief 里 `_block(api, "data class Done(")` 抓不到东西——Kotlin 的
 # `data class Done(...) : ChatEvent()` 声明体里没有 "{"，配对括号抓取会一路滑进
 # object Api 的整块。这里改用 _between（Done 声明到 Failed 声明之间），意图不变。
+# Task 10 沿用同一条惯例：`data class ModelInfo(` 也改 _between（滑到 ModelsResult 为止）。
+#
+# Task 10（模型卡 / 模型管理 / 设置页迁移）另起一段：设置页那只 CtxRow 已撤，
+# 原 `test_settings_ctxrow_writes_per_provider_budget` 按网页 Task 9 的同方向重钉成
+# `test_settings_page_gives_up_the_budget_slider_to_the_model_card`（撤入口不撤真相）。
 from pathlib import Path
 
 from tests.test_apk_release_discipline import _code
@@ -228,15 +235,286 @@ def test_native_relay_identity_and_ring_remember():
     assert "queues[" not in ring_body, "queuedK 混进了环读数公式：usedK/pct 不许动"
 
 
-def test_settings_ctxrow_writes_per_provider_budget():
+def test_settings_page_gives_up_the_budget_slider_to_the_model_card():
+    """Task 10 设置页迁移（与网页 Task 9 同方向重钉，语义没降）。
+
+    原锁 `test_settings_ctxrow_writes_per_provider_budget` 守的是"设置页那只滑杆不许
+    再写旧全局键"。这一单把滑杆从设置页撤了，原句里那三条 CtxRow 判据随之失去对象；
+    撤入口不撤真相，所以判据翻成两面：
+    ① 设置页不再重复一份预算滑杆/上限输入（两个真相的源头）；
+    ② 预算的真相仍只有一份，住在 Prefs，模型卡与上下文面板都从它读写。
+    """
     st = _c("ui/SettingsUi.kt")
-    assert "Prefs.contextTokensK" not in st, "设置滑杆还在读写旧全局键"
-    row_sig = _between(st, "private fun CtxRow(", "{")  # 签名段（体首brace之前）
-    assert "providerId: String" in row_sig
-    row = _block(st, "private fun CtxRow(")
-    assert "Prefs.contextBudgetK(" in row and "Prefs.setContextBudget(" in row
-    call = _between(st, "CtxRow(cap", "SetRow(FenverIcon.Export")
-    assert "?: Prefs.defaultProviderId" in call, "调用点没给 provider 口径（显示会分叉）"
+    assert "Prefs.contextTokensK" not in st, "设置页还在读写旧全局键"
+    assert "private fun CtxRow(" not in st, "设置页还在重复上下文滑杆"
+    assert "fCtxK" not in st, "模型服务表单还在重复模型上限"
+    assert "Prefs.setContextBudget(" not in st, "预算写口没收成模型卡/账本一处"
+    assert "模型上限与思考能力在「选择模型」里管理" in st, "撤了入口没留指路那句"
+    # 反向钉：撤的是入口，不是真相——Prefs 与 Api/ChatUi 那条链路必须原样在位
+    pf = _c("Prefs.kt")
+    assert "fun contextBudgetK(providerId: String)" in pf
+    assert "fun setContextBudget(providerId: String" in pf
+    assert "fun contextBudgetWantedK(" in pf, "夹紧判据没有原始读数可取（会恒不成立）"
+    assert "Prefs.contextBudgetK(" in _c("ui/ChatUi.kt")
+    assert "budgetK" in _c("Api.kt"), "outbound 不再吃 per-provider 预算：发送与界面分叉"
+    # 连接配置一格不许跟着能力字段一起被撤掉（spec §4.2「设置页的边界」）
+    for keep in ("Base URL", "API Key", "supports_vision", "测试连通"):
+        assert keep in st, f"撤能力入口时顺带弄丢了连接配置：{keep}"
+
+
+# ---------------- Task 10：安卓模型卡 / 模型管理 / 思考偏好（2026-10-31） ----------------
+# 全部是 source-shape 锁（Kotlin 侧没有 JS 那样的真跑宿主）：判"接线形状"，不判行为。
+# 每条 docstring 写明「改坏什么就会红」与射程边界，能绕过的一律写在射程里。
+
+def test_native_model_card_and_settings_move():
+    """brief Step 1 逐字收进本文件（五格 / 卡吃三态 / 预算同源 / 设置页撤件）。
+    唯一改动：ModelInfo 那一处的锚点从 _block 换成 _between，理由见本文件开头
+    （Kotlin 的 data class 声明体没有 `{`，配对括号会滑进 object Api 整块）。"""
+    api = _c("Api.kt")
+    mi = _between(api, "data class ModelInfo(", "data class ModelsResult(")
+    for key in ("supports_thinking", "thinking_levels", "thinking_default",
+                "thinking_status", "can_edit"):
+        assert key in mi, f"ModelInfo 缺 {key}"
+    chat = _c("ui/ChatUi.kt")
+    assert "ModelPickerScreen(" in chat
+    assert "thinking_status" in _block(chat, "private fun ModelPickerScreen("), \
+        "模型卡没渲染思考三态"
+    assert "Prefs.contextBudgetK(" in chat
+    settings = _c("ui/SettingsUi.kt")
+    assert "private fun CtxRow(" not in settings, "设置页还在重复上下文滑杆"
+    assert "fCtxK" not in settings, "模型服务表单还在重复模型上限"
+
+
+def test_modelinfo_five_fields_all_have_defaults_old_server_survives():
+    """五格必须**带默认值**——旧服务端 /v1/models 没有这些键，缺省解崩就是全量闪退。
+
+    变异：把任一格的 `= …` 去掉 → 该格红。判据是"逐格都有 `=`"，不是"格子存在"，
+    因为存在但无默认值的那一份照样崩（与 Done.usage 同一容错纪律）。
+    射程：只看声明那一行区间里的 `名字: 类型 = 默认`；把默认值写成运行期才可用的
+    表达式（例如引用另一个构造参数）这把尺看不见——那类写法 Kotlin 会在构造期报错，
+    由 compileDebugKotlin 兜住，不在静态锁的眼里。
+    锚点：brief 那段写的是 `_block(api, "data class ModelInfo(")`，Kotlin 的 data class
+    声明体里没有 `{`，配对括号抓取会一路滑进 `object Api` 整块（与本文件开头为
+    `data class Done(` 记的同一条陷阱），所以这里同样改用 _between，意图不变。
+    """
+    api = _c("Api.kt")
+    mi = _between(api, "data class ModelInfo(", "data class ModelsResult(")
+    for sig in ('supports_thinking: Boolean = false',
+                'thinking_levels: List<String> = emptyList()',
+                'thinking_default: String = ""',
+                'thinking_status: String = "unsupported"',
+                'can_edit: Boolean = false'):
+        assert sig in mi, f"ModelInfo 缺「{sig}」：缺字段或没带默认值（旧服务端会崩）"
+    # 缺省态只能是"不支持 + 不能改"，不能是"支持但未核实"这种替服务端说话的值
+    assert 'thinking_status: String = "unsupported"' in mi
+    assert "can_edit: Boolean = false" in mi
+
+
+def test_picker_takes_modelinfo_list_not_id_name_pairs():
+    """调用处必须交整份 ModelInfo：Pair(id, name) 那份装不下三态/上限/倍率。
+
+    变异：把 `models = providers.filter { it.usable }` 改回 `.map { it.id to it.name }`
+    → 第一条红（形参类型对不上，第二条也读不到那份 filter）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    assert "private fun ModelPickerScreen(models: List<ModelInfo>" in chat
+    assert "models = providers.filter { it.usable }" in chat
+    assert "it.id to it.name" not in chat, "模型行还只交 id/名字：卡片无从渲染"
+    # 上限与模型来源不许另起炉灶：currentProvider() 是唯一口径（Task 6/7 收口过）
+    at = chat.index("if (modelMenuOpen) {")
+    call = chat[at:at + 700]
+    assert "currentProvider()?.id" in call, "卡片当前项另挑了一条就会与实发分叉"
+
+
+def test_picker_rows_and_card_render_thinking_tri_state_and_disable_branch():
+    """三态文案不许说谎：判据只认服务端 thinking_status，未核实的那一支必须禁用+给原因。
+
+    变异：① 把 'unverified' 那句文案改成「可切换思考强度」→ 第一条红（界面替服务端
+    拔高）；② 删掉 `clickable(enabled = ctlEnabled`（禁用态改成永远可点）→ 第三条红；
+    ③ 把 reason 那一句撤掉 → 第四条红（禁用不说为什么就是"控件坏了"）。
+    射程：只判"这些字符串与这道门在代码里"，不判运行时真的点不动——真机点按留在手测
+    清单；把 enabled 判据换成 `status != "unsupported"` 这种"未核实也能点"的写法，
+    本锁看不见字符串以外的等价物，所以同锁钉住 `ctlEnabled` 只能是 `== "verified"`。
+    """
+    chat = _c("ui/ChatUi.kt")
+    label = _block(chat, "private fun thinkingStatusLabel(")
+    assert 'verified' in label and 'unverified' in label
+    assert "可切换思考强度" in label
+    assert "支持思考（参数未核实，暂时不能开）" in label, "unverified 文案与网页不同尺"
+    assert "不支持思考" in label
+    reason = _block(chat, "private fun thinkingStateReason(")
+    assert "参数配方还未核实" in reason and "这个模型没有思考能力" in reason
+    page = _block(chat, "private fun ModelPickerScreen(")
+    assert "thinking_status" in page and "thinkingStatusLabel(" in page
+    card = _block(chat, "private fun ModelCard(")
+    assert 'val ctlEnabled = item.thinking_status == "verified"' in card, \
+        "三态门换了判据（unverified 也给了点就是界面在说谎）"
+    assert "enabled = ctlEnabled" in card, "禁用分支只剩文案没有门"
+    pill = _block(chat, "private fun ModelMiniPill(")
+    assert "clickable(enabled = enabled" in pill, "小胶囊钮的 enabled 没接到 clickable：禁用是假的"
+    assert "thinkingStateReason(" in card, "禁用了没给原因"
+    assert "Prefs.thinkingEnabled(" in card and "Prefs.setThinkingEnabled(" in card
+    assert "Prefs.thinkingLevel(" in card and "Prefs.setThinkingLevel(" in card
+    # 今天不落进请求体（Task 12/13 的活）：界面不许出现"已生效/已发送"那种话
+    assert "本轮会带上" in card, "verified 那一支的措辞必须与网页同句（今天不可达）"
+
+
+def test_card_budget_slider_shares_the_panel_map_and_can_edit_gates_cap_only():
+    """预算与上限分家：滑杆读写同一张 map，`can_edit` 只闸上限、不闸预算。
+
+    变异：① 卡片自己 `sp.putString("card_budget…")` 另存一份 → 第二条红；
+    ② 把预算滑杆整段挪进 `if (canEdit)` 里（写口在 canEdit 之后先出现）→ 第三条红；
+    ③ 让 can_edit=false 的人也能改上限（把上限输入挪到 canEdit 之前）→ 第四条红。
+    射程：按"两个写口在函数体里的先后"判归属，不是判嵌套——把闸门外层的 if 删掉但保留
+    语句顺序这一条骗得过第二条断言，所以同锁另外钉住只读那句原话必须在 canEdit 之后
+    出现（真删闸门会先撞那条）。真正的越权拒绝由服务端二验兜着（本单不改后端）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    card = _block(chat, "private fun ModelCard(")
+    assert "Prefs.contextBudgetK(" in card and "Prefs.setContextBudget(" in card
+    assert "sp.putString" not in card and "localStorage" not in card, "卡片另存一份预算"
+    # 门用 `if (canEdit)` 那一处（不是 `val canEdit = …` 那行声明）：声明在预算之前是
+    # 正常的取值顺序，只有把预算滑杆塞进那道分支才是"共享模型连自己那一栏也改不了"。
+    assert card.index("Prefs.setContextBudget(") < card.index("if (canEdit)"), \
+        "预算写口排到了 can_edit 分支之后：共享模型的用户被自己改不了的那一栏连坐了"
+    gate = card[card.index("if (canEdit)"):]
+    assert "onSaveCaps(" in gate, "上限/能力的写口排到了 canEdit 分支之前：只读成了摆设"
+    assert "模型上限" in gate and "本会话预算仍然归你改" in gate, "只读那句实话没写全"
+    # 与上下文面板同源：面板仍在，且读写同一对函数（撤设置页不撤面板）
+    panel = _block(chat, "private fun ContextPanel(")
+    assert "Prefs.setContextBudget(" in panel
+
+
+def test_cap_lowering_clamps_budget_and_says_so_once():
+    """上限夹小时必须吭一声（spec §3.2「不静默保留越界值」，网页 Task 9 同一条）。
+
+    变异：① 把判据 `stored > capK` 换成用读数比（读数已夹过，恒不成立）→ 第一条红
+    （这正是网页 Task 9 踩过的坑，这里钉的是"取原始值"那个函数名）；
+    ② 删掉那句提示 → 第二/三条红；③ 夹了不写回 map → 第四条红。
+    射程：提示"一次"清在 onClose/换身份两处，静态只判"这两句都存在"；渲染时机与
+    真的只印一次要靠真机手测（清单在报告里）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    rec = _block(chat, "fun reconcileBudgetCap(")
+    assert "Prefs.contextBudgetWantedK(" in rec, "拿夹过的读数比上限：那条分支恒不成立"
+    assert "stored > capK" in rec
+    assert "Prefs.setContextBudget(" in rec, "夹了不写回：本机那份越界值一直躺着"
+    assert "budgetClampNote(" in chat
+    note = _block(chat, "private fun budgetClampNote(")
+    assert "上限降到了" in note and "已经按上限夹小" in note
+    assert "budgetClamped = null" in chat, "提示没有「只一次」的收口"
+
+
+def test_capability_put_body_comes_from_the_full_record():
+    """PUT 是全量语义：body 的每一格从 /v1/me/providers 那条完整记录取。
+
+    变异：① 把 `rec` 换成 /v1/models 的 ModelInfo（那里没有 base_url）→ 第一/二条红；
+    ② 补一行 `put("paid_by", …)` 或 `put("id", …)` → 反向断言红（前者 ProviderRequest
+    没这一格、留着只让下一个人以为界面改得动；后者路由按 path 钉这一条）；
+    ③ 把 api_key 那行删了 → 第三条红（服务端按占位符保原密钥，缺键就是洗密钥）；
+    ④ scope 分流改成固定一面 → 第六条红（共享条目会打到属主门上被拒）。
+    射程：只判"这些键在不在那个月亮符区间里"，不判真发出去的报文——真实 PUT 需要登录
+    态与服务端，本单没跑（报告里登记）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    body = _block(chat, "private fun capabilityBody(")
+    for keep in ('put("api_key", "")', "is_default", "base_url", "supports_vision",
+                 "max_context_k", "thinking_profile", "thinking_levels", "label"):
+        assert keep in body, f"全量 PUT 少了一格：{keep}"
+    assert "paid_by" not in body, "paid_by 不该由界面发（ProviderRequest 没这一格）"
+    assert '"id"' not in body, "PUT body 不许带 id：路由按 path 钉这一条"
+    assert "ProviderRequest" not in body
+    scope = _block(chat, "private fun providerCapabilityScope(")
+    assert 'shared' in scope and '"admin"' in scope and '"mine"' in scope
+    save = _block(chat, "fun saveModelCapabilities(")
+    assert "providerRecords[" in save, "写口的记录来源不是那份完整记录缓存"
+    assert "capabilityBody(rec" in save
+    assert "Api.updateProvider(" in save and "Api.updateMyProvider(" in save
+    loader = _block(chat, "suspend fun loadProviderRecordsNow(")
+    assert "Api.myProviders()" in loader, "记录不是来自 /v1/me/providers"
+    for section in ('"shared"', '"mine"'):
+        assert section in loader, f"没把 {section} 那一栏并进缓存"
+    assert "remember(identityId) { mutableStateOf(mapOf<String, JsonObject>()) }" in chat, \
+        "记录缓存不随身份复位：换账号会拿着上一个人的 base_url 往新账号的门里 PUT"
+
+
+def test_thinking_prefs_are_local_per_identity_with_honest_defaults():
+    """思考偏好住本机、按「用户 + provider」一格；enabled 默认 false；档位不落空。
+
+    变异：① 内键去掉 userId 前缀（`providerId` 单键）→ 第二条红（A 的开关跟着 B 回来）；
+    ② enabled 默认值改成 true → 第三条红（不给全站悄悄改计费行为）；
+    ③ `thinkingLevel` 在候选里没有默认档时返回 ""（"有档位但没默认档"那个存不下状态）
+    → 第五条红。
+    射程：判的是键形与缺省那几串，不判 SharedPreferences 真的按身份分格读写；
+    真跑需要 Android 运行时，本机没有宿主（报告里登记为未证实）。
+    """
+    pf = _c("Prefs.kt")
+    assert "fun thinkingEnabled(providerId: String)" in pf
+    assert "fun thinkingLevel(providerId: String" in pf
+    assert "fun setThinkingEnabled(providerId: String" in pf
+    assert "fun setThinkingLevel(providerId: String" in pf
+    assert "thinking_prefs_map" in pf, "思考偏好没有自己的 map 键"
+    assert '"$uid:$providerId"' in pf, "内键不是「用户:provider」形状：换身份会串"
+    assert "val enabled: Boolean = false" in pf
+    # 档位归一只有一处：候选里有默认档用默认档，否则落第一档（后端同一口径）
+    lvl = _block(pf, "fun thinkingLevel(")
+    assert "levels.contains(saved)" in lvl
+    assert "levels.contains(thinkingDefault)" in lvl and "levels.first()" in lvl, \
+        "档位回落不是「默认档→第一档」：界面上会冒出一个本机存不下的空档位"
+    assert 'return ""' in lvl, "没有档位时该给空串，不该编一个假的"
+    # 键形只有两套：预算 map 与思考 map（不许自创第三套按 provider 的散键）
+    for stray in ('"thinking_" + providerId', '"thinking:"', 'providerId + "-thinking"'):
+        assert stray not in pf, f"自创键形：{stray}"
+
+
+def test_level_labels_survive_spaces_and_are_not_truncated_locally():
+    """档位标签：分隔判据与网页/后端同尺（空格不是分隔符），本地不截断（交服务端拒收）。
+
+    变异：把分隔符退回含 `\\s` 的那一份（"快速 思考" 被劈成两档）→ 第二条红；
+    加一句 `.take(3)`（界面悄悄砍掉第 4 档，把"没配上"演成"配上了"）→ 第三条红。
+    """
+    chat = _c("ui/ChatUi.kt")
+    p = _block(chat, "private fun parseThinkingLevels(")
+    assert "Regex(" in p or "split(" in p
+    assert "，、;" in p or "\\uFF0C" in p, "分隔符集合里没有全角逗号/顿号"
+    assert "\\s" not in p, "把空白当分隔符会劈开带空格的档位标签（网页 Task 9 同一条）"
+    assert "take(3)" not in p and "drop(3)" not in p, "本地截断=替服务端作答"
+
+
+def test_native_preset_cap_travels_only_with_a_new_draft():
+    """预置上限（Task 9 的 I-2）：原生确实有「选预置新建」这条路，必须只在新建时走一次。
+
+    变异：① 条件放宽成只看预置（编辑态也发这一格）→ 第一条红（编辑会把模型卡里的
+    1000K 洗成预置那份）；② 新建时干脆不发 → 第二条红（选 DeepSeek 预置新建的
+    1000K 落回服务端缺省 64K）；③ 表单又加回一个能改上限的输入框 → 第三条红
+    （两个真相）。
+    射程：判的是 draft() 那一行的形状与 openForm 里的复位；真实"点预置→保存→卡片读数"
+    需要登录态与服务端，本单没跑（列进手测清单）。
+    """
+    st = _c("ui/SettingsUi.kt")
+    draft = _block(st, "fun draft(): JsonObject")
+    assert "editingId.isEmpty() && presetCtxK != null" in draft, \
+        "预置上限的条件不是「新建 + 点过预置」：编辑路径会洗掉模型卡那份"
+    assert 'put("max_context_k"' in draft, "新建时不带预置上限 = 1000K 被洗成 64K"
+    assert "fCtxK" not in st, "表单还留着能改上限的输入框"
+    assert "上下文上限（K token）" not in st, "上限输入项没撤干净"
+    form = _block(st, "fun openForm(")
+    assert "presetCtxK = " in form, "开单没复位预置上限：上一单的数会跟着下一单发"
+    assert "ps.ctxK" in _c("ui/SettingsUi.kt"), "预置那份上限的取数被删了（新建会落空）"
+
+
+def test_native_card_text_is_plain_compose_text_only():
+    """动态文本（模型名/档位标签/服务端报错）只走 Text(：不许 WebView、不许拼 HTML。
+
+    变异：把某处改成 WebView/evaluateJavascript/注解字符串 → 断言红（沿用 QueueStrip
+    那条同款尺子）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    for name in ("private fun ModelPickerScreen(", "private fun ModelCard("):
+        block = _block(chat, name)
+        assert "Text(" in block, f"{name} 没有走 Text"
+        for sink in ("Web", "html", "Html", "evaluateJavascript", "AnnotatedString"):
+            assert sink not in block, f"{name} 里出现了 {sink}"
 
 
 # ---------------- Task 7 修复轮 1（独立审查 Changes requested，2026-10-31） ----------------
