@@ -15,19 +15,32 @@
    「我以为这是第 3 次」和机器要发的不是同一次，那正是重复烧额度的形状。
    单次运行另外还有一道 `CALLS_PER_RUN = 1`；SDK 层用 `max_retries=0`，
    否则「一次调用」在传输层可以是三次 HTTP 请求。
+   **live 模式必须显式给 `--ledger`**（修复轮 1，Critical-1）：账本缺省时它落在
+   **本次**隔离目录里，而 `isolate_runtime_env(None)` 每次 `mkdtemp` 一个新目录 ⇒
+   每个进程都从空账本开始、`used=0` 恒成立，"总额 4 次"这道闸永不生效。今天没超额度
+   纯粹因为操作者手动传了持久 `--isolation-dir`——那叫"由操作者记得"，不叫"由机制守"。
+   所以：非 `--dry-run` 而不给 `--ledger` → rc=2 拒发、**零出站、零写盘、连环境变量都不动**。
+   授权用尽后**不自动续**，要更多次需要用户新的明示。
 2. **绝不写 data/**。`app/core/providers.py:1059` 有模块级 `store = ProviderStore()`，
-   import 它就跑 `_load()`，而 `_load()` 看到内联密钥会 `_flush()` 回写
-   `data/providers.json` + `provider_keys.json`——本仓目录同时是生产机，那一下写的
-   就是线上配置。所以顺序被钉死：`isolate_runtime_env()` 把 `PROVIDERS_DB_PATH`
-   指到仓库外 → `load_backend_modules(iso)` 才许 import providers →
-   `assert_store_quarantined()` 再验一遍单例的三个路径（keys/prefs 由记录路径推导，
-   而 `_flush()` 三个都写，所以三个都验）。**不用 `providers.store.resolve(...)`**：
-   那条路走的就是 import 触发的单例。现网那条记录是自己 `json.load` 只读出来的。
+   import 它就跑 `_load()`，而 `_load()` 缺文件时 `_seed_from_env()`（读 `DEEPSEEK_API_KEY`）
+   非空即 `_flush()` 落盘 `providers.json` + `provider_keys.json`（第三个 `provider_prefs.json`
+   由 `set_default` 那一路写，所以单例的三个落点都验）——本仓目录同时是生产机，指错了地方
+   写的就是线上配置。所以顺序被钉死：
+   **先判 `overlaps(请求的隔离目录, data_dir)`** → `isolate_runtime_env()`（这一步才 mkdir）
+   → 再判一次 `overlaps(iso, data_dir)`（缺省自建那一支的落点）→ 才许 `load_backend_modules(iso)`
+   → `assert_store_quarantined()` 验单例的 `path`/`keys_path`/`prefs_path` 三个落点。
+   **重叠判据必须在 import 之前**（修复轮 1，Important-3）：import 本身就是那一次写盘，
+   先 import 再判重叠等于"先把文件开进只读目录，再宣布这里不许有文件"。
+   只读证据 `files_digest` 也**递归覆盖 `--data-dir` 整棵树**（含子目录），不再只盯顶层
+   那两个名字——否则 `<data-dir>/iso/providers.json` 这种事尺子本身就看不见。
+   **不用 `providers.store.resolve(...)`**：那条路走的就是 import 触发的单例。
+   现网那条记录是自己 `json.load` 只读出来的。
 3. **密钥不出终端**。出口只允许 `provider_id / profile / level / accepted /
    has_reasoning_content / reasoning_tokens / error_class / usage 三个计数 /
-   密钥的 sha256[:12]`。异常正文先过值级遮盖（`secrets` 里那把真 key 只做内存替换）
-   → `providers.scrub_secrets` → `pathmask.hide_paths`，最后整份 payload 还要过一次
-   `render_and_check`：认出密钥值或凭据形状就一个字都不打印（rc 3）。
+   密钥的 sha256[:12]`。异常正文**先脱敏再截断**（`error_excerpt`，修复轮 1，Important-5：
+   先 `[:180]` 会让一颗跨边界的无形状 key 漏出前缀碎片，而值级整值替换和整份体检都要求
+   **完整值在场**，两层都不认那半截）→ `providers.scrub_secrets` → `pathmask.hide_paths`，
+   最后整份 payload 还要过一次 `render_and_check`：认出密钥值或凭据形状就一个字都不打印（rc 3）。
    值级那层不是多余的：`scrub_secrets` 的按值替换读的是**进程级 store** 那份表
    （`_own_key_values()`），而这里的 store 被隔离在临时目录、根本不认识现网那两把 key。
 4. **先 dry-run 绿，才许真发**。`--dry-run` 走假 client，零网络、不记账，
@@ -35,16 +48,30 @@
    附带一条同样免费的检查：配方里的字段先对着 `Completions.create` 的**签名**问一遍
    （本机 openai 2.37.0 没有 `**kwargs`，裸 `thinking=` 会在本地就 TypeError——
    一次 HTTP 都不发却已经占掉一格额度），到不了上游的形状在记账前就被挡掉。
+   live 模式还多一道形状闸：`--max-tokens` 必须 ≤ `AUTHORIZED_MAX_TOKENS`（8），
+   越出授权形状就拒——自由命令行值不是越权的许可证。
+
+结论的射程也在设计里（修复轮 1，Important-4）：能判「已核实」的那两种证据只证明
+**这一格参数形状被这条上游接受**。两个上游的基线本来就在出推理，所以开关效果、
+三档有没有区别，**都没证**。Task 12 的消费端已经准备直接抄结论（`enabled: status === "verified"`
++ 档位候选吃服务端 `thinking_levels`），裸「已核实」在那头就变成"三个点、wire 上一个值"。
+所以 payload 自带 `scope` / `level_used` / `level_distinct_wire_values` /
+`baseline_had_reasoning`，`verdict_label` 也写成自带射程的句子。
 
 诚实结果也在设计里：DashScope 兼容模式在 `stream=False` 下可能直接拒
 `enable_thinking=true`。那种格子写成 `form_unverifiable`（「该形态今天不可核实」），
 **不改成流式再发一次**——那会超出授权的 4 次。
 
+本工具不许对另一个 checkout 运行（修复轮 1，Minor）：`inside_dir(…, REPO_ROOT)` 只挡
+发起这一跑的那棵树，所以 `--data-dir` 的宿主目录若带着 `.git` 又不是本工具这棵树，直接拒
+（判据只 stat 宿主和它的 `.git`，**绝不去读那份 data/**）。
+
 退出码
     0  拿到证据（`verified`，或基线那一格的 `baseline_ok`）
     1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败）——**不重试**
-    2  闸拦停，这条结论不可采信：要么一次都没发（隔离/账本/配方/记录不成立），
-       要么只读承诺被打破（跑完之后现网那两个文件的摘要变了）
+    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 形状越出授权 /
+       `--data-dir` 属于另一棵 checkout；或隔离、重叠、账本、配方、记录任一条不成立），
+       要么只读承诺被打破（跑完之后 `--data-dir` 那棵树的摘要变了）
     3  出口泄露闸拦停：payload 里还认得出凭据，整份一个字都不打印
 """
 import argparse
@@ -66,10 +93,14 @@ if str(BACKEND_DIR) not in sys.path:                       # 纯数据模块，i
 
 from app.core import thinking_profiles                      # noqa: E402  候选配方表（零依赖）
 
-AUTHORIZED_LIVE_CALLS = 4        # 用户授权的出站总额，一次一记
+AUTHORIZED_LIVE_CALLS = 4        # 用户 2026-11-01 明示授权的 4 次：两上游各 1 基线 + 1 带参数
+                                 # （用尽即停，**不自动续**；改宽这个数字需要用户新的明示。
+                                 #  字面值与它作为默认上限的行为，由
+                                 #  test_authorized_live_call_count_is_the_grant_itself 钉住）
 CALLS_PER_RUN = 1                # 单次运行最多发 1 条：第 5 次绝对不许发
 DEFAULT_PROMPT = "ping"          # 两个上游同一句，便于对照
 DEFAULT_MAX_TOKENS = 8           # 极小：这一格花的是钱，不是结论
+AUTHORIZED_MAX_TOKENS = DEFAULT_MAX_TOKENS   # 授权形状里那一格的字面值（live 模式的上限）
 DEFAULT_TIMEOUT = 30.0
 REDACTED = "«密钥已隐去»"
 RUNTIME_DATA_FILES = ("providers.json", "provider_keys.json")
@@ -80,12 +111,60 @@ RC_BLOCKED = 2                   # 闸拦停：这条结论不可采信
 RC_LEAK_BLOCKED = 3              # 出口泄露闸：一个字都不打
 
 VERDICT_LABELS = {
-    "verified": "已核实",
+    # 「已核实」三个字不许单独出现在结论里（Important-4）：Task 12 的消费端是
+    # `enabled: status === "verified"` + 档位候选直接吃服务端 `thinking_levels`，
+    # 一个不带射程的裸结论在那头就长成"三个点、wire 上一个值"。
+    "verified": "参数形状已核实（开关效果与档位差别未证）",
     "unverified": "未核实",
     "form_unverifiable": "该形态今天不可核实",
-    "baseline_ok": "基线通过",
+    "baseline_ok": "基线通过（不代表思考已关：不发参数也在出推理）",
     "baseline_failed": "基线失败",
     "preflight_failed": "预检失败，未发出调用",
+}
+
+# 结论的射程，机器可读那一层。`not_proved` 不许空着——空着就等于让下游自己猜，
+# 而"自己猜"在这一单里已经付过一次代价（见 VERDICT_LABELS 那条注释）。
+VERDICT_SCOPES = {
+    "verified": {
+        "tier": "shape",
+        "sent": True,
+        "proved": "这一格的参数形状被这条上游接受，且响应里出现了推理证据",
+        "not_proved": ("开关有没有效果（基线本就出推理，差分为 0）",
+                       "三档有没有区别（本档只证这一个出网值）",
+                       "流式形态（本单没花额度去试）",
+                       "模型级 / 厂商级结论"),
+    },
+    "unverified": {
+        "tier": "none",
+        "sent": True,
+        "proved": "无：参数被接受 ≠ 它在思考",
+        "not_proved": ("参数形状", "开关效果", "档位差别"),
+    },
+    "form_unverifiable": {
+        "tier": "none",
+        "sent": True,
+        "proved": "无：这一格只证明该形态在当前请求形状下被拒",
+        "not_proved": ("参数形状", "开关效果", "档位差别", "换形态后能不能通（没试，试要超授权）"),
+    },
+    "baseline_ok": {
+        "tier": "control",
+        "sent": True,
+        "proved": "这条 provider 记录今天能通（不带任何思考参数）",
+        "not_proved": ("思考有没有被关闭——基线响应里就有推理痕迹时，"
+                       "「关闭思考」这句话对模型行为就是不诚实的"),
+    },
+    "baseline_failed": {
+        "tier": "none",
+        "sent": True,
+        "proved": "无：连不带参数的基线都没打通，这一格不能当对照用",
+        "not_proved": ("参数形状", "开关效果", "档位差别"),
+    },
+    "preflight_failed": {
+        "tier": "none",
+        "sent": False,
+        "proved": "无：一次都没发出去，本行不含任何上游事实",
+        "not_proved": ("参数形状", "开关效果", "档位差别"),
+    },
 }
 
 
@@ -123,6 +202,26 @@ def overlaps(a, b) -> bool:
     return inside_dir(a, b) or inside_dir(b, a)
 
 
+def data_dir_belongs_to_another_checkout(data_dir) -> bool:
+    """`--data-dir` 的宿主目录是不是**另一棵 checkout**（有 `.git` 且不是本工具这棵树）。
+
+    为什么要有这一条：`inside_dir(target, REPO_ROOT)` 只挡得住"发起这一跑的那棵树"。
+    从 `.qoder/worktrees/<x>` 跑、而 `--data-dir` 指主工作树 `data/` 这个形状，
+    原本只靠别的判据兜着——而 AGENTS.md §1 把 `data/` 列为受保护运行期资产，
+    主工作树那一份**就是现网正在用的那一份**。所以把它显式列入禁止名单。
+
+    **只加判据，不去读它**：这里只 `exists()` 宿主目录和它的 `.git`，
+    既不打开 `data/` 里的任何文件，也不 `stat` 它们。
+    """
+    target = Path(_norm(data_dir))
+    host = target.parent
+    if not host.exists():
+        return False
+    if _norm(host) == _norm(REPO_ROOT):
+        return False
+    return (host / ".git").exists()
+
+
 # --------------------------------------------------------------- 闸 2：隔离 ----
 
 def isolate_runtime_env(isolation_dir=None) -> Path:
@@ -131,6 +230,15 @@ def isolate_runtime_env(isolation_dir=None) -> Path:
     keys/prefs 两个路径都由记录路径推导（`ProviderStore.__init__`），所以指走
     `PROVIDERS_DB_PATH` 一个变量就够了——这也是为什么这里不再单独设它们：
     两处事实来源迟早会漂。
+
+    **本工具不许对另一个 checkout 运行**：这里挡的是发起这一跑的那棵树
+    （`REPO_ROOT`）。从工作树跑而 `--data-dir` 指另一棵树（例如主工作树那份
+    现网 `data/`）的形状，由 `data_dir_belongs_to_another_checkout()` 在调用本函数
+    **之前**拒掉——那道判据在 `run_probe` 的预检里，不在这里，因为到这儿已经太晚了。
+
+    另外：缺省自建的是**每次全新的 `mkdtemp`**。这正是 Critical-1 的根因——
+    账本若跟着隔离目录走，每个进程都从空账本开始，"总额 4 次"永不生效。所以
+    live 模式必须由调用方显式给一条跨进程稳定的 `--ledger`（见 `run_probe` 的预检）。
     """
     if isolation_dir:
         target = Path(os.path.abspath(str(isolation_dir)))
@@ -169,9 +277,9 @@ def assert_store_quarantined(providers_mod, forbidden_dirs) -> None:
     判据取「不许落在这些目录里」而不是「必须等于我的临时目录」，是有意的：测试进程里
     `providers.store` 早就被 conftest 指到别的临时目录了，拿等号去判会把一条真闸演成
     假红。而真正要守的是——**这个单例不能指着我们即将只读的那份配置，也不能指着仓库**
-    （本仓目录同时是生产机，`_flush()` 会写 `store.path`/`keys_path`/`prefs_path`
-    三个文件，三个都验）。有人把 `isolate_runtime_env()` 那三行删了，这里就是那一下
-    响亮失败的地方，而且此时一次都还没发。
+    （本仓目录同时是生产机：`_flush()` 写 `store.path` 与 `keys_path`，
+    `set_default` 那一路还写 `prefs_path`，三个都验）。有人把 `isolate_runtime_env()`
+    那三行删了，这里就是那一下响亮失败的地方，而且此时一次都还没发。
     """
     store = getattr(providers_mod, "store", None)
     if store is None:
@@ -235,21 +343,38 @@ def key_fingerprint(key: str) -> str:
 
 
 def files_digest(directory, names=RUNTIME_DATA_FILES) -> dict:
-    """运行态文件「没被动过」的证据：文件名 + mtime_ns + size 的摘要。
+    """运行态文件「没被动过」的证据：整棵树每一项的 名字 + mtime_ns + size 的摘要。
 
-    不摘内容、不摘路径，但改一个字节或写一次盘都会变——负控见
-    `test_runtime_digest_actually_moves_when_the_file_is_written`。
+    **递归覆盖 `directory` 下的每一层**（修复轮 1，Important-3）。原来只摘顶层那两个
+    名字，于是"`<data-dir>/iso/providers.json` 被开出来了"这种事这把尺子**根本看不见**
+    ——闸和它所量的洞一起瞎。现在多一个子目录、多一个深层文件、深层文件改一个字节都会动。
+
+    不摘内容、不摘路径，也不读内容（只 `stat`）：`data/` 里可能有正在被现网服务改写的
+    大文件，读它既慢又越界。代价是这条证据认的是"名字/时间戳/大小"三元组而不是逐字节哈希，
+    所以报告里那句"逐字节不变"用的是外面另算的 `sha256` 清单，不是这个函数。
+    负控见 `test_runtime_digest_actually_moves_when_the_file_is_written` 与
+    `test_files_digest_covers_everything_under_the_data_dir`。
     """
+    root = Path(directory)
     out = {}
+    if root.exists():
+        for path in sorted(root.rglob("*"), key=lambda p: p.as_posix()):
+            rel = path.relative_to(root).as_posix()
+            try:
+                stat = path.stat()
+            except OSError:
+                out[rel] = "unreadable"
+                continue
+            if path.is_dir():
+                # 目录也进摘要，而且带上它自己的时间戳：删掉再建一个同名空目录
+                # 也是"动过"，只记名字的话这种形状会漏（写在这里而不是"dir"常量上）。
+                raw = f"{rel}|d|{stat.st_mtime_ns}"
+            else:
+                raw = f"{rel}|f|{stat.st_mtime_ns}|{stat.st_size}"
+            out[rel] = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
     for name in names:
-        path = Path(directory) / name
-        try:
-            stat = path.stat()
-        except OSError:
-            out[name] = "missing"
-            continue
-        raw = f"{name}|{stat.st_mtime_ns}|{stat.st_size}"
-        out[name] = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+        # 顶层那两份就算不存在也要在摘要里留一格："从无到有"得能让摘要动起来。
+        out.setdefault(name, "missing")
     return out
 
 
@@ -335,8 +460,17 @@ def render_and_check(payload, secrets, scrub=None) -> str:
 
 
 def error_excerpt(exc, secrets, scrub=None, hide=None, limit=180) -> str:
-    """只给"这一格为什么没核实"所需的那一句，且必须先过三层脱敏。"""
-    return redact(f"{type(exc).__name__}: {exc}"[:limit], secrets, scrub, hide)
+    """只给"这一格为什么没核实"所需的那一句，且**先脱敏、后截断**。
+
+    顺序是有原因的（Important-5）：值级整值替换和出口那道整份体检都要求**完整值在场**。
+    先 `[:limit]` 再脱敏，一颗没有凭据形状的 key 跨在边界上时，留在句子里的那半截
+    两层都不认——于是 ≥6 字的前缀碎片就这么走进终端历史和报告了（审查员实测三组样本
+    `exit_gate=allows print`）。截完之后再过一遍三层，是为了挡住"截断把某个已确认
+    的片段切成新形状"这种次要情形。反例锁：
+    `test_error_excerpt_is_redacted_before_it_is_truncated`。
+    """
+    full = redact(f"{type(exc).__name__}: {exc}", secrets, scrub, hide)[:limit]
+    return redact(full, secrets, scrub, hide)
 
 
 # ------------------------------------------------------------- 读响应证据 ----
@@ -390,6 +524,40 @@ def classify_verdict(baseline: bool, evidence: dict) -> str:
     if evidence.get("has_reasoning_content") or int(evidence.get("reasoning_tokens") or 0) > 0:
         return "verified"
     return "unverified"
+
+
+def stamp_verdict(payload) -> None:
+    """结论与它的射程一起写：label 自带射程，`scope` 给机器读。
+
+    为什么不能只留一个「已核实」：Task 12 那头的消费端是
+    `enabled: status === "verified"` + 档位候选直接吃服务端 `thinking_levels`，
+    "配方已核实 + 管理员填三档"在那里就等于**三个点、wire 上一个值**，而且没人会报错。
+    """
+    verdict = payload["verdict"]
+    payload["verdict_label"] = VERDICT_LABELS[verdict]
+    scope = dict(VERDICT_SCOPES[verdict])
+    scope["covers"] = ("单条 provider 记录 + 它当时的 base_url + 它当时的 model；"
+                       "不是模型级、不是厂商级——换端点或换 model 要重开探针")
+    payload["scope"] = scope
+
+
+def distinct_wire_values(profile, baseline=None):
+    """三档折算成**出网体那一格**之后还剩几个不同的值；基线不适用时给 None。
+
+    这是 Important-4 要的"三档同一个出网值"那句事实的机器可读形式：原来它只写在候选表的
+    注释和测试里，交接那 4 行一个字不提。表自己畸形（缺档位）时返回 None——
+    那种情况后面 `probe_kwargs` 会响亮报错，不该在这里先炸栈。
+    """
+    if profile == thinking_profiles.NONE_PROFILE:
+        return None
+    try:
+        seen = {json.dumps(thinking_profiles.body_fragment(
+                    thinking_profiles.probe_kwargs(profile, lvl)),
+                    sort_keys=True, ensure_ascii=False)
+                for lvl in thinking_profiles.THINKING_LEVEL_LABELS}
+    except (ValueError, KeyError):
+        return None
+    return len(seen)
 
 
 def looks_form_unverifiable(exc, message: str) -> bool:
@@ -502,21 +670,28 @@ def send_once(client, record, kwargs, budget, prompt=DEFAULT_PROMPT,
 
 def make_config(argv=None) -> dict:
     parser = argparse.ArgumentParser(
-        description="思考参数核实探针（出站额度 4 次，一次一记）")
-    parser.add_argument("--data-dir", required=True, help="provider 配置所在目录（只读）")
+        description="思考参数核实探针（出站额度 4 次，一次一记；本单授权已用尽）")
+    parser.add_argument("--data-dir", required=True,
+                        help="provider 配置所在目录（只读；不许指向另一棵 checkout 的 data/）")
     parser.add_argument("--provider", required=True, help="provider_id，如 deepseek-chat")
     parser.add_argument("--profile", required=True, choices=list(thinking_profiles.probe_profile_ids()),
-                        help="候选配方名；none = 基线（不发任何思考参数）")
+                        help="候选配方名；none = 基线（不发任何思考参数，不代表模型不思考）")
     parser.add_argument("--level", default=None,
                         help="档位标签（%s）；基线不填" % "、".join(thinking_profiles.THINKING_LEVEL_LABELS))
     parser.add_argument("--attempt", type=int, default=None, help="登记的第几次，须与账本序号一致")
-    parser.add_argument("--isolation-dir", default=None, help="仓库外临时目录；缺省自建")
-    parser.add_argument("--ledger", default=None, help="出站账本；缺省落在隔离目录里")
+    parser.add_argument("--isolation-dir", default=None,
+                        help="仓库外临时目录；缺省每次新建一个（所以账本**不再**跟着它走）")
+    parser.add_argument("--ledger", default=None,
+                        help="出站账本，要一份跨进程稳定的路径。**live 模式必填**：缺省即 rc=2 拒发，"
+                             "因为跟着隔离目录走的账本每个进程都是空的，「总额 4 次」永不生效；"
+                             "也不许落在 --data-dir 里面")
     parser.add_argument("--dry-run", action="store_true", help="假 client：零网络、不记账")
     parser.add_argument("--fake", default="reasoning",
                         choices=("reasoning", "quiet", "extra_reasoning", "error_form",
                                  "error_plain", "error_leak"), help="dry-run 演哪一种形态")
-    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                        help="默认 8；live 模式必须 ≤ %d（越出授权形状就拒）"
+                             % AUTHORIZED_MAX_TOKENS)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     return vars(parser.parse_args(argv))
 
@@ -525,10 +700,15 @@ def run_probe(config, client_factory=None):
     """跑一次探针，返回 `(payload, rc, secrets)`。
 
     `client_factory` 只给测试用：注入一个替身，就能在零网络下走完真实调用那段代码
-    （隔离 → 单例校验 → 记账 → 发 → 读证据 → 判据），CLI 里没有这个开关。
+    （预检 → 隔离 → 重叠判据 → 单例校验 → 记账 → 发 → 读证据 → 判据），CLI 里没有这个开关。
     第三个返回值是那把真 key——只在本进程内存里，`main()` 把它交给出口体检，绝不打印。
+
+    顺序本身就是判据，两处不能换（各自都有会红的反例）：
+    **重叠判据先于 `load_backend_modules()`**（import 会写盘），
+    **预检先于隔离**（越权的命令行形状连目录都不该开、环境都不该动）。
     """
     baseline = config["profile"] == thinking_profiles.NONE_PROFILE
+    entry = thinking_profiles.PROBE_PROFILES.get(config["profile"]) or {}
     # 字段名有条反作用在身上的约束：整份 payload 出门前会再过一次 `scrub_secrets`
     # （`render_and_check`），而它的第一条形状规则连**键名**一起吃——`key_fp`、
     # `key_source` 这种名字会被它当成凭据掩掉，于是干净的结果被误判成泄露、整份拒打
@@ -537,42 +717,79 @@ def run_probe(config, client_factory=None):
     payload = {
         "probe": "thinking_profile", "task": "v0.39.1 Task 11",
         "live": not config["dry_run"],
-        "transport": "openai_sdk" if (client_factory is None and not config["dry_run"]) else "test_double",
+        # 只在真进入传输那一步才盖章（见下面 `factory` 那一段）：预检被拒、一次都没发时
+        # 这里必须留 None，否则与 `live: true` 并读会被当成"发过"。
+        "transport": None,
         "provider_id": config["provider"], "profile": config["profile"],
         "level": config["level"], "authorized_live_calls": AUTHORIZED_LIVE_CALLS,
         "attempt": config["attempt"], "call_slot": None,
         "request_shape": {"prompt": DEFAULT_PROMPT, "max_tokens": config["max_tokens"],
                           "stream": False, "timeout": config["timeout"], "max_retries": 0},
         "request_kwargs": {}, "request_body": {}, "sdk_kwarg_check": None,
+        # —— 交接物自带的射程（Important-4）：这三格是 Task 12 会直接抄的那一层。
+        "level_used": entry.get("level_used"),
+        "level_distinct_wire_values": distinct_wire_values(config["profile"], baseline),
+        "level_shape": entry.get("shape"),
+        "baseline_had_reasoning": None,
         "credential_fp": None, "credential_origin": None,
         "accepted": None, "has_reasoning_content": False, "reasoning_tokens": 0,
         "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
         "evidence_fields": [], "error_class": None, "error_excerpt": None,
-        "verdict": None, "verdict_label": None, "isolation_ok": False,
+        "verdict": None, "verdict_label": None, "scope": None, "isolation_ok": False,
         "runtime_data_untouched": None, "notes": [],
     }
     secrets = []
     scrub = hide = None
 
     def blocked(note, exc=None):
-        """闸拦停：不给结论，只给"为什么没发"。"""
+        """闸拦停：不给结论，只给"为什么没发"——射程那一格也必须写清"一次都没发"。"""
         payload["verdict"] = payload["verdict"] or "preflight_failed"
-        payload["verdict_label"] = VERDICT_LABELS[payload["verdict"]]
+        stamp_verdict(payload)
         payload["notes"].append(redact(note, secrets, scrub, hide))
         if exc is not None:
             payload["error_class"] = type(exc).__name__
             payload["notes"].append(error_excerpt(exc, secrets, scrub, hide))
         return payload, RC_BLOCKED, secrets
 
-    # —— 闸 2：先隔离，才许 import providers；再把"会写哪儿"验一遍
+    # —— 闸 0：预检。四条判据全部走在这里，而不是隔离/记账之后：
+    #    越权的命令行形状一次都不该发，也不该在磁盘上留下任何东西。
     try:
         data_dir = Path(os.path.abspath(str(config["data_dir"])))
-        iso = isolate_runtime_env(config["isolation_dir"])
-        providers_mod, pathmask_mod = load_backend_modules(iso)
-        # 临时目录与现网配置目录必须互不相干：`--isolation-dir` 指到 data/ 里面去的话，
-        # "隔离"就恰好变成了"把要保护的那份挂进来"。
+        if data_dir_belongs_to_another_checkout(data_dir):
+            raise RuntimeError("--data-dir 的宿主目录是另一棵 checkout（有 .git 却不是本工具这棵树）："
+                               "本工具不许对另一个 checkout 运行，主工作树那份 data/ 是现网资产")
+        ledger = str(config["ledger"] or "").strip()
+        if not config["dry_run"] and not ledger:
+            raise RuntimeError("live 模式必须显式给 --ledger（一份跨进程稳定的账本路径）："
+                               "缺省的账本会落进本次新建的隔离目录，每个进程都从空账本开始 ⇒ "
+                               "「总额 4 次」这道闸永不生效。本次零出站")
+        if ledger and overlaps(ledger, data_dir):
+            raise RuntimeError("--ledger 不许落在 --data-dir 里面：那是本次声明只读的目录，"
+                               "账本每发一次都要写它一笔")
+        if not config["dry_run"] and not 1 <= int(config["max_tokens"]) <= AUTHORIZED_MAX_TOKENS:
+            raise RuntimeError(f"max_tokens={config['max_tokens']} 越出授权形状"
+                               f"（授权的那一格是 {AUTHORIZED_MAX_TOKENS}，只许等于或小于它、且必须 ≥1）："
+                               f"live 模式拒发")
+    except Exception as exc:                                    # noqa: BLE001 - 闸没让过就停
+        return blocked("预检闸拒绝：命令行形状不在授权范围内，一次都不发", exc)
+
+    # —— 闸 2：先隔离，**先判重叠**，才许 import providers；再把"会写哪儿"验一遍。
+    #    重叠判据必须在 `load_backend_modules()` **之前**（Important-3）：import providers
+    #    这一步本身就会跑 `ProviderStore._load()`，缺文件时 `_seed_from_env()` 非空即
+    #    `_flush()`，于是 `--isolation-dir <data-dir>/iso` 会在声明只读的 `--data-dir`
+    #    **里面**开出两个文件——先 import 再判重叠，等于先把文件写进去再宣布这里不许有文件。
+    #    所以这里查两次：显式 `--isolation-dir` 的形状在** mkdir 之前**就拒（连开目录都不许），
+    #    缺省自建那一支的落点在隔离之后再验一遍（`mkdtemp` 正常不可能落在 data_dir 里，
+    #    但"不可能"不是判据）。反例锁：
+    #    `test_overlap_with_the_live_data_is_refused_before_providers_is_imported`。
+    try:
+        requested_iso = config["isolation_dir"]
+        if requested_iso and overlaps(Path(os.path.abspath(str(requested_iso))), data_dir):
+            raise RuntimeError("显式 --isolation-dir 与 --data-dir 重叠：在开任何目录之前就拒了")
+        iso = isolate_runtime_env(requested_iso)
         if overlaps(iso, data_dir):
-            raise RuntimeError("隔离目录与 --data-dir 重叠，拒绝继续")
+            raise RuntimeError("隔离目录与 --data-dir 重叠，拒绝继续（且一次 import 都没做）")
+        providers_mod, pathmask_mod = load_backend_modules(iso)
         assert_store_quarantined(providers_mod, [REPO_ROOT, data_dir])
     except Exception as exc:                                    # noqa: BLE001 - 闸没让过就停
         return blocked("隔离闸拒绝：providers 单例没被请到仓库外", exc)
@@ -611,8 +828,9 @@ def run_probe(config, client_factory=None):
     before = files_digest(config["data_dir"])
 
     # —— 闸 1：真实调用先记账（dry-run 不进账本，它没花额度）
+    #    `--ledger` 在预检那一步已经强制存在（Critical-1）：这里**不再**回退到
+    #    `iso / "call-ledger.jsonl"`——那个默认值正是"每个进程从空账本开始"的来源。
     if not config["dry_run"]:
-        ledger = config["ledger"] or str(iso / "call-ledger.jsonl")
         try:
             payload["call_slot"] = reserve_call_slot(
                 ledger, config["provider"], config["profile"], config["level"],
@@ -627,6 +845,9 @@ def run_probe(config, client_factory=None):
     else:
         factory = lambda record: build_live_client(providers_mod, record,          # noqa: E731
                                                     config["timeout"])
+    # 走到这一行才算"进入传输那一步"。上面任何一条闸返回的 payload 都留 transport=None，
+    # 免得 `live: true` + `transport: "openai_sdk"` 并读时被当成"已经发过一次"。
+    payload["transport"] = "openai_sdk" if client_factory is None else "test_double"
     budget = CallBudget()
     try:
         evidence = read_evidence(send_once(factory(record), record, kwargs, budget,
@@ -637,10 +858,11 @@ def run_probe(config, client_factory=None):
                         "error_excerpt": error_excerpt(exc, secrets, scrub, hide)})
         if baseline:
             payload["verdict"] = "baseline_failed"
+            payload["baseline_had_reasoning"] = False
         else:
             payload["verdict"] = ("form_unverifiable" if looks_form_unverifiable(exc, message)
                                   else "unverified")
-        payload["verdict_label"] = VERDICT_LABELS[payload["verdict"]]
+        stamp_verdict(payload)
         payload["notes"].append("失败不重试：这一格的证据就是这条错误本身")
         payload["runtime_data_untouched"] = files_digest(config["data_dir"]) == before
         return payload, RC_UNVERIFIED, secrets
@@ -648,10 +870,15 @@ def run_probe(config, client_factory=None):
     payload.update({k: v for k, v in evidence.items() if k != "accepted"})
     payload["accepted"] = True
     payload["verdict"] = classify_verdict(baseline, evidence)
-    payload["verdict_label"] = VERDICT_LABELS[payload["verdict"]]
+    if baseline:
+        # 基线那一格的证据必须自己说话（Important-4 第 3 格的机器可读那一半）：
+        # 不发任何思考参数而响应里仍有推理痕迹 ⇒ 界面不许把这一格写成"已关闭思考"。
+        payload["baseline_had_reasoning"] = bool(evidence["has_reasoning_content"]) or \
+            int(evidence["reasoning_tokens"] or 0) > 0
+    stamp_verdict(payload)
     payload["runtime_data_untouched"] = files_digest(config["data_dir"]) == before
     if not payload["runtime_data_untouched"]:
-        payload["notes"].append("只读承诺被打破：跑完之后现网那两个文件的摘要变了，"
+        payload["notes"].append("只读承诺被打破：跑完之后 --data-dir 那棵树的摘要变了，"
                                 "本次结论不予采信")
         return payload, RC_BLOCKED, secrets
     if payload["verdict"] in ("verified", "baseline_ok"):

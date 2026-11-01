@@ -15,6 +15,10 @@
 4. **闸 3（密钥不出终端）**：值级 → 形状级（`providers.scrub_secrets`）→ 路径级
    （`hide_paths`）三层，加最后一道整份体检。`scrub_secrets` 会不会打码不假设，
    当场造样本演；同时演它**认不出**无形状的值——那正是探针要多一层值级遮盖的理由。
+
+修复轮 1（审查员 1 Critical + 4 Important + 3 Minor）新增 §8：闸的牙全部换成机制的牙
+——默认参数下"总额 4 次"必须真咬、`AUTHORIZED_LIVE_CALLS` 这个数字本身有锁、重叠判据
+必须在 import **之前**、交接物必须自带射程、脱敏必须在截断**之前**。每条都配会红的反例。
 """
 import ast
 import importlib.util
@@ -63,8 +67,13 @@ def _write_config(tmp_path: Path, *, provider_id="p_probe_deep", key=SHAPEY,
 
 def _argv(tmp_path: Path, *extra: str, provider_id="p_probe_deep", key=SHAPEY,
           inline_key=None, asked=None) -> list:
+    """夹具命令行。**live 形状（不带 --dry-run）必须有一份显式账本**，这是 Critical-1
+    修完之后的新契约：缺省账本会落进每次新建的隔离目录 ⇒ "总额 4 次"永不咬。所以这里
+    给每格测试一条固定的持久账本（在 data_dir 之外），让既有用例继续演真调用那一段。
+    位置在 `*extra` **之前**：谁要自己指定账本，谁说了算（argparse 取最后一次）。"""
     _write_config(tmp_path, provider_id=provider_id, key=key, inline_key=inline_key)
     return ["--data-dir", str(tmp_path / "live-data"), "--provider", asked or provider_id,
+            "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
             "--isolation-dir", str(tmp_path / "iso"), *extra]
 
 
@@ -332,14 +341,19 @@ def _fill_ledger(path: Path, n: int) -> None:
 
 
 def test_budget_gate_refuses_the_fifth_call_without_sending(tmp_path):
-    """授权就 4 次。第 5 次不许"再试一次"——账本到数就停，停手时客户端一次都没被碰。"""
+    """授权就 4 次。第 5 次不许"再试一次"——账本到数就停，停手时客户端一次都没被碰。
+
+    **条数写死字面量 4**（Important-2）：这一格是"第 5 次必须被拒"的那道锁，填充条数
+    若跟着 `AUTHORIZED_LIVE_CALLS` 一起漂，把常量改成 9 就变成"填满 9 条再发第 10 次"，
+    尺子和被测同源 ⇒ 全绿。常量本身由 `test_authorized_live_call_count_is_the_grant` 钉。
+    """
     ledger = tmp_path / "iso" / "call-ledger.jsonl"
-    _fill_ledger(ledger, probe.AUTHORIZED_LIVE_CALLS)
+    _fill_ledger(ledger, 4)
     build, seen = _never()
     payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
                           "--attempt", "5", "--ledger", str(ledger), factory=build)
     assert rc == probe.RC_BLOCKED and seen == []
-    assert len(probe.read_ledger(ledger)) == probe.AUTHORIZED_LIVE_CALLS
+    assert len(probe.read_ledger(ledger)) == 4, "被拒的那一次不许在账上留痕"
     assert payload["verdict"] == "preflight_failed"
 
 
@@ -727,6 +741,7 @@ def test_run_reports_the_live_config_untouched(tmp_path):
     data_dir = _write_config(tmp_path)
     config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
                                 "--profile", "deepseek_thinking_type", "--level", "均衡",
+                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
                                 "--isolation-dir", str(tmp_path / "iso")])
     # 摘要必须在 `make_config` 之后取：`_run` 那层助手会重写这份夹具，先把 before
     # 记下来就会把"夹具自己写的"当成"探针写的"——那是假红，不是证据。
@@ -757,3 +772,303 @@ def test_default_isolation_dir_lives_outside_the_repo(tmp_path):
         assert os.environ["DATA_ROOT"] == str(iso)
     finally:
         shutil.rmtree(iso, ignore_errors=True)
+
+
+# ---------------- 8. 修复轮 1：审查员 1 Critical + 4 Important + 3 Minor --
+#
+# 这一节守的不是上游，是**这一版探针自己的闸**。审查员的实测结论是：五条问题全在闸上，
+# 而且都能被"操作者记得"暂时掩盖过去。所以每条判据都配一条已知应当相反的输入，
+# 并当场实跑过红（变异名单与还原摘要写在 `C:/Users/34426/dl/sdd-takeover-20261101/`
+# 那份报告的「修复轮 1」一节）。本节**零出站**：客户端一律是注入的替身。
+
+def test_live_run_without_an_explicit_ledger_is_refused(tmp_path):
+    """Critical-1 的一半：`--ledger` 缺省时账本落在**本次**隔离目录里，而 `isolate_runtime_env(None)`
+    每次 `mkdtemp` 一个新目录 ⇒ 每个进程从空账本开始，`used=0` 恒成立，"总额 4 次"永不咬。
+    修法是把默认拿掉：live 模式不给显式账本就 rc=2 拒发，**零出站、零写盘、连环境都不动**。"""
+    data_dir = _write_config(tmp_path)
+    argv = ["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+            "--profile", "deepseek_thinking_type", "--level", "均衡",
+            "--isolation-dir", str(tmp_path / "iso")]
+    build, seen = _never()
+    env_before = dict(os.environ)
+    payload, rc, _ = probe.run_probe(probe.make_config(argv), client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["verdict"] == "preflight_failed"
+    assert payload["isolation_ok"] is False, "账本没定就别开始隔离：这道闸必须在隔离之前"
+    assert payload["transport"] is None, "一次都没发，不许报 transport"
+    assert payload["call_slot"] is None
+    assert not (tmp_path / "iso").exists(), "拒发这一支不许开出隔离目录"
+    assert dict(os.environ) == env_before, "没走到隔离就不许改 PROVIDERS_DB_PATH / DATA_ROOT"
+    assert any("--ledger" in note for note in payload["notes"]), payload["notes"]
+
+
+def test_five_live_runs_against_one_persistent_ledger_stop_at_the_fourth(tmp_path):
+    """Critical-1 的另一半：给了持久账本之后，**第 5 次**必须被拒。
+    四格真发（替身，零出站），第五格连客户端都不许被构造。"""
+    ledger = tmp_path / "budget" / "call-ledger.jsonl"
+    for seq in (1, 2, 3, 4):
+        payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", str(seq),
+                              "--ledger", str(ledger),
+                              factory=lambda r: probe.FakeClient("reasoning"))
+        assert rc == probe.RC_VERIFIED and payload["call_slot"] == seq, seq
+    assert len(probe.read_ledger(ledger)) == 4
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["error_class"] == "BudgetExhausted"
+    assert payload["transport"] is None
+    assert len(probe.read_ledger(ledger)) == 4, "被拒的第五格不许把账本撑到 5"
+
+
+def test_authorized_live_call_count_is_the_grant_itself(tmp_path):
+    """Important-2：这个数字原本只被上一格当**填充条数**用（尺子与被测同源），
+    审查员把它改成 9 ⇒ 83 条全绿。出处：用户 2026-11-01 授权的 4 次出站 =
+    两个上游 × (1 次基线 + 1 次带参数)。授权用尽后**不自动续**，要更多次得用户明示。
+    常量被改宽（哪怕只是本地实验）这一格必须红——两条都要：字面值 + 默认上限的行为。"""
+    assert probe.AUTHORIZED_LIVE_CALLS == 4, "改这个数字需要用户新的明示授权"
+    assert probe.CALLS_PER_RUN == 1, "单次运行也只许 1 条：第二条就是超授权"
+    assert probe.AUTHORIZED_MAX_TOKENS == 8, "授权形状里的 token 上限是 8，不是「反正很大」"
+    # 行为那一半：`reserve_call_slot` 不填 limit 时用的必须就是这份授权上限。
+    # 常量漂到 9 ⇒ 这一句不再抛 ⇒ 红。（上一格那条用字面量 4 填账，量的形状不跟着漂。）
+    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    _fill_ledger(ledger, 4)
+    with pytest.raises(probe.BudgetExhausted):
+        probe.reserve_call_slot(ledger, "p_probe_deep", "none", None, None)
+    assert len(probe.read_ledger(ledger)) == 4, "被拒的那一次不许留痕"
+
+
+def test_overlap_with_the_live_data_is_refused_before_providers_is_imported(tmp_path, monkeypatch):
+    """Important-3 的顺序锁：原顺序是 `isolate → load_backend_modules → if overlaps → assert`，
+    而 **import providers 就会跑 `ProviderStore._load()`**：缺文件时 `_seed_from_env()`
+    （读 `DEEPSEEK_API_KEY`）非空即 `_flush()` 落盘三个文件 ⇒
+    `--isolation-dir <data-dir>/iso` 会在声明只读的 `--data-dir` **里面**开出
+    `iso/providers.json` + `iso/provider_keys.json`。AGENTS.md §1 说 `data/` 是受保护运行期资产。
+    修法：重叠判据前移到 import 之前。把那句 `overlaps` 挪回 `load_backend_modules` 之后，
+    这一格立刻红（`imported` 非空 + 目标树被写了）。"""
+    data_dir = _write_config(tmp_path)
+    before = probe.files_digest(data_dir)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", SHAPEY)      # 播种的燃料：没这颗 `_seed_from_env` 会返回空表
+    imported = []
+
+    def spy(isolation_dir):
+        imported.append(isolation_dir)
+        raise AssertionError("重叠时一次都不许走到 import app.core.providers")
+
+    monkeypatch.setattr(probe, "load_backend_modules", spy)
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+                                "--profile", "none", "--dry-run",
+                                "--isolation-dir", str(data_dir / "iso")])
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(config, client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert imported == [], "重叠判据必须在 import 之前——import 本身就会写盘"
+    assert not (data_dir / "iso").exists()
+    assert probe.files_digest(data_dir) == before, "声明只读的那棵树必须逐字节没动"
+    assert payload["isolation_ok"] is False
+
+
+def test_files_digest_covers_everything_under_the_data_dir(tmp_path):
+    """Important-3 的尺子锁：原来只盯顶层那两个名字，所以"`iso/` 子目录被开出来"这件事
+    它**根本看不见**——那道闸和它所量的洞一起瞎。改成递归覆盖整棵树之后：
+    多一个子目录、多一个深层文件、深层文件改一个字节，都要动。"""
+    data_dir = _write_config(tmp_path)
+    before = probe.files_digest(data_dir)
+    (data_dir / "iso").mkdir()
+    assert probe.files_digest(data_dir) != before, "只多一个空子目录也是一种写盘"
+    deep = data_dir / "iso" / "deeper"
+    deep.mkdir()
+    (deep / "provider_keys.json").write_text("{}", encoding="utf-8")
+    mid = probe.files_digest(data_dir)
+    assert mid != before, "深层子目录里的文件也在射程内（原尺子看不见）"
+    assert probe.files_digest(data_dir) == mid, "同一棵树原地不动时必须相等——不许是恒红的尺子"
+    (deep / "provider_keys.json").write_text('{"a": 1}', encoding="utf-8")
+    assert probe.files_digest(data_dir) != mid
+    # 负控的最后一半：目录不存在时仍是"missing"那一格，既有那格用例的口径不变
+    assert set(probe.files_digest(tmp_path / "nope").values()) == {"missing"}
+
+
+def test_none_profile_label_describes_the_request_not_the_model():
+    """Important-4 的第 3 格：`none` 那格旧 label 是「不使用思考（基线）」。
+    基线 #1/#3 证明这两个上游**不发参数也在思考** ⇒ 这句话对**参数**诚实、
+    对**模型行为**不诚实，界面照着写就成了"已关闭思考"。label 只能说"服务端不发这颗参数"。"""
+    entry = thinking_profiles.PROBE_PROFILES[thinking_profiles.NONE_PROFILE]
+    assert "不使用思考" not in entry["label"], "不许宣称模型不思考，只能宣称不发这颗参数"
+    assert "不发思考参数" in entry["label"] and "不代表模型不思考" in entry["label"]
+    assert "不发任何思考参数" in entry["shape"]
+
+
+def test_handoff_payload_declares_what_the_three_levels_actually_do(tmp_path):
+    """Important-4 第 1 格的锁：`level_used` 与"三档折算成出网值还剩几个"必须在交接物里。
+    原来"三档同一个出网值"这件事只写在候选表的注释和测试里，交接那 4 行一个字不提 ⇒
+    Task 12 照着填三档，界面就是三个点、wire 上一个值，而且没人会报错。"""
+    same, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
+                       factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_VERIFIED
+    assert same["level_used"] is False, "这一支三档同一个出网值，标志必须说实话"
+    assert same["level_distinct_wire_values"] == 1
+    # 负控：真的三档不同那一支（openai_reasoning_effort）必须报 True / 3
+    three, rc2, _ = _run(tmp_path, "--profile", "openai_reasoning_effort", "--level", "深入",
+                         factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED
+    assert three["level_used"] is True and three["level_distinct_wire_values"] == 3
+    # 负控：基线那一格没有档位可言，必须是 None 而不是 1（"1"会被读成"三档塌成一档"）
+    base, rc3, _ = _run(tmp_path, "--profile", "none", factory=lambda r: probe.FakeClient("quiet"))
+    assert rc3 == probe.RC_VERIFIED and base["level_distinct_wire_values"] is None
+
+
+def test_handoff_payload_carries_the_scope_the_evidence_actually_supports(tmp_path):
+    """Important-4 第 2 格的锁：结论必须自带射程。Task 12 的消费端是
+    `enabled: status === "verified"` + 档位候选直接吃服务端 `thinking_levels`，
+    裸「已核实」在那头就长成"三档可切换"。改回裸「已核实」这一格必须红（变异实测过）。"""
+    payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
+                          factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_VERIFIED
+    label = payload["verdict_label"]
+    assert label.strip() != "已核实", "「已核实」三个字不许单独出现在结论里"
+    assert "已核实" in label and "未证" in label, label
+    assert payload["scope"]["tier"] == "shape"
+    assert payload["scope"]["sent"] is True
+    assert payload["scope"]["not_proved"], "射程字段不许空着让下游自己猜"
+    assert "不是模型级" in payload["scope"]["covers"]
+    # 锁 2 的负控：预检被拒那一格也有射程字段，且明说"一次都没发"
+    # （档位传表外标签就走 `probe_kwargs` 那句 ValueError；`none` 那一档不吃档位，所以换一支）
+    blocked_payload, rc3, _ = _run(tmp_path, "--profile", "openai_reasoning_effort",
+                                   "--level", "瞎填", "--dry-run")
+    assert rc3 == probe.RC_BLOCKED
+    assert blocked_payload["scope"]["tier"] == "none"
+    assert blocked_payload["scope"]["sent"] is False
+
+
+def test_baseline_row_reports_that_the_upstream_was_already_reasoning(tmp_path):
+    """Important-4 的第 3 格（机器可读那一半）：基线那一格必须把"不发参数也在出推理"
+    这件事写进 payload，否则 Task 12 的界面会把它写成"已关闭思考"。"""
+    loud, rc, _ = _run(tmp_path, "--profile", "none",
+                       factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_VERIFIED and loud["baseline_had_reasoning"] is True
+    assert "不代表" in loud["verdict_label"] and "已核实" not in loud["verdict_label"]
+    assert loud["scope"]["not_proved"], "基线那一格也要带射程"
+    # 负控 A：基线安静时必须是 False，不许留 None 让下游自己猜
+    quiet, rc2, _ = _run(tmp_path, "--profile", "none", factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and quiet["baseline_had_reasoning"] is False
+    # 负控 B：非基线那一格没有"基线推理"这件事可报，留 None
+    other, _rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
+                         factory=lambda r: probe.FakeClient("reasoning"))
+    assert other["baseline_had_reasoning"] is None
+
+
+def test_error_excerpt_is_redacted_before_it_is_truncated(tmp_path):
+    """Important-5：`redact(f"{type}:{exc}"[:180], ...)` 先截后遮。值级整值替换和出口
+    整份体检都要求**完整值在场**，于是一颗没有凭据形状的 key 跨在 180 边界上时，
+    会漏出前缀碎片而两层都不认（审查员直接调 `render_and_check` 实测三组样本
+    `exit_gate=allows print`）。修法：先脱敏、再截断、出口再体检一遍。"""
+    padding = "x" * 150          # 前缀 21+5+150=176，让 key 正好跨在 180 那条边上
+    exc = probe.FakeBadRequestError("上游拒绝 " + padding + SHAPELESS)
+    out = probe.error_excerpt(exc, [SHAPELESS], providers.scrub_secrets, pathmask.hide_paths)
+    assert SHAPELESS not in out
+    for n in range(4, len(SHAPELESS) + 1):
+        assert SHAPELESS[:n] not in out, "漏出 %d 字的 key 前缀碎片就是泄露" % n
+    assert len(out) <= 180
+    # 出口那道整份体检对这一格是**放行**的（它本来就认不出半截 key），所以截断顺序
+    # 是唯一的防线——这里同时证明"改完之后这仍是一句能打印的话"。
+    assert probe.render_and_check({"error_excerpt": out}, [SHAPELESS],
+                                  providers.scrub_secrets)
+
+
+def test_max_tokens_beyond_the_authorized_shape_is_refused(tmp_path):
+    """Minor：授权形状是 `max_tokens=8`，而它是自由命令行值——改成 2000 也照发就是越权
+    （这一格花的是钱）。live 模式越出形状就拒，且**在记账之前**拒。"""
+    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
+                          "--ledger", str(ledger), "--max-tokens", "2000", factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert ledger.exists() is False, "越权的形状不许占额度"
+    assert payload["transport"] is None
+    assert payload["request_shape"]["max_tokens"] == 2000, "拒了也要如实记下它想发什么"
+    assert any("max_tokens" in note for note in payload["notes"]), payload["notes"]
+    # 负控 A：授权形状内（8）照走
+    ok, rc2, _ = _run(tmp_path, "--profile", "none", "--max-tokens", "8",
+                      factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED
+    # 负控 B：dry-run 零出站，不受这一道约束（拿来演别的形状才是安全的）
+    dry, rc3, _ = _run(tmp_path, "--profile", "none", "--dry-run", "--max-tokens", "2000")
+    assert rc3 == probe.RC_VERIFIED and dry["request_shape"]["max_tokens"] == 2000
+    # 另一半：0 与负数也不是"更小所以更省"，那是发不出去也照样占额度的畸形形状
+    for bogus in ("0", "-5"):
+        b, s = _never()
+        blocked_payload, rc4, _ = _run(tmp_path, "--profile", "none", "--max-tokens", bogus,
+                                       "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
+                                       factory=b)
+        assert rc4 == probe.RC_BLOCKED and s == [], bogus
+        assert blocked_payload["request_shape"]["max_tokens"] == int(bogus)
+
+
+def test_ledger_pointed_into_the_read_only_data_dir_is_refused(tmp_path):
+    """Critical-1 的配套：账本从此必填，那它就有可能被指进 `--data-dir`——而那一轮它
+    是声明只读的（每发一次都要在那棵树里写一笔，`files_digest` 从此只会一直红）。
+    预检就拒：零出站、零写盘。"""
+    data_dir = _write_config(tmp_path)
+    inside = data_dir / "call-ledger.jsonl"
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(inside), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == [] and payload["transport"] is None
+    assert inside.exists() is False
+    assert any("--ledger" in n and "--data-dir" in n for n in payload["notes"]), payload["notes"]
+    # 负控：账本在树外时这一条必须放行（否则这道闸是恒红的装饰）
+    ok, rc2, _ = _run(tmp_path, "--profile", "none",
+                      "--ledger", str(tmp_path / "out" / "l.jsonl"),
+                      factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
+
+
+def test_transport_is_only_stamped_when_the_call_is_actually_attempted(tmp_path, monkeypatch):
+    """Minor：`transport: "openai_sdk"` 原本在 `preflight_failed`（一次都没发）时也照打，
+    与 `live: true` 并读会被当成"发过"。改成只在真进入传输那一步才打。
+    真发那一支用替身顶掉 `build_live_client`——真客户端的唯一出口被换掉，没有 socket 被创建。"""
+    blocked_payload, rc, _ = _run(tmp_path, "--profile", "openai_reasoning_effort",
+                                  "--level", "瞎填", "--dry-run")
+    assert rc == probe.RC_BLOCKED and blocked_payload["transport"] is None
+    sent, rc2, _ = _run(tmp_path, "--profile", "none",
+                        factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED and sent["transport"] == "test_double"
+    built = []
+
+    def stub(provider, record, timeout=0):
+        built.append(record["id"])
+        return probe.FakeClient("reasoning")
+
+    monkeypatch.setattr(probe, "build_live_client", stub)
+    live, rc3, _ = _run(tmp_path, "--profile", "none",
+                        "--ledger", str(tmp_path / "b" / "l.jsonl"))
+    assert rc3 == probe.RC_VERIFIED and live["transport"] == "openai_sdk"
+    assert built == ["p_probe_deep"], "构造真客户端的唯一入口只许走一次"
+
+
+def test_data_dir_of_another_checkout_is_refused_without_being_read(tmp_path, monkeypatch):
+    """Minor：`inside_dir(target, REPO_ROOT)` 只挡"发起这一跑的那棵树"——从工作树跑、
+    `--data-dir` 指主工作树的 `data/`（AGENTS.md §1 的受保护运行期资产）这个形状原本靠
+    的是另一格判据。现在把它显式列入禁止名单：宿主目录里有 `.git` 而宿主又不是本工具
+    这棵树 ⇒ 拒。**只加判据，绝不去读那份目录**（这里连 stat 都只打在宿主和它的 `.git` 上）。"""
+    other = tmp_path / "checkout"
+    (other / ".git").mkdir(parents=True)
+    live = other / "data"
+    live.mkdir()
+    calls = []
+
+    def spy_isolate(isolation_dir=None):
+        calls.append(isolation_dir)
+        raise AssertionError("--data-dir 属于另一棵 checkout 时不许开始隔离")
+
+    monkeypatch.setattr(probe, "isolate_runtime_env", spy_isolate)
+    config = probe.make_config(["--data-dir", str(live), "--provider", "p_probe_deep",
+                                "--profile", "none", "--dry-run",
+                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
+                                "--isolation-dir", str(tmp_path / "iso")])
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(config, client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == [] and calls == []
+    assert any("checkout" in note for note in payload["notes"]), payload["notes"]
+    # 负控：本工具自己那棵树里的 data/、以及宿主没有 .git 的夹具目录都必须放行
+    assert probe.data_dir_belongs_to_another_checkout(REPO_ROOT / "data") is False
+    assert probe.data_dir_belongs_to_another_checkout(_write_config(tmp_path)) is False
+    assert probe.data_dir_belongs_to_another_checkout(live) is True

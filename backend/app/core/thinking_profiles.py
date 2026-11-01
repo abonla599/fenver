@@ -10,11 +10,14 @@
 只有钉成表 + 逐档断言才能在零网络时就发现"第三档我忘了映射"。
 
 为什么本文件**不 import app.core.providers**：那个模块末尾有进程级单例
-（providers.py:1059 `store = ProviderStore()`），import 它就等于 `_load()`，而
-`_load()` 检测到内联密钥会 `_flush()` 回写 `data/providers.json` 与 keys——本仓的开发机
-同时就是生产机，那一下写的就是线上那份配置。所以这里保持零依赖：纯数据 + 一个查表函数，
+（providers.py:1059 `store = ProviderStore()`），import 它就等于跑 `_load()`，而
+`_load()` 在记录文件缺失时会 `_seed_from_env()`（读 `DEEPSEEK_API_KEY`）、只要播种出
+非空列表就 `_flush()` 回写 `providers.json` 与 keys 两份文件——本仓的开发机同时就是
+生产机，那一下写的就是线上那份配置（Task 11 修复轮 1 实测过这条路径：先 import 再判
+重叠，等于先把文件开进声明只读的那棵树）。所以这里保持零依赖：纯数据 + 一个查表函数，
 测试里可以随便 import。（`tools/probe_thinking_profile.py` 确实要用 providers，它在
- import 之前先把 `PROVIDERS_DB_PATH` 指到仓库外，判据见那个文件的 `isolate_runtime_env`。）
+ import **之前**先把 `PROVIDERS_DB_PATH` 指到仓库外、并先判完重叠，判据见那个文件的
+ `run_probe` 闸 2 与 `isolate_runtime_env`。）
 """
 import copy
 
@@ -37,10 +40,15 @@ NONE_PROFILE = "none"
 # 仍是体顶层，与"直接写 thinking"完全一致。
 PROBE_PROFILES = {
     NONE_PROFILE: {
-        "label": "不使用思考（基线）",
+        # 措辞是修过的（Task 11 修复轮 1，Important-4）：基线 #1/#3 证明这两个上游
+        # **不发参数也在出推理**。旧 label「不使用思考（基线）」对**参数**诚实、
+        # 对**模型行为**不诚实，界面照着写就成了"已关闭思考"那句假话。
+        # 这一格只能说一件事：服务端这一轮不再发送那颗思考参数。
+        "label": "不发思考参数（基线，不代表模型不思考）",
         "level_used": False,
         "levels": {},
-        "shape": "不发任何思考参数，与今天线上的调用形状完全一致",
+        "shape": "不发任何思考参数，与今天线上的调用形状完全一致；"
+                 "它只是对照组，不是「思考已关闭」的证据",
     },
     "openai_reasoning_effort": {
         "label": "OpenAI reasoning_effort",
