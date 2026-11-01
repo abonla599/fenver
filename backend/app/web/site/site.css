@@ -20,51 +20,27 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --display: "Helvetica Neue", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
-  --bg: #f7f8fa;
-  --surface: #ffffff;
-  --surface-2: #eef0f4;
-  --surface-3: #e4e7ec;
-  --line: #e3e6eb;
-  --line-strong: #cbd1da;
-  --ink: #16181d;
-  --ink-soft: #5f6672;
-  --ink-faint: #8a919c;
-  --brand: #0a7d5e;
-  --brand-bright: #3dd598;
-  --brand-soft: #e6f6f0;
-  --brand-ink: #ffffff;
-  --ai: #5566f0;
-  --ai-soft: #eef0ff;
-  --danger: #dc2626;
-  --shadow-sm: 0 1px 2px rgba(10, 11, 14, .04), 0 8px 24px rgba(10, 11, 14, .04);
-  --shadow-lg: 0 30px 80px rgba(10, 11, 14, .16), 0 8px 24px rgba(10, 11, 14, .08);
-  color-scheme: light;
-}
-
-html[data-theme="dark"] {
-  --bg: #0a0b0e;
-  --surface: #121317;
-  --surface-2: #181a20;
-  --surface-3: #1f222a;
-  --line: #262a31;
-  --line-strong: #3a404b;
-  --ink: #f2f3f5;
-  --ink-soft: #a1a6b0;
-  --ink-faint: #6f747e;
-  --brand: #3dd598;
-  --brand-bright: #3dd598;
-  --brand-soft: #112c23;
-  --brand-ink: #061b12;
-  --ai: #7c83ff;
-  --ai-soft: #1d1e38;
-  --danger: #f87171;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .18), 0 8px 24px rgba(0, 0, 0, .12);
-  --shadow-lg: 0 30px 80px rgba(0, 0, 0, .42), 0 8px 24px rgba(0, 0, 0, .24);
+  /* 全站只有这一套配色，没有日间/夜间切换：底色取带一点绿意的炭黑，与首屏那块
+     产品示意同色系（明度差一档，不作孤岛）；强调绿刻意压过饱和度，黑底上不发荧光。 */
+  --bg: #0b0f0e;
+  --surface: #121816;
+  --surface-2: #172220;
+  --surface-3: #1d2a26;
+  --line: #223230;
+  --line-strong: #33463f;
+  --ink: #e9efec;
+  --ink-soft: #9fb0a9;
+  --ink-faint: #6f8179;
+  --brand: #4bb98d;
+  --brand-bright: #63c9a0;
+  --brand-soft: #13241d;
+  --brand-ink: #06150f;
+  --ai: #8b8ff5;
+  --ai-soft: #1a1b33;
+  --danger: #f07171;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .28), 0 8px 24px rgba(0, 0, 0, .2);
+  --shadow-lg: 0 30px 80px rgba(0, 0, 0, .5), 0 8px 24px rgba(0, 0, 0, .3);
   color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  html:not([data-theme]) { color-scheme: light; }
 }
 
 * { box-sizing: border-box; }
@@ -156,21 +132,6 @@ strong { font-weight: 650; }
   background: var(--surface); color: var(--ink);
   font: 550 .82rem/1 var(--sans); cursor: pointer;
 }
-.iconbtn {
-  display: grid; place-items: center; width: 42px; height: 42px;
-  margin-left: 10px; padding: 0; border: 1px solid var(--line); border-radius: 12px;
-  background: var(--surface); color: var(--ink-soft); cursor: pointer;
-  transition: color var(--dur-1), border-color var(--dur-1), transform var(--dur-1);
-}
-.iconbtn:hover { color: var(--brand); border-color: var(--brand); }
-.iconbtn:active { transform: scale(.95); }
-.iconbtn svg {
-  width: 19px; height: 19px; fill: none; stroke: currentColor;
-  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
-}
-#themeBtn .i-moon { display: none; }
-html[data-theme="light"] #themeBtn .i-sun { display: none; }
-html[data-theme="light"] #themeBtn .i-moon { display: block; }
 
 /* 首屏 */
 .hero {
@@ -225,13 +186,6 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 .hero-assurances { display: flex; flex-wrap: wrap; gap: 8px 18px; list-style: none; margin: 0; padding: 0; color: var(--ink-soft); font-size: .78rem; }
 .hero-assurances li { display: inline-flex; align-items: center; gap: 7px; }
 .hero-assurances li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--brand); }
-.hero-proof {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px;
-  margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line);
-}
-.hero-proof div { display: grid; gap: 4px; }
-.hero-proof strong { font-size: .82rem; letter-spacing: -.01em; }
-.hero-proof span { color: var(--ink-faint); font-size: .7rem; line-height: 1.5; }
 
 /* 首屏产品示意 */
 .product-stage {
@@ -243,7 +197,7 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
 .product-stage::before {
   content: ""; position: absolute; z-index: -1; width: 240px; height: 240px;
   top: -40px; right: -20px; border-radius: 50%; background: var(--brand-bright);
-  filter: blur(110px); opacity: .13;
+  filter: blur(110px); opacity: .09;
 }
 .stage-orbit { position: absolute; z-index: -1; border: 1px solid color-mix(in srgb, var(--brand) 18%, transparent); border-radius: 50%; pointer-events: none; }
 .orbit-one { width: 440px; height: 440px; right: -210px; top: -170px; }
@@ -254,8 +208,12 @@ html[data-theme="light"] #themeBtn .i-moon { display: block; }
    配白截图"。 */
 .app-window {
   width: min(100%, 390px); overflow: hidden;
+  /* 这块是"软件界面的屏幕"，全站固定浅色，与 #shots 里四张真实截图同一套颜色。
+     color-scheme: light 是给浏览器看的：页面上层已经是深色，别把这块当漏网的浅色
+     反色处理——一旦被强制反转，就会出现"黑示意窗配白截图"的割裂。 */
+  color-scheme: light;
   border: 1px solid #e3e6eb; border-radius: 23px;
-  background: #f7f8fa; box-shadow: 0 24px 60px rgba(16, 24, 40, .12);
+  background: #f7f8fa; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
   transform: rotate(1.2deg);
 }
 .window-bar { display: flex; align-items: center; justify-content: space-between; padding: 15px 17px; border-bottom: 1px solid #e3e6eb; }
@@ -526,8 +484,6 @@ footer > .note { margin-top: 12px; }
   .issue { display: none; }
   .topbar { grid-template-columns: auto 1fr auto; }
   .hero-grid { grid-template-columns: minmax(0, 1fr) minmax(390px, .9fr); gap: 34px; }
-  .hero-proof { gap: 10px; }
-  .hero-proof span { font-size: .66rem; }
   .product-stage { min-height: 550px; padding-inline: 24px; }
   .memory-float { left: 8px; }
   .model-float { right: 8px; }
@@ -564,7 +520,6 @@ footer > .note { margin-top: 12px; }
   .brand { font-size: 1.34rem; }
   .brand-symbol { width: 29px; height: 29px; }
   .menubtn { min-height: 40px; padding-inline: 11px; }
-  .iconbtn { width: 40px; height: 40px; margin-left: 7px; }
   .hero { padding-top: 40px; padding-bottom: 56px; }
   .hero-kicker { margin-bottom: 22px; font-size: .7rem; }
   .hero-title { font-size: clamp(2.1rem, 9vw, 2.9rem); }
@@ -574,9 +529,6 @@ footer > .note { margin-top: 12px; }
   .btn { min-height: 48px; padding-inline: 16px; }
   .hero .cta .btn { flex: 1 1 150px; }
   .hero-assurances { gap: 7px 13px; font-size: .72rem; }
-  .hero-proof { grid-template-columns: 1fr; gap: 13px; margin-top: 30px; padding-top: 20px; }
-  .hero-proof div { grid-template-columns: 100px 1fr; align-items: center; }
-  .hero-proof span { font-size: .7rem; }
   .product-stage { min-height: 545px; margin-top: 4px; padding: 38px 15px 50px; border-radius: 24px; }
   .app-window { width: min(100%, 350px); transform: none; }
   .window-body { min-height: 350px; }

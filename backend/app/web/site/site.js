@@ -1,5 +1,6 @@
-/* 官网交互：主题、目录、滚动渐显、导航高亮、阅读进度、复制链接、回到顶部。
-   零依赖、零外部请求；语法保守写（var / 函数），Android WebView 也能跑。 */
+/* 官网交互：目录、滚动渐显、导航高亮、阅读进度、复制链接、回到顶部。
+   零依赖、零外部请求；语法保守写（var / 函数），Android WebView 也能跑。
+   主题不在其中：全站只有一套深色，没有切换，也不记偏好。 */
 (function () {
   "use strict";
 
@@ -11,29 +12,6 @@
 
   var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
   var cancel = window.cancelAnimationFrame || clearTimeout;
-
-  function storeTheme(v) {
-    try { localStorage.setItem("site-theme", v); } catch (e) { /* 隐私模式：不记就不记 */ }
-  }
-
-  /* ---------- 主题 ---------- */
-  var themeBtn = document.getElementById("themeBtn");
-  function syncThemeLabel() {
-    if (!themeBtn) return;
-    var dark = root.getAttribute("data-theme") === "dark";
-    themeBtn.setAttribute("aria-label", dark ? "切换到浅色" : "切换到深色");
-  }
-  if (themeBtn) {
-    syncThemeLabel();
-    themeBtn.addEventListener("click", function () {
-      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-      var meta = document.querySelector('meta[name="theme-color"]');
-      if (meta) meta.setAttribute("content", next === "dark" ? "#0a0b0e" : "#f7f8fa");
-      storeTheme(next);
-      syncThemeLabel();
-    });
-  }
 
   /* ---------- 目录 ---------- */
   var menuBtn = document.getElementById("menuBtn");

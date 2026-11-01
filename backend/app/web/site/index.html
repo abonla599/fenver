@@ -1,25 +1,13 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="dark">
 <title>Fenver：跑在你自己服务器上的 AI 智能助手</title>
 <meta name="description" content="开源的 AI 助手：多模型切换、文件阅读、长期记忆、联网搜索，数据待在你自己的服务器上。">
-<meta name="theme-color" content="#f7f8fa">
+<meta name="theme-color" content="#0b0f0e">
 <link rel="stylesheet" href="/site/site.css">
-<script>
-/* 首屏之前把主题定下来，避免页面加载时闪烁。 */
-(function () {
-  try {
-    var saved = localStorage.getItem("site-theme");
-    if (saved !== "dark" && saved !== "light") saved = "light";
-    document.documentElement.setAttribute("data-theme", saved);
-    var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f7f8fa");
-  } catch (e) { /* 隐私模式下保留默认浅色。 */ }
-})();
-</script>
 </head>
 <body>
 
@@ -40,10 +28,6 @@
     <li><a href="#open-source">开源</a></li>
     <li><a href="#faq">常见问题</a></li>
   </ul>
-  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到深色">
-    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2.2V5.8M12 18.2V21.8M2.2 12H5.8M18.2 12H21.8M5.1 5.1L7.6 7.6M16.4 16.4L18.9 18.9M18.9 5.1L16.4 7.6M7.6 16.4L5.1 18.9"/></svg>
-    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 19.4A8.4 8.4 0 1 1 15 4.6M15 19.4A7.4 7.4 0 1 1 15 4.6"/></svg>
-  </button>
 </nav>
 
 <header class="hero">
@@ -62,11 +46,6 @@
         <li>不用填 API 密钥</li>
         <li>注册完就能聊</li>
       </ul>
-      <div class="hero-proof" aria-label="产品特点">
-        <div><strong>长期记忆</strong><span>偏好跨越单次对话</span></div>
-        <div><strong>账号隔离</strong><span>会话与文件各自独立</span></div>
-        <div><strong>Apache-2.0</strong><span>代码公开，可自己部署</span></div>
-      </div>
     </div>
 
     <div class="product-stage" aria-label="Fenver 产品能力示意">

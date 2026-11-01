@@ -1,25 +1,13 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="dark">
 <title>更新日志 · Fenver</title>
 <meta name="description" content="Fenver 每一版改了什么、优化了什么、新增了什么。数据来自仓库里 docs/releases 的发版说明。">
-<meta name="theme-color" content="#f7f8fa">
+<meta name="theme-color" content="#0b0f0e">
 <link rel="stylesheet" href="/site/site.css">
-<script>
-/* 与首页同一招：首屏之前把主题定下来，等 site.js 再读 localStorage 会先闪一下深色。 */
-(function () {
-  try {
-    var saved = localStorage.getItem("site-theme");
-    if (saved !== "dark" && saved !== "light") saved = "light";
-    document.documentElement.setAttribute("data-theme", saved);
-    var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", saved === "dark" ? "#0a0b0e" : "#f7f8fa");
-  } catch (e) { /* 隐私模式下 localStorage 会抛：留着默认深色就好 */ }
-})();
-</script>
 </head>
 <body>
 
@@ -33,10 +21,6 @@
     <li><a href="/"><span>00</span>回到首页</a></li>
     <li><a href="/changelog" aria-current="true"><span>01</span>更新日志</a></li>
   </ul>
-  <button class="iconbtn" id="themeBtn" type="button" aria-label="切换到深色">
-    <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
-    <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-  </button>
 </nav>
 
 <header class="archive-hero">
