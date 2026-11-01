@@ -229,6 +229,13 @@ def test_two_blank_id_creates_make_two_rows_and_the_second_rewrites_nothing():
       - 顺带把命中共享默认行时的 ★ 洗掉（个人面强制 is_default=False，
         那是 #229 的形状，本单只是让非管理员也能触发它）。
     所以这把锁一次判三件事：形状（`p_` 开头）、互不相同、第二条不许动第一条。
+
+    射程自陈（有实测，不是客套的警告）：**这四把锁钉的是行为，不是实现位置**，
+    本锁也是其中之一。把空白 id 的归一下沉进 `providers._validate`（在那里
+    `.strip()`）一样能过本锁，而那会改变「盘上遗留空白 id 行」的 PUT 语义
+    （就地改一条 → 另起新行），属 #231 的射程。审查员的 M-c 变异实测：那种
+    搬家形状下四把锁全绿、全量 4247 条用例无人报红——所以哪天归一真的搬进
+    存储层，本锁不会替你喊话，得另立一把钉实现位置的锁。
     """
     first = client.post("/v1/providers", json=_payload(
         id="   ", label="空白第一条", base_url="https://one.invalid/v1", model="one-chat"))

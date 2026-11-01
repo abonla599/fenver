@@ -1452,8 +1452,12 @@ def test_provider_create_draft_structurally_cannot_send_an_id():
     但界面上它只长成一行 ❌，而 CI 全绿：这条契约一旦退化，是真实用户点保存才发现。
 
     判据只吃这一格的**函数体**，两处都是必要的：
-      - 整份 app.js 里 `$("provId")` 本来就有别处在用（openProviderForm 填它、
-        saveProvider 读它），按全文判"不许出现"今天就是红的；
+      - 整份 app.js 里 `$("provId")` 本来就有别处在用，但那些**全是写**：剥注释后
+        全文只剩 2 处——`openProviderForm` 填它（`app.js:1056`）、
+        `openBlankProviderForm` 清它（`app.js:1071`），全仓没有任何读点。所以按
+        全文判"不许出现"今天同样是红的，尺子必须只吃这一格；而 `#provId`
+        （`index.html:482`）到此只剩"写进去再也没人读"的第二份真相，另立小票清
+        （本单不碰 markup，避免与驾驶舱批的模型页改动撞车）。
       - 函数体里那句解释性注释（"隐藏域 provId 的值由打开表单时填"）含 `provId`
         字样，不剥注释的尺子会被它喂绿——所以语料必须走 `_js()`。
     已声明的射程：钉的是"这一格从 `state.editingProvider` 取"，不钉"id 这格以别的
