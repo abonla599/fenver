@@ -267,7 +267,17 @@ const state = {
   modelCardOpen: false,     // 手机（无 hover）：点行展开/收起同一张卡
   modelManage: false,       // 能力编辑区开没开（模型管理与模型卡共用同一份字段）
   modelDetailError: "",     // 服务端那句人话落在卡上，不弹窗
-  modelSaved: "",
+  // 保存成功那一句绑着**它属于哪张卡**：保存要等一次 PUT + 两次重读，期间 hover 到别的行
+  // 是常事；不绑 id 的话成功句会印在别人家（模型名不同，看起来像"改完 A 结果 B 变了"）。
+  modelSaved: null,         // { id, text } | null
+  // 预置（DeepSeek 那一排按钮）带来的初始上限，只在**新建**那一次随表单发出去。
+  // 上限本身从此由模型卡单源持有；这一格不是"表单还能改上限"，是"新建时别把
+  // PRESETS 里写好的 1000K 丢掉"（providers.py 的 PRESETS["deepseek"]，官方 v4 系 1M token）。
+  // 编辑已有条目、开空白表单都必须清成 null，否则一次编辑会把预置值盖回库里那份。
+  presetMaxContextK: null,
+  // 预算被模型上限夹过一次的那笔账：{ id, from, to }，由 syncCtxRow/setContextBudget 记，
+  // 卡片印一次就清（spec §3.2「提示一次，不静默保留越界值」）。也是本机态，随身份清。
+  budgetClamped: null,
   // v0.39.x 驾驶舱（Task 5）："立即插话"的待发射件——{sid, user, item}，
   // 只在出发会话/身份还成立时被 streamInto 消费一次；换身份/清空队列都要归零。
   forceNext: null,
@@ -352,9 +362,37 @@ function contextBudgetK(providerId) {
 function setContextBudget(providerId, k) {
   const p = state.providers.find((x) => x.id === providerId);
   const cap = Math.max(1, Number(p && p.max_context_k) || 64);
+  const wanted = Math.round(Number(k) || 8);
+  noteBudgetClamp(providerId, wanted, cap);   // 越界被夹：留一句该说的话，别静默
   const map = readContextBudgets();
-  map[providerId] = Math.max(1, Math.min(cap, Math.round(Number(k) || 8)));
+  map[providerId] = Math.max(1, Math.min(cap, wanted));
   localStorage.setItem(contextBudgetStorageKey(), JSON.stringify(map));
+}
+
+/* 上限被调低时把预算夹下来必须吭一声（spec §3.2「夹到新上限并提示一次，不静默保留
+   越界值」）。夹紧这个动作有两处：setContextBudget 写入时、syncCtxRow 发现存着的
+   预算越过新上限而重写时——提示就钉在这两处，不在第三处猜。
+   为什么必须先记一份 state.budgetClamped 而不是渲染时现算：夹紧会把越界值**覆盖掉**
+   （spec 要的就是"不静默保留越界值"），下一次渲染再想算"夹了多少"已经没有原料了。
+   这正是"提示一次"这四个字的含义，也是它必须绑 id 的原因（与 modelSaved 同一纪律：
+   话只印在它属于的那张卡上）。 */
+function contextBudgetWantedK(providerId) {
+  const raw = Number(readContextBudgets()[providerId]);
+  return Number.isFinite(raw) ? Math.round(raw) : 0;
+}
+
+function noteBudgetClamp(providerId, wanted, cap) {
+  const from = Math.round(Number(wanted) || 0);
+  const to = Math.max(1, Math.round(Number(cap) || 64));
+  if (from > to) state.budgetClamped = { id: providerId, from: from, to: to };
+}
+
+function budgetClampNoteK(providerId) {
+  const hit = state.budgetClamped;
+  if (!hit || hit.id !== providerId) return "";
+  return `这条模型的上限降到了 ${hit.to}K：这台设备上原本记着的预算是 ${hit.from}K，`
+    + "已经按上限夹小，多出来的那部分不会带上。要把窗口放大，先把上限调回去、再拖"
+    + "这只滑杆（原来那个数已经被夹掉，不会自己回来）。";
 }
 
 function migrateContextBudget() {
@@ -419,8 +457,17 @@ function syncCtxRow() {
   const range = $("ctxBudgetRange");
   range.max = cap;
   range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
-  const budget = contextBudgetK(budgetProviderId());
-  if (known && budget > cap) setContextBudget(budgetProviderId(), cap);
+  const pid = budgetProviderId();
+  const budget = contextBudgetK(pid);
+  // 存着的那份预算越过**新**上限（管理员把上限调小了）：当场夹进 map 并记下这一笔，
+  // 由模型卡提示一次。判据取 contextBudgetWantedK（map 里的原始值）而不是
+  // contextBudgetK（读数时已经夹过）——拿夹过的数比上限，这个条件永远不成立，
+  // 于是"夹到新上限"只发生在显示层，本机那份越界值一直躺着（spec §3.2）。
+  const stored = contextBudgetWantedK(pid);
+  if (known && stored > cap) {
+    noteBudgetClamp(pid, stored, cap);
+    setContextBudget(pid, cap);
+  }
   const shown = Math.min(budget, cap);
   range.value = shown;
   $("ctxVal").textContent = shown;
@@ -1402,8 +1449,12 @@ function renderModelSelect() {
     sel.appendChild(opt);
   });
   sel.value = pref.provider;
+  // 顺序有理由：syncCtxRow 是"存着的预算越过新上限"这件事唯一会当场夹、并记下提示的
+  // 地方，而卡片（renderModelChip → renderModelDetail）是那句提示唯一的落点。
+  // 反过来写的话保存一次"把上限从 512K 调到 64K"，卡片渲染时还没有可提示的记录，
+  // 用户只看到预算数字自己变小了——正是 spec §3.2 禁止的"静默"。
+  syncCtxRow();          // 模型清单/当前模型变了，上下文行的量程与「/上限」跟着变
   renderModelChip();
-  syncCtxRow();   // 模型清单/当前模型变了，上下文行的量程与「/上限」跟着变
 }
 
 /* ---------------- 模型卡：能力、三态与本机思考偏好（Task 9） ----------------
@@ -1493,10 +1544,16 @@ function thinkingChoice(providerId, item) {
 }
 
 /* 档位标签只清洗不截断：>3 个交给服务端拒收（"思考档位最多 3 个"落在卡上），
- * 界面悄悄砍掉第 4 档等于把"没配上"演成"配上了"。 */
+ * 界面悄悄砍掉第 4 档等于把"没配上"演成"配上了"。
+ * 分隔判据与后端对齐（providers._clean_levels）：后端拿到的是**列表**，对每一项只
+ * strip() 首尾空白，从不按空格劈开一项。所以这里也不能把 `\s` 当分隔符——
+ * 之前按 `[,，、;；\s]+` 切，"快速 思考" 这种带空格的标签会被劈成两档，
+ * 管理员填两个、库里存四个，撞上"最多 3 个"那句拒收，报错还指着没填错的那一格。
+ * 现在只认显式分隔符（半/全角逗号与顿号、分号），首尾空白照旧 strip；长度上限、
+ * 去重、去空一律由服务端那一处判（界面不复制第二份口径）。 */
 function parseThinkingLevels(text) {
   const out = [];
-  String(text || "").split(/[,，、;；\s]+/).forEach((x) => {
+  String(text || "").split(/[,，、;；]+/).forEach((x) => {
     const t = x.trim();
     if (t && out.indexOf(t) < 0) out.push(t);
   });
@@ -1508,7 +1565,12 @@ function parseThinkingLevels(text) {
  *   is_default 原样带上 → 否则一次改上限就把全站那颗 ★ 洗掉；
  *   thinking_profile 原样带上 → 否则已核实的配方被洗回 none。
  * pricing 为 null（未定价）时不发这一格：没带=保留，显式 null=主动取消定价。
- * 不带记录 id——路由按 path 钉这一条。 */
+ * 不带记录 id——路由按 path 钉这一条。
+ * 这里**没有** paid_by，也不是遗漏：`main.ProviderRequest` 就没有这一格，客户端发了
+ * 也会被 Pydantic 丢掉，写进 body 只会让下一个人以为"计费归属是界面能改的"。
+ * 真正保住它的是服务端那份保留（`providers.ProviderStore.upsert`：请求里没带 paid_by
+ * 就沿用库里那一份，锁在 test_review_fixes_20260923.py
+ * ::test_upsert_keeps_paid_by_when_update_omits_it）。 */
 function providerCapabilityBody(rec, patch) {
   const body = {
     label: rec.label,
@@ -1517,7 +1579,6 @@ function providerCapabilityBody(rec, patch) {
     api_key: "",
     supports_vision: !!rec.supports_vision,
     is_default: !!rec.is_default,
-    paid_by: rec.paid_by || "operator",
     max_context_k: rec.max_context_k,
     supports_thinking: !!rec.supports_thinking,
     thinking_levels: rec.thinking_levels || [],
@@ -1554,7 +1615,7 @@ async function saveModelCapabilities(recordId, patch) {
     await API.updateProviderCapabilities(providerCapabilityScope(rec), recordId,
       providerCapabilityBody(rec, patch));
     state.modelDetailError = "";
-    state.modelSaved = `${rec.label} 的能力已保存`;
+    state.modelSaved = { id: recordId, text: `${rec.label} 的能力已保存` };
     // 先重读记录、再重读清单：反过来的话 renderModelChip 会在新缓存落地之前重画卡片，
     // 于是卡片再自己去发一次 /v1/me/providers（第三枪），而两处真值短暂不一致。
     await loadProviders();
@@ -1583,10 +1644,10 @@ function modelMenuIsTouch() {
 /* hover / 点击 / 保存后都只走这一个入口：换 #modelDetail 的内容，
  * 清单里任何一行都不重渲染（整表重画会让 hover 抖动、键盘焦点乱跳）。 */
 function showModelDetail(id) {
-  if (state.modelDetailId !== id) {
-    state.modelDetailError = "";
-    state.modelSaved = "";
-  }
+  if (state.modelDetailId !== id) state.modelDetailError = "";
+  // modelSaved 不在这里清：它绑着"我保存的是哪一张"（{ id, text }），由打印它的那次
+  // 渲染消化。切走就清等于把成功句销毁——用户在 A 卡上按了保存、期间 hover 到 B 看一眼
+  // 再回来，本该还能看到那句"已保存"，而不是什么都没发生。
   state.modelDetailId = id;
   return renderModelDetail(id);
 }
@@ -1640,7 +1701,9 @@ async function renderModelDetail(id) {
     + `${item.priced ? (item.multiplier || "?x") : "未定价"}`));
 
   const chips = fvEl("div", "mm-chips");
-  chips.setAttribute("data-thinking", ctl.status);
+  // 容器自己不挂 data-thinking：样式只认 .mm-chip[data-thinking=...] 与卡片那层，
+  // 给一个没人消费的属性等于骗下一个读代码的人"这里还有样式在管"（派生锁
+  // test_every_thinking_state_attribute_is_actually_styled 钉的就是这件事）。
   [["思考", ctl.label, ctl.status],
    ["模型上限", `${capK}K`, ""],
    ["输入", item.supports_vision ? "支持图片" : "只收文字", ""],
@@ -1684,6 +1747,13 @@ async function renderModelDetail(id) {
   quick.appendChild(full);
   bRow.appendChild(quick);
   card.appendChild(bRow);
+  // 上限被调低过、这一格预算因此被夹小：说一句人话（提示一次，印完就清）。
+  // 沉默是不行的——用户看到的是"预算自己变小了"，那正是他猜不到的那一格。
+  const clampNote = budgetClampNoteK(pid);
+  if (clampNote) {
+    card.appendChild(fvEl("p", "mm-note", clampNote));
+    state.budgetClamped = null;
+  }
 
   // 思考：偏好开关 + 档位 chips。三态里只有 verified 给点，其余禁用并说明原因。
   const th = fvEl("div", "mm-row mm-thinking");
@@ -1755,9 +1825,13 @@ async function renderModelDetail(id) {
   card.appendChild(actions);
 
   if (state.modelDetailError) card.appendChild(fvEl("p", "mm-err", state.modelDetailError));
-  else if (state.modelSaved) card.appendChild(fvEl("p", "mm-ok", state.modelSaved));
+  else if (state.modelSaved && state.modelSaved.id === pid) {
+    // 只印给它自己那张卡：保存要等一次 PUT + 两次重读，期间 hover 到别的行是常事，
+    // 不绑 id 的话"DeepSeek 的能力已保存"会印在 Qwen 的卡上。
+    card.appendChild(fvEl("p", "mm-ok", state.modelSaved.text));
+    state.modelSaved = null;   // 一句话一次，印过就不再跟着下次渲染跑
+  }
   box.appendChild(card);
-  state.modelSaved = "";
   // 底部那颗的按下态跟着卡片一起画：它和卡上的「管理此模型」是同一个开关的两张脸，
   // 状态不许各留一份（各留一份就会出现"按钮亮着而卡上没有编辑区"）。
   const mgBtn = $("modelManageBtn");
@@ -1769,7 +1843,8 @@ async function renderModelDetail(id) {
  * 默认档"那个状态（服务端会把显式空的默认归一成 levels[0]，这里不假装能存下它）。 */
 function modelManageSection(item, rec, capK) {
   const sec = fvEl("div", "mm-manage");
-  sec.setAttribute("data-thinking", thinkingControlState(item).status);
+  // 这里不挂 data-thinking：编辑区改的是**服务端能力字段**，跟"当前这条的三态"是两件事。
+  // 挂上它再配一条降饱和的规则，会把"你现在正在改的这个开关"画成灰的，看着像禁编辑。
   sec.appendChild(fvEl("p", "mm-h", "模型上限与思考能力"));
 
   const capRow = fvEl("div", "mm-row");
@@ -1886,7 +1961,10 @@ function renderModelChip() {
     row.setAttribute("data-thinking", status);
     const main = fvEl("button", "mm-row-main");
     main.type = "button";
-    main.setAttribute("role", "menuitem");
+    // 行就是普通按钮：#modelMenu 现在是 role="group"（不是 menu），
+    // `menuitem` 只允许出现在 role="menu"/"menubar"/"tree" 之下，挂在这儿是半套 ARIA
+    // ——读屏会把容器念成分组、却把行念成菜单项，而方向键契约（menu 要求实现
+    // ↑↓ 与 Home/End）谁也没做。规范冲突按"去掉不适用的语义"修，见修复轮报告 I-4。
     if (isCur) main.classList.add("current");
     main.append(
       fvEl("span", "mm-name", (isCur ? "✓ " : "") + p.name),
@@ -1959,6 +2037,13 @@ function hideModelMenu() {
   // 而不是接着上一次的展开状态（那会让人以为卡片没换是 bug）。
   state.modelPinned = "";
   state.modelCardOpen = false;
+  // state.modelManage **故意不清**，这是行为不是遗漏：收起弹单不等于"退出管理"。
+  // 管理员改一条模型要「展开管理 → 改 → 保存」，中途关一下菜单（去看清单、切到
+  // 设置页）回来还得接着改；清掉等于把他刚点开的那一节收走，还得再按一次。
+  // 真正该清的地方都清了：「收起管理」按钮（closeModelManage）与换身份
+  // （resetViewForIdentity）——后者是另一个人的编辑区，必须归零。
+  // 这条由 test_hiding_the_model_menu_keeps_the_manage_section 真跑一遍钉住（收起 → 断言
+  // modelPinned/modelCardOpen 归零、modelManage 原样），别再往这里加"顺手清一行"。
   $("modelMenu").classList.remove("card-open");
 }
 
@@ -2095,11 +2180,15 @@ function providerRow(p, scope) {
 function openProviderForm(p, scope) {
   state.editingProvider = p.id;
   state.editingScope = scope;
+  // 编辑已有条目：上限这一格由模型卡单源持有，这次 PUT 不许带预置值（带了就是把库里
+  // 那份覆盖掉）。清成 null 是这条纪律的开关，见 providerDraftFromForm。
+  state.presetMaxContextK = null;
+  showPresetCapNote(null);
   $("provId").value = p.id;
   $("provLabel").value = p.label;
   $("provBase").value = p.base_url;
   $("provModel").value = p.model;
-  // Task 9：这里不再回填「上下文上限」——这一格搬进模型卡了，表单这次 PUT 也不发它
+  // Task 9：这里不再回填「上下文上限」——这一格搬进模型卡了，编辑路径这次 PUT 也不发它
   // （providers._pending 会按"这次没带"从库里保留那一份）。
   $("provVision").checked = !!p.supports_vision;
   $("provKey").value = ""; $("provKey").placeholder = p.api_key_masked ? `已设置（${p.api_key_masked}），留空则不修改` : "填入 API Key";
@@ -2110,6 +2199,8 @@ function openProviderForm(p, scope) {
 function openBlankProviderForm(scope) {
   state.editingProvider = null;
   state.editingScope = scope;
+  state.presetMaxContextK = null;   // 空白表单没点预置 = 不发上限，服务端按缺省归一
+  showPresetCapNote(null);
   $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
   $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
   $("provKey").placeholder = "填入 API Key";
@@ -2118,25 +2209,43 @@ function openBlankProviderForm(scope) {
   $("provLabel").focus();
 }
 
+/* 预置带进来的初始上限只在**新建**那一次随表单走：PRESETS 里写好的 1000K（DeepSeek
+ * v4 系 1M token）如果不发出去，就会落进 providers._validate 的缺省 64 —— 管理员新增
+ * 一个 DeepSeek 拿到的是 64K 闸门，全站预算跟着缩 16 倍，一句提示都没有。
+ * 上限之后归模型卡改（这一格从表单发第二次就是覆盖卡片刚写的值）。 */
 function fillFormFromPreset(preset) {
   if (!state.editingProvider) $("provLabel").value = preset.label;
   $("provBase").value = preset.base_url;
   $("provModel").value = preset.model;
-  // preset.max_context_k 不进表单：上限是模型的能力，配到「选择模型 → 模型管理」里去。
+  const k = Number(preset.max_context_k);
+  state.presetMaxContextK = Number.isFinite(k) && k > 0 ? Math.round(k) : null;
+  showPresetCapNote(state.presetMaxContextK);
   $("provVision").checked = !!preset.supports_vision;
+}
+
+/* 那句说明只在预置真的带了上限时出现：没带上限的预置（OpenAI/Qwen 那几份）不该跟着说
+ * "我给了你 1000K"。文案说清两件事——这是预置带来的**初始**值、之后归模型卡改。 */
+function showPresetCapNote(k) {
+  const box = $("provPresetCap");
+  if (!box) return;
+  box.textContent = k ? `这条预置带来的初始上限是 ${k}K：只有新建时随这一份表单发出去一次，`
+    + "之后改上限请到「选择模型 → 模型管理」的卡片里，这个表单不再改它。" : "";
+  box.classList.toggle("hidden", !k);
 }
 
 function closeProviderForm() {
   state.editingProvider = null;
   state.editingScope = null;
+  state.presetMaxContextK = null;
+  showPresetCapNote(null);
   $("provForm").classList.add("hidden");
 }
 
-/* 表单只发连接配置。max_context_k 从这里**不发**是设计，不是遗漏：
- * 服务端 _pending 按"这次没带"保留库里那一份，所以改一次名字不会把 1000K 洗成 64K，
- * 而模型卡那次 PUT 才带上限（见 providerCapabilityBody）。 */
+/* 表单只发连接配置，外加"新建时那一份预置上限"。max_context_k 在**编辑**路径上不发是
+ * 设计，不是遗漏：服务端 _pending 按"这次没带"保留库里那一份，所以改一次名字不会把
+ * 1000K 洗成 64K，而模型卡那次 PUT 才负责改上限（见 providerCapabilityBody）。 */
 function providerDraftFromForm() {
-  return {
+  const draft = {
     id: $("provId").value || undefined,
     label: $("provLabel").value.trim(),
     base_url: $("provBase").value.trim(),
@@ -2145,6 +2254,10 @@ function providerDraftFromForm() {
     supports_vision: $("provVision").checked,
     is_default: false,
   };
+  if (!state.editingProvider && state.presetMaxContextK !== null) {
+    draft.max_context_k = state.presetMaxContextK;
+  }
+  return draft;
 }
 
 /* 新条目默认落"我的模型"：表单从哪个按钮打开，保存就走哪一面。
@@ -4556,7 +4669,11 @@ function resetViewForIdentity() {
   state.modelCardOpen = false;
   state.modelManage = false;
   state.modelDetailError = "";
-  state.modelSaved = "";
+  state.modelSaved = null;
+  // 上限夹下来的那句提示与"预置带来的初始上限"同样是这个人的本机态：换身份不清，
+  // B 会看到一句关于 A 的预算的话，新建表单也会把 A 点过的预置上限发到 B 的门里。
+  state.budgetClamped = null;
+  state.presetMaxContextK = null;
   // 接力队列同样随身份清掉（Task 5）：队列只在内存、条目是上一个人的原文，
   // 待发的"立即插话"也一起作废——绝不带着旧身份/旧会话的落点去发新轮。
   resetQueuesForIdentity();

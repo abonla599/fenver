@@ -70,6 +70,14 @@ TASK_FACE_FUNCS = ("taskStatusText", "taskProgressLine", "taskWaitingLine", "tas
                    "taskCardView", "paintTaskCard", "taskErrorLine", "renderTaskList",
                    "paintTasks", "openTaskDetail", "loadTasks", "submitTaskAnswer")
 
+# 换身份那条路上，切片必须端出来的函数（任务模块那一组由 _task_module_source() 单源带上）。
+# 名单与 `resetViewForIdentity` 的真实调用边由 test_the_identity_slice_declares_every_function_it_calls
+# 双向核对：这里多了没人调用不红（只是白搭一段），少了立刻红（node 抛 ReferenceError，
+# 三条用例一起炸在 harness 的 assert out["ok"]）。Task 5 漏了 resetQueuesForIdentity、
+# Task 9 漏了 renderQueueStrip，两次都是这个形状。
+IDENTITY_SLICE_FUNCS = ("renderTaskList", "setTaskError", "resetViewForIdentity",
+                        "resetQueuesForIdentity", "renderQueueStrip", "queueFor", "queueKey")
+
 
 def _text(path: Path) -> str:
     assert path.is_file(), f"契约的另一端不在仓库里：{path}"
@@ -239,6 +247,9 @@ var renderSessions = () => {};
 var NetMinder = { note: () => {} };
 var needsAuth = () => false;
 var API = {};
+// 换身份那一段切片里 renderQueueStrip 要读 pref.sessionId（排队条按会话分桶）。
+// 这是一份只读的本机态桩：它只给一个稳定的会话键，队列内容一律由用例自己铺。
+var pref = { sessionId: "s-1", userId: "u-1" };
 """
 
 
@@ -878,10 +889,62 @@ def test_the_card_title_and_the_waiting_gate_are_the_agreed_words():
 # ==========================================================================
 
 def _identity_source() -> str:
-    """换身份那条路上真正会跑的几段：任务渲染 + 错误条 + resetViewForIdentity。"""
+    """换身份那条路上真正会跑的几段：任务渲染 + 错误条 + resetViewForIdentity 及其调用边。
+
+    名单必须跟着 `resetViewForIdentity` 的函数体走（下面那条派生锁钉的就是这件事）：
+    切片里缺一个被调用的名字，node 抛 `ReferenceError`，三条用例一起炸在
+    `assert out["ok"]`——那三句是本轮唯一用 node 真跑「换身份后上一个人的答案原文/
+    答案框/在途标记不许留在这一页」的守卫，答案框里常是短信验证码。
+    Task 5 让它开始调队列那两个函数时名单没跟上（红过一次），Task 9 又加了
+    `renderQueueStrip()`（第二次）。名单写在这里而不是散在各用例里，就是为了
+    派生锁能拿同一份清单核对。
+    """
     app = _app_source()
     return _with_dom(_task_module_source() + "\n" + "\n".join(
-        _js_function(app, n) for n in ("renderTaskList", "setTaskError", "resetViewForIdentity")))
+        _js_function(app, n) for n in IDENTITY_SLICE_FUNCS))
+
+
+def test_the_identity_slice_declares_every_function_it_calls():
+    """派生锁：`resetViewForIdentity` 体里调用到的每个函数名，都必须在切片里有着落。
+
+    三侧都是现读的，测试里不写第二份清单：
+    - 调用边：`_js_function(app, "resetViewForIdentity")` 体里的 `name(`
+      （`(?<![.\\w$])` 把 `foo.bar()` 这类属性调用排掉，语句关键字另排）；
+    - 谁算"真函数"：app.js 全文 `function X(` 的名单——只有它说了算，否则
+      `String(...)` 这类 node 内建会被当成缺名字；
+    - 切片提供了谁：`_identity_source()` 那段文本自己的 `function X(` 名单
+      （任务模块 + 名单函数一起算），加上假 DOM 里桩成 `var X = (...)` 的那几个。
+
+    差集非空即红。它比"node 跑不跑得起来"早一步、也说得更准：Task 12/13 再往那个
+    函数里加一个调用而名单没跟上时，这里直接点名缺谁，而不是让三条用例一起炸在
+    harness 的 `assert out["ok"]` 上——那句话说的是"这段 JS 跑挂了"，看不出是名单漏了。
+    """
+    app = _app_source()
+    body = _js_function(app, "resetViewForIdentity")
+    defined = set(re.findall(r"^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", app, re.M))
+    assert defined, "app.js 里一个 `function X(` 都没扫到——这条锁的读法坏了"
+    stmt = {"if", "for", "while", "switch", "catch", "return", "typeof", "function"}
+    bare = {m for m in re.findall(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(", body)} - stmt
+    slice_text = _identity_source()
+    provided = set(re.findall(r"^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(",
+                              slice_text, re.M))
+    stubbed = set(re.findall(r"^var ([A-Za-z_$][\w$]*)\s*=\s*\(", _FAKE_DOM, re.M))
+
+    def missing(excluded=()):
+        return {n for n in bare & defined
+                if n not in provided - set(excluded) and n not in stubbed}
+
+    unaccounted = missing()
+    assert not unaccounted, (
+        f"resetViewForIdentity 调用了这些函数，换身份切片里却没有它们的名字：{sorted(unaccounted)}"
+        "——把它们加进 IDENTITY_SLICE_FUNCS。漏一个就是三条用例一起炸在 harness 的 "
+        "assert out[\"ok\"]，因为 node 抛的是 ReferenceError，错话只会说「这段 JS 跑挂了」。")
+
+    # 反面对照：名单里删掉任何一个"真被直接调用、且由名单提供"的函数，判据必须还能报红。
+    probes = sorted(n for n in bare & defined & provided if n in IDENTITY_SLICE_FUNCS)
+    assert len(probes) >= 3, f"探针太少，这条派生锁等于没跑：{probes}"
+    for probe in probes:
+        assert missing(excluded=(probe,)) == {probe}, f"判据没牙：从名单里删掉 {probe} 它还不红"
 
 
 def test_switching_identity_leaves_none_of_the_previous_answer_in_the_dom():

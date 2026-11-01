@@ -81,6 +81,46 @@ def test_update_without_max_context_k_keeps_the_stored_cap(tmp_path):
     assert s.get("p_new")["max_context_k"] == providers.DEFAULT_MAX_CONTEXT_K
 
 
+def test_route_put_without_cap_keeps_the_preset_cap(client, enforced):
+    """I-2 的路由层端到端（Minor 9 一并收掉）：不带 max_context_k 的一次 PUT，读回来仍是 1000。
+
+    上面那条 store 用例证明的是合并逻辑；这一条走的是**管理员真会发的那份 payload**：
+    形状取自 app.js 的 providerDraftFromForm（编辑路径只发连接配置七格）。只看 store
+    挡不住"路由把 exclude_none 改成 exclude_unset""表单从此又发一次上限"这类改法，
+    而现网是 PyInstaller 整包，界面与后端只有这一条 HTTP 缝——缝上没人验过就等于没验。
+    三格都要成：① 预置那份上限建得住；② 不带这一格的编辑读回来仍是 1000（不是 64）；
+    ③ /v1/models 那份目录跟着说 1000（界面封顶读的就是这一份）。
+    """
+    hdr = {"Authorization": "Bearer boot-token"}
+    created = client.post("/v1/providers", headers=hdr, json={
+        "label": "DeepSeek 预置新建", "base_url": "https://1.1.1.1/v1",
+        "api_key": "sk-test-123456",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+        "model": "deepseek-flash", "supports_vision": True, "max_context_k": 1000,
+    })
+    assert created.status_code == 200, created.text
+    pid = created.json()["provider"]["id"]
+    try:
+        assert created.json()["provider"]["max_context_k"] == 1000
+        # 表单那次 PUT：七格连接配置，没有 max_context_k（与 app.js providerDraftFromForm 同形状）
+        edited = client.put(f"/v1/providers/{pid}", headers=hdr, json={
+            "label": "DeepSeek 改个名", "base_url": "https://1.1.1.1/v1",
+            "api_key": "", "model": "deepseek-flash",
+            "supports_vision": True, "is_default": False,
+        })
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["provider"]["max_context_k"] == 1000, \
+            "改名把 1000K 洗成了缺省 64：管理员新增 DeepSeek 拿到 64K 闸门，全站预算跟着缩 16 倍"
+        back = next(p for p in client.get("/v1/providers", headers=hdr).json()["providers"]
+                    if p["id"] == pid)
+        assert back["max_context_k"] == 1000, back
+        listed = next(m for m in client.get("/v1/models", headers=hdr).json()["models"]
+                      if m["id"] == pid)
+        assert listed["max_context_k"] == 1000, \
+            "/v1/me/providers 保住了而 /v1/models 说 64：界面封顶与滑杆量程按被洗掉的那份画"
+    finally:
+        assert client.delete(f"/v1/providers/{pid}", headers=hdr).status_code == 200
+
+
 def test_thinking_fields_validate_and_old_client_put_preserves_them(tmp_path):
     s = _store(tmp_path, [_old()])
     s.upsert({**_old(), "supports_thinking": True,

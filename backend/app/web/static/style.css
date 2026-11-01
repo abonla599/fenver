@@ -638,6 +638,11 @@ a.trace-result-title:hover { text-decoration: underline; }
 .mm-chip[data-thinking="verified"] { border-color: var(--fv-accent); color: var(--fv-accent); }
 .mm-item { border-radius: 10px; }
 .mm-item[data-thinking="unsupported"] .mm-chip { opacity: .7; }
+/* 思考那一行（开关 + 档位 chips）在"点不动"的两态下降饱和：禁用得有禁用的样子。
+   只降不隐藏——原因那句人话（thinkingStateReason）仍在下面，看得懂为什么不能点。
+   Task 9 修复轮 Minor 6：这一档 data-thinking 之前没有任何 CSS 消费，属性白挂。 */
+.mm-thinking[data-thinking="unsupported"],
+.mm-thinking[data-thinking="unverified"] { opacity: .55; }
 .mm-manage { display: flex; flex-direction: column; gap: 8px;
   border-top: 1px solid var(--line); padding-top: 8px; }
 .mm-h { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }

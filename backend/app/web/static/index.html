@@ -224,8 +224,13 @@
              两个容器都由 app.js 用 createElement + textContent 现渲染——模型名和档位
              标签是服务端文本，拼 innerHTML 等于给它开门。
              桌面（@media hover: hover）hover 左行只换右栏内容，不重渲染整张清单；
-             手机没有 hover，改成点行展开/收起同一张卡。和附件菜单同款"让位层"。 -->
-        <div class="model-menu hidden" id="modelMenu" role="menu" aria-label="选择模型">
+             手机没有 hover，改成点行展开/收起同一张卡。和附件菜单同款"让位层"。
+             Task 9 修复轮：role 由 menu 改成 group。这层里住着详情卡（滑杆、输入框、
+             「模型管理」按钮），而 menu 的合法子元素只有 menuitem / menuitemcheckbox /
+             menuitemradio / group / separator；方向键契约（↑↓ 移动焦点）也没实现。
+             留半套 ARIA 比不给语义更糟——读屏会把它报成"菜单"却按不出菜单的行为。
+             aria-label 留着：group 接受可访问名，读屏仍会说"选择模型 分组"。 -->
+        <div class="model-menu hidden" id="modelMenu" role="group" aria-label="选择模型">
           <div class="mm-list" id="modelList"></div>
           <div class="mm-detail" id="modelDetail"></div>
           <button type="button" class="fv-btn mm-manage-btn" id="modelManageBtn">模型管理</button>
@@ -525,6 +530,11 @@
                  上限与思考能力是模型的本事，不是连接配置，改到「选择模型 → 模型管理」
                  的模型卡里配：这一格从表单发出去的话，一次普通保存会盖掉卡片刚写的值。 -->
             <p class="pane-note">模型上限与思考能力请到「选择模型 → 模型管理」里配。</p>
+            <!-- Task 9 修复轮 I-2：点了预置（DeepSeek 那份带着 1000K）就说清"这是预置带来的
+                 初始上限，只在新建时随这一份表单发一次，之后归模型卡改"。不写这句，下一个人
+                 会以为这个表单还能改上限，或以为预置的上限根本没生效。
+                 内容（含数字）由 app.js 的 showPresetCapNote 用 textContent 落，空则整行收起。 -->
+            <p class="pane-note hidden" id="provPresetCap"></p>
             <label class="check"><input id="provVision" type="checkbox"><span>该模型支持图片输入（视觉）</span></label>
             <div class="row">
               <button class="btn" type="button" id="provTestBtn">测试连通</button>

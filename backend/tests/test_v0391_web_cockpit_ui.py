@@ -17,6 +17,42 @@ import pytest
 from tests.test_web_pwa import _css, _fn_text, _function_body, _html, _js
 
 
+# 把文本拼进 HTML 的出口不止 innerHTML 一个。本仓同类锁早就按一组 sink 判
+# （test_v0363_admin_console.py:86 test_admin_js_has_no_html_sinks），本文件此前只查
+# `"innerHTML" not in X` 这一条——把渲染改成 insertAdjacentHTML("afterbegin", item.name)
+# 之后 17+171 全绿、node --check rc=0，模型名走 HTML 拼接这条 XSS 面在测试层完全隐形
+# （Task 9 修复轮 I-3）。判据一律走这里，别再用单个词。
+_HTML_SINKS = ("innerHTML", "outerHTML", "insertAdjacentHTML", "eval(", "new Function")
+
+
+def _no_html_sinks(body: str, where: str) -> None:
+    """这一段的渲染只许 createElement + textContent；出现任何 HTML sink 即红。"""
+    hit = [needle for needle in _HTML_SINKS if needle in body]
+    assert not hit, f"{where} 把文本拼进了 HTML：{hit}（模型名/档位标签/服务端报错都可能是别人写的字）"
+
+
+def test_no_html_sinks_helper_proves_its_own_teeth():
+    """这条判据的自证：换一种"不是 innerHTML"的写法，它必须还能报红。
+
+    没有这一段，I-3 的修复就只是"把 innerHTML 这个词换成五个词"——下一个人写成
+    `el.insertAdjacentHTML(...)`（旧判据看不见）照样绿。这里同时验一个反例（干净
+    文本渲染不许误报），否则"什么都算 sink"也是一种没牙的判据。
+    """
+    clean = 'function f(){ const n = document.createElement("span"); n.textContent = name; }'
+    _no_html_sinks(clean, "自检：干净的纯文本渲染")
+    for mutant in ('list.insertAdjacentHTML("afterbegin", item.name)',
+                   'box.outerHTML = "<p>" + name + "</p>"',
+                   'box.innerHTML = "<p>" + name + "</p>"',
+                   'box.appendChild(eval("document"))',
+                   "box.appendChild(new Function('return name')())"):
+        probe = clean + "\n" + mutant
+        try:
+            _no_html_sinks(probe, "自检：变异样本")
+        except AssertionError:
+            continue
+        raise AssertionError(f"判据没牙：{mutant} 这种写法它还说绿")
+
+
 def test_context_ring_and_panel_are_wired_without_innerhtml_for_user_text():
     html = _html()
     js = _js()
@@ -29,7 +65,7 @@ def test_context_ring_and_panel_are_wired_without_innerhtml_for_user_text():
         "环没有走本会话预算/校准口径"
     panel = _function_body(js, "renderContextPanel")
     assert "contextSegments(" in panel, "账本没有分段"
-    assert "innerHTML" not in panel, "账本对用户/模型文本拼了 innerHTML"
+    _no_html_sinks(panel, "上下文账本")
     assert "textContent" in panel, "账本没有用 textContent 落文本"
     assert "aria-label" in panel or "setAttribute(\"aria-label\"" in panel, \
         "账本没有可读的无障碍标签"
@@ -244,8 +280,8 @@ def test_relay_queue_ui_and_auto_send_guards():
     assert re.search(r'addEventListener\("visibilitychange"[\s\S]{0,220}pauseQueue\(', js), \
         "切后台没有暂停当前会话队列"
     card = _function_body(js, "queueCardNode")
-    assert "textContent" in card and "innerHTML" not in card, \
-        "队列卡对用户文本拼了 innerHTML"
+    assert "textContent" in card, "队列卡没有用 textContent 落用户原文"
+    _no_html_sinks(card, "接力排队条")
     assert "queueShowNow(" in card, "队列卡没挂立即插话"
     strip = _function_body(js, "renderQueueStrip")
     assert "renderMessages" not in strip, "排队条刷新里递归重画消息"
@@ -352,11 +388,11 @@ def test_web_model_card_management_and_settings_move():
     detail = _function_body(js, "renderModelDetail")
     assert "contextBudgetK(" in detail and "setContextBudget(" in detail, \
         "模型卡没接本会话预算"
-    assert "innerHTML" not in detail, "模型卡对模型文本拼了 innerHTML"
+    _no_html_sinks(detail, "模型卡")
     assert "data-thinking" in js and "thinking_levels" in js, "思考三态/档位没有接线"
     assert "updateProviderCapabilities" in _js(), "能力写口没有 API 封装"
-    # 本单补锁：行是模型名（服务端文本）的第一个展示面，同样不许拼 innerHTML
-    assert "innerHTML" not in render, "模型行对模型名拼了 innerHTML"
+    # 本单补锁：行是模型名（服务端文本）的第一个展示面，同样不许拼 HTML
+    _no_html_sinks(render, "模型行")
 
 
 def test_model_menu_is_a_two_pane_container_with_one_manage_entry():
@@ -402,10 +438,17 @@ def test_capability_write_path_is_scoped_and_reads_one_record_source():
         "换身份没清记录缓存：上一个人的 base_url 会跟着下一次 PUT 发出去"
 
     body = _function_body(js, "providerCapabilityBody")
-    for keep in ("api_key", "is_default", "paid_by", "pricing", "thinking_profile",
+    for keep in ("api_key", "is_default", "pricing", "thinking_profile",
                  "base_url", "model", "supports_vision"):
         assert keep in body, f"全量 PUT 少了 {keep}：一次保存会把这一格洗掉"
     assert 'api_key: ""' in body, "api_key 不传空串就带不回原密钥（服务端按占位符保留）"
+    # Minor 4（修复轮）：这一格以前写在 body 里、配一句"少了 paid_by 就会被洗掉"的红话，
+    # 那是假承诺——`main.ProviderRequest` 没有 paid_by，Pydantic 直接把客户端发的丢掉，
+    # 删了 body 里那行也不会红。真正保住计费归属的是服务端那份保留，它另有自己的锁
+    # （test_review_fixes_20260923.py::test_upsert_keeps_paid_by_when_update_omits_it）。
+    # 所以这里判的是**反向**：body 不许出现 paid_by（别留下一个改了也没用的输入口）。
+    assert "paid_by" not in body, \
+        "body 还发 paid_by：请求模型没这一格，发出去会被 Pydantic 丢掉，留着只让下一个人以为界面改得动"
     # 每一格都必须**从那份记录里取**：写死一个值等于把"这次没改"演成"改成这个值"
     assert "max_context_k: rec.max_context_k" in body, \
         "上限不从完整记录里取：改一次思考档位就把库里的上限写死"
@@ -431,7 +474,7 @@ def test_thinking_switch_is_only_clickable_when_the_profile_is_verified():
     assert "can_edit" in detail and "modelManageSection(" in detail
     section = _function_body(js, "modelManageSection")
     assert "saveModelCapabilities(" in section and "max_context_k" in section
-    assert "innerHTML" not in section, "管理区对模型文本拼了 innerHTML"
+    _no_html_sinks(section, "能力编辑区")
     assert js.count("API.updateProviderCapabilities(") == 1, \
         "能力写口开了第二处：scope 分流就不止一个出处了"
 
@@ -519,9 +562,370 @@ def test_settings_form_keeps_connection_fields_and_gives_up_capability_inputs():
     assert "模型管理" in prov and "上限" in prov, \
         "表单没留一句「上限与思考能力到模型卡里配」的指路，改完的人只会找不到入口"
     draft = _function_body(js, "providerDraftFromForm")
-    assert "max_context_k" not in draft and "provCtxK" not in draft, \
-        "表单还在发上限：这一格从此只由模型卡写"
+    assert "provCtxK" not in draft, "表单还读那个已删掉的输入框：null.value 空指针"
+    # 修复轮 I-2 重钉：原判据是"草稿里根本不许出现 max_context_k"。放开的只有**新建**
+    # 那一次（预置带着写好的 1000K 来，不发就落进服务端缺省 64）；编辑路径仍一字不许发，
+    # 因为那一格的真相在模型卡。两侧都由下面的 node 真跑判行为，不靠读源码。
+    assert re.search(r"if \(!state\.editingProvider && state\.presetMaxContextK !== null\)\s*\{\s*"
+                     r"draft\.max_context_k = state\.presetMaxContextK;", draft), \
+        "上限从表单发出去的条件不是「新建 + 点过预置」：编辑路径会盖掉模型卡刚写的那一格"
+    assert draft.count("max_context_k") == 1, "上限在这份草稿里出现两次：出处不止一个"
     for name in ("openProviderForm", "openBlankProviderForm", "fillFormFromPreset"):
         assert "provCtxK" not in _function_body(js, name), \
             f"{name} 还读 provCtxK：字段删掉后就是 null.value 空指针"
     assert "provCtxK" not in js, "app.js 里还留着 provCtxK 的引用"
+
+
+# ---------------- Task 9 修复轮 1：审查员判 Changes requested 的四条 ----------------
+# I-1（换身份守卫补牙）落在 test_v0350_task_ui_web_contract.py，那里是唯一的 node 真跑现场；
+# 这里补齐 I-2（预置上限）、I-3（HTML sink 判据，见文件头那组）、I-4（ARIA 归属），
+# 以及一并收掉的 Minor 2/3/4/5/6/7。判据一律优先真跑：这一批改动的形状是
+# "读源码读着都对、跑起来是错的"（审查员实测的三条都是这个形状）。
+
+
+def _run_js(names, harness, prefix):
+    """把 app.js 里点名的那几个函数摘进 vm 真跑一遍，返回 JSON 结果。"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    src = "\n".join(_fn_text(_js(), n) for n in names)
+    d = Path(tempfile.mkdtemp(prefix=f"model-cockpit-{prefix}-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(harness, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己跑失败：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+# 假 DOM 的最小一颗：只给表单那几个输入框，够跑就行（拿不到节点=当场抛，不静默跳过）。
+_FAKE_FIELDS = r"""
+const nodes = {};
+const mk = (id) => (nodes[id] || (nodes[id] = {
+  id, value: "", checked: false, placeholder: "", textContent: "",
+  focus() {}, blur() {}, setAttribute() {}, appendChild() {},
+  classList: { _s: new Set(["hidden"]),
+    add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+    contains(c) { return this._s.has(c); },
+    toggle(c, on) { if (on) { this._s.add(c); } else { this._s.delete(c); } } },
+}));
+"""
+
+_PRESET_CAP_HARNESS = _FAKE_FIELDS + r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+ctx.document = { getElementById: mk };
+ctx.$ = (id) => mk(id);
+ctx.state = { editingProvider: null, editingScope: null, presetMaxContextK: null };
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+// 与后端 providers.PRESETS 同形状的两份：一份带 max_context_k（deepseek=1000），一份不带。
+const deepseek = { label: "DeepSeek", base_url: "https://api.deepseek.com/v1",
+                   model: "deepseek-flash", supports_vision: true, max_context_k: 1000 };
+const plain = { label: "OpenAI", base_url: "https://api.openai.com/v1",
+                model: "gpt-4o", supports_vision: true };
+const out = {};
+ctx.openBlankProviderForm("mine");
+ctx.fillFormFromPreset(deepseek);
+out.create = ctx.providerDraftFromForm();
+out.createNote = mk("provPresetCap").textContent;
+out.createNoteHidden = mk("provPresetCap").classList.contains("hidden");
+
+ctx.openBlankProviderForm("mine");
+ctx.fillFormFromPreset(plain);
+out.createPlain = ctx.providerDraftFromForm();
+out.plainNote = mk("provPresetCap").textContent;
+
+// 编辑已有条目：哪怕刚点过预置换 base_url，也不许带上上限（卡片单源）。
+ctx.fillFormFromPreset(deepseek);
+ctx.openProviderForm({ id: "p1", label: "已配的", base_url: "https://old/v1", model: "m" }, "mine");
+out.edit = ctx.providerDraftFromForm();
+out.editNote = mk("provPresetCap").textContent;
+
+// 关单再开：上一单点过的预置不许跟着走下一单。
+ctx.openBlankProviderForm("mine");
+ctx.fillFormFromPreset(deepseek);
+ctx.closeProviderForm();
+ctx.openBlankProviderForm("mine");
+out.afterClose = ctx.providerDraftFromForm();
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_preset_cap_travels_only_with_a_new_provider_draft():
+    """I-2：选 DeepSeek 预置再保存，上限不能从 1000K 静默掉到 64K。
+
+    链路（审查员实测）：loadProviders 把 data.presets 原样给前端 → fillFormFromPreset
+    不回填上限 → providerDraftFromForm 也不发 → POST 落 providers._validate 的缺省 64。
+    而 PRESETS["deepseek"]["max_context_k"] = 1000（providers.py，官方 v4 系 1M token）。
+    修的是主控人定的口径：**预置上限只在新建时随表单走一次**，编辑路径继续由模型卡单源持有。
+    路由层端到端（不带这一格的一次 PUT 读回来仍是 1000）在
+    test_v0391_provider_capabilities.py::test_route_put_without_cap_keeps_the_preset_cap。
+    """
+    out = _run_js(("openProviderForm", "openBlankProviderForm", "fillFormFromPreset",
+                   "showPresetCapNote", "closeProviderForm", "providerDraftFromForm"),
+                  _PRESET_CAP_HARNESS, "preset-cap")
+    assert out["create"].get("max_context_k") == 1000, \
+        f"新建 + 预置却没带上限：POST 会落进 _validate 的缺省 64，管理员拿到 64K 闸门：{out['create']}"
+    assert out["create"]["label"] == "DeepSeek" and out["create"]["base_url"], out["create"]
+    assert "max_context_k" not in out["createPlain"], \
+        "没带上限的预置也被发了一份：那是界面在替服务端编缺省"
+    assert "max_context_k" not in out["edit"], \
+        f"编辑路径发了上限：会把模型卡刚写的那一格盖回预置值：{out['edit']}"
+    assert "max_context_k" not in out["afterClose"], \
+        "关单后上一单的预置还跟着走：新建第二条会被莫名放大"
+    # 表单里那句说明：有预置上限才出现，且说清"只在初始一次、之后归模型卡"。
+    assert "1000" in out["createNote"] and "模型管理" in out["createNote"], out["createNote"]
+    assert out["createNoteHidden"] is False
+    assert out["plainNote"] == "" and out["editNote"] == "", \
+        "没带上限（或走编辑）时那句「预置带来的初始上限」还在说亮话"
+
+
+def test_preset_cap_note_exists_in_the_settings_form():
+    """HTML 侧的落点：#provPresetCap 真的在那张表单里（否则 showPresetCapNote 永远空转）。"""
+    html = _html()
+    prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
+    assert 'id="provPresetCap"' in prov, "表单里没有那句话的落点：管理员看不见初始上限从哪来"
+    assert re.search(r'<p class="pane-note hidden" id="provPresetCap"></p>', prov), \
+        "那句话不该默认就显示出来（没点预置时它是无关的）"
+
+
+# ---------------- Minor 2：上限调低把预算夹下来必须吭一声 ----------------
+
+_BUDGET_CLAMP_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+const mem = new Map();
+ctx.localStorage = {
+  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+  setItem: (k, v) => mem.set(k, String(v)),
+};
+ctx.pref = { userId: "u1", contextTokensK: 8 };
+ctx.state = { providers: [{ id: "m1", max_context_k: 512 }], budgetClamped: null };
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const out = {};
+const key = "fv.contextBudget.u1.v1";
+const stored = () => JSON.parse(mem.get(key) || "{}").m1;
+ctx.setContextBudget("m1", 512);          // 这台设备记着 512K
+out.wantedBefore = ctx.contextBudgetWantedK("m1");
+ctx.state.budgetClamped = null;           // 上一句写下的账不算这一次的
+// 管理员把上限从 512K 调到 64K：syncCtxRow 走的就是这两行（夹值 + 记账）。
+ctx.state.providers = [{ id: "m1", max_context_k: 64 }];
+ctx.noteBudgetClamp("m1", ctx.contextBudgetWantedK("m1"), 64);
+ctx.setContextBudget("m1", 64);
+out.clamped = ctx.budgetClampNoteK("m1");
+out.storedAfter = stored();
+out.readAfter = ctx.contextBudgetK("m1");
+// 印一次就清（渲染侧清的那一行）：清掉之后不该再冒出来。
+ctx.state.budgetClamped = null;
+out.afterPrint = ctx.budgetClampNoteK("m1");
+// 没夹过的情形：不越界不出现；为别的模型记的账也不许说给这一张卡听。
+ctx.state.providers = [{ id: "m1", max_context_k: 64 }, { id: "m2", max_context_k: 1000 }];
+ctx.noteBudgetClamp("m2", 8, 1000);
+out.notClamped = ctx.budgetClampNoteK("m2");
+ctx.state.budgetClamped = { id: "m1", from: 512, to: 64 };
+out.wrongCard = ctx.budgetClampNoteK("m2");
+out.rightCard = ctx.budgetClampNoteK("m1");
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_lowering_the_cap_clamps_the_budget_and_says_so_once():
+    """Minor 2（spec §3.2）：夹到新上限并提示一次，不静默保留越界值。
+
+    三条各自都要成立：① 越界那份**被写回**上限（原来只在读数时夹，本机 map 里那份
+    越界值一直躺着，syncCtxRow 那句 `if (budget > cap)` 因为拿的是夹过的数而恒不成立）；
+    ② 卡片说得出"从多少夹到多少"；③ 只在被夹那张卡上出现一次，没夹过就不出现。
+    """
+    out = _run_js(("contextBudgetStorageKey", "readContextBudgets", "contextBudgetK",
+                   "setContextBudget", "contextBudgetWantedK", "noteBudgetClamp",
+                   "budgetClampNoteK"), _BUDGET_CLAMP_HARNESS, "clamp")
+    assert out["wantedBefore"] == 512 and out["readAfter"] == 64, out
+    assert out["storedAfter"] == 64, "越界那份没被写回：界面夹了、本机还留着 512，下次换个上限又冒出来"
+    assert "512" in out["clamped"] and "64" in out["clamped"] and "夹" in out["clamped"], out["clamped"]
+    assert out["afterPrint"] == "", "印过一次还在说：一句提示变成常驻警告"
+    assert out["notClamped"] == "" and out["wrongCard"] == "", \
+        "没被夹（或不是这张卡）时也冒出提示：界面在编一个没发生过的动作"
+    assert out["rightCard"] == out["clamped"]
+
+    # 接线：提示的唯一落点是卡片（mm-note），记夹的地方是 syncCtxRow 与 setContextBudget；
+    # 顺序也钉住——syncCtxRow 必须排在 renderModelChip 之前，否则同一次渲染里卡片先画完、
+    # 账还没记，那句提示就永远迟到一拍。
+    js = _js()
+    detail = _function_body(js, "renderModelDetail")
+    assert "budgetClampNoteK(" in detail and 'fvEl("p", "mm-note"' in detail, \
+        "夹完没人说：spec §3.2 那句「提示一次」落不了地"
+    assert "state.budgetClamped = null" in detail, "提示印完不清：下一次渲染还在说同一句"
+    sync = _function_body(js, "syncCtxRow")
+    assert "contextBudgetWantedK(" in sync and "noteBudgetClamp(" in sync, \
+        "syncCtxRow 还拿夹过的读数比上限：那个分支恒不成立，越界值从来没被真正夹回去过"
+    order = _function_body(js, "renderModelSelect")
+    assert order.index("syncCtxRow()") < order.index("renderModelChip()"), \
+        "先画卡片后夹值：同一次保存里那句提示永远迟到一拍"
+    assert "budgetClamped: null" in js[js.index("const state = {"):js.index("};", js.index("const state = {"))], \
+        "这笔账没在 state 字面量里初始化：第一次读它时是 undefined，行为随渲染顺序变"
+    reset = _function_body(js, "resetViewForIdentity")
+    assert "state.budgetClamped = null" in reset, \
+        "换身份没清这笔账：B 会看到一句关于 A 的预算被夹小的话"
+
+
+# ---------------- Minor 3：成功句绑卡片 id ----------------
+
+def test_saved_note_is_bound_to_the_card_it_belongs_to():
+    """保存期间 hover 到别的行，成功句不许印在别人家（也不许被顺手销毁）。"""
+    js = _js()
+    save = _function_body(js, "saveModelCapabilities")
+    assert "state.modelSaved = { id: recordId" in save, \
+        "成功句又变回裸字符串：它不认得自己属于哪张卡"
+    detail = _function_body(js, "renderModelDetail")
+    assert "state.modelSaved.id === pid" in detail, \
+        "渲染时没比对卡片 id：hover 到别的行就印错地方"
+    assert "state.modelSaved = null" in detail, "印过没清：下一次渲染再印一遍"
+    show = _function_body(js, "showModelDetail")
+    assert "state.modelSaved" not in show, \
+        "切走时把成功句清了：用户 hover 出去看一眼再回来，那句「已保存」就凭空消失"
+    reset = _function_body(js, "resetViewForIdentity")
+    assert "state.modelSaved = null" in reset, "换身份没清成功句：B 看见 A 的「已保存」"
+
+
+# ---------------- Minor 5：hideModelMenu 的注释与代码对齐 ----------------
+
+_HIDE_MENU_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const nodes = {};
+const mk = (id) => (nodes[id] || (nodes[id] = {
+  id,
+  // 一开始既没有 hidden 也没有 open/card-open：判据看的是 hideModelMenu 跑完之后的状态，
+  // 预置成"已经收起来"会让"忘了 add(hidden)"这种写法照样绿。
+  classList: { _s: new Set(),
+    add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+    contains(c) { return this._s.has(c); },
+    toggle(c, on) { if (on) { this._s.add(c); } else { this._s.delete(c); } } },
+}));
+const ctx = {};
+vm.createContext(ctx);
+ctx.$ = (id) => mk(id);
+ctx.state = { modelPinned: "p1", modelCardOpen: true, modelManage: true, modelDetailId: "p1" };
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+ctx.hideModelMenu();
+process.stdout.write(JSON.stringify({
+  pinned: ctx.state.modelPinned,
+  cardOpen: ctx.state.modelCardOpen,
+  manage: ctx.state.modelManage,
+  menuHidden: mk("modelMenu").classList.contains("hidden"),
+  cardOpenClass: mk("modelMenu").classList.contains("card-open"),
+  chipOpen: mk("modelChip").classList.contains("open"),
+}));
+"""
+
+
+def test_hiding_the_model_menu_keeps_the_manage_section():
+    """Minor 5：注释说清两个本机态、代码实际清了哪几个——按行为对齐，不打反向。
+
+    定下来的行为是「下次打开还接着上次的编辑区」：收起弹单不等于退出管理（改一条模型
+    中途去看清单/切设置页，回来还得接着改）。所以 modelManage 故意不清，而
+    「收起管理」按钮与换身份两处该清的都在。这条真跑把三个本机态各自的去向钉住，
+    下一次"顺手补一行清理"会当场红。
+    """
+    out = _run_js(("hideModelMenu",), _HIDE_MENU_HARNESS, "hide-menu")
+    assert out["pinned"] == "" and out["cardOpen"] is False, out
+    assert out["menuHidden"] is True and out["cardOpenClass"] is False and out["chipOpen"] is False, out
+    assert out["manage"] is True, \
+        "管理区被收起时清了：注释与行为又打反向（本轮定的口径是留着，见 hideModelMenu 那段）"
+    js = _js()
+    assert "state.modelManage = false" in _function_body(js, "closeModelManage"), \
+        "「收起管理」不再真的收起：留着这一格它就不是收的入口"
+    assert "state.modelManage = false" in _function_body(js, "resetViewForIdentity"), \
+        "换身份没清管理区：B 打开卡片直接落在 A 的编辑区里"
+
+
+# ---------------- Minor 6：data-thinking 属性必须有 CSS 消费 ----------------
+
+def _thinking_style_pairs(js: str, css: str):
+    """(挂载点, 没人消费的孤儿)。射程见下面那条用例的 docstring。"""
+    styled = set(re.findall(r"\.([A-Za-z][\w-]*)\[data-thinking", css))
+    stamped = []
+    for var in sorted(set(re.findall(r"const ([A-Za-z_$][\w$]*) = fvEl\(", js))):
+        if f'{var}.setAttribute("data-thinking"' not in js:
+            continue
+        m = re.search(rf'const {re.escape(var)} = fvEl\("[a-z]+", "([^"]*)"', js)
+        assert m, f"{var} 挂了 data-thinking 却找不到它的 fvEl 类名——这条锁要跟着改读法"
+        stamped.append((var, m.group(1)))
+    orphans = [(var, cls) for var, cls in stamped if not set(cls.split()) & styled]
+    return stamped, orphans
+
+
+def test_every_thinking_state_attribute_is_actually_styled():
+    """Minor 6（派生锁）：app.js 里挂 data-thinking 的那些元素，样式表必须真的认它。
+
+    射程：只认 `const X = fvEl("tag", "类名")` 之后紧跟 `X.setAttribute("data-thinking", ...)`
+    这一种形状（模型卡那批都这么写）。把属性挂在别的来源（querySelector 拿到的节点、
+    dataset 直接赋值）不在这条锁眼里——出现那种写法时要么改这条的读法，要么别指望它挡。
+    """
+    js = _js()
+    css = _css()
+    stamped, orphans = _thinking_style_pairs(js, css)
+    assert len(stamped) >= 4, f"只扫到 {len(stamped)} 处挂载点，判据等于没跑：{stamped}"
+    assert not orphans, (
+        f"这些元素挂了 data-thinking 却没有任何 CSS 消费：{orphans}——"
+        "要么补一条规则（禁用态该看得出是禁用的），要么把装饰删掉；"
+        "白挂的属性会让下一个人以为样式在管它")
+    # 自证有牙（在内存里做，树上不留红）：把样式表里那条"思考行降饱和"的选择器换个名字，
+    # 孤儿名单必须立刻点名 mm-thinking——这正是本轮之前那两处白挂的形状。
+    _, mutants = _thinking_style_pairs(js, css.replace(".mm-thinking[", ".mm-thinking-renamed["))
+    assert [cls for _, cls in mutants] == ["mm-row mm-thinking"], \
+        f"判据没牙：换掉 CSS 选择器后它还不知道谁变成了孤儿：{mutants}"
+
+
+# ---------------- Minor 7：档位标签里的空格不许被劈开 ----------------
+
+_THINKING_LEVELS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+process.stdout.write(JSON.stringify({
+  spaced: ctx.parseThinkingLevels("快速 思考， 均衡 、深入"),
+  four: ctx.parseThinkingLevels("a,b,c,d"),
+  blank: ctx.parseThinkingLevels("   "),
+  none: ctx.parseThinkingLevels(null),
+  dup: ctx.parseThinkingLevels("均衡，均衡，快速"),
+}));
+"""
+
+
+def test_thinking_level_labels_survive_spaces_and_dedup():
+    """Minor 7：分隔判据与后端 _clean_levels 同一口径——后端只 strip，从不按空格劈开一项。"""
+    out = _run_js(("parseThinkingLevels",), _THINKING_LEVELS_HARNESS, "levels")
+    assert out["spaced"] == ["快速 思考", "均衡", "深入"], \
+        "含空格的档位标签被劈开了：填 3 个、库里存 4 个，撞上「最多 3 个」拒收的却是没填错的那格：" \
+        f"{out['spaced']}"
+    assert out["four"] == ["a", "b", "c", "d"], "界面悄悄砍掉第 4 档 = 把「没配上」演成「配上了」"
+    assert out["blank"] == [] and out["none"] == [], out
+    assert out["dup"] == ["均衡", "快速"], out
+
+
+# ---------------- I-4：role="menu" 的 ARIA 归属 ----------------
+
+def test_model_menu_uses_group_semantics_not_menu_semantics():
+    """I-4：#modelMenu 里住着详情卡（滑杆/输入框/「模型管理」按钮），menu 语义罩不住。
+
+    menu 的合法子元素只有 menuitem / menuitemcheckbox / menuitemradio / group / separator，
+    而方向键契约（↑↓ + Home/End）没实现。改法取"去掉不适用的语义"那一支：容器换
+    role="group"（仍接受 aria-label，读屏会说"选择模型 分组"），行回到普通 button——
+    半套 ARIA 比不给语义更糟。附件菜单那颗 role="menu" 不在本单射程，一字未动。
+    """
+    html = _html()
+    js = _js()
+    tag = re.search(r'<div class="model-menu[^"]*" id="modelMenu"[^>]*>', html)
+    assert tag, "#modelMenu 那一行的形状变了，这条锁要跟着改读法"
+    assert 'role="group"' in tag.group(0), f"模型菜单还挂着 menu 语义（或干脆没角色）：{tag.group(0)}"
+    assert 'role="menu"' not in tag.group(0), tag.group(0)
+    assert 'aria-label="选择模型"' in tag.group(0), \
+        "去掉 menu 时把 aria-label 一起删了：读屏连「选择模型」都不报了（可见行为：分组名仍播报）"
+    assert "menuitem" not in _function_body(js, "renderModelChip"), \
+        "行上还挂着 menuitem：它只在 menu/menubar/tree 之下才是合法角色"
+    attach = html[html.index('id="attachMenu"'):html.index('id="modelMenu"')]
+    assert 'role="menu"' in attach and 'role="menuitem"' in attach, \
+        "附件菜单那套合法的 menu/menuitem 被顺手改掉了：本单射程只有模型菜单"

@@ -1460,8 +1460,17 @@ def test_context_cap_follows_the_selected_model_end_to_end():
 
     assert 'id="provCtxK"' not in html, "设置页表单还在收模型上限：与模型卡两个真相"
     draft = _function_body(js, "providerDraftFromForm")
-    assert "max_context_k" not in draft, \
-        "表单还在发上限：一次普通保存会盖掉模型卡刚写进去的那一格"
+    assert "provCtxK" not in draft, "表单还在读那个已删掉的输入框：null.value 空指针"
+    # Task 9 修复轮 I-2 重钉：判据从"草稿里根本不许出现 max_context_k"改成
+    # "只在**新建**且**点过预置**时出现"。原写法挡的是"改一次名字洗掉上限"（编辑路径），
+    # 那一半一字未松：编辑路径照样不许发。放开的是新建那一次——PRESETS 里写好的
+    # 1000K（DeepSeek v4 系）不发出去，就会落进 _validate 的缺省 64，全站预算跟着缩。
+    # 行为侧由 test_v0391_web_cockpit_ui.py::test_preset_cap_... 那组 node 真跑钉死。
+    assert "state.editingProvider" in draft and "state.presetMaxContextK" in draft, \
+        "上限从表单发出去了却没绑新建条件：一次普通保存会盖掉模型卡刚写的那一格"
+    assert re.search(r"if \(!state\.editingProvider && state\.presetMaxContextK !== null\)", draft), \
+        "那道条件被改宽了（只看预置不看是否编辑）：编辑已有条目会带上预置上限"
+    assert draft.count("max_context_k") == 1, "上限在这一份草稿里出现第二次：出处不止一个"
     card = _function_body(js, "providerCapabilityBody")
     assert "max_context_k" in card, "上限不再经模型卡 PUT 进出：这一格从此没人能改"
 
