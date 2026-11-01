@@ -1092,7 +1092,12 @@ function closeProviderForm() {
 
 function providerDraftFromForm() {
   return {
-    id: $("provId").value || undefined,
+    // id 只跟着"这次是在改哪一条"走，不跟隐藏域走（#224）：
+    // 隐藏域 provId 的值由打开表单时填，closeProviderForm 不清它——一旦哪天
+    // 新建态下它留着上一条的 id，这个草稿就会带着别人的身份去 POST，而后端
+    // 现在会响亮地 400。创建一律不发 id（服务端生成），编辑的 id 由路径参数
+    // 说话，这里的值会被后端覆盖，留着只是为了与 saveProvider 的判断同源。
+    id: state.editingProvider || undefined,
     label: $("provLabel").value.trim(),
     base_url: $("provBase").value.trim(),
     api_key: $("provKey").value.trim(),

@@ -102,6 +102,123 @@ def test_private_provider_never_becomes_site_default(client, enforced):
     assert got != pid
 
 
+# ---------- AC-2b：创建面不接受客户端自带的 id（#224 的攻击复现锁） ----------
+# 复现路径（审查员在 BASE 实测 200）：用户 B 往 /v1/me/providers POST 一条
+# 带 A 的私有 id 的配置。路由只覆盖 owner/paid_by/is_default 三格，id 原样
+# 进 upsert → 更新分支命中 A 那条，base_url/model/api_key 整条换成 B 给的，
+# owner 仍是被冒名的那位。此后 A 聊天用的是 B 的上游与 B 的密钥。
+# 私有 id 形如 p_<8 hex>（32 位熵），可穷举；共享 id 更是人人可枚举。
+
+HIJACK_KEY = "sk-hijacker-key-777"  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+_MUTABLE_FIELDS = ("label", "base_url", "model", "api_key_masked", "has_key",
+                   "shared", "paid_by")
+
+
+def _mine(client, hdr, pid):
+    return next((p for p in client.get("/v1/me/providers", headers=hdr).json()["mine"]
+                 if p["id"] == pid), None)
+
+
+def _shared(client, hdr, pid):
+    return next((p for p in client.get("/v1/me/providers", headers=hdr).json()["shared"]
+                 if p["id"] == pid), None)
+
+
+def _hijack_payload(pid):
+    return _payload(id=pid, label="被冒名改的那条", base_url="https://api.attacker.invalid/v1",
+                    model="attacker-chat", api_key=HIJACK_KEY)
+
+
+def test_post_with_other_users_private_id_is_rejected_and_his_row_untouched(client, enforced):
+    a = enforced("id-trust-owner")
+    b = enforced("id-trust-attacker")
+    pid = _add(client, a)
+    before = _mine(client, a, pid)
+    assert before is not None, "前置条件没成立：A 的私有条目没建起来"
+
+    r = client.post("/v1/me/providers", json=_hijack_payload(pid), headers=b)
+    assert r.status_code == 400, f"B 拿 A 的私有 id 创建本该被拒，实际 {r.status_code}：{r.text}"
+    assert "id" in r.json()["detail"], r.text
+
+    after = _mine(client, a, pid)
+    for field in _MUTABLE_FIELDS:
+        assert after[field] == before[field], \
+            f"A 那条私有配置的 {field} 被 B 的一次 POST 改掉了：{before[field]} -> {after[field]}"
+    # 冒名不该把这条同时挂到 B 名下，也不该留下攻击者那个 label
+    assert _mine(client, b, pid) is None
+    assert "被冒名改的那条" not in client.get("/v1/me/providers", headers=a).text
+    # 两栏纪律：这把新密钥既不许进错误 detail，也不许从任何读口回来
+    assert HIJACK_KEY not in r.text
+    assert HIJACK_KEY not in client.get("/v1/me/providers", headers=a).text
+    assert MY_KEY not in r.text
+
+    # A 之后聊天用的还是自己那条上游（不是攻击者的）
+    chat = _chat(client, a, provider=pid)
+    assert chat.status_code == 200, chat.text
+    assert chat.json()["model"] == "my-chat", "A 的聊天被改道到了 B 塞的模型"
+
+
+def test_post_with_shared_id_cannot_rewrite_the_site_wide_entry(client, enforced):
+    """同一条漏洞在共享条目上：一次 POST 换掉全站那一条的上游与密钥。"""
+    a = enforced("id-trust-shared-user")
+    before = _shared(client, a, "fake-model")
+    assert before is not None, "前置条件没成立：共享夹具条目不见了"
+
+    r = client.post("/v1/me/providers", json=_hijack_payload("fake-model"), headers=a)
+    assert r.status_code == 400, f"带共享 id 的创建本该被拒，实际 {r.status_code}：{r.text}"
+
+    after = _shared(client, a, "fake-model")
+    for field in _MUTABLE_FIELDS:
+        assert after[field] == before[field], \
+            f"共享条目「fake-model」的 {field} 被普通用户的一次 POST 改掉了"
+    assert after["shared"] is True, "共享条目被改姓成私有条目"
+    assert HIJACK_KEY not in r.text
+    # 私有面也不许凭空多出一条同 id 的"我的"配置
+    assert _mine(client, a, "fake-model") is None
+
+
+def test_post_my_provider_still_generates_id_when_absent_or_blank(client, enforced):
+    """正控：不带 / 空串 / 纯空白都必须照常创建（别把正常用户打死）。"""
+    a = enforced("id-trust-creator")
+    made = []
+    for over in ({}, {"id": ""}, {"id": "   "}):
+        r = client.post("/v1/me/providers", json=_payload(**over), headers=a)
+        assert r.status_code == 200, r.text
+        pid = r.json()["provider"]["id"]
+        assert pid and pid not in made, f"三次创建拿到同一个 id：{made + [pid]}"
+        made.append(pid)
+    assert [p["id"] for p in client.get("/v1/me/providers", headers=a).json()["mine"]] == made
+
+
+def test_both_post_create_routes_reject_client_id_before_upsert(client, enforced, monkeypatch):
+    """守卫必须在 upsert 之前拦住，两条创建路由共用同一把（不各抄一份）。"""
+    import inspect
+
+    import app.core.providers as providers
+    import app.main as main
+
+    assert inspect.getsource(main).count("def _reject_client_provider_id") == 1, \
+        "守卫被抄成两份：下一次改动只会漂移其中一份"
+
+    calls = []
+    real = providers.store.upsert
+
+    def _spy(record):
+        calls.append(record.get("id"))
+        return real(record)
+
+    monkeypatch.setattr(providers.store, "upsert", _spy)
+    a = enforced("id-trust-no-write")
+    admin = {"Authorization": "Bearer boot-token"}
+
+    assert client.post("/v1/me/providers", json=_payload(id="fake-model"), headers=a).status_code == 400
+    assert client.post("/v1/providers", json=_payload(id="fake-model"), headers=admin).status_code == 400
+    assert calls == [], f"被拒的创建仍然打到了存储层：{calls}"
+
+    assert client.post("/v1/me/providers", json=_payload(), headers=a).status_code == 200
+    assert len(calls) == 1, "正控：不带 id 的创建必须照常落库"
+
+
 # ---------- AC-3：管理员面只见共享、不碰私有 ----------
 
 def test_admin_surface_never_sees_or_touches_private(client, enforced):

@@ -275,20 +275,23 @@ def test_共享条目改单价是管理员的门_普通用户两条路都进不�
     普通用户改共享价 = 全站成本说改就改；管理员面碰私有条目 = 不存在（同 404 不泄露归属）。"""
     admin_headers, user_headers, private_id, _ = enforced_available
     client = TestClient(app)
+    # #224：创建路由不再收客户端自带 id（POST 带 id = 按 id 覆盖任何一条），
+    # 所以这里的 id 从响应里读，而不是在请求里指定。
     shared = client.post("/v1/providers", headers=admin_headers, json={
-        "id": "shared-priced", "label": "共享", "base_url": "https://s.invalid/v1",
+        "label": "共享", "base_url": "https://s.invalid/v1",
         "api_key": "sk-shared-000111222",  # secret-scan:allow 测试里造的假密钥
         "model": "m", "pricing": {"mode": "token", "currency": "CNY",
                                   "input_per_m": 1.0, "output_per_m": 4.0}})
     assert shared.status_code == 200, shared.text
+    shared_id = shared.json()["provider"]["id"]
     try:
         # 普通用户走管理员面：403（角色不够）；走个人面碰共享：404（不是他的条目）
-        res = client.put("/v1/providers/shared-priced", headers=user_headers, json={
+        res = client.put("/v1/providers/%s" % shared_id, headers=user_headers, json={
             "label": "共享", "base_url": "https://s.invalid/v1", "model": "m",
             "pricing": {"mode": "token", "currency": "CNY",
                         "input_per_m": 0.0, "output_per_m": 0.0}})
         assert res.status_code == 403, f"普通用户改得动共享单价：{res.status_code}"
-        res = client.put("/v1/me/providers/shared-priced", headers=user_headers, json={
+        res = client.put("/v1/me/providers/%s" % shared_id, headers=user_headers, json={
             "label": "共享", "base_url": "https://s.invalid/v1", "model": "m"})
         assert res.status_code == 404, "别人的共享条目在个人面必须是『不存在』"
         # 管理员也休想碰用户的私有条目（与 R1 的防枚举纪律同一形状）
@@ -296,7 +299,7 @@ def test_共享条目改单价是管理员的门_普通用户两条路都进不�
             "label": "私改", "base_url": "https://p.invalid/v1", "model": "m"})
         assert res.status_code == 404, "私有条目对管理员面也是不存在——不泄露存在性"
     finally:
-        provider_store.delete("shared-priced")
+        provider_store.delete(shared_id)
 
 
 @pytest.fixture
@@ -314,16 +317,18 @@ def enforced_available(monkeypatch, tmp_path):
     _, tok2 = store.register(username="路人乙", password="correct-horse-battery2")
     other_headers = {"Authorization": "Bearer " + tok2}
     client = TestClient(app)
+    # #224：私有条目同样只能由服务端发 id（创建面带 id = 冒名覆盖任何一条）。
     saved = client.post("/v1/me/providers", headers=user_headers, json={
-        "id": "mine-priced", "label": "我的", "base_url": "https://m.invalid/v1",
+        "label": "我的", "base_url": "https://m.invalid/v1",
         "api_key": "sk-mine-000111222",  # secret-scan:allow 测试里造的假密钥
         "model": "m", "pricing": {"mode": "token", "currency": "CNY",
                                   "input_per_m": 2.0, "output_per_m": 8.0}})
     assert saved.status_code == 200, saved.text
+    private_id = saved.json()["provider"]["id"]
     try:
-        yield BOOT, user_headers, "mine-priced", other_headers
+        yield BOOT, user_headers, private_id, other_headers
     finally:
-        provider_store.delete("mine-priced")
+        provider_store.delete(private_id)
 
 
 def test_私有条目的属主可以改自己的单价_别人连条目都不存在(enforced_available):

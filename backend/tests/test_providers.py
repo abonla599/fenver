@@ -136,6 +136,93 @@ def test_invalid_base_url_rejected():
     assert "base_url" in res.json()["detail"]
 
 
+# ---------- #224：创建面不接受客户端自带的 id ----------
+# 审查员在 BASE 上实测跑通的那条：POST /v1/providers 曾经把 req.id 原样送进
+# upsert，而 upsert 见到已存在的 id 走的是**更新分支**（只沿用库内那份 owner，
+# base_url/model/api_key/label 整条替换）。于是「创建」= 「改别人的那一条」：
+# 共享 id 人人可从 /v1/models 枚举，改一次就把全站聊天换到攻击者的上游，
+# 顺带把管理员垫在后面的密钥换成攻击者那把。PUT 两侧本来有 _owner_gate，
+# POST 没有这道门——守卫因此落在创建路由上，而不是存储层（存储层仍要能
+# 被 seeded/内部路径显式指定 id，见 test_v033_ssrf_guards 直接调 upsert 那几条）。
+
+_MUTABLE_FIELDS = ("label", "base_url", "model", "api_key_masked", "has_key",
+                   "shared", "paid_by")
+
+
+def _shared_entry(pid):
+    return next(p for p in client.get("/v1/providers").json()["providers"]
+                if p["id"] == pid)
+
+
+def test_post_with_existing_shared_id_is_rejected_and_that_row_untouched():
+    before = _shared_entry("fake-model")
+    res = client.post("/v1/providers", json=_payload(
+        id="fake-model", label="劫持共享", base_url="https://evil.invalid/v1",
+        model="evil-chat", api_key="sk-attacker-key-4321"))  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+    assert res.status_code == 400, f"带已有 id 的创建本该被拒，实际 {res.status_code}：{res.text}"
+    assert "id" in res.json()["detail"], res.text
+
+    after = _shared_entry("fake-model")
+    for field in _MUTABLE_FIELDS:
+        assert after[field] == before[field], f"共享条目「fake-model」的 {field} 被一次 POST 改掉了"
+    assert after["shared"] is True, "共享条目被改姓"
+    # 两栏纪律：错误响应不许把请求里的密钥带出来，界面回显也算出口
+    assert "sk-attacker-key-4321" not in res.text
+    assert "sk-real-looking-key-123456" not in res.text  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+
+
+def test_post_with_a_brand_new_client_id_is_also_rejected():
+    """id 由服务端生成这件事不许是"可选"的：传了新 id 也不落库。
+
+    放过新 id 等于把"客户端可以指定身份"这条接口留着——今天没人撞车，
+    明天就有人靠它抢占一个后来才出现的共享 id。
+    """
+    res = client.post("/v1/providers", json=_payload(id="admin-chosen-id"))
+    assert res.status_code == 400, res.text
+    assert "admin-chosen-id" not in [p["id"] for p in client.get("/v1/providers").json()["providers"]]
+
+
+def test_rejected_create_never_reaches_the_store(monkeypatch):
+    """守卫必须在 upsert **之前**拦住：400 之后存储层一次都不该被叫到。"""
+    import app.core.providers as providers
+
+    def _boom(*a, **k):
+        raise AssertionError("带客户端 id 的创建走到了 upsert：守卫没在落库之前拦住")
+
+    monkeypatch.setattr(providers.store, "upsert", _boom)
+    res = client.post("/v1/providers", json=_payload(id="fake-model"))
+    assert res.status_code == 400, res.text
+
+
+def test_post_still_generates_id_when_client_sends_none_or_blank():
+    """正控：没带 / 空串 / 纯空白都照常创建，且各自拿到服务端生成的新 id。
+
+    这一条是防止修法把正常创建打死——也钉住口径：空白串算"没带"，不算"带了"。
+    """
+    made = []
+    for payload in (_payload(), _payload(id=""), _payload(id="   ")):
+        res = client.post("/v1/providers", json=payload)
+        assert res.status_code == 200, res.text
+        made.append(res.json()["provider"]["id"])
+    assert len(set(made)) == 3, f"三次创建拿到同一个 id，说明空白 id 没被换成新 id：{made}"
+    assert all(made), made
+    for pid in made:
+        client.delete(f"/v1/providers/{pid}")
+
+
+def test_both_create_routes_share_one_id_guard():
+    """两条 POST 走同一把守卫，不各抄一份（本仓纪律：抄两份迟早漂移）。"""
+    import inspect
+
+    import app.main as main
+
+    src = inspect.getsource(main)
+    assert src.count("def _reject_client_provider_id") == 1, "守卫出现了第二份实现"
+    for fn in (main.add_provider, main.add_my_provider):
+        assert "_reject_client_provider_id(" in inspect.getsource(fn), \
+            f"{fn.__name__} 没过这道门：创建面又能收客户端 id 了"
+
+
 def test_set_default_and_delete():
     saved = client.post("/v1/providers", json=_payload()).json()["provider"]
     assert client.post(f"/v1/providers/{saved['id']}/default").status_code == 200
