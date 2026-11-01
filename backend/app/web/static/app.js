@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.38.3：本版只换服务端（官网视觉终版：首屏主次、浅色实拍、区块头绿带、全站去深色）；APK 仍 0.36.4。 */
 /* release-marker-v0.38.2：本版只换服务端（官网产品化重设计与移动端适配）；APK 仍 0.36.4。 */
 /* release-marker-v0.38.1：本版只换服务端（M-9 日志治理 B1，app/watchdog/cloudflared 日志移出 data）；APK 仍 0.36.4。 */
 /* release-marker-v0.38.0：本版只换服务端（provider DNS pin + 审批清理 + 认证限速 + Actions SHA）；APK 仍 0.36.4。 */
