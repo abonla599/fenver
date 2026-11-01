@@ -9,7 +9,8 @@
 
 四条闸（都是代码，不是「记得」）
 ----------------------------------------
-1. **出站总额 4 次**。`call-ledger.jsonl` 落在仓库外，每发一次**先记账再发**
+1. **出站总额 4 次**。`call-ledger.jsonl` 落在仓库外——这句从修复轮 2 起**也是判据**：
+   账本若落在本仓树内或属于另一棵 checkout，闸 0 直接拒（N3）。每发一次**先记账再发**
    （进程半路死掉也算花掉了），发之前先数账本：`AUTHORIZED_LIVE_CALLS` 就是上限，
    到数了直接拒绝、一次都不发。`--attempt` 还要和账本序号对上——对不上说明
    「我以为这是第 3 次」和机器要发的不是同一次，那正是重复烧额度的形状。
@@ -30,9 +31,15 @@
    → 再判一次 `overlaps(iso, data_dir)`（缺省自建那一支的落点）→ 才许 `load_backend_modules(iso)`
    → `assert_store_quarantined()` 验单例的 `path`/`keys_path`/`prefs_path` 三个落点。
    **重叠判据必须在 import 之前**（修复轮 1，Important-3）：import 本身就是那一次写盘，
-   先 import 再判重叠等于"先把文件开进只读目录，再宣布这里不许有文件"。
-   只读证据 `files_digest` 也**递归覆盖 `--data-dir` 整棵树**（含子目录），不再只盯顶层
-   那两个名字——否则 `<data-dir>/iso/providers.json` 这种事尺子本身就看不见。
+   先 import 再判重叠等于"先把文件开进只读目录，再宣布这里不许有文件"。判据走
+   `os.path.realpath` 而非词法路径（修复轮 2，N2）：`mklink /J` 造的重解析点换个名字
+   指的还是同一棵树，词法层判"不相干"就是把尺子的刻度停在字符串上。
+   只读证据 `files_digest` **递归覆盖 `--data-dir` 整棵树**（修复轮 1，Important-3），
+   且 `before` 快照取在 `isolate_runtime_env()` **之前**（修复轮 2，N2：原来取在
+   import 之后，"隔离/import 期间"的写盘在结构上就看不见）。跑完后的比对拆成软硬两格
+   （修复轮 2，concerns.3）：**硬**（rc=2，结论作废）= store 三件套变了或多/少路径；
+   **软**（只追加 note、点名是哪几项）= 既有无关文件的 mtime/size 变了——现网 300 秒
+   定时器会无条件重写 `data/preference.txt`，硬判等价于拿付费额度去给心跳陪葬。
    **不用 `providers.store.resolve(...)`**：那条路走的就是 import 触发的单例。
    现网那条记录是自己 `json.load` 只读出来的。
 3. **密钥不出终端**。出口只允许 `provider_id / profile / level / accepted /
@@ -45,6 +52,9 @@
    （`_own_key_values()`），而这里的 store 被隔离在临时目录、根本不认识现网那两把 key。
 4. **先 dry-run 绿，才许真发**。`--dry-run` 走假 client，零网络、不记账，
    退出码两种走向由 `backend/tests/test_v0391_thinking_mapping.py` 演。
+   dry-run 产出的行在机器可读层必须自己承认是模拟（修复轮 2，N1）：`transport` 打
+   `fake_client`（不是 `openai_sdk`），`scope.simulated` 为 `true`——§R8 第 8 条拿
+   `transport` 当"零出站的机械凭据"用，让一行模拟数据顶着真发的章，烧掉的是这份凭据本身。
    附带一条同样免费的检查：配方里的字段先对着 `Completions.create` 的**签名**问一遍
    （本机 openai 2.37.0 没有 `**kwargs`，裸 `thinking=` 会在本地就 TypeError——
    一次 HTTP 都不发却已经占掉一格额度），到不了上游的形状在记账前就被挡掉。
@@ -62,16 +72,20 @@
 `enable_thinking=true`。那种格子写成 `form_unverifiable`（「该形态今天不可核实」），
 **不改成流式再发一次**——那会超出授权的 4 次。
 
-本工具不许对另一个 checkout 运行（修复轮 1，Minor）：`inside_dir(…, REPO_ROOT)` 只挡
-发起这一跑的那棵树，所以 `--data-dir` 的宿主目录若带着 `.git` 又不是本工具这棵树，直接拒
-（判据只 stat 宿主和它的 `.git`，**绝不去读那份 data/**）。
+本工具不许对另一个 checkout 运行（修复轮 1，Minor；修复轮 2 补 N3/N4）：`inside_dir(…, REPO_ROOT)`
+只挡发起这一跑的那棵树，所以 `--data-dir`（以及 live 必填的 `--ledger`——账本同样是落盘，
+N3）若沿父链上溯碰到 `.git` 且不是本工具这棵树，直接拒。N4：原判据只看父级一层，
+`<other>/data/swap-snapshots/snap-1/data` 这种深树形状曾放行并一路读到密钥指纹——现在沿
+**整条父链**上溯（判据只 stat 各级祖先目录有没有 `.git`，**绝不去读树里那份 data/**）。
 
 退出码
     0  拿到证据（`verified`，或基线那一格的 `baseline_ok`）
     1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败）——**不重试**
-    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 形状越出授权 /
-       `--data-dir` 属于另一棵 checkout；或隔离、重叠、账本、配方、记录任一条不成立），
-       要么只读承诺被打破（跑完之后 `--data-dir` 那棵树的摘要变了）
+    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 账本落在仓库内或
+       属于另一棵 checkout / 形状越出授权 / `--data-dir` 属于另一棵 checkout；
+       或隔离、重叠、账本、配方、记录任一条不成立），要么只读承诺被**硬**打破
+       （跑完之后 store 三件套变了，或 `--data-dir` 树里多/少了路径；无关文件只是
+       mtime/size 漂移走软判：追加 note 点名，rc 按原判据走。修复轮 2，concerns.3）
     3  出口泄露闸拦停：payload 里还认得出凭据，整份一个字都不打印
 """
 import argparse
@@ -104,6 +118,9 @@ AUTHORIZED_MAX_TOKENS = DEFAULT_MAX_TOKENS   # 授权形状里那一格的字面
 DEFAULT_TIMEOUT = 30.0
 REDACTED = "«密钥已隐去»"
 RUNTIME_DATA_FILES = ("providers.json", "provider_keys.json")
+# store 单例真正拥有的三份文件（providers/keys 由 _flush 写、prefs 由 set_default 那一路写）。
+# 只读证据的**硬判**认这三份 + 结构增减；别的文件漂移只算软判（修复轮 2，concerns.3）。
+STORE_OWNED_FILES = ("providers.json", "provider_keys.json", "provider_prefs.json")
 
 RC_VERIFIED = 0
 RC_UNVERIFIED = 1
@@ -185,7 +202,11 @@ class FakeBadRequestError(RuntimeError):
 
 
 def _norm(path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    """路径口径：**realpath**，不是 abspath（修复轮 2，N2）。词法口径（abspath+normcase）
+    看不见重解析点：`mklink /J iso-junction → <data-dir>/iso` 被判"与 --data-dir 不相干"，
+    于是 mkdir、import 照常进行，只读树里真被开出文件。realpath 把 junction/symlink
+    还原到真实目标再比；不存在的尾部路径按最长存在前缀解析，不需要目标先存在。"""
+    return os.path.normcase(os.path.realpath(str(path)))
 
 
 def inside_dir(child, parent) -> bool:
@@ -203,23 +224,32 @@ def overlaps(a, b) -> bool:
 
 
 def data_dir_belongs_to_another_checkout(data_dir) -> bool:
-    """`--data-dir` 的宿主目录是不是**另一棵 checkout**（有 `.git` 且不是本工具这棵树）。
+    """`data_dir`（或账本文件路径）是不是落在**另一棵 checkout** 里。
 
     为什么要有这一条：`inside_dir(target, REPO_ROOT)` 只挡得住"发起这一跑的那棵树"。
     从 `.qoder/worktrees/<x>` 跑、而 `--data-dir` 指主工作树 `data/` 这个形状，
     原本只靠别的判据兜着——而 AGENTS.md §1 把 `data/` 列为受保护运行期资产，
     主工作树那一份**就是现网正在用的那一份**。所以把它显式列入禁止名单。
 
-    **只加判据，不去读它**：这里只 `exists()` 宿主目录和它的 `.git`，
-    既不打开 `data/` 里的任何文件，也不 `stat` 它们。
+    修复轮 2（N4）：原判据只看 `target.parent` 一层——`<other>/data` 拒了，
+    `<other>/data/swap-snapshots/snap-1/data`（同样一份 providers.json + provider_keys.json）
+    却放行并一路读到 `credential_fp`。现在沿**整条父链**上溯：先撞见 `REPO_ROOT` ⇒ 放行
+    （那是咱们自己这棵树），先撞见 `.git` ⇒ 拒。
+
+    **只加判据，不去读它**：这里只对各级祖先目录的存在性与 `.git` 做 `exists()`，
+    既不打开树里任何文件，也不 `stat` 它们的内容。
     """
-    target = Path(_norm(data_dir))
-    host = target.parent
-    if not host.exists():
-        return False
-    if _norm(host) == _norm(REPO_ROOT):
-        return False
-    return (host / ".git").exists()
+    root_norm = _norm(REPO_ROOT)
+    current = Path(_norm(data_dir)).parent
+    while True:
+        if _norm(current) == root_norm:
+            return False
+        if (current / ".git").exists():
+            return True
+        parent = current.parent
+        if parent == current:                       # 到盘根了：链上没有 .git，放行
+            return False
+        current = parent
 
 
 # --------------------------------------------------------------- 闸 2：隔离 ----
@@ -352,6 +382,9 @@ def files_digest(directory, names=RUNTIME_DATA_FILES) -> dict:
     不摘内容、不摘路径，也不读内容（只 `stat`）：`data/` 里可能有正在被现网服务改写的
     大文件，读它既慢又越界。代价是这条证据认的是"名字/时间戳/大小"三元组而不是逐字节哈希，
     所以报告里那句"逐字节不变"用的是外面另算的 `sha256` 清单，不是这个函数。
+    这把尺子看得到多少，还取决于**快照取的时点**（修复轮 2，N2）：`before` 必须取在
+    `isolate_runtime_env()` / import **之前**，否则"隔离期间"的写盘依旧不在射程里。
+    跑完后的比对不是一条"相等/不等"，而是 `digest_delta` 的软硬两格（concerns.3）。
     负控见 `test_runtime_digest_actually_moves_when_the_file_is_written` 与
     `test_files_digest_covers_everything_under_the_data_dir`。
     """
@@ -376,6 +409,42 @@ def files_digest(directory, names=RUNTIME_DATA_FILES) -> dict:
         # 顶层那两份就算不存在也要在摘要里留一格："从无到有"得能让摘要动起来。
         out.setdefault(name, "missing")
     return out
+
+
+def digest_delta(before: dict, after: dict) -> tuple:
+    """只读证据的**软硬两格**（修复轮 2，concerns.3；审查员给的两格拆法，不加第三条）。
+
+    硬（结论作废，rc=2）：store 拥有的三件套变了，**或**树里多/少了路径——后者才是
+    Important-3 要挡的形状（`<data-dir>/iso/providers.json` 被开出来）。
+    软（只追加 note 并点名是哪几项）：树里**既有无关文件**的 mtime/size 变了。现网
+    300 秒定时器（`main.py:426-442` → `analyze_all_preferences()`）无条件重写
+    `data/preference.txt`，把它硬判等于拿已经花掉的付费额度给心跳陪葬——误红既烧钱
+    又把下一次真红训成"狼来了"。
+
+    返回 `(hard, soft)`，均为有序名单。单元负控：`test_digest_delta_separates_hard_from_soft`。
+    """
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(after) & set(before) if before[k] != after[k])
+    store_changed = [k for k in changed if k in STORE_OWNED_FILES]
+    soft = [k for k in changed if k not in STORE_OWNED_FILES]
+    return sorted(added + removed + store_changed), soft
+
+
+def readonly_delta_verdict(payload, before: dict, data_dir) -> list:
+    """把 `digest_delta` 的结论写进 payload：`runtime_data_untouched`、软硬两条 note。
+    返回硬判名单（空 = 通过原判据）。成功路与失败路共用这一个函数——写盘这件事
+    不挑结论（修复轮 2；错误那一支以前只记 flag 不作废，store 被改了也照样 rc=1）。"""
+    after = files_digest(data_dir)
+    hard, soft = digest_delta(before, after)
+    payload["runtime_data_untouched"] = not hard and not soft
+    if hard:
+        payload["notes"].append("只读承诺被打破：store 三件套被改写或树里多/少了路径（"
+                                + ", ".join(hard) + "），本次结论不予采信")
+    if soft:
+        payload["notes"].append("窗口内有无关既有文件被重写（mtime/size 变了，不影响本次判据，"
+                                "点名如下）：" + ", ".join(soft))
+    return hard
 
 
 # ----------------------------------------------------------- 闸 1：记账 ----
@@ -526,16 +595,21 @@ def classify_verdict(baseline: bool, evidence: dict) -> str:
     return "unverified"
 
 
-def stamp_verdict(payload) -> None:
+def stamp_verdict(payload, simulated) -> None:
     """结论与它的射程一起写：label 自带射程，`scope` 给机器读。
 
     为什么不能只留一个「已核实」：Task 12 那头的消费端是
     `enabled: status === "verified"` + 档位候选直接吃服务端 `thinking_levels`，
     "配方已核实 + 管理员填三档"在那里就等于**三个点、wire 上一个值**，而且没人会报错。
+
+    `scope.simulated` 是修复轮 2（N1）加的一格：dry-run / 注入替身跑出来的行，与真证据
+    在机器可读层原本只差 `live: false` 一格，而 `proved` 那句「这一格的参数形状被这条
+    上游接受」对模拟行是不成立的。显式一格 `simulated`，让抄 payload 的人不必自己推断。
     """
     verdict = payload["verdict"]
     payload["verdict_label"] = VERDICT_LABELS[verdict]
     scope = dict(VERDICT_SCOPES[verdict])
+    scope["simulated"] = bool(simulated)
     scope["covers"] = ("单条 provider 记录 + 它当时的 base_url + 它当时的 model；"
                        "不是模型级、不是厂商级——换端点或换 model 要重开探针")
     payload["scope"] = scope
@@ -672,7 +746,8 @@ def make_config(argv=None) -> dict:
     parser = argparse.ArgumentParser(
         description="思考参数核实探针（出站额度 4 次，一次一记；本单授权已用尽）")
     parser.add_argument("--data-dir", required=True,
-                        help="provider 配置所在目录（只读；不许指向另一棵 checkout 的 data/）")
+                        help="provider 配置所在目录（只读；不许指向另一棵 checkout 的 data/——"
+                             "判据沿父链上溯找 .git，含 swap-snapshots 那类深层子树）")
     parser.add_argument("--provider", required=True, help="provider_id，如 deepseek-chat")
     parser.add_argument("--profile", required=True, choices=list(thinking_profiles.probe_profile_ids()),
                         help="候选配方名；none = 基线（不发任何思考参数，不代表模型不思考）")
@@ -684,7 +759,9 @@ def make_config(argv=None) -> dict:
     parser.add_argument("--ledger", default=None,
                         help="出站账本，要一份跨进程稳定的路径。**live 模式必填**：缺省即 rc=2 拒发，"
                              "因为跟着隔离目录走的账本每个进程都是空的，「总额 4 次」永不生效；"
-                             "也不许落在 --data-dir 里面")
+                             "也不许落在 --data-dir 里面、**不许在仓库树内、不许属于另一棵 checkout**"
+                             "（修复轮 2，N3：这三条都是预检判据，不再由操作者记得）；"
+                             "另注意这道闸按账本文件计数，换路径从 0 重计——路径必须钉死同一份")
     parser.add_argument("--dry-run", action="store_true", help="假 client：零网络、不记账")
     parser.add_argument("--fake", default="reasoning",
                         choices=("reasoning", "quiet", "extra_reasoning", "error_form",
@@ -703,12 +780,18 @@ def run_probe(config, client_factory=None):
     （预检 → 隔离 → 重叠判据 → 单例校验 → 记账 → 发 → 读证据 → 判据），CLI 里没有这个开关。
     第三个返回值是那把真 key——只在本进程内存里，`main()` 把它交给出口体检，绝不打印。
 
-    顺序本身就是判据，两处不能换（各自都有会红的反例）：
+    顺序本身就是判据，三处不能换（各自都有会红的反例）：
     **重叠判据先于 `load_backend_modules()`**（import 会写盘），
-    **预检先于隔离**（越权的命令行形状连目录都不该开、环境都不该动）。
+    **预检先于隔离**（越权的命令行形状连目录都不该开、环境都不该动），
+    **`before` 快照先于 `isolate_runtime_env()`**（修复轮 2，N2：晚取一步，
+    隔离/import 期间的写盘就永远不在尺子射程里）。
     """
     baseline = config["profile"] == thinking_profiles.NONE_PROFILE
     entry = thinking_profiles.PROBE_PROFILES.get(config["profile"]) or {}
+    # 这一跑的"是不是模拟"在入口就定死（修复轮 2，N1）：dry-run 走脚本自带的 FakeClient，
+    # 注入 client_factory 走测试替身——两者的行都不许被读成上游事实。真发那一支才是 False
+    # （即便 build_live_client 被测试用替身顶掉，那也不是 CLI 能走出来的形状）。
+    simulated_run = bool(config["dry_run"]) or client_factory is not None
     # 字段名有条反作用在身上的约束：整份 payload 出门前会再过一次 `scrub_secrets`
     # （`render_and_check`），而它的第一条形状规则连**键名**一起吃——`key_fp`、
     # `key_source` 这种名字会被它当成凭据掩掉，于是干净的结果被误判成泄露、整份拒打
@@ -744,7 +827,7 @@ def run_probe(config, client_factory=None):
     def blocked(note, exc=None):
         """闸拦停：不给结论，只给"为什么没发"——射程那一格也必须写清"一次都没发"。"""
         payload["verdict"] = payload["verdict"] or "preflight_failed"
-        stamp_verdict(payload)
+        stamp_verdict(payload, simulated_run)
         payload["notes"].append(redact(note, secrets, scrub, hide))
         if exc is not None:
             payload["error_class"] = type(exc).__name__
@@ -766,12 +849,25 @@ def run_probe(config, client_factory=None):
         if ledger and overlaps(ledger, data_dir):
             raise RuntimeError("--ledger 不许落在 --data-dir 里面：那是本次声明只读的目录，"
                                "账本每发一次都要写它一笔")
+        if ledger and inside_dir(ledger, REPO_ROOT):
+            raise RuntimeError("--ledger 必须在仓库外：docstring 那句「账本落在仓库外」从这一版起"
+                               "由判据守，不再由操作者记得（修复轮 2，N3）——本仓目录同时是生产机，"
+                               "AGENTS.md §1 的受保护运行期资产就在树里")
+        if ledger and data_dir_belongs_to_another_checkout(ledger):
+            raise RuntimeError("--ledger 落在另一棵 checkout 的树里（沿父链撞上 .git）："
+                               "账本与 --data-dir 同一条判据，不许写进别的树")
         if not config["dry_run"] and not 1 <= int(config["max_tokens"]) <= AUTHORIZED_MAX_TOKENS:
             raise RuntimeError(f"max_tokens={config['max_tokens']} 越出授权形状"
                                f"（授权的那一格是 {AUTHORIZED_MAX_TOKENS}，只许等于或小于它、且必须 ≥1）："
                                f"live 模式拒发")
     except Exception as exc:                                    # noqa: BLE001 - 闸没让过就停
         return blocked("预检闸拒绝：命令行形状不在授权范围内，一次都不发", exc)
+
+    # —— 只读证据的 `before` 快照取在**隔离之前**（修复轮 2，N2）：原来它取在 SDK 签名
+    #    检查之后（也就是 import providers 之后）——"隔离/import 期间"发生的写盘在结构上
+    #    就不在这把尺子的射程里，递归化并没有让它看得见那一刻。`data_dir` 在闸 0 就已定，
+    #    不必等隔离。后面的软硬比对见 `readonly_delta_verdict`。
+    before = files_digest(data_dir)
 
     # —— 闸 2：先隔离，**先判重叠**，才许 import providers；再把"会写哪儿"验一遍。
     #    重叠判据必须在 `load_backend_modules()` **之前**（Important-3）：import providers
@@ -825,18 +921,24 @@ def run_probe(config, client_factory=None):
                                 + ", ".join(rejected))
         return blocked("配方到不了上游：字段不在 create() 签名里", None)
 
-    before = files_digest(config["data_dir"])
-
     # —— 闸 1：真实调用先记账（dry-run 不进账本，它没花额度）
     #    `--ledger` 在预检那一步已经强制存在（Critical-1）：这里**不再**回退到
     #    `iso / "call-ledger.jsonl"`——那个默认值正是"每个进程从空账本开始"的来源。
     if not config["dry_run"]:
+        ledger_is_new = not Path(ledger).is_file()
         try:
             payload["call_slot"] = reserve_call_slot(
                 ledger, config["provider"], config["profile"], config["level"],
                 config["attempt"])
         except (BudgetExhausted, AttemptMismatch, OSError) as exc:   # noqa: BLE001
             return blocked("账本没让过：这一次不发", exc)
+        if ledger_is_new:
+            # concerns.1 的残余（审查员判可接受，但要求登记 + 一句提示）：这道闸绑的是
+            # "这一份账本文件 ≤4"而不是"这次授权 ≤4"——换 --ledger 路径就从 0 重计。
+            # 跨账本累计不修（一次性 4 格探针不值那道工程税），但新建那一跑必须自己说。
+            payload["notes"].append(
+                "新建账本：这道闸按账本文件计数，跨账本不累计——换一份 --ledger 就从 0 重计；"
+                "授权上限 4 次真正的凭据是那本权威账本，路径必须钉死同一份")
 
     if client_factory is not None:
         factory = client_factory
@@ -847,7 +949,16 @@ def run_probe(config, client_factory=None):
                                                     config["timeout"])
     # 走到这一行才算"进入传输那一步"。上面任何一条闸返回的 payload 都留 transport=None，
     # 免得 `live: true` + `transport: "openai_sdk"` 并读时被当成"已经发过一次"。
-    payload["transport"] = "openai_sdk" if client_factory is None else "test_double"
+    # 修复轮 2（N1）：上一版这一支只判了 `client_factory is None`，把 dry-run 也打成
+    # `openai_sdk`——`openai_sdk` 这个值是"这条记录来自真上游"的机械凭据（§R8 第 8 条），
+    # 而 Task 12 抄的正是这份 payload，一行模拟数据不许顶着它。三分：注入替身 test_double、
+    # 脚本自带 FakeClient 的 dry-run 走 fake_client、只有真 CLI 那一支才是 openai_sdk。
+    if client_factory is not None:
+        payload["transport"] = "test_double"
+    elif config["dry_run"]:
+        payload["transport"] = "fake_client"
+    else:
+        payload["transport"] = "openai_sdk"
     budget = CallBudget()
     try:
         evidence = read_evidence(send_once(factory(record), record, kwargs, budget,
@@ -862,9 +973,12 @@ def run_probe(config, client_factory=None):
         else:
             payload["verdict"] = ("form_unverifiable" if looks_form_unverifiable(exc, message)
                                   else "unverified")
-        stamp_verdict(payload)
+        stamp_verdict(payload, simulated_run)
         payload["notes"].append("失败不重试：这一格的证据就是这条错误本身")
-        payload["runtime_data_untouched"] = files_digest(config["data_dir"]) == before
+        if readonly_delta_verdict(payload, before, data_dir):
+            # 修复轮 2：错误那一支以前只记 flag 不作废——store 三件套被改了也照样 rc=1。
+            # 写盘这件事不挑结论，硬判两条路共用同一个函数。
+            return payload, RC_BLOCKED, secrets
         return payload, RC_UNVERIFIED, secrets
 
     payload.update({k: v for k, v in evidence.items() if k != "accepted"})
@@ -875,11 +989,10 @@ def run_probe(config, client_factory=None):
         # 不发任何思考参数而响应里仍有推理痕迹 ⇒ 界面不许把这一格写成"已关闭思考"。
         payload["baseline_had_reasoning"] = bool(evidence["has_reasoning_content"]) or \
             int(evidence["reasoning_tokens"] or 0) > 0
-    stamp_verdict(payload)
-    payload["runtime_data_untouched"] = files_digest(config["data_dir"]) == before
-    if not payload["runtime_data_untouched"]:
-        payload["notes"].append("只读承诺被打破：跑完之后 --data-dir 那棵树的摘要变了，"
-                                "本次结论不予采信")
+    stamp_verdict(payload, simulated_run)
+    # 软硬两格（concerns.3）：硬（store 三件套变了或多/少路径）作废结论 rc=2；
+    # 软（无关既有文件被现网定时器之类的东西重写）只追加点名 note，rc 按原判据走。
+    if readonly_delta_verdict(payload, before, data_dir):
         return payload, RC_BLOCKED, secrets
     if payload["verdict"] in ("verified", "baseline_ok"):
         return payload, RC_VERIFIED, secrets

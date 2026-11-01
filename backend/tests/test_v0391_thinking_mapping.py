@@ -19,12 +19,19 @@
 修复轮 1（审查员 1 Critical + 4 Important + 3 Minor）新增 §8：闸的牙全部换成机制的牙
 ——默认参数下"总额 4 次"必须真咬、`AUTHORIZED_LIVE_CALLS` 这个数字本身有锁、重叠判据
 必须在 import **之前**、交接物必须自带射程、脱敏必须在截断**之前**。每条都配会红的反例。
+
+修复轮 2（复审 4 Important + 2 Minor）新增 §9，并补强 §6/§8 的两格：dry-run 那一行不许
+冒充真发（N1）、重叠判据走 realpath 且只读快照先于隔离（N2）、账本"仓库外"从一句话
+变成预检判据（N3）、"另一棵 checkout"沿父链上溯（N4）、新建账本必须自我声明计数口径
+（concerns.1 残余）、只读证据拆成软硬两格（concerns.3）。本节同样**零出站**。
 """
 import ast
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1024,13 +1031,19 @@ def test_ledger_pointed_into_the_read_only_data_dir_is_refused(tmp_path):
 def test_transport_is_only_stamped_when_the_call_is_actually_attempted(tmp_path, monkeypatch):
     """Minor：`transport: "openai_sdk"` 原本在 `preflight_failed`（一次都没发）时也照打，
     与 `live: true` 并读会被当成"发过"。改成只在真进入传输那一步才打。
-    真发那一支用替身顶掉 `build_live_client`——真客户端的唯一出口被换掉，没有 socket 被创建。"""
+    真发那一支用替身顶掉 `build_live_client`——真客户端的唯一出口被换掉，没有 socket 被创建。
+
+    修复轮 2（N1）补上第三格：dry-run 走脚本自带的 `FakeClient`，上一版却把它打成
+    `openai_sdk`——一行模拟数据与一行真证据在机器可读层只差 `live: false` 一格，而 §R8
+    第 8 条恰恰拿 `transport` 当"零出站的机械凭据"、Task 12 抄的又正是这份 payload。
+    所以 dry-run 那一支归 `fake_client`，且 `scope.simulated` 必须自己把话说死。"""
     blocked_payload, rc, _ = _run(tmp_path, "--profile", "openai_reasoning_effort",
                                   "--level", "瞎填", "--dry-run")
     assert rc == probe.RC_BLOCKED and blocked_payload["transport"] is None
     sent, rc2, _ = _run(tmp_path, "--profile", "none",
                         factory=lambda r: probe.FakeClient("reasoning"))
     assert rc2 == probe.RC_VERIFIED and sent["transport"] == "test_double"
+    assert sent["scope"]["simulated"] is True, "注入替身那一行也必须自己声明是模拟"
     built = []
 
     def stub(provider, record, timeout=0):
@@ -1042,6 +1055,13 @@ def test_transport_is_only_stamped_when_the_call_is_actually_attempted(tmp_path,
                         "--ledger", str(tmp_path / "b" / "l.jsonl"))
     assert rc3 == probe.RC_VERIFIED and live["transport"] == "openai_sdk"
     assert built == ["p_probe_deep"], "构造真客户端的唯一入口只许走一次"
+    assert live["scope"]["simulated"] is False, "真发那一支的 simulated 必须是 False"
+    # 第四格（本轮点名的那格）：CLI dry-run，不注入任何注入口，走脚本自带的假 client。
+    dry, rc4, _ = _run(tmp_path, "--profile", "none", "--dry-run")
+    assert rc4 == probe.RC_VERIFIED
+    assert dry["transport"] == "fake_client", "dry-run 不许冒充 openai_sdk：那是谎报为真发"
+    assert dry["live"] is False
+    assert dry["scope"]["simulated"] is True, "同一行必须有一格显式的模拟标记，而不是只靠 live"
 
 
 def test_data_dir_of_another_checkout_is_refused_without_being_read(tmp_path, monkeypatch):
@@ -1068,7 +1088,241 @@ def test_data_dir_of_another_checkout_is_refused_without_being_read(tmp_path, mo
     payload, rc, _ = probe.run_probe(config, client_factory=build)
     assert rc == probe.RC_BLOCKED and seen == [] and calls == []
     assert any("checkout" in note for note in payload["notes"]), payload["notes"]
+    # 修复轮 2（N4）：原判据只看 `target.parent` 一层——`<other>/data` 拒了，
+    # `<other>/data/swap-snapshots/snap-1/data`（同样一份 providers.json + provider_keys.json，
+    # 而本机 `data\swap-snapshots` 真实存在）却**放行**并一路读到 credential_fp。
+    # 现在沿父链上溯找 `.git`，深树那一格必须同样被拒。
+    deep = live / "swap-snapshots" / "snap-1" / "data"
+    deep.mkdir(parents=True)
+    (deep / "providers.json").write_text("[]", encoding="utf-8")
+    (deep / "provider_keys.json").write_text("{}", encoding="utf-8")
+    assert probe.data_dir_belongs_to_another_checkout(deep) is True, "只查一层 = 换个子目录就绕开"
+    # （整条链那一跑单独成格见 §9 `test_another_checkout_deep_data_dir_run_is_refused`：
+    #  本格挂着 spy_isolate，deep 那一跑会被它掩盖，判不出新旧差别。）
     # 负控：本工具自己那棵树里的 data/、以及宿主没有 .git 的夹具目录都必须放行
     assert probe.data_dir_belongs_to_another_checkout(REPO_ROOT / "data") is False
     assert probe.data_dir_belongs_to_another_checkout(_write_config(tmp_path)) is False
     assert probe.data_dir_belongs_to_another_checkout(live) is True
+
+
+# ------------- 9. 修复轮 2：N1–N4 + concerns.1 残余 + concerns.3 软硬拆分 ----------
+#
+# 这一节全是**上一轮修复自己修出来的新洞**（审查员复审原话方向）：dry-run 那一行谎报为
+# 真发、重叠判据停在词法层、"账本落在仓库外"又回到"由操作者记得"、另一棵 checkout 只查
+# 父级一层、递归尺子把 300 秒定时器判成凶手。全部零出站：注入替身 / --dry-run。
+
+def _tree_sha_listing(root: Path) -> dict:
+    """测试自备的**逐字节**清单（内容 sha256）。`files_digest` 只 stat 不读内容，
+    "目标树跑前跑后 sha256 清单一致"这条锁要的是字节级证据，得另拿一把尺子。"""
+    out = {}
+    for path in sorted(root.rglob("*"), key=lambda q: q.as_posix()):
+        rel = path.relative_to(root).as_posix()
+        out[rel] = "dir" if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """造一个指向 `target` 的目录级重解析点：Windows 用 `mklink /J`（junction，非管理员
+    即可），POSIX 用目录 symlink。两条路都走不通时返回 False，由调用方声明退到的
+    "最接近的等价形状"（见那一格的 skip 文案）。"""
+    try:
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True, check=False)
+        if done.returncode == 0 and link.is_dir():
+            return True
+    except OSError:
+        pass
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except OSError:
+        return False
+
+
+def test_junction_isolation_dir_into_the_data_tree_is_refused(tmp_path, monkeypatch):
+    """N2 第一层：`_norm` 原本只做 `abspath`+`normcase`，不解析重解析点。审查员造
+    `mklink /J iso-junction → <data-dir>/iso`，跑 `--isolation-dir <junction> --dry-run`：
+    词法判"不相干" → mkdir → import providers → `_seed_from_env()`→`_flush()`，
+    **只读树里真的被开出两个文件**，payload 却报 `isolation_ok: true`、rc=0。
+    修法：`_norm` 走 `os.path.realpath`。锁：目标树跑前跑后**逐字节**清单一致 + rc=2。"""
+    data_dir = _write_config(tmp_path)
+    hidden = data_dir / "iso"
+    hidden.mkdir()                            # junction 的落点：data_dir 树里的一个真目录
+    link = tmp_path / "iso-junction"
+    if not _make_dir_link(link, hidden):
+        pytest.skip("本机造不出目录级重解析点（mklink /J 与 symlink 都失败）；"
+                    "最接近的等价形状是 normcase 已挡的大小写/斜杠漂移，那条既有负控仍要过")
+    before = _tree_sha_listing(data_dir)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", SHAPEY)   # 播种燃料：没有它 _seed_from_env 返回空表
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+                                "--profile", "none", "--dry-run",
+                                "--isolation-dir", str(link)])
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(config, client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["isolation_ok"] is False
+    assert not (hidden / "providers.json").exists(), "junction 绕开词法判据后依旧不许写树"
+    assert _tree_sha_listing(data_dir) == before, "只读树必须逐字节没动（清单是内容 sha256）"
+
+
+def test_the_readonly_ruler_starts_before_isolation(tmp_path, monkeypatch):
+    """N2 第二层（顺序）：`before = files_digest(...)` 原本取在 SDK 签名检查之后
+    （import 之后）——递归化并没有让这把尺子**看得见 import 那一刻**的写盘。
+    修法：快照提到 `isolate_runtime_env()` 之前（`data_dir` 在闸 0 就已定）。
+    复现形状：把隔离函数换成"顺手往只读树里开一个文件"的替身——旧顺序里这个文件
+    在 before 之前就存在，after == before ⇒ 假绿灯；新顺序里它是**多出的路径** ⇒ 硬判 rc=2。"""
+    data_dir = _write_config(tmp_path)
+    real_isolate = probe.isolate_runtime_env
+
+    def dirty_isolate(isolation_dir=None):
+        (data_dir / "seeded-during-import.json").write_text("{}", encoding="utf-8")
+        return real_isolate(isolation_dir)
+
+    monkeypatch.setattr(probe, "isolate_runtime_env", dirty_isolate)
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+                                "--profile", "none", "--dry-run",
+                                "--isolation-dir", str(tmp_path / "iso")])
+    payload, rc, _ = probe.run_probe(config, client_factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_BLOCKED, "隔离/import 期间的写盘必须在尺子射程内"
+    assert any("只读承诺被打破" in n and "seeded-during-import.json" in n
+               for n in payload["notes"]), payload["notes"]
+
+
+def test_ledger_inside_the_repository_is_refused(tmp_path):
+    """N3：docstring 明写"账本落在仓库外"，预检却只判 `overlaps(ledger, data_dir)`。
+    实测：账本**真的写进了那棵树的 `data/call-ledger.jsonl`**，rc=0、notes 一个字没有。
+    这句话从此由机制守：账本在本仓树内 ⇒ 预检拒（本仓目录同时是生产机，AGENTS.md §1）。
+    成对负控：树外、且父链上没有 `.git` 的路径必须放行。"""
+    ledger = REPO_ROOT / "data" / "call-ledger-round2-lock.jsonl"
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
+                          "--ledger", str(ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert ledger.exists() is False, "拒发这一支不许在仓库里留下一个字节"
+    assert payload["transport"] is None and payload["call_slot"] is None
+    assert any("--ledger" in n and "仓库外" in n for n in payload["notes"]), payload["notes"]
+    # 负控：仓库外（本夹具的 tmp 树，父链上没有 .git）照旧放行
+    outside = tmp_path / "out-of-repo" / "l.jsonl"
+    ok, rc2, _ = _run(tmp_path, "--profile", "none", "--ledger", str(outside),
+                      factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
+
+
+def test_ledger_of_another_checkout_is_refused(tmp_path):
+    """N3 的另一半：账本不许属于**另一棵 checkout**（判据与 --data-dir 同一条，
+    复用 `data_dir_belongs_to_another_checkout`，N4 之后它沿父链上溯）。"""
+    other = tmp_path / "other-checkout"
+    (other / ".git").mkdir(parents=True)
+    (other / "data").mkdir()
+    ledger = other / "data" / "call-ledger.jsonl"
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert ledger.exists() is False and not (other / "data" / "call-ledger.jsonl").exists()
+    assert any("checkout" in n for n in payload["notes"]), payload["notes"]
+
+
+def test_another_checkout_deep_data_dir_run_is_refused(tmp_path):
+    """N4 的整链那一跑：`<other>/data/swap-snapshots/snap-1/data` 放着同样一份
+    providers.json + provider_keys.json——旧判据只查 target.parent 一层，这一形状
+    **放行**并一路读到 credential_fp。新判据沿父链上溯找 .git ⇒ 预检就拒。"""
+    other = tmp_path / "other-checkout"
+    (other / ".git").mkdir(parents=True)
+    deep = other / "data" / "swap-snapshots" / "snap-1" / "data"
+    deep.mkdir(parents=True)
+    (deep / "providers.json").write_text(json.dumps(
+        [{"id": "p_probe_deep", "base_url": FAKE_HOST, "model": "probe-flash"}]), encoding="utf-8")
+    (deep / "provider_keys.json").write_text(json.dumps({"p_probe_deep": SHAPEY}), encoding="utf-8")
+    build, seen = _never()
+    # 夹具 `_argv` 不接受改 --data-dir，所以这格走 make_config 直给命令行。
+    config = probe.make_config(["--data-dir", str(deep), "--provider", "p_probe_deep",
+                                "--profile", "none", "--dry-run",
+                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
+                                "--isolation-dir", str(tmp_path / "iso")])
+    payload, rc, _ = probe.run_probe(config, client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["credential_fp"] is None, "拒了就不该已经把另一棵树里密钥的指纹读进内存"
+    assert any("checkout" in n for n in payload["notes"]), payload["notes"]
+
+
+def test_fresh_ledger_run_declares_the_gate_counts_per_file(tmp_path):
+    """concerns.1 的残余（审查员判可接受，但要求登记 + 一句提示）：闸绑的是"这一份账本
+    文件 ≤4"而不是"这次授权 ≤4"——换 `--ledger` 路径就从 0 重计（实测两条路径连发 8 格
+    全放行、notes=[] 零提示）。跨账本累计不修（一次性 4 格探针不值那道工程税），
+    但**新建账本**那一跑必须自己把计数口径说出来，且**只在真新建时**说。"""
+    ledger = tmp_path / "budget" / "call-ledger.jsonl"
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
+                          "--ledger", str(ledger),
+                          factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_VERIFIED
+    assert any("新建账本" in n and "跨账本不累计" in n for n in payload["notes"]), payload["notes"]
+    # 同一份账本的第二次跑：文件已存在 ⇒ 这句不许再出现（否则"新建"成了套话）
+    payload2, rc2, _ = _run(tmp_path, "--profile", "none", "--attempt", "2",
+                            "--ledger", str(ledger),
+                            factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED
+    assert not any("新建账本" in n for n in payload2["notes"]), payload2["notes"]
+
+
+def test_digest_delta_separates_hard_from_soft():
+    """concerns.3 判据单元的负控：软的一格（既有无关文件时间戳/大小变了）不许升成硬，
+    硬的两格（store 三件套变了、树里多/少路径）不许降成软。"""
+    before = {"providers.json": "a", "provider_keys.json": "b", "preference.txt": "c"}
+    moved = dict(before, **{"preference.txt": "c2"})
+    assert probe.digest_delta(before, moved) == ([], ["preference.txt"])
+    store = dict(before, **{"providers.json": "a2"})
+    assert probe.digest_delta(before, store)[0] == ["providers.json"]
+    added = dict(before, **{"iso": "d"})
+    assert probe.digest_delta(before, added)[0] == ["iso"]
+    assert probe.digest_delta(added, before)[0] == ["iso"], "少一个路径同样是结构变化"
+
+
+def test_unrelated_file_rewritten_during_the_window_stays_pass_with_a_note(tmp_path):
+    """concerns.3 软那一格：现网 300 秒定时器（main.py:426-442 → analyze_all_preferences
+    无条件重写 `data/preference.txt`）在调用窗口内写一下，旧写法整棵树摘要一变就 rc=2
+    ——**那一格付费额度已经花掉**，误红等于烧钱 + 把下一次真红训成"狼来了"。
+    新判据：无关既有文件被重写 → rc 按原判据走（这里是 baseline_ok → 0），只追加一条
+    **点名是哪几项**的 note。注入点选在替身被调用的那一刻，正落在 before/after 窗口里。"""
+    data_dir = _write_config(tmp_path)
+    (data_dir / "preference.txt").write_text("old\n", encoding="utf-8")
+
+    def build(record):
+        (data_dir / "preference.txt").write_text("timer rewrote this line, longer\n",
+                                                 encoding="utf-8")
+        return probe.FakeClient("reasoning")
+
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--dry-run", factory=build)
+    assert rc == probe.RC_VERIFIED, "无关文件被定时器重写不该作废本次结论"
+    assert payload["runtime_data_untouched"] is False
+    assert any("preference.txt" in n for n in payload["notes"]), payload["notes"]
+    assert not any("只读承诺被打破" in n for n in payload["notes"])
+
+
+def test_store_owned_file_rewritten_during_the_window_is_hard(tmp_path):
+    """concerns.3 硬那一格 A：store 拥有的三份文件（providers/provider_keys/provider_prefs）
+    变了 ⇒ rc=2、结论作废——这才是 Important-3 要挡的形状。"""
+    data_dir = _write_config(tmp_path)
+
+    def build(record):
+        (data_dir / "providers.json").write_text("[1,2,3] some longer payload", encoding="utf-8")
+        return probe.FakeClient("reasoning")
+
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--dry-run", factory=build)
+    assert rc == probe.RC_BLOCKED
+    assert payload["runtime_data_untouched"] is False
+    assert any("只读承诺被打破" in n and "providers.json" in n for n in payload["notes"])
+
+
+def test_new_path_in_the_data_tree_during_the_window_is_hard(tmp_path):
+    """concerns.3 硬那一格 B：树里**多出路径**（`iso/providers.json` 被开出来——
+    正是修复轮 1 Important-3 的形状）⇒ rc=2，不许被"无关文件时间戳漂移"的软判顺路放过。"""
+    data_dir = _write_config(tmp_path)
+
+    def build(record):
+        (data_dir / "iso").mkdir()
+        (data_dir / "iso" / "providers.json").write_text("[]", encoding="utf-8")
+        return probe.FakeClient("reasoning")
+
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--dry-run", factory=build)
+    assert rc == probe.RC_BLOCKED
+    assert any("iso/providers.json" in n for n in payload["notes"]), payload["notes"]
