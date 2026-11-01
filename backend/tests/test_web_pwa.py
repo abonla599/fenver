@@ -712,12 +712,18 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
         assert end > 0
         return html[start:end + len(close)]
 
-    for el_id, what in (("modelSel", "换模型"), ("ctxRange", "改上下文预算"), ("exportBtn", "导出对话")):
+    # Task 9：预算滑杆从设置页那行迁进上下文面板（与模型卡同一份 map）。
+    # 这一格判的从来不是"它在哪一页"，而是**这一行不许标 data-admin-only**——
+    # 预算是这台设备自己的设置，普通用户也得有"少带几条历史"的能力，而且不会报错。
+    for el_id, what in (("modelSel", "换模型"), ("ctxBudgetRange", "改上下文预算"),
+                        ("exportBtn", "导出对话")):
         assert "data-admin-only" not in row_of(el_id), \
             f"{el_id} 那一行标了 data-admin-only：普通用户没有{what}的能力，而且不会报错"
     prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
-    assert 'id="ctxRange"' not in prov and 'id="tokenInput"' in prov, \
-        "滑杆还留在管理员那一页里，或手工填令牌没跟着收进同一页"
+    assert "ctxRange" not in html, \
+        "设置页的旧预算滑杆 id 又回来了：与上下文面板/模型卡并成第三个真相"
+    assert 'id="tokenInput"' in prov, \
+        "手工填令牌没跟着收进同一页"
 
 
 
@@ -1395,9 +1401,15 @@ def test_context_length_is_displayed_and_budgeted_in_tokens():
     row = html[m.start():html.index("</div>", m.start())]
     assert "条" not in row, "k 之外还挂着「条」：两套刻度同时出现在一行里"
     assert "携带上下文条数" not in html
-    range_tag = re.search(r'<input[^>]*id="ctxRange"[^>]*>', html).group(0)
+    # Task 9：这一行从设置页迁进上下文账本，读数（预算/上限）与滑杆仍在同一行里，
+    # 第二刻度「条」依旧不许出现——迁的是位置，不是这套口径。
+    panel = html[html.index('id="contextPanel"'):html.index('id="imageInput"')]
+    assert 'id="ctxVal"' in panel and 'id="ctxBudgetRange"' in panel, \
+        "预算读数与滑杆不在一起：迁走后要么没进账本，要么又新造了一份"
+    range_tag = re.search(r'<input[^>]*id="ctxBudgetRange"[^>]*>', html).group(0)
     assert "上限随所选模型" in range_tag
-    assert 'min="2"' in range_tag and 'max="64"' in range_tag, "滑杆还停在旧量程"
+    assert 'min="1"' in range_tag and 'max="64"' in range_tag, \
+        "预算滑杆的缺省量程与服务端缺省（1..64K）对不上"
 
     assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
     ob = _function_body(js, "outbound")
@@ -1418,8 +1430,12 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     """「随所选模型自动取上限」是一条从存储到滑杆的链，断在哪一环界面都是假的。
 
     后端：_validate 与 catalog 都过 normalize_max_context_k（老记录兜底 64）；
-    表单：provCtxK 有进有出；界面：renderModelSelect 刷完必重画上下文行，
-    而量程只认 modelCapK 一个出处。前端读的后端字段名由源码对源码钉死。
+    界面：renderModelSelect 刷完必重画上下文行，而量程只认 modelCapK 一个出处。
+    前端读的后端字段名由源码对源码钉死。
+
+    Task 9 改向的一半：这一格**不再从设置页表单进出**——表单只留连接配置，
+    上限只经模型卡的 PUT 进出（表单那次 PUT 不带这一格，由 providers._pending
+    从库里保留，见 test_v0391_provider_capabilities）。
     """
     js = _js()
     html = _html()
@@ -1430,7 +1446,7 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     assert "max_context_k" in inspect.getsource(providers.ProviderStore.catalog), \
         "catalog 不再把上限带给前端：模型档案成哑字段"
     assert "max_context_k" in inspect.getsource(providers.ProviderStore._public)
-    assert "max_context_k" in main.ProviderRequest.model_fields, "API 不收这个字段，表单填了也白填"
+    assert "max_context_k" in main.ProviderRequest.model_fields, "API 不收这个字段，模型卡填了也白填"
 
     cap = _function_body(js, "modelCapK")
     assert "max_context_k" in cap and "currentProvider()" in cap, "封顶读的不是当前模型"
@@ -1442,10 +1458,12 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     assert "syncCtxRow()" in _function_body(js, "renderModelSelect"), \
         "切模型/刷清单没重画上下文行"
 
-    assert 'id="provCtxK"' in html
+    assert 'id="provCtxK"' not in html, "设置页表单还在收模型上限：与模型卡两个真相"
     draft = _function_body(js, "providerDraftFromForm")
-    assert "provCtxK" in draft and "max_context_k" in draft, "表单的值进不了草稿"
-    assert "provCtxK" in _function_body(js, "openProviderForm"), "编辑不回显上限"
+    assert "max_context_k" not in draft, \
+        "表单还在发上限：一次普通保存会盖掉模型卡刚写进去的那一格"
+    card = _function_body(js, "providerCapabilityBody")
+    assert "max_context_k" in card, "上限不再经模型卡 PUT 进出：这一格从此没人能改"
 
 
 def test_token_estimate_and_budget_truncation_behavior():

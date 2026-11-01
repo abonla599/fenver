@@ -684,6 +684,16 @@ const API = (() => {
     myProviders: () => request("/v1/me/providers"),
     addMyProvider: (rec) => request("/v1/me/providers", { method: "POST", body: rec }),
     updateMyProvider: (id, rec) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "PUT", body: rec }),
+    /* 模型卡的能力写口（v0.39.1 Task 9）：改的是「这个模型能吃多少上下文、会不会思考」，
+     * 与上面两个 update 是同一批路由——差别只在**调用方必须交一份完整记录**。
+     * PUT 是全量语义（服务端整条替换），所以 body 由 app.js 的 providerCapabilityBody
+     * 从 state.providerRecords 里那份完整记录合并 patch 得到，不拿 /v1/models 的目录项凑
+     * （那里没有 base_url，凑上去等于把上游洗掉）。
+     * scope 分流只认服务端给的 can_edit：admin = 管理员改共享条目（真门在 RequireAdmin），
+     * 其余走个人面（属主闸）。界面从来不是边界，这里选的是"打哪扇门"，不是"能不能打"。 */
+    updateProviderCapabilities: (scope, id, patch) =>
+      request((scope === "admin" ? "/v1/providers/" : "/v1/me/providers/")
+              + encodeURIComponent(id), { method: "PUT", body: patch }),
     deleteMyProvider: (id) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "DELETE" }),
     setMyDefaultProvider: (id) => request("/v1/me/providers/default", { method: "POST", body: { provider_id: id } }),
     testMyProvider: (id) => request(`/v1/me/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),

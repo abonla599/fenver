@@ -614,6 +614,58 @@ a.trace-result-title:hover { text-decoration: underline; }
 .model-menu button.current { color: var(--accent); font-weight: 600; }
 .model-menu .mm-sub { font-size: 12px; opacity: .65; flex: none; }
 
+/* v0.39.1 Task 9：模型卡两栏。左列是可用模型行（52dp 热区，与 .set-row 同规格），
+   右列是同一张卡（16 圆角，走 --fv-radius-lg）。三态配色只认 [data-thinking]
+   这一枚属性——unsupported / unverified / verified 各一色，全部取既有 token，
+   不加第三强调色（verified=强调绿、unverified=AI 紫、unsupported=弱化灰）。
+   手机（无 hover）默认收起右栏，点行加 .card-open 才展开；桌面见文末的 hover 段。 */
+.model-menu .mm-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.model-menu .mm-item { display: flex; align-items: center; gap: 6px; min-height: 52px; }
+.model-menu .mm-row-main { flex: 1; min-width: 0; }
+.model-menu .mm-name { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.model-menu .mm-detail { display: none; min-width: 0; }
+.model-menu.card-open .mm-detail { display: block; }
+.mm-card { display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  padding: 10px 12px; background: var(--fv-surface-2); }
+.mm-title { margin: 0; font-weight: 600; font-size: 14px; }
+.mm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mm-chip { font-size: 11.5px; line-height: 1.5; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--fv-surface-3); color: var(--text-2); }
+.mm-chip[data-thinking="unsupported"], .mm-card[data-thinking="unsupported"] .mm-chip { color: var(--text-3); }
+.mm-chip[data-thinking="unverified"] { border-color: var(--fv-ai); color: var(--fv-ai); }
+.mm-chip[data-thinking="verified"] { border-color: var(--fv-accent); color: var(--fv-accent); }
+.mm-item { border-radius: 10px; }
+.mm-item[data-thinking="unsupported"] .mm-chip { opacity: .7; }
+.mm-manage { display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 8px; }
+.mm-h { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.mm-card .mm-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.mm-card .mm-lbl { flex: none; color: var(--text-2); }
+.mm-card .mm-val { font-size: 13px; }
+.mm-quick { display: flex; flex-wrap: wrap; gap: 4px; }
+.mm-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.model-menu .mm-mini, .model-menu .mm-pick, .model-menu .mm-manage-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
+  border-radius: 10px; padding: 4px 10px; font-size: 12px; cursor: pointer; flex: none; }
+.model-menu .mm-mini:hover { background: var(--bg-hover); }
+.model-menu .mm-mini.on { border-color: var(--fv-accent); color: var(--fv-accent); }
+.model-menu .mm-mini:disabled, .model-menu .mm-pick:disabled,
+.model-menu .mm-input:disabled, .model-menu .mm-switch:disabled { opacity: .5; cursor: not-allowed; }
+.model-menu .mm-pick { border-color: var(--fv-accent); color: var(--fv-accent); font-weight: 600; }
+.model-menu .mm-manage-btn { align-self: stretch; justify-content: center; min-height: 36px; }
+.model-menu .mm-manage-btn.on { border-color: var(--fv-accent); color: var(--fv-accent); }
+.model-menu .mm-input { flex: 1; min-width: 0; background: var(--fv-surface-3);
+  border: 1px solid var(--line); border-radius: 8px; color: var(--text);
+  padding: 4px 8px; font-size: 12.5px; }
+.model-menu .mm-range { flex: 1; min-width: 0; accent-color: var(--accent); }
+.model-menu .mm-switch { flex: none; accent-color: var(--accent); }
+.mm-note { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+.mm-err { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--danger); }
+.mm-ok { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--accent); }
+
 /* v0.39.x 驾驶舱：上下文环 + 账本。环 24dp，conic-gradient 由 app.js 写的
    --ctx-pct/--ctx-color 两个自定义属性直接驱动（--fv-warn 是留给未来警示色的
    空位，本版没有第三强调色，兜到 --fv-danger）；账本沿用卡面/线/圆角同一套 token。 */
@@ -642,8 +694,8 @@ a.trace-result-title:hover { text-decoration: underline; }
 .ctx-seg-history { background: var(--accent); }
 .ctx-seg-input { background: var(--bg-hover); }
 .ctx-seg-residual { background: var(--danger); opacity: .55; }
-.ctx-panel-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
-.ctx-panel-row input[type="range"] { flex: 1; min-width: 0; }
+/* Task 9：账本里那行预算改用了 .set-row 骨架（读数为啥与滑杆同一行见 index.html），
+   旧的 .ctx-panel-row 两条随迁走一起删掉，不留尸。 */
 .ctx-panel-actions { display: flex; gap: 8px; }
 .ctx-preview { display: flex; flex-direction: column; gap: 4px; }
 .ctx-preview-row { display: flex; gap: 8px; align-items: baseline; }
@@ -1183,3 +1235,26 @@ a.trace-result-title:hover { text-decoration: underline; }
 #netMinder .nm-mute { color: var(--text-2); }
 #netMinder .nm-btn:hover { text-decoration: underline; }
 
+
+/* ---------- v0.39.1 Task 9：模型卡两栏与账本里的预算行 ---------- */
+
+/* 账本里那一行「预算/上限 + 滑杆」沿用了 .set-row 的骨架（同一套行高/读数排布），
+   在这张面板里收一档：不留设置页那套 52dp 热区与分隔线，滑杆给足宽度。
+   这条必须写在 .set-row 基础规则**之后**——test_web_pwa 用第一个 `.set-row {`
+   量热区下限，抢先匹配到这条就等于把那条锁改窄了。 */
+.context-panel .set-row { min-height: 48px; padding: 0; border-bottom: 0; gap: 8px;
+  cursor: default; }
+.context-panel .set-row:hover { background: transparent; }
+.context-panel .ctx-budget-row .set-val input[type="range"] { width: 148px; }
+
+/* 桌面（有 hover 的设备）：清单与卡片并成两栏，「模型管理」横跨整行。
+   hover 左行只换右栏内容——JS 侧那条纪律（不重渲染整张清单）在这里兑现成布局。
+   手机没有 hover，右栏默认收起、点行加 .card-open 展开，所以这一栏只在
+   (hover: hover) 下常开；两栏都吃 max-height 让长清单在弹层里能滚。 */
+@media (hover: hover) {
+  .model-menu { display: grid; grid-template-columns: minmax(230px, 44%) minmax(280px, 1fr);
+    gap: 10px 14px; align-items: start; }
+  .model-menu .mm-detail { display: block; }
+  .model-menu .mm-list { max-height: 58vh; overflow-y: auto; }
+  .model-menu .mm-manage-btn { grid-column: 1 / -1; }
+}

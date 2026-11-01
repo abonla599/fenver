@@ -257,6 +257,17 @@ const state = {
   // lastUsageBySession 记上一轮 done.usage 的校准锚点 {prompt_tokens, clientK, providerId}。
   contextDropBySession: {},
   lastUsageBySession: {},
+  // v0.39.x 驾驶舱（Task 9）：模型卡与能力写口的本机态。
+  // providerRecords 是 PUT 的**唯一**完整记录来源（/v1/me/providers 的 shared+mine 按 id
+  // 缓存）——PUT 是全量语义，拿 /v1/models 的目录项凑等于把 base_url 洗掉。随身份清：
+  // 上一个人的 base_url/记录不许跟着下一次保存发出去。
+  providerRecords: {},
+  modelDetailId: "",        // 右栏现在画的是哪张卡（hover/点击/保存后都只改这一格）
+  modelPinned: "",          // 桌面点行钉住的那张卡；非空时 hover 别的行不抢走它
+  modelCardOpen: false,     // 手机（无 hover）：点行展开/收起同一张卡
+  modelManage: false,       // 能力编辑区开没开（模型管理与模型卡共用同一份字段）
+  modelDetailError: "",     // 服务端那句人话落在卡上，不弹窗
+  modelSaved: "",
   // v0.39.x 驾驶舱（Task 5）："立即插话"的待发射件——{sid, user, item}，
   // 只在出发会话/身份还成立时被 streamInto 消费一次；换身份/清空队列都要归零。
   forceNext: null,
@@ -398,13 +409,14 @@ function modelCapK() {
   return (p && p.max_context_k) || 64;
 }
 
-/* 设置里的「上下文长度」行：滑杆量程、步长与 `预算/上限` 显示随当前模型重画。
-   读数与写数都走「用户 + provider」预算 map（contextBudgetK/setContextBudget），
+/* 上下文账本里那一行「预算/上限 + 滑杆」：量程、步长与读数随当前模型重画。
+   Task 9 起这行住在账本里（设置页那份已删），模型卡的预算滑杆读写同一份 map；
+   读数与写数都走「用户 + provider」预算（contextBudgetK/setContextBudget），
    与 outbound 同源；清单没回来时只读不写，冷启动不会把大模型的设置误砍成 64。 */
 function syncCtxRow() {
   const known = state.providers.length > 0;
   const cap = Math.max(2, modelCapK());
-  const range = $("ctxRange");
+  const range = $("ctxBudgetRange");
   range.max = cap;
   range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
   const budget = contextBudgetK(budgetProviderId());
@@ -1394,11 +1406,465 @@ function renderModelSelect() {
   syncCtxRow();   // 模型清单/当前模型变了，上下文行的量程与「/上限」跟着变
 }
 
+/* ---------------- 模型卡：能力、三态与本机思考偏好（Task 9） ----------------
+ * 模型卡是「这个模型能干什么」与「我这一轮让它干多少」的落点：上限与思考能力写在
+ * 服务端（provider 记录），本会话预算与思考开关写在本机。四条纪律写在这里：
+ *   1. 动态文本一律 createElement + textContent（fvEl 是唯一出口）——模型名、档位
+ *      标签、服务端报错原文都可能是别人写的字，拼 innerHTML 等于给他们开门；
+ *   2. 预算只有一份真相：contextBudgetK/setContextBudget 那张「用户 + provider」的
+ *      map，卡片与账本谁都不另写 localStorage；
+ *   3. 思考开关只在 verified 可点。本版服务端白名单只有 none（P0c 才核实参数配方），
+ *      所以 supports_thinking=true 的条目全落在 unverified：卡上说的是「参数未核实，
+ *      暂时不能开」，不假装已开启——一个点了会写偏好却发不出去的开关比没有更坏；
+ *   4. 能力 PUT 的唯一记录来源是 state.providerRecords（/v1/me/providers 那份）。
+ */
+function fvEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined && text !== null) el.textContent = String(text);
+  return el;
+}
+
+function clearNode(el) {
+  while (el && el.firstChild) el.removeChild(el.firstChild);
+}
+
+/* 三态文案一眼可懂且不许说谎：verified 的含义是「这个 profile 的参数形状已核实」，
+ * 不是「这个模型一定支持思考」，所以措辞落在"可切换强度"；unverified 必须把
+ * "暂时不能开"说在前面，别让人以为开关坏了。 */
+function thinkingStatusLabel(status) {
+  if (status === "verified") return "可切换思考强度";
+  if (status === "unverified") return "支持思考（参数未核实，暂时不能开）";
+  return "不支持思考";
+}
+
+function thinkingStateReason(status) {
+  if (status === "unsupported") return "这个模型没有思考能力，所以开关不给点。";
+  if (status === "unverified") return "这个模型标了支持思考，但参数配方还未核实"
+    + "（本版服务端白名单只有 none）：现在把开关打开也发不出去，所以这里禁用，"
+    + "核实通过后（P0c）这一栏自动能用。";
+  return "";
+}
+
+/* 三态合成只写这一处，判据只认服务端给的 thinking_status（界面不按模型名猜）：
+ * enabled=false 时 reason 必须非空——禁用要说清为什么，不然就是"控件坏了"。 */
+function thinkingControlState(item) {
+  const status = (item && item.thinking_status) || "unsupported";
+  return {
+    status,
+    label: thinkingStatusLabel(status),
+    enabled: status === "verified",
+    reason: status === "verified" ? "" : thinkingStateReason(status),
+  };
+}
+
+/* 本机思考偏好：按「用户 + provider」分键。换身份读的是自己那一格，上一个人的
+ * 开关不会跟着 provider id 回来（键里带 userId，天然隔离，不需要再清一遍）。 */
+function thinkingPrefsKey() {
+  return "fv.thinking." + (pref.userId || "anon") + ".v1";
+}
+
+function readThinkingPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(thinkingPrefsKey()) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch (_) { return {}; }
+}
+
+function writeThinkingPref(providerId, patch) {
+  const all = readThinkingPrefs();
+  all[providerId] = Object.assign({}, all[providerId] || {}, patch);
+  localStorage.setItem(thinkingPrefsKey(), JSON.stringify(all));
+}
+
+/* 读偏好的唯一口径：enabled 缺省 **false**（不给全站悄悄改计费行为）；level 取
+ * 该模型的 thinking_default，该值不在候选里时落 levels[0]——与服务端 _thinking_view
+ * 同一份归一，界面上不存在"有档位但没有默认档"这个状态，也不说它能存。 */
+function thinkingChoice(providerId, item) {
+  const saved = readThinkingPrefs()[providerId] || {};
+  const levels = (item && item.thinking_levels) || [];
+  const wanted = saved.level;
+  const fallback = levels.indexOf((item && item.thinking_default) || "") >= 0
+    ? item.thinking_default : (levels[0] || "");
+  return {
+    enabled: saved.enabled === true,
+    level: levels.indexOf(wanted) >= 0 ? wanted : fallback,
+  };
+}
+
+/* 档位标签只清洗不截断：>3 个交给服务端拒收（"思考档位最多 3 个"落在卡上），
+ * 界面悄悄砍掉第 4 档等于把"没配上"演成"配上了"。 */
+function parseThinkingLevels(text) {
+  const out = [];
+  String(text || "").split(/[,，、;；\s]+/).forEach((x) => {
+    const t = x.trim();
+    if (t && out.indexOf(t) < 0) out.push(t);
+  });
+  return out;
+}
+
+/* PUT 是全量语义：body = 这条记录的完整一份 + 这次要改的那几格。三格不许省：
+ *   api_key 传空串 → 服务端按占位符保留原密钥（掩码永不出服务端，回显不了）；
+ *   is_default 原样带上 → 否则一次改上限就把全站那颗 ★ 洗掉；
+ *   thinking_profile 原样带上 → 否则已核实的配方被洗回 none。
+ * pricing 为 null（未定价）时不发这一格：没带=保留，显式 null=主动取消定价。
+ * 不带记录 id——路由按 path 钉这一条。 */
+function providerCapabilityBody(rec, patch) {
+  const body = {
+    label: rec.label,
+    base_url: rec.base_url,
+    model: rec.model,
+    api_key: "",
+    supports_vision: !!rec.supports_vision,
+    is_default: !!rec.is_default,
+    paid_by: rec.paid_by || "operator",
+    max_context_k: rec.max_context_k,
+    supports_thinking: !!rec.supports_thinking,
+    thinking_levels: rec.thinking_levels || [],
+    thinking_default: rec.thinking_default || "",
+    thinking_profile: rec.thinking_profile || "none",
+  };
+  if (rec.pricing !== undefined && rec.pricing !== null) body.pricing = rec.pricing;
+  return Object.assign(body, patch);
+}
+
+/* 打哪扇门只由归属决定（服务端那份 can_edit 已经算过角色，这里不再猜）：
+ * 共享条目 → 管理员面 /v1/providers（真门是 RequireAdmin）；我的条目 → /v1/me/providers。 */
+function providerCapabilityScope(rec) {
+  return rec && rec.shared ? "admin" : "mine";
+}
+
+async function ensureProviderRecord(recordId) {
+  if (state.providerRecords[recordId]) return state.providerRecords[recordId];
+  try { await loadProviders(); } catch (_) { /* 读不到就在卡上明说，不猜 */ }
+  return state.providerRecords[recordId] || null;
+}
+
+/* 能力/上限的写口：成功重读两份真值（清单 + 完整记录），让卡片和清单都跟着
+ * 服务端说话；失败把服务端那句人话写在卡上——弹窗会盖掉他正在读的那几个字段。 */
+async function saveModelCapabilities(recordId, patch) {
+  const rec = state.providerRecords[recordId];
+  if (!rec) {
+    state.modelDetailError = "没拿到这条模型的完整记录，保存已禁用：模型目录里没有 base_url，"
+      + "拿它 PUT 等于把上游地址洗掉。请先开一次「设置 → 模型服务」再回来。";
+    await showModelDetail(recordId);
+    return false;
+  }
+  try {
+    await API.updateProviderCapabilities(providerCapabilityScope(rec), recordId,
+      providerCapabilityBody(rec, patch));
+    state.modelDetailError = "";
+    state.modelSaved = `${rec.label} 的能力已保存`;
+    // 先重读记录、再重读清单：反过来的话 renderModelChip 会在新缓存落地之前重画卡片，
+    // 于是卡片再自己去发一次 /v1/me/providers（第三枪），而两处真值短暂不一致。
+    await loadProviders();
+    await loadModels();
+    setStatus("模型能力已保存", false);
+    return true;
+  } catch (e) {
+    state.modelDetailError = (e && e.message) ? e.message : "保存失败：服务端没给理由";
+    await showModelDetail(recordId);
+    return false;
+  }
+}
+
+/* 卡片上的预算写入与账本同一条路：写完让 syncCtxRow 重读，两处读数一起动。
+ * 各自算一遍就是"卡上写 128K、账本显示 64K"那类漂移的形状。 */
+function applyCardBudget(recordId, k) {
+  setContextBudget(recordId, k);
+  syncCtxRow();
+  showModelDetail(state.modelDetailId || recordId);
+}
+
+function modelMenuIsTouch() {
+  return !(window.matchMedia && window.matchMedia("(hover: hover)").matches);
+}
+
+/* hover / 点击 / 保存后都只走这一个入口：换 #modelDetail 的内容，
+ * 清单里任何一行都不重渲染（整表重画会让 hover 抖动、键盘焦点乱跳）。 */
+function showModelDetail(id) {
+  if (state.modelDetailId !== id) {
+    state.modelDetailError = "";
+    state.modelSaved = "";
+  }
+  state.modelDetailId = id;
+  return renderModelDetail(id);
+}
+
+/* 模型管理 = 这张卡展开能力编辑区。与模型卡同一份字段、同一个 PUT，不另开一份表单
+ * （设置页那份只管连接配置）。底部「模型管理」管当前这张卡，行上「管理」管那一行。 */
+function openModelManage(id) {
+  state.modelManage = true;
+  return showModelDetail(id || state.modelDetailId || budgetProviderId());
+}
+
+function closeModelManage() {
+  state.modelManage = false;
+  return showModelDetail(state.modelDetailId || budgetProviderId());
+}
+
+/* 一行的可操作性由服务端的 can_edit 决定，不由"看起来像谁的"决定。 */
+async function renderModelDetail(id) {
+  const box = $("modelDetail");
+  if (!box) return;
+  clearNode(box);
+  const item = state.providers.find((p) => p.id === id) || currentProvider();
+  if (!item) {
+    // 这句话只说得住现场：清单为空时芯片那侧已经把弹单收了，走到这里的是
+    // "当前那条不在清单里、服务端也没报出可用默认"，所以说"点左边一行"，
+    // 不许谎报成"还没有可用模型"。
+    box.appendChild(fvEl("p", "mm-note",
+      "还没定这一轮用哪个模型：清单里没有当前那条，服务端也没报出可用的默认。"
+      + "点左边任意一行就看它的卡。"));
+    return;
+  }
+  const pid = item.id;
+  const canEdit = item.can_edit === true;
+  // 完整记录只有 /v1/me/providers 那一份（PUT 是全量语义）。菜单没打开、管理区也没
+  // 展开时不发这一枪：卡片在后台只是画着，编辑入口还没露出来。缓存为空才去读一次，
+  // 读不到就把保存禁用并说明——不拿 /v1/models 的目录项凑，那里没有 base_url。
+  const menu = $("modelMenu");
+  const needRecord = canEdit && (state.modelManage
+    || !menu || !menu.classList.contains("hidden"));
+  const rec = needRecord ? await ensureProviderRecord(pid) : null;
+  const ctl = thinkingControlState(item);
+  const choice = thinkingChoice(pid, item);
+  const capK = Math.max(1, Number(item.max_context_k) || 64);
+  const budget = contextBudgetK(pid);
+
+  const card = fvEl("div", "mm-card");
+  card.setAttribute("data-thinking", ctl.status);
+  card.appendChild(fvEl("p", "mm-title", item.name));
+  card.appendChild(fvEl("p", "mm-sub",
+    `上游 ${item.model || "未填"} · ${item.shared ? "共享模型" : "我的模型"} · `
+    + `${item.priced ? (item.multiplier || "?x") : "未定价"}`));
+
+  const chips = fvEl("div", "mm-chips");
+  chips.setAttribute("data-thinking", ctl.status);
+  [["思考", ctl.label, ctl.status],
+   ["模型上限", `${capK}K`, ""],
+   ["输入", item.supports_vision ? "支持图片" : "只收文字", ""],
+   ["本会话预算", `${budget}K`, ""]].forEach(([kind, text, tone]) => {
+    const c = fvEl("span", "mm-chip", `${kind}：${text}`);
+    if (tone) c.setAttribute("data-thinking", tone);
+    chips.appendChild(c);
+  });
+  card.appendChild(chips);
+
+  // 本会话预算：与上下文账本那只滑杆读写同一份 map（上限之外的快捷档夹到上限）。
+  const bRow = fvEl("div", "mm-row");
+  bRow.appendChild(fvEl("span", "mm-lbl", "本会话预算（k）"));
+  const bRange = fvEl("input", "mm-range");
+  bRange.type = "range";
+  bRange.min = "1";
+  bRange.max = String(capK);
+  bRange.step = "1";
+  bRange.value = String(budget);
+  bRange.setAttribute("aria-label", `${item.name} 的本会话上下文预算（k），上限随模型`);
+  const bVal = fvEl("b", "mm-val", String(budget));
+  bRange.oninput = (e) => {
+    setContextBudget(pid, e.target.value);   // 同一份 map，不是卡片自己那一份
+    bVal.textContent = String(contextBudgetK(pid));
+    syncCtxRow();                            // 账本那行跟着重读，不各写各的
+  };
+  bRow.append(bRange, bVal);
+  const quick = fvEl("div", "mm-quick");
+  [8, 32, 64, 128].forEach((k) => {
+    if (k > capK) return;   // 超过模型上限的档不给：点了只会夹回来，不如不点
+    const b = fvEl("button", "mm-mini", `${k}K`);
+    b.type = "button";
+    b.setAttribute("aria-label", `本会话预算设为 ${k}K`);
+    b.onclick = () => applyCardBudget(pid, k);
+    quick.appendChild(b);
+  });
+  const full = fvEl("button", "mm-mini", "用满");
+  full.type = "button";
+  full.setAttribute("aria-label", `本会话预算用满 ${capK}K`);
+  full.onclick = () => applyCardBudget(pid, capK);
+  quick.appendChild(full);
+  bRow.appendChild(quick);
+  card.appendChild(bRow);
+
+  // 思考：偏好开关 + 档位 chips。三态里只有 verified 给点，其余禁用并说明原因。
+  const th = fvEl("div", "mm-row mm-thinking");
+  th.setAttribute("data-thinking", ctl.status);
+  const sw = fvEl("input", "mm-switch");
+  sw.type = "checkbox";
+  sw.checked = ctl.enabled && choice.enabled;
+  sw.disabled = !ctl.enabled;
+  sw.setAttribute("aria-label", `本机思考开关：${item.name}`);
+  sw.onchange = (e) => {
+    writeThinkingPref(pid, { enabled: e.target.checked === true });
+    showModelDetail(pid);
+  };
+  th.append(fvEl("span", "mm-lbl", "思考（这台设备自己的偏好）"), sw);
+  (item.thinking_levels || []).forEach((lv) => {
+    const chip = fvEl("button", "mm-mini", lv);
+    chip.type = "button";
+    chip.disabled = !ctl.enabled;
+    if (ctl.enabled && choice.enabled && choice.level === lv) chip.classList.add("on");
+    chip.setAttribute("aria-label", `思考档位：${lv}`);
+    chip.onclick = () => {
+      writeThinkingPref(pid, { enabled: true, level: lv });
+      showModelDetail(pid);
+    };
+    th.appendChild(chip);
+  });
+  card.appendChild(th);
+  card.appendChild(fvEl("p", "mm-note", ctl.enabled
+    ? `本轮会带上「${choice.enabled ? choice.level || "默认档" : "不带上思考参数"}」：`
+      + "开关与档位是这台设备自己的偏好，服务端不存，换设备不同步。"
+    : ctl.reason));
+
+  // 模型上限：只读时把话说清（谁能改、为什么不能改），可改时给管理入口。
+  // 底部那颗「模型管理」对谁都给，所以这里必须给一句实话，不能点了没反应。
+  if (state.modelManage) {
+    if (canEdit) {
+      card.appendChild(modelManageSection(item, rec, capK));
+    } else {
+      card.appendChild(fvEl("p", "mm-note",
+        "这一条是共享模型：思考能力与模型上限由管理员维护，你这里只能读。"
+        + "上面那栏的本会话预算仍然归你改——那是这台设备自己的设置，不动别人的配置。"));
+    }
+  } else {
+    const capRow = fvEl("div", "mm-row");
+    capRow.append(fvEl("span", "mm-lbl", "模型上限（K token）"),
+                  fvEl("b", "mm-val", String(capK)));
+    card.appendChild(capRow);
+    if (canEdit) {
+      const mg = fvEl("button", "mm-mini", "管理此模型");
+      mg.type = "button";
+      mg.setAttribute("aria-label", `管理 ${item.name} 的模型上限与思考能力`);
+      mg.onclick = () => openModelManage(pid);
+      card.appendChild(mg);
+    } else {
+      card.appendChild(fvEl("p", "mm-note",
+        "共享模型的能力与上限由管理员维护，这一栏只读；你的本会话预算仍然自己说了算——"
+        + "那是这台设备自己的设置。"));
+    }
+  }
+
+  const actions = fvEl("div", "mm-actions");
+  const pick = fvEl("button", "mm-pick", "设为这条");
+  pick.type = "button";
+  pick.onclick = () => switchModel(pid);
+  actions.appendChild(pick);
+  if (item.id !== pref.provider) {
+    actions.appendChild(fvEl("span", "mm-sub", "当前这条不是正在用的模型"));
+  }
+  card.appendChild(actions);
+
+  if (state.modelDetailError) card.appendChild(fvEl("p", "mm-err", state.modelDetailError));
+  else if (state.modelSaved) card.appendChild(fvEl("p", "mm-ok", state.modelSaved));
+  box.appendChild(card);
+  state.modelSaved = "";
+  // 底部那颗的按下态跟着卡片一起画：它和卡上的「管理此模型」是同一个开关的两张脸，
+  // 状态不许各留一份（各留一份就会出现"按钮亮着而卡上没有编辑区"）。
+  const mgBtn = $("modelManageBtn");
+  if (mgBtn) mgBtn.classList.toggle("on", !!state.modelManage);
+}
+
+/* 能力编辑区（模型管理展开的就是这一节）：字段与卡片同源，写口与卡片同一个
+ * saveModelCapabilities。默认档只能从当前候选里选——界面上不存在"有档位却没有
+ * 默认档"那个状态（服务端会把显式空的默认归一成 levels[0]，这里不假装能存下它）。 */
+function modelManageSection(item, rec, capK) {
+  const sec = fvEl("div", "mm-manage");
+  sec.setAttribute("data-thinking", thinkingControlState(item).status);
+  sec.appendChild(fvEl("p", "mm-h", "模型上限与思考能力"));
+
+  const capRow = fvEl("div", "mm-row");
+  const capInput = fvEl("input", "mm-input");
+  capInput.type = "number";
+  capInput.min = "1";
+  capInput.max = "10000";
+  capInput.step = "1";
+  capInput.value = String(capK);
+  capInput.disabled = !rec;
+  capInput.setAttribute("aria-label", "模型上限（K token），1..10000，越界由服务端钳住");
+  capRow.append(fvEl("span", "mm-lbl", "模型上限（K token）"), capInput);
+  sec.appendChild(capRow);
+
+  const supRow = fvEl("div", "mm-row");
+  const sup = fvEl("input", "mm-switch");
+  sup.type = "checkbox";
+  sup.checked = !!item.supports_thinking;
+  sup.disabled = !rec;
+  sup.setAttribute("aria-label", "这个模型支持思考（服务端能力字段）");
+  supRow.append(fvEl("span", "mm-lbl", "支持思考"), sup);
+  sec.appendChild(supRow);
+
+  const lvRow = fvEl("div", "mm-row");
+  const levels = fvEl("input", "mm-input");
+  levels.type = "text";
+  levels.value = (item.thinking_levels || []).join("，");
+  levels.placeholder = "最多 3 个，用逗号分开";
+  levels.disabled = !rec;
+  levels.setAttribute("aria-label", "思考档位标签，用逗号分开，最多 3 个");
+  lvRow.append(fvEl("span", "mm-lbl", "档位标签"), levels);
+  sec.appendChild(lvRow);
+
+  const defRow = fvEl("div", "mm-row");
+  const defSel = fvEl("select", "mm-input");
+  defSel.setAttribute("aria-label", "默认思考档位（只能是候选之一）");
+  const refill = () => {
+    const keep = defSel.value;
+    clearNode(defSel);
+    parseThinkingLevels(levels.value).forEach((lv) => {
+      const opt = fvEl("option", "", lv);
+      opt.value = lv;
+      defSel.appendChild(opt);
+    });
+    if (defSel.options.length) {
+      let hit = false;
+      for (const o of defSel.options) if (o.value === keep) hit = true;
+      defSel.value = hit ? keep : defSel.options[0].value;
+    }
+    defSel.disabled = !rec || !defSel.options.length;
+  };
+  refill();
+  // 默认档只能落在候选里：候选中有它就用它，没有就跟着 refill 落到的第一档。
+  // 这里不造"有档位但默认档为空"那个状态（服务端会把显式空的默认归一成 levels[0]）。
+  const wantDefault = item.thinking_default || "";
+  if (parseThinkingLevels(levels.value).indexOf(wantDefault) >= 0) defSel.value = wantDefault;
+  levels.oninput = refill;
+  defRow.append(fvEl("span", "mm-lbl", "默认档"), defSel);
+  sec.appendChild(defRow);
+
+  const save = fvEl("button", "mm-pick", "保存能力");
+  save.type = "button";
+  save.disabled = !rec;
+  save.onclick = () => {
+    const patch = {
+      supports_thinking: sup.checked === true,
+      thinking_levels: parseThinkingLevels(levels.value),
+      thinking_default: defSel.value || "",
+    };
+    const k = Math.floor(Number(capInput.value));
+    if (Number.isFinite(k) && k > 0) patch.max_context_k = k;
+    saveModelCapabilities(item.id, patch);
+  };
+  sec.appendChild(save);
+  sec.appendChild(fvEl("p", "mm-note",
+    `参数配方保持「${(rec && rec.thinking_profile) || "none"}」：本版服务端白名单只有 none，`
+    + "没有可选项，所以能力改完思考状态仍是「未核实」。越界与超限由服务端判（钳 1..10000、"
+    + "档位最多 3 个），这句理由会写在这里。"));
+  if (!rec) {
+    sec.appendChild(fvEl("p", "mm-err",
+      "这条模型的完整记录还没读回来，保存键是禁用的：全量 PUT 缺了 base_url 会洗掉上游地址。"));
+  }
+  const hide = fvEl("button", "mm-mini", "收起管理");
+  hide.type = "button";
+  hide.onclick = closeModelManage;
+  sec.appendChild(hide);
+  return sec;
+}
+
 /* ---------------- 发送框旁的快速切换模型 ----------------
  * 芯片显示"当前会用哪个"（currentProvider 口径，与发送时真正用的一致），
- * 点开是纵向弹单：只列 usable 的，标出「共享/我的模型」，当前项打 ✓。
- * 选择即生效：本机 pref.provider 立刻换，服务端「我的默认」同步写一份
- * （存失败不反悔——localStorage 仍是这台设备的答案，与设置页下拉同一口径）。 */
+ * 点开是两栏：左列 usable 模型行（模型名 / 共享或我的 / 思考三态 / 上限 / 倍率），
+ * 右列就是上面那张卡（renderModelDetail）。
+ * 桌面 hover 左行只换右栏内容，绝不重渲染整张清单；手机没有 hover，点行展开/收起。
+ * 换模型本身仍走 switchModel：它写本机 pref.provider 并同步服务端「我的默认」。 */
 function renderModelChip() {
   const usable = state.providers.filter((p) => p.usable);
   const chip = $("modelChip");
@@ -1411,24 +1877,63 @@ function renderModelChip() {
   chip.classList.remove("hidden");
   const cur = currentProvider();
   $("modelChipName").textContent = cur ? cur.name : "选择模型";
-  const menu = $("modelMenu");
-  menu.innerHTML = "";
+  const list = $("modelList");
+  clearNode(list);
   usable.forEach((p) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.setAttribute("role", "menuitem");
     const isCur = !!cur && p.id === cur.id;
-    if (isCur) b.classList.add("current");
-    const name = document.createElement("span");
-    name.textContent = (isCur ? "✓ " : "") + p.name;
-    const sub = document.createElement("span");
-    sub.className = "mm-sub";
-    sub.textContent = p.shared ? "共享" : "我的模型";
-    b.append(name, sub);
-    b.onclick = () => switchModel(p.id);
-    menu.appendChild(b);
+    const status = p.thinking_status || "unsupported";
+    const row = fvEl("div", "mm-item");
+    row.setAttribute("data-thinking", status);
+    const main = fvEl("button", "mm-row-main");
+    main.type = "button";
+    main.setAttribute("role", "menuitem");
+    if (isCur) main.classList.add("current");
+    main.append(
+      fvEl("span", "mm-name", (isCur ? "✓ " : "") + p.name),
+      fvEl("span", "mm-sub", p.shared ? "共享" : "我的模型"),
+      (() => {
+        const c = fvEl("span", "mm-chip", thinkingStatusLabel(status));
+        c.setAttribute("data-thinking", status);
+        return c;
+      })(),
+      // 上限与倍率是选模型时真正比的两个数：一个决定能带多少历史，一个决定花多少。
+      fvEl("span", "mm-sub", `${p.max_context_k || 64}K · ${p.multiplier || "?x"}`)
+    );
+    main.onmouseenter = () => {
+      if (modelMenuIsTouch()) return;
+      // 已经钉住另一张卡时 hover 不抢：看一眼别的模型不该改掉用户打开的那一张。
+      if (state.modelPinned && state.modelPinned !== p.id) return;
+      showModelDetail(p.id);
+    };
+    main.onclick = () => toggleModelDetail(p.id);
+    row.appendChild(main);
+    if (p.can_edit) {
+      const mg = fvEl("button", "mm-mini", "管理");
+      mg.type = "button";
+      mg.setAttribute("aria-label", `管理 ${p.name} 的模型上限与思考能力`);
+      mg.onclick = () => openModelManage(p.id);
+      row.appendChild(mg);
+    }
+    list.appendChild(row);
   });
+  // 卡片默认开哪一张：只用 currentProvider()（内部已按服务端 /v1/models 的 default 兜底），
+  // 不在这里按清单顺序自己挑一条——两侧各挑一次就是"界面显示 B、实际用 A"那条漂移。
+  showModelDetail(state.modelPinned || state.modelDetailId || (cur ? cur.id : ""));
   renderContextRing();   // 换模型/刷清单：预算与上限都跟着当前模型走，环同步重画
+}
+
+/* 手机：点行展开/收起同一张卡（一次只有一张开着的）。
+ * 桌面：点行把这张卡钉住，再点同一行放回"跟着 hover 走"。 */
+function toggleModelDetail(id) {
+  if (modelMenuIsTouch()) {
+    const collapse = state.modelCardOpen && state.modelDetailId === id;
+    state.modelCardOpen = !collapse;
+    $("modelMenu").classList.toggle("card-open", state.modelCardOpen);
+    if (!collapse) showModelDetail(id);
+    return;
+  }
+  state.modelPinned = state.modelPinned === id ? "" : id;
+  showModelDetail(id);
 }
 
 function switchModel(id) {
@@ -1450,6 +1955,11 @@ function setModelMenu(open) {
 function hideModelMenu() {
   $("modelMenu").classList.add("hidden");
   $("modelChip").classList.remove("open");
+  // 收起来就把"钉住/展开"这两个本机态清掉：下次打开该跟着当前模型走，
+  // 而不是接着上一次的展开状态（那会让人以为卡片没换是 bug）。
+  state.modelPinned = "";
+  state.modelCardOpen = false;
+  $("modelMenu").classList.remove("card-open");
 }
 
 function serverDefaultProvider() {
@@ -1480,6 +1990,14 @@ function budgetProviderId() {
 async function loadProviders() {
   const data = await API.myProviders();
   const admin = isAdmin();
+  // 完整记录按 id 缓存这一份（shared + mine）：它是模型卡那次全量 PUT 的**唯一**来源。
+  // /v1/models 的目录项不够——那里没有 base_url/api_key_masked/priced 之外的连接字段，
+  // 拿它拼 PUT 等于一次保存就把上游地址洗掉。整表重建（不是增量合并），否则上一个人
+  // 被删掉的条目会一直留在缓存里，下一次 PUT 就发到一条已经不存在的配置上。
+  state.providerRecords = {};
+  (data.shared || []).concat(data.mine || []).forEach((p) => {
+    if (p && p.id) state.providerRecords[p.id] = p;
+  });
   const shared = $("sharedProvList");
   shared.innerHTML = "";
   (data.shared || []).forEach((p) => shared.appendChild(providerRow(p, admin ? "admin" : "shared")));
@@ -1581,10 +2099,10 @@ function openProviderForm(p, scope) {
   $("provLabel").value = p.label;
   $("provBase").value = p.base_url;
   $("provModel").value = p.model;
-  $("provCtxK").value = p.max_context_k || "";
+  // Task 9：这里不再回填「上下文上限」——这一格搬进模型卡了，表单这次 PUT 也不发它
+  // （providers._pending 会按"这次没带"从库里保留那一份）。
   $("provVision").checked = !!p.supports_vision;
-  $("provKey").value = "";
-  $("provKey").placeholder = p.api_key_masked ? `已设置（${p.api_key_masked}），留空则不修改` : "填入 API Key";
+  $("provKey").value = ""; $("provKey").placeholder = p.api_key_masked ? `已设置（${p.api_key_masked}），留空则不修改` : "填入 API Key";
   $("provTestResult").textContent = "";
   $("provForm").classList.remove("hidden");
 }
@@ -1593,7 +2111,7 @@ function openBlankProviderForm(scope) {
   state.editingProvider = null;
   state.editingScope = scope;
   $("provId").value = ""; $("provLabel").value = ""; $("provBase").value = "";
-  $("provKey").value = ""; $("provModel").value = ""; $("provCtxK").value = ""; $("provVision").checked = false;
+  $("provKey").value = ""; $("provModel").value = ""; $("provVision").checked = false;
   $("provKey").placeholder = "填入 API Key";
   $("provTestResult").textContent = "";
   $("provForm").classList.remove("hidden");
@@ -1604,7 +2122,7 @@ function fillFormFromPreset(preset) {
   if (!state.editingProvider) $("provLabel").value = preset.label;
   $("provBase").value = preset.base_url;
   $("provModel").value = preset.model;
-  if (preset.max_context_k != null) $("provCtxK").value = preset.max_context_k;
+  // preset.max_context_k 不进表单：上限是模型的能力，配到「选择模型 → 模型管理」里去。
   $("provVision").checked = !!preset.supports_vision;
 }
 
@@ -1614,6 +2132,9 @@ function closeProviderForm() {
   $("provForm").classList.add("hidden");
 }
 
+/* 表单只发连接配置。max_context_k 从这里**不发**是设计，不是遗漏：
+ * 服务端 _pending 按"这次没带"保留库里那一份，所以改一次名字不会把 1000K 洗成 64K，
+ * 而模型卡那次 PUT 才带上限（见 providerCapabilityBody）。 */
 function providerDraftFromForm() {
   return {
     id: $("provId").value || undefined,
@@ -1621,8 +2142,6 @@ function providerDraftFromForm() {
     base_url: $("provBase").value.trim(),
     api_key: $("provKey").value.trim(),
     model: $("provModel").value.trim(),
-    // 留空 → undefined → 服务端归一为缺省 64；判据（钳 1..10000）只写后端一处。
-    max_context_k: Number($("provCtxK").value) || undefined,
     supports_vision: $("provVision").checked,
     is_default: false,
   };
@@ -4029,6 +4548,15 @@ function resetViewForIdentity() {
   // 内存态。换身份不清，上一个人的用量锚点会校准到新会话头上。
   state.contextDropBySession = {};
   state.lastUsageBySession = {};
+  // 模型卡的记录缓存与卡片本机态同理（Task 9）：那份缓存是全量 PUT 的唯一来源，
+  // 换人不清空的话，下一次"保存能力"会把上一个人的 base_url 发到新身份的那扇门里。
+  state.providerRecords = {};
+  state.modelDetailId = "";
+  state.modelPinned = "";
+  state.modelCardOpen = false;
+  state.modelManage = false;
+  state.modelDetailError = "";
+  state.modelSaved = "";
   // 接力队列同样随身份清掉（Task 5）：队列只在内存、条目是上一个人的原文，
   // 待发的"立即插话"也一起作废——绝不带着旧身份/旧会话的落点去发新轮。
   resetQueuesForIdentity();
@@ -4961,8 +5489,14 @@ function bind() {
     const cm = currentProvider();
     if (!cm) return;
     setContextBudget(budgetProviderId(), e.target.value);
-    syncCtxRow();            // 设置页那行与环都从同一口径重读，不各写各的
+    syncCtxRow();            // 账本那行与环都从同一口径重读，不各写各的
     renderContextPanel();
+  };
+  // 模型卡与清单同在一个容器里（Task 9）：底部那颗是"能力编辑区"的总开关。
+  // 管的是当前这张卡；能不能真写得下去，由卡里的 can_edit 与服务端那道门说了算。
+  $("modelManageBtn").onclick = () => {
+    if (state.modelManage) closeModelManage();
+    else openModelManage(state.modelDetailId || budgetProviderId());
   };
   $("ctxTidyBtn").onclick = applyContextTidy;
   $("ctxResetBtn").onclick = () => {
@@ -5039,12 +5573,8 @@ function bind() {
   $("provTestBtn").onclick = testProviderDraft;
   $("provCancelBtn").onclick = closeProviderForm;
 
-  $("ctxRange").oninput = (e) => {
-    setContextBudget(budgetProviderId(), e.target.value);
-    $("ctxVal").textContent = contextBudgetK(budgetProviderId());
-    renderContextRing();   // 设置页滑杆拖一格，环的分母就得跟一格（Task 9 才迁移这一行）
-  };
-
+  // Task 9：设置页那颗「上下文长度」滑杆（#ctxRange）随这一行一起删掉了——
+  // 预算的落点是上下文账本与模型卡，两处读写同一份 map，不再有第三份。
   $("memoryAddForm").onsubmit = async (e) => {
     e.preventDefault();
     const el = $("memoryInput");

@@ -38,16 +38,30 @@ def test_context_ring_and_panel_are_wired_without_innerhtml_for_user_text():
         "轻量整理没有按本轮发送丢最早消息"
 
 
-def test_ring_sits_beside_model_chip_and_settings_slider_survives():
-    """环放在现有 #modelChip 旁边（不硬造第二套模型控件）；设置页 #ctxRange
-    要到 Task 9 才迁移，这里钉住它仍在；账本是 role=dialog 的层。"""
+def test_ring_sits_beside_model_chip_and_the_budget_control_has_one_source():
+    """环放在现有 #modelChip 旁边（不硬造第二套模型控件）；预算控件到 Task 9 真的从
+    设置页搬走了——现在只剩两处（上下文面板的滑杆与模型卡），两处读同一份 per-model
+    map（contextBudgetK/setContextBudget），没有第三份真相。"""
     html = _html()
+    js = _js()
     foot = html[html.index('class="input-foot"'):html.index("</form>")]
     assert 'id="ctxRingBtn"' in foot and 'id="modelChip"' in foot, "环或芯片不在输入脚"
     assert foot.index('id="ctxRingBtn"') < foot.index('id="modelChip"'), \
         "环应排在芯片前（点环开账本，点芯片仍开模型菜单）"
-    assert 'id="ctxRange"' in html, "设置页预算滑杆被提前拆掉了（Task 9 才迁移）"
+    assert 'id="ctxRange"' not in html, \
+        "设置页还留着第二份预算滑杆：Task 9 迁走了它，留回来就是两个真相"
     assert 'id="contextPanel"' in html and 'role="dialog"' in html
+    assert 'id="ctxBudgetRange"' in html, "预算控件迁移后仍要在上下文面板里"
+    detail = _function_body(js, "renderModelDetail")
+    panel = _function_body(js, "renderContextPanel")
+    sync = _function_body(js, "syncCtxRow")
+    for name, body in (("账本", panel), ("模型卡", detail), ("读数行", sync)):
+        assert "contextBudgetK(" in body, f"{name}没读那份按模型存的预算 map"
+    assert "setContextBudget(" in detail, "模型卡没接本会话预算"
+    assert "localStorage.setItem" not in detail and "localStorage.getItem" not in detail, \
+        "模型卡自己写了一份预算：与账本滑杆就此各存真相"
+    assert "localStorage.setItem" not in panel and "localStorage.getItem" not in panel, \
+        "账本自己写了一份预算：与模型卡就此各存真相"
 
 
 def test_panel_layer_and_ring_style_use_the_established_patterns():
@@ -317,3 +331,197 @@ def test_requeue_force_next_pure_function_requeues_only_on_mismatch():
         f"身份或会话任一切走都必须回队：{out}"
     assert out["calls"] == ["s1:b", "s1:c"], \
         f"回队桶键必须是 forceNext.sid（原队列），不是当前会话：{out}"
+
+
+# ---------------- Task 9：模型卡 / 模型管理 / 设置页迁移 ----------------
+# 判据源：task-9-brief.md Step 1 逐字，外加本轮拍定的口径（两栏 DOM、三态文案不说谎、
+# 预算两处同源、能力写口的 scope 分流、PUT 的唯一记录来源、动态文本不拼 innerHTML）。
+# "点了开关到底发不发得出去""偏好是不是随身份分键"这类读源码读不出结论的，
+# 交给下面那段 node 真跑。
+
+
+def test_web_model_card_management_and_settings_move():
+    html = _html()
+    js = _js()
+    assert 'id="modelDetail"' in html and 'id="modelManageBtn"' in html
+    assert 'id="ctxRange"' not in html, "设置页还在重复上下文滑杆：两个真相"
+    assert 'id="provCtxK"' not in html, "模型服务表单还在重复模型上限"
+    render = _function_body(js, "renderModelChip")
+    assert "thinking_status" in render and "can_edit" in render, \
+        "模型行没有能力/权限状态"
+    detail = _function_body(js, "renderModelDetail")
+    assert "contextBudgetK(" in detail and "setContextBudget(" in detail, \
+        "模型卡没接本会话预算"
+    assert "innerHTML" not in detail, "模型卡对模型文本拼了 innerHTML"
+    assert "data-thinking" in js and "thinking_levels" in js, "思考三态/档位没有接线"
+    assert "updateProviderCapabilities" in _js(), "能力写口没有 API 封装"
+    # 本单补锁：行是模型名（服务端文本）的第一个展示面，同样不许拼 innerHTML
+    assert "innerHTML" not in render, "模型行对模型名拼了 innerHTML"
+
+
+def test_model_menu_is_a_two_pane_container_with_one_manage_entry():
+    html = _html()
+    js = _js()
+    at = html.index('id="modelMenu"')
+    menu = html[at:html.index('id="contextPanel"', at)]
+    for el in ('id="modelList"', 'id="modelDetail"', 'id="modelManageBtn"'):
+        assert el in menu, f"模型菜单的两栏容器缺 {el}：清单/详情/管理必须同在这一层"
+    assert '$("modelManageBtn")' in js, "「模型管理」按钮没接线"
+    manage = _function_body(js, "openModelManage")
+    assert "state.modelManage" in manage and "showModelDetail(" in manage, \
+        "模型管理没有落点：点一下只换个 class 等于没这个功能"
+    # 行上的管理入口只在 can_edit 时给（服务端说不许改，就别留一个必然 403 的键）
+    assert "openModelManage(" in _function_body(js, "renderModelChip")
+    assert "openModelManage(" in _function_body(js, "renderModelDetail")
+
+
+def test_capability_write_path_is_scoped_and_reads_one_record_source():
+    api = _js("api.js")
+    js = _js()
+    m = re.search(r"updateProviderCapabilities:\s*\(([^)]*)\)\s*=>", api)
+    assert m, "api.js 里 updateProviderCapabilities 不是箭头函数（形状变了，锁要跟着改）"
+    assert [p.strip() for p in m.group(1).split(",")] == ["scope", "id", "patch"], \
+        "能力写口的形参必须是 (scope, id, patch)"
+    assert 'scope === "admin"' in api, "scope 没分流：管理员改共享条目会打到个人面上"
+    assert "/v1/providers/" in api and "/v1/me/providers/" in api, "两面 PUT 少了一面"
+
+    save = _function_body(js, "saveModelCapabilities")
+    assert "state.providerRecords[" in save and "API.updateProviderCapabilities(" in save
+    assert "state.providers" not in save, \
+        "PUT 的记录来自 /v1/models 目录项：那里没有 base_url，保存会把上游洗掉"
+    assert "await loadModels()" in save or "loadModels()" in save, \
+        "保存后没重读清单：界面继续拿一份旧真值"
+    assert "loadProviders()" in save, "保存后没重读记录：卡片下一次编辑会拿旧的 PUT 上去"
+    assert "alert(" not in save, "服务端那句人话该写在卡上，不是弹窗"
+    cache = _function_body(js, "loadProviders")
+    assert "state.providerRecords = {}" in cache and "state.providerRecords[p.id] = p" in cache, \
+        "完整记录没在 loadProviders 里整表重建：PUT 就没有唯一来源（或留着上一条旧记录）"
+    assert "data.shared" in cache and "data.mine" in cache, \
+        "记录缓存只建了一面：管理员改共享条目时拿不到那份完整记录"
+    assert "state.providerRecords = {}" in _function_body(js, "resetViewForIdentity"), \
+        "换身份没清记录缓存：上一个人的 base_url 会跟着下一次 PUT 发出去"
+
+    body = _function_body(js, "providerCapabilityBody")
+    for keep in ("api_key", "is_default", "paid_by", "pricing", "thinking_profile",
+                 "base_url", "model", "supports_vision"):
+        assert keep in body, f"全量 PUT 少了 {keep}：一次保存会把这一格洗掉"
+    assert 'api_key: ""' in body, "api_key 不传空串就带不回原密钥（服务端按占位符保留）"
+    # 每一格都必须**从那份记录里取**：写死一个值等于把"这次没改"演成"改成这个值"
+    assert "max_context_k: rec.max_context_k" in body, \
+        "上限不从完整记录里取：改一次思考档位就把库里的上限写死"
+    assert "base_url: rec.base_url" in body and "label: rec.label" in body, \
+        "连接字段不从完整记录里取：全量 PUT 会把它洗掉"
+    assert "id:" not in body, "PUT body 不带 id：路由按 path 钉这一条"
+
+
+def test_thinking_switch_is_only_clickable_when_the_profile_is_verified():
+    js = _js()
+    ctl = _function_body(js, "thinkingControlState")
+    assert "thinking_status" in ctl and '"verified"' in ctl, "三态判据没落在一个函数里"
+    detail = _function_body(js, "renderModelDetail")
+    assert "thinkingControlState(" in detail and ".disabled" in detail, \
+        "思考开关没按三态禁用：会做出一个点了写偏好却发不出去的状态"
+    assert "thinkingChoice(" in detail and "writeThinkingPref(" in detail, \
+        "开关/档位没接到本机偏好"
+    label = _function_body(js, "thinkingStatusLabel")
+    for text in ("不支持思考", "支持思考（参数未核实，暂时不能开）", "可切换思考强度"):
+        assert text in label, f"三态文案少了「{text}」"
+    # 能力编辑区（服务端字段）与偏好开关（本机）是两件事，只有 can_edit 才给写口，
+    # 而写口全页只有一个：卡片与管理区不许各发一份 PUT（分流散成两处是漂移的起点）。
+    assert "can_edit" in detail and "modelManageSection(" in detail
+    section = _function_body(js, "modelManageSection")
+    assert "saveModelCapabilities(" in section and "max_context_k" in section
+    assert "innerHTML" not in section, "管理区对模型文本拼了 innerHTML"
+    assert js.count("API.updateProviderCapabilities(") == 1, \
+        "能力写口开了第二处：scope 分流就不止一个出处了"
+
+
+_THINKING_PREF_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+const mem = new Map();
+ctx.localStorage = {
+  getItem: (k) => mem.has(k) ? mem.get(k) : null,
+  setItem: (k, v) => mem.set(k, String(v)),
+};
+ctx.pref = { userId: "u1" };
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const verified = { thinking_status: "verified", thinking_levels: ["快速", "均衡"],
+                   thinking_default: "均衡" };
+const out = {
+  keyU1: ctx.thinkingPrefsKey(),
+  fresh: ctx.thinkingChoice("p1", verified),
+  otherProvider: ctx.thinkingChoice("p2", verified),
+};
+ctx.writeThinkingPref("p1", { enabled: true, level: "快速" });
+out.afterWrite = ctx.thinkingChoice("p1", verified);
+ctx.pref.userId = "u2";
+out.newIdentity = ctx.thinkingChoice("p1", verified);
+out.keyU2 = ctx.thinkingPrefsKey();
+ctx.pref.userId = "u1";
+out.defaultNotInLevels = ctx.thinkingChoice("p8",
+  { thinking_status: "verified", thinking_levels: ["甲", "乙"], thinking_default: "丙" });
+out.noLevels = ctx.thinkingChoice("p9",
+  { thinking_status: "unsupported", thinking_levels: [], thinking_default: "" });
+for (const st of ["unsupported", "unverified", "verified"]) {
+  out[st] = ctx.thinkingControlState(
+    { thinking_status: st, thinking_levels: ["甲"], thinking_default: "甲" });
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_thinking_prefs_are_local_per_identity_and_honest_about_state():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    src = "\n".join(_fn_text(_js(), n) for n in (
+        "thinkingPrefsKey", "readThinkingPrefs", "writeThinkingPref",
+        "thinkingChoice", "thinkingStatusLabel", "thinkingStateReason",
+        "thinkingControlState"))
+    d = Path(tempfile.mkdtemp(prefix="model-cockpit-thinking-"))
+    (d / "fns.js").write_text(src, encoding="utf-8")
+    (d / "harness.cjs").write_text(_THINKING_PREF_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js")],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己跑失败：\n{r.stdout}\n{r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["keyU1"] == "fv.thinking.u1.v1", out["keyU1"]
+    assert out["keyU2"] == "fv.thinking.u2.v1", out["keyU2"]
+    # enabled 缺省 false：不给全站悄悄改计费行为
+    assert out["fresh"]["enabled"] is False and out["fresh"]["level"] == "均衡", out["fresh"]
+    assert out["otherProvider"]["enabled"] is False, "偏好按 provider 分格：不能串到别的模型上"
+    assert out["afterWrite"]["enabled"] is True and out["afterWrite"]["level"] == "快速", \
+        out["afterWrite"]
+    assert out["newIdentity"]["enabled"] is False, \
+        "换身份读到了上一个人的开关：偏好必须按 userId 分键"
+    # 默认档不在候选里 → 落 levels[0]（与服务端 _thinking_view 同一口径，界面不另造状态）
+    assert out["defaultNotInLevels"]["level"] == "甲", out["defaultNotInLevels"]
+    assert out["noLevels"]["level"] == "", out["noLevels"]
+    # 三态：只有 verified 可点，其余两态禁用且给出原因
+    assert out["unsupported"]["enabled"] is False and out["unsupported"]["reason"], \
+        out["unsupported"]
+    assert out["unverified"]["enabled"] is False and "未核实" in out["unverified"]["reason"], \
+        out["unverified"]
+    assert out["verified"]["enabled"] is True and out["verified"]["reason"] == "", \
+        out["verified"]
+
+
+def test_settings_form_keeps_connection_fields_and_gives_up_capability_inputs():
+    html = _html()
+    js = _js()
+    prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
+    for keep in ("provLabel", "provBase", "provKey", "provModel", "provVision",
+                 "provTestBtn"):
+        assert f'id="{keep}"' in prov, f"连接配置字段被误删：{keep}"
+    assert 'id="provCtxK"' not in prov, "表单还在收模型上限：与模型卡两个真相"
+    assert "模型管理" in prov and "上限" in prov, \
+        "表单没留一句「上限与思考能力到模型卡里配」的指路，改完的人只会找不到入口"
+    draft = _function_body(js, "providerDraftFromForm")
+    assert "max_context_k" not in draft and "provCtxK" not in draft, \
+        "表单还在发上限：这一格从此只由模型卡写"
+    for name in ("openProviderForm", "openBlankProviderForm", "fillFormFromPreset"):
+        assert "provCtxK" not in _function_body(js, name), \
+            f"{name} 还读 provCtxK：字段删掉后就是 null.value 空指针"
+    assert "provCtxK" not in js, "app.js 里还留着 provCtxK 的引用"
