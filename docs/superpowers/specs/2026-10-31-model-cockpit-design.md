@@ -234,7 +234,11 @@
 }
 ```
 
-`thinking_status` 由服务端派生：`supports_thinking=true` 且 `thinking_profile!="none"` = `verified`；`supports_thinking=false` = `unsupported`；其余（profile 为 none）= `unverified`。客户端不根据名字猜。
+`thinking_status` 由服务端派生（实现：`app/core/providers.py::_thinking_status`）：`supports_thinking=false` = `unsupported`；`thinking_profile` 等于 `none`（含缺省）= `unverified`；`thinking_profile` 命中服务端白名单**且那一条自己带 `verified: true` 旗标** = `verified`；其余一律 `unverified`。客户端不根据名字猜。
+
+> 口径收口（Task 8 的裁决，Task 9 修复轮写回本行）：本行原文写的是「`supports_thinking=true` 且 `thinking_profile != "none"` = verified」，代码不是这么做的，而且代码更诚实。判据多了一格：**白名单条目必须自带 `verified` 旗标**。理由是把「不是 none」当成已核实，等于让盘上任何一条没人验过的 profile（老记录、手工写坏的、回滚留下的）都够格让界面说"这个模型的思考参数已核实"——那句话会直接决定用户能不能打开思考开关、这一轮要不要按上游的推理参数计费。§6.1 里「`profile != "none"` 本身就是已核实的事实，不需要再存一个 verified 布尔」那一句以本行为准，已被这条取代。**Task 12 往 `THINKING_PROFILES` 加配方时，必须同时给它 `verified: True`（真实 API 核实通过之后），否则界面只会显示「参数未核实」，开关永远点不动。**
+
+`none` 在白名单里也标了 `verified: True`（"不带任何思考参数"这件事本身是确定的），但它被单独排除在 `verified` 之外：`profile == none` 永远只意味着"没配思考参数"，不意味着"思考已核实"。
 
 `verified` 的准确含义是「该 profile 的参数形状已核实，且这条 provider 记录声明支持」，**不是**对每个模型做了逐模型实测；管理端选择 profile 时仍要按 provider 文档核对模型。不要把「profile 已核实」写成「这个模型一定支持思考」。
 
