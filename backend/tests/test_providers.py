@@ -198,16 +198,60 @@ def test_post_still_generates_id_when_client_sends_none_or_blank():
     """正控：没带 / 空串 / 纯空白都照常创建，且各自拿到服务端生成的新 id。
 
     这一条是防止修法把正常创建打死——也钉住口径：空白串算"没带"，不算"带了"。
+    「算没带」必须落成**服务端生成的那个形状**（`p_<8 hex>`），不能只判"三个 id
+    互不相同"：修法没落地时那一条的 id 是字面量 `"   "`，它和 `p_xxxxxxxx` 天然
+    不同，光比不同等于什么都不判（#224 修复轮 1 的审查实测）。
     """
     made = []
     for payload in (_payload(), _payload(id=""), _payload(id="   ")):
         res = client.post("/v1/providers", json=payload)
         assert res.status_code == 200, res.text
-        made.append(res.json()["provider"]["id"])
+        pid = res.json()["provider"]["id"]
+        assert pid.startswith("p_"), f"空白/空串 id 原样进了存储层，库里躺着字面量 {pid!r}"
+        made.append(pid)
     assert len(set(made)) == 3, f"三次创建拿到同一个 id，说明空白 id 没被换成新 id：{made}"
     assert all(made), made
     for pid in made:
         client.delete(f"/v1/providers/{pid}")
+
+
+def test_two_blank_id_creates_make_two_rows_and_the_second_rewrites_nothing():
+    """本轮判据本体：两次带纯空白 id 的创建必须拿到两个不同的服务端 id。
+
+    为什么"只判不改"是不够的（修复轮 1 的 Important-1）：守卫只看 `strip()` 判
+    不判"带了 id"，判成"没带"的那个 `"   "` 会原样落进 `upsert`，而存储层的
+    id 归一是 `str(record.get("id") or f"p_{uuid...}")` —— 空白串是**真值**，
+    于是那条的 id 就成了字面量 `"   "`。后果不是"难看"而是覆盖还在活着：
+      - 谁再 POST 一次同样的空白 id，`upsert` 认的就是这个字面量 → 走更新分支，
+        把上一条的 label/base_url/model/api_key 整条换掉（共享面是这样，个人面
+        跨用户也是这样：owner 沿用库里那位，被覆盖的人之后每次聊天都在走
+        攻击者的上游）；
+      - 顺带把命中共享默认行时的 ★ 洗掉（个人面强制 is_default=False，
+        那是 #229 的形状，本单只是让非管理员也能触发它）。
+    所以这把锁一次判三件事：形状（`p_` 开头）、互不相同、第二条不许动第一条。
+    """
+    first = client.post("/v1/providers", json=_payload(
+        id="   ", label="空白第一条", base_url="https://one.invalid/v1", model="one-chat"))
+    assert first.status_code == 200, first.text
+    pid1 = first.json()["provider"]["id"]
+    assert pid1.startswith("p_"), f"空白 id 没被归零，存进去的是字面量 {pid1!r}"
+    before = _shared_entry(pid1)
+
+    second = client.post("/v1/providers", json=_payload(
+        id="   ", label="空白第二条", base_url="https://two.invalid/v1", model="two-chat"))
+    assert second.status_code == 200, second.text
+    pid2 = second.json()["provider"]["id"]
+    assert pid2.startswith("p_"), f"第二次空白创建的 id 也不是服务端生成的：{pid2!r}"
+    assert pid1 != pid2, f"两次空白 id 撞到同一条上：{pid1} / {pid2}"
+
+    after = _shared_entry(pid1)
+    for field in ("label", "base_url", "model"):
+        assert after[field] == before[field], \
+            f"第二次带空白 id 的 POST 改掉了第一条的 {field}：{before[field]} -> {after[field]}"
+    assert _shared_entry(pid2)["label"] == "空白第二条", "第二条没被单独建出来"
+
+    client.delete(f"/v1/providers/{pid1}")
+    client.delete(f"/v1/providers/{pid2}")
 
 
 def test_both_create_routes_share_one_id_guard():

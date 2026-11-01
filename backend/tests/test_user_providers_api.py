@@ -124,6 +124,16 @@ def _shared(client, hdr, pid):
                  if p["id"] == pid), None)
 
 
+def _ids_of(client, hdr):
+    """这个人视角下**已经存在**的全部 provider id（共享 + 他自己的）。
+
+    空白 id 的 POST 只要落进这个集合，就是"命中了一条已有配置"——不管命中的是
+    别人的私有条目还是全站那一条。
+    """
+    view = client.get("/v1/me/providers", headers=hdr).json()
+    return [p["id"] for p in view["shared"]] + [p["id"] for p in view["mine"]]
+
+
 def _hijack_payload(pid):
     return _payload(id=pid, label="被冒名改的那条", base_url="https://api.attacker.invalid/v1",
                     model="attacker-chat", api_key=HIJACK_KEY)
@@ -178,16 +188,76 @@ def test_post_with_shared_id_cannot_rewrite_the_site_wide_entry(client, enforced
 
 
 def test_post_my_provider_still_generates_id_when_absent_or_blank(client, enforced):
-    """正控：不带 / 空串 / 纯空白都必须照常创建（别把正常用户打死）。"""
+    """正控：不带 / 空串 / 纯空白都必须照常创建（别把正常用户打死）。
+
+    形状也必须钉：个人面是**普通用户唯一能写的那一面**，而"空白算没带"若只停在
+    守卫的判据里、没把 id 归零，那条的 id 就是字面量 `"   "`——它和 `p_xxxxxxxx`
+    天然不同，下面那句"三次互不相同"抓不住这种改法（#224 修复轮 1 的审查实测）。
+    """
     a = enforced("id-trust-creator")
     made = []
     for over in ({}, {"id": ""}, {"id": "   "}):
         r = client.post("/v1/me/providers", json=_payload(**over), headers=a)
         assert r.status_code == 200, r.text
         pid = r.json()["provider"]["id"]
-        assert pid and pid not in made, f"三次创建拿到同一个 id：{made + [pid]}"
+        assert pid.startswith("p_"), f"空白/空串 id 原样进了存储层，库里躺着字面量 {pid!r}"
+        assert pid not in made, f"三次创建拿到同一个 id：{made + [pid]}"
         made.append(pid)
     assert [p["id"] for p in client.get("/v1/me/providers", headers=a).json()["mine"]] == made
+
+
+def test_blank_id_variants_never_land_on_an_existing_row(client, enforced):
+    """跨用户覆盖那条锁补的形状格：空白 id 的各种写法都不许命中已有那一行。
+
+    审查员在 BASE 上实测活着的那条缝，走的就是这一面：
+      1. A 往个人面 POST 一条 `id="   "` 的私有配置 → 200，而库里那条的 id 是
+         字面量 `"   "`（存储层 `record.get("id") or 生成` 里空白是真值）；
+      2. B 再 POST 一条 `id="   "` → 也 200，`upsert` 认到这个字面量走更新分支，
+         把 A 那条的 label/base_url/model/api_key 整条换掉、owner 仍是 A；
+      3. A 之后每次聊天都在用 B 的上游与 B 的密钥——#224 原本要修的那个后果，
+         只是触发条件从"知道 id"变成"发一个空白"。
+    判据写成"400 或全新 `p_` id"两种都放过，是因为归零之后它必然走后者；真正
+    不许放过的是**命中已有行**那一种，所以逐格比 A 那条 + 断言新 id 从没出现过。
+    三种空白各有来路：`"   "` 是表单里手打的空格，`"\t\n "` 是复制粘贴带进来的，
+    `"\\xa0"` 是不破空格（中文输入法 / 网页粘贴最常见，且 `strip()` 也认它）。
+    """
+    a = enforced("blank-id-victim")
+    b = enforced("blank-id-attacker")
+
+    victim = client.post("/v1/me/providers",
+                         json=_payload(id="   ", label="主人那条"), headers=a)
+    assert victim.status_code == 200, victim.text
+    vid = victim.json()["provider"]["id"]
+    assert vid.startswith("p_"), f"空白 id 没被归零，A 那条的 id 是字面量 {vid!r}"
+    before = _mine(client, a, vid)
+    assert before is not None, "前置条件没成立：A 那条没建起来"
+    default_before = client.get("/v1/models", headers=a).json()["default"]
+
+    for variant in ("   ", "\t\n ", "\xa0"):
+        seen = set(_ids_of(client, b))
+        r = client.post("/v1/me/providers", json=_hijack_payload(variant), headers=b)
+        assert r.status_code in (200, 400), \
+            f"空白 id 变体 {variant!r} 既没被拒也没被归零：{r.status_code} {r.text}"
+        if r.status_code == 200:
+            pid = r.json()["provider"]["id"]
+            assert pid.startswith("p_"), \
+                f"空白 id 变体 {variant!r} 原样进了存储层，那条的 id 是 {pid!r}"
+            assert pid not in seen, \
+                f"空白 id 变体 {variant!r} 命中了一条已有配置（{pid}）——跨用户覆盖还活着"
+            assert pid != vid
+
+        after = _mine(client, a, vid)
+        for field in _MUTABLE_FIELDS:
+            assert after[field] == before[field], \
+                f"B 带空白 id {variant!r} 的一次 POST 改掉了 A 那条的 {field}：" \
+                f"{before[field]} -> {after[field]}"
+        assert HIJACK_KEY not in client.get("/v1/me/providers", headers=a).text
+        # 星号不许被顺带洗掉：个人面 POST 强制 is_default=False，一旦命中站内默认
+        # 那条就把 ★ 抹了（那是 #229 的形状，本单归零之后这条路一并关掉，所以
+        # 这里钉"默认没动"而不是"默认还在"——后者对洗掉 ★ 的改法是瞎的）。
+        default_after = client.get("/v1/models", headers=a).json()["default"]
+        assert default_after == default_before, \
+            f"带空白 id {variant!r} 的一次 POST 动了全站默认：{default_before} -> {default_after}"
 
 
 def test_both_post_create_routes_reject_client_id_before_upsert(client, enforced, monkeypatch):

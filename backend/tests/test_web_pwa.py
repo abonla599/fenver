@@ -1442,6 +1442,35 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     assert "provCtxK" in _function_body(js, "openProviderForm"), "编辑不回显上限"
 
 
+def test_provider_create_draft_structurally_cannot_send_an_id():
+    r"""「创建不发 id」在前端也得有一把静态锁，不能只靠后端那句 400（#224 Minor-4）。
+
+    为什么非锁不可：审查员把 `providerDraftFromForm` 的 id 改回
+    `$("provId").value || undefined`（也就是"隐藏域哪天在新建态没被清空"那条路），
+    在仓库外的克隆里跑了**读 app.js 的全集 42 个文件**——982 passed / 15 skipped /
+    0 failed，`test_web_pwa.py` 单跑改前改后都 141 passed。后端 400 是硬边界没错，
+    但界面上它只长成一行 ❌，而 CI 全绿：这条契约一旦退化，是真实用户点保存才发现。
+
+    判据只吃这一格的**函数体**，两处都是必要的：
+      - 整份 app.js 里 `$("provId")` 本来就有别处在用（openProviderForm 填它、
+        saveProvider 读它），按全文判"不许出现"今天就是红的；
+      - 函数体里那句解释性注释（"隐藏域 provId 的值由打开表单时填"）含 `provId`
+        字样，不剥注释的尺子会被它喂绿——所以语料必须走 `_js()`。
+    已声明的射程：钉的是"这一格从 `state.editingProvider` 取"，不钉"id 这格以别的
+    表达式出现"（换成 `id: draftId()` 这类helper 调用会红，因为正则不再命中——
+    那是想要的行为，不是漏判）。
+    """
+    js = _js()
+    draft = _function_body(js, "providerDraftFromForm")
+    assert '$("provId")' not in draft, \
+        "providerDraftFromForm 又去读隐藏域了：新建态一旦留着上一条的 id，" \
+        "草稿就会带着它去 POST，后端响亮地 400，界面只有一行 ❌"
+    assert "state.editingProvider" in draft, \
+        "草稿的 id 不再跟 state.editingProvider 走——和 saveProvider 选 PUT/POST 的依据分叉了"
+    assert re.search(r"\bid:\s*state\.editingProvider\b", draft), \
+        f"id 这一格不是从 state.editingProvider 直读的，草稿身份来源又变松了：{draft[:120]}"
+
+
 def test_token_estimate_and_budget_truncation_behavior():
     """node 真跑纯函数：估算口径与"最后一条必带、往前放不下就停"是行为契约。
 
