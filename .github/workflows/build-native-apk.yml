@@ -11,6 +11,12 @@ on:
 
 jobs:
   apk:
+    # tag 推送也会触发这条：GitHub 的 `paths` 过滤只对分支推送生效，对 tag 不生效，
+    # 于是每个发版 tag 都白跑一遍安卓构建（v0.37.5 起七个 tag 各一次，都在几分钟）。
+    # 这里按 ref 类型挡掉，判据是确定的——`github.ref_type` 只有 branch / tag 两个值，
+    # 不用去猜 `tags-ignore` 与 `paths` 混写时谁管谁：那种"能不能触发"的事，
+    # release-apk.yml 的文件头已经写明不该靠猜。
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

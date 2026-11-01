@@ -24,7 +24,55 @@ permissions:
   contents: write
 
 jobs:
+  # 这一版要不要出包，先让发版说明自己回答：docs/releases/<tag>.md 引言区那行
+  # `<!-- scope: server-only -->` 就是"本版没有可安装的包"的机器可读声明。读法与
+  # 换包闸、官网更新页共用同一份实现（tools/release_marker.py 的 scope_from_text），
+  # 不在这里另写一个 grep——同一份说明不该在三条链路上读出两个结论。
+  #
+  # 为什么单开一个 job：服务端专用版本不发包，tag 与 versionName 必然对不上，交给
+  # 下面那道"tag 必须等于 versionName"的闸门只会得到一次注定失败的红灯。红灯在公开
+  # 仓库里是"有东西坏了"的信号，不该被预期内的版本形态占用——v0.37.5 起连续七版都红
+  # 在同一格，等于把这条 lane 的红灯训成了背景噪音。判定独立成 job 后，release 整条
+  # 按 needs/if 跳过，run 的结论是 success，跳过的理由写在 notice 里。
+  #
+  # 为什么不在下面那一步里 `exit 0` 了事：那只是放行**这一步**，后面的 assemble、
+  # 签名、Publish 会照跑——可能真的发布一个版本号与 tag 不符的包，比红更坏。
+  # 拦截必须发生在 job 这一层。
+  scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      server_only: ${{ steps.read.outputs.server_only }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - id: read
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import sys
+
+          sys.path.insert(0, "tools")
+          from release_marker import SCOPE_SERVER_ONLY, scope_from_text
+
+          ref = os.environ["GITHUB_REF_NAME"]
+          note = pathlib.Path("docs/releases") / (ref + ".md")
+          server_only = False
+          if note.is_file():
+              found, value = scope_from_text(note.read_text(encoding="utf-8"))
+              server_only = found and value == SCOPE_SERVER_ONLY
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("server_only=%s\n" % ("true" if server_only else "false"))
+          if server_only:
+              print("::notice::%s 声明 server-only：本版没有可安装的包，release 跳过" % ref)
+          PY
+
   release:
+    needs: scope
+    # 只有"这一版真有包要发"才往下走。判定读的是发版说明里的声明，不是版本号长什么样：
+    # 真发版时下面的 versionName 闸门照旧生效，两件事各管各的。
+    if: needs.scope.outputs.server_only != 'true'
     # 签名产物需要可复现的执行环境：这条 lane 钉 24.04；测试/扫描/原生构建仍用
     # latest，以便尽早发现镜像漂移（#141）。
     runs-on: ubuntu-24.04

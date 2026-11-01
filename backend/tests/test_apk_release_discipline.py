@@ -492,3 +492,65 @@ def test_the_ci_test_step_names_the_lock_that_went_red(tmp_path):
     })
     assert ok.returncode == 0, f"全绿却被判红：{ok.stdout!r} {ok.stderr!r}"
     assert "::error" not in ok.stdout, "没失败却发了错误标注：下一次没人相信它了"
+
+
+# ---------------------------------------------------------------------------
+# server-only 的 tag 不该把这条 lane 染红
+# ---------------------------------------------------------------------------
+
+def test_a_server_only_tag_skips_the_release_lane_instead_of_going_red(tmp_path):
+    """server-only 的 tag 没有可安装的包，tag 与 versionName 必然对不上。
+
+    v0.37.5~v0.38.3 连续七个 tag 全红在同一格（Check tag matches versionName）。
+    红灯在公开仓库里是"有东西坏了"的信号，被预期内的版本形态占满之后，真的坏了
+    也没人看——这正是本仓反复写的"效果没了但不报错"的镜像版本。
+
+    这条锁钉三件事：判定读的是发版说明里的 scope（与换包闸、官网同一份实现），
+    release 整条按 needs/if 跳过（不是放行某一步），以及那四个输入下的真实结论。
+    只断言"文件里有这些字"是不够的：判据错一个分支，CI 就会继续红或者更糟——把
+    一个没有包的版本当成有包的去打。
+    """
+    import shlex
+    import sys
+
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "release-apk.yml")
+                         .read_text(encoding="utf-8"))
+    jobs = doc["jobs"]
+
+    assert jobs["release"].get("needs") == "scope", (
+        "release 没有等 scope 判完：server-only 的 tag 会照旧跑去打包")
+    assert "server_only" in (jobs["release"].get("if") or ""), (
+        "release 的 if 没读 scope 的输出：白加了一个 job")
+
+    # 修红的办法不是把闸门删掉：真发版时 tag 与包内版本必须仍然被比对。
+    assert any(s.get("name") == "Check tag matches versionName"
+               for s in jobs["release"]["steps"]), (
+        "versionName 闸门被删了：tag 与包内版本不一致就没人拦了")
+
+    script = "\n".join(s.get("run", "") for s in jobs["scope"]["steps"])
+    assert "docs/releases" in script, "判定没读发版说明，那它读的是什么"
+    assert "scope_from_text" in script, (
+        "自己另写了一个 grep：同一份说明会在三条链路上读出三个结论")
+
+    # 结构对了还要真跑：判据要在四种输入上都给出对的答案。
+    exe = shlex.quote(sys.executable.replace("\\", "/"))
+    runner = "cd %s\n%s" % (shlex.quote(REPO_ROOT.as_posix()),
+                            script.replace("python3 -", exe + " -"))
+
+    cases = {
+        "v0.38.3": "true",   # 说明里声明了 server-only
+        "v0.36.4": "false",  # 真有包的老版本（说明里没有 scope 行）
+        "v0.39.0": "false",  # 说明还没写：放行，交给"说明缺失"那一步红
+        "develop": "false",  # workflow_dispatch 走分支时行为不变
+    }
+    for ref, want in cases.items():
+        out = tmp_path / ("gh_output_" + ref)
+        out.write_text("", encoding="utf-8")
+        run = _run_bash_e(runner, {"GITHUB_REF_NAME": ref,
+                                   "GITHUB_OUTPUT": out.as_posix()})
+        got = out.read_text(encoding="utf-8").strip()
+        assert run.returncode == 0, f"{ref} 判定跑挂了：{run.stderr!r}"
+        assert got == "server_only=" + want, (
+            f"{ref} 判成了 {got!r}，期望 server_only={want}")
