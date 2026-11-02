@@ -8,6 +8,7 @@
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -22,9 +23,15 @@ from openai import OpenAI
 from app.core import credits, net_guard
 from app.core import thinking_profiles as _thinking_profiles
 from app.core.atomic_write import write_json_atomic
+from app.core.pathmask import hide_paths
 from app.core.paths import data_root, load_project_env
 from app.core.pinned_http import install_pins
 from app.core.tls import system_ssl_context
+
+# 回落留痕用的 logger（12B 修复轮 2 · I-R2-4）。名字写死成 "app.core.providers"，
+# 与本仓 `core/mcp_client.py` 同一口径；除 debug 级的那一条回落线之外本模块不记任何东西
+# ——provider 记录里全是管理员的内部配置，多写一行就多一份泄露面。
+logger = logging.getLogger("app.core.providers")
 
 # 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
 # 否则首次运行时读不到 DEEPSEEK_API_KEY、播种不出任何模型配置。
@@ -490,9 +497,16 @@ def _thinking_fields(record: dict, requested=None) -> dict:
         # （`:40-45` 那份基座没有 `supports_thinking`，supports 落 False 却带 4 档）与
         # 本版的 `test_the_generic_level_cap_is_still_judged_when_thinking_is_off`
         # ⇒ 挪它等于放宽 Task 8 留下的既有断言，明令禁止。
-        # 代价可接受：UI 永远发不出 >3 档（表单最多三个候选），所以"关掉思考 + 4 档"
-        # 这一墙只有直连 API 的写法会撞到，而那次 PUT 的 400 说的是"这个形状存不下"，
-        # 不是"你不支持思考"——归因没坏。
+        # 代价说清楚（12B 修复轮 2，审查 M-R2-1：上一版那句"UI 永远发不出 >3 档"是假话，
+        # 现在按实测写成事实）：这一墙**从界面就是可达的**。设置页的档位框是自由文本
+        # （`app.js:1874` 把清单 `join("，")` 写进输入框），`app.js:1554-1560` 的
+        # `parseThinkingLevels` 只做去空白/去重、**没有条数上限**，`app.js:1914` 原样提交，
+        # 而 `main.py:1460` 的 `thinking_levels: Optional[list[str]]` 没有 `max_length`
+        # ⇒ 管理员在模型卡里打四个标签、再取消勾选"支持思考"，这次 PUT 就带着 4 档走到这里，
+        # "关掉思考 + 4 档"不是什么只有直连 API 才撞得到的形状。
+        # 但拒收的裁决与上面三条理由一个字不动：撞到这一墙的人收到的是"这个形状存不下"
+        # 那句 400，不是"你不支持思考"——归因仍然没坏。剩下那半件（界面在提交前就提示上限、
+        # 关思考时顺带清档位）是 **Task 13** 的活，本单按硬约束不动 `app.js`。
         if "thinking_levels" in brought:
             raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
         levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
@@ -595,6 +609,26 @@ def thinking_request_index(record, label):
     return index
 
 
+# 回落留痕（12B 修复轮 2 · I-R2-4）。"这条记录没被核实到 / 这个序号在它此刻的清单里越界"
+# 过去是一次完全静默的回落：用户点了档位没反应，事后无人能复盘。留痕只许 debug 级，
+# 字段按裁决逐字收紧成 **provider id + thinking_status + 序号 + 这一句固定文案**——
+# 档位清单原文、配方名、base_url 全文、模型名、任何凭据都不许进来（那一份记录里全是
+# 管理员的内部配置，`_thinking_view` 与 `catalog` 的对外字段名单正是同一道边界）；
+# 写之前照本仓老规矩再过一层 `scrub_secrets` → `hide_paths`，认不出来的形状由它们兜。
+# 文案本身不含任何记录内部信息，所以它同时是测试挑出这一行的锚点（改名等于缴械）。
+THINKING_FALLBACK_PHRASE = "思考档位未发送"
+
+
+def _thinking_fallback_note(record, index, status, kind) -> str:
+    """拼那一行留痕：只给四个允许字段，越界用 kind 标记而不是猜一个"最大档"。"""
+    return (f"{THINKING_FALLBACK_PHRASE} reason={kind} provider="
+            f"{str((record or {}).get('id') or '-')} status={status} index={index}")
+
+
+def _log_thinking_fallback(record, index, status, kind) -> None:
+    logger.debug(hide_paths(scrub_secrets(_thinking_fallback_note(record, index, status, kind))))
+
+
 def thinking_kwargs_for(record, index) -> dict:
     """四个出网站点唯一的合并入口：`index` 为 None ⇒ 一个字节都不加。
 
@@ -605,18 +639,36 @@ def thinking_kwargs_for(record, index) -> dict:
     两次解析之间一次管理员 PUT 就能把这条记录换成"同一个在册且 verified 的配方、但这条
     host+model 从没进过它的 `verified_for`"。所以"已核实"这句话必须在发送点再说一遍，
     不能采信调用方带过来的序号是哪条记录换的——那正是 M1 那句假话（把一次逐条观察演成
-    全局结论）的出口。
+    全局结论）的出口。非流式两支（`pipeline.py:205`、`core/llm_client.py:37`）同样是
+    "校验在前、发送在后"的两次解析，这道门对三条发送路都生效。
 
     判据只有一份：走 `_thinking_view`（12A 那把唯一尺子，内部就是带 host+model 的
     `_thinking_status`），`thinking_status != "verified"` 直接返回 `{}`。**不在这里另拼
     一份 status**，也**不接受调用方传进来的"已 verified"标记**——多一个入参就是多一条
     "调用方自己说了算"的通道，与 B1 换算点只此一处同源。
+
+    作用域判完还要**用这条记录此刻的清单重判序号上界**（12B 修复轮 2，审查 I-R2-3，
+    主控裁"要重判"）：序号是在第一次解析时换算的，管理员在那之前之后把 `thinking_levels`
+    从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条不存在（或含义已变）的档位。
+    这与 I-1 是同一类形状，不留到"以后"。越界一律 `{}`——fail-closed：**宁可这一轮不发
+    参数，也不发一个指向错档位的值**；不许回退成"取最后一档"那种猜测，也不许 raise
+    （raise 会把一次配置改动演成 500）。`build_thinking_kwargs` 只看**配方**声明的
+    `level_count`、看不见这条记录的清单，所以这一判只能在发送点做。
+
+    两次回落都不是静默的（I-R2-4）：各留一行 debug，字段只有 provider id、status、
+    序号与一句固定文案，见 `_log_thinking_fallback`。
     组装仍交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise，`none` 它自己
     回 `{}`，所以今天（表里只有 `none`）这四条路永远收到空字典。
     """
     if index is None:
         return {}
-    if _thinking_view(record or {})["thinking_status"] != "verified":
+    view = _thinking_view(record or {})
+    status = str(view["thinking_status"])
+    if status != "verified":
+        _log_thinking_fallback(record, index, status, "scope")
+        return {}
+    if index > len(view["thinking_levels"]):
+        _log_thinking_fallback(record, index, status, "ordinal_out_of_range")
         return {}
     profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
     return _thinking_profiles.build_thinking_kwargs(profile, index)

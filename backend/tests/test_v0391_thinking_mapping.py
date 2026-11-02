@@ -2901,6 +2901,161 @@ def test_a_record_swapped_between_validation_and_send_sends_nothing(client, b3_r
         assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
 
 
+# ---- 修复轮 2 · F2（审查 M-R2-2）：非流式两支的时序格子收进仓库 ----
+#
+# 上面那格演的是流式那一路（生产者线程里的第二次解析）。`/v1/chat` 的两支同样是
+# "校验在前、发送在后"（站点 2 `pipeline.py:205` 的重解析、站点 3 `core/llm_client.py:37`
+# 的重解析），行为由同一道共享的门盖着，但**判据不在仓库里**——审查员是在仓库外的
+# 探针 B 里演的（HEAD 上 2 passed；摘掉重判那枚刀下 2 failed）。这一节把她的形状
+# 原样收进来，形状照 `zz_r2_probe_b.py`，只是 USE_PIPELINE 两支都显式钉住：
+# `main.py:67-73` 那一格取决于 import 是否成功，显式写下才不许它反过来决定这格跑哪一支。
+
+def _b3_swap_after_first_resolve(monkeypatch, b3_records):
+    """登记表塞 synthetic 条目、装好记录，并把 `store.resolve` 套一层：
+    第一次解析（校验点）之后立刻真做一次 upsert 把 base_url 换到别的域。
+    返回 calls 列表，调用方用它证明发送点确实**又**解析了一次（不是假设）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record())
+    real_resolve = providers.store.resolve
+    calls: list = []
+
+    def _resolve(provider_id=None, legacy_model=None, user_id=None):
+        found = dict(real_resolve(provider_id, legacy_model=legacy_model, user_id=user_id))
+        if provider_id == _B3_ID:
+            calls.append(user_id)
+            if len(calls) == 1:
+                providers.store.upsert({**found, "base_url": _B3_OTHER_BASE_URL})
+        return found
+
+    monkeypatch.setattr(providers.store, "resolve", _resolve)
+    assert providers.thinking_request_index(_b3_record(), _B3_LEVELS[1]) == 2
+    return calls
+
+
+def _b3_assert_no_thinking_on_the_wire(wire, leg):
+    """两支共用的判据：先证明真的出过网，再逐条断言零思考键（不带 = 判据不空转）。"""
+    assert wire, f"{leg} 根本没出网 = 下面两条断言是空的"
+    for sent in wire:
+        assert _B3_KEY not in sent, f"{leg} 把另一段作用域的结论发了出去：{sorted(sent)}"
+        assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
+
+
+def test_the_pipeline_leg_rejudges_when_the_record_changes_before_send(client, b3_records,
+                                                                       b3_wire, monkeypatch):
+    """F2 站点 2（`USE_PIPELINE=True`）：校验与发送之间换掉记录 ⇒ 出网零思考键。"""
+    import app.main as main
+
+    monkeypatch.setattr(main, "USE_PIPELINE", True)
+    calls = _b3_swap_after_first_resolve(monkeypatch, b3_records)
+    res = client.post("/v1/chat", json={
+        "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+        "thinking_level": _B3_LEVELS[1]})
+    assert res.status_code == 200, res.text[:200]
+    assert len(calls) >= 2, f"pipeline 支没有第二次解析：{calls}"
+    _b3_assert_no_thinking_on_the_wire(b3_wire, "pipeline 支")
+
+
+def test_the_llm_client_leg_rejudges_when_the_record_changes_before_send(client, b3_records,
+                                                                         b3_wire, monkeypatch):
+    """F2 站点 3（`USE_PIPELINE=False`，走 `get_llm_response`）：同一形状也必须零思考键。"""
+    import app.main as main
+
+    monkeypatch.setattr(main, "USE_PIPELINE", False)
+    calls = _b3_swap_after_first_resolve(monkeypatch, b3_records)
+    res = client.post("/v1/chat", json={
+        "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+        "thinking_level": _B3_LEVELS[1]})
+    assert res.status_code == 200, res.text[:200]
+    assert len(calls) >= 2, f"llm_client 支没有第二次解析：{calls}"
+    _b3_assert_no_thinking_on_the_wire(b3_wire, "llm_client 支")
+
+
+# ---- 修复轮 2 · F3（审查 I-R2-3，主控已裁"要重判"）与 F4（I-R2-4 回落要看得见） ----
+
+def test_the_send_helper_rejudges_the_ordinal_on_this_records_current_levels(monkeypatch):
+    """F3：重判完作用域，还要拿这条记录**此刻**的清单校验序号上界；越界一律 `{}`。
+
+    I-1 的根因是"两次解析"，而序号同样是在第一次解析时换算的：管理员在校验之后、
+    发送之前把 `thinking_levels` 从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条
+    不存在的档位。裁决是 fail-closed——宁可这一轮不发参数，也不发一个指向错档位的值，
+    **不许**回退成"取最后一档"那种猜测。
+
+    两向都跑（防恒真/恒假）：清单缩到 1 档 ⇒ 不带；清单照旧 3 档、序号 2 ⇒ 必须带。
+    前提三行撑起"这一格判的确实是序号这一判"：两次解析都还在 verified 作用域内（差别
+    只在清单长度），且唯一写者手里没有这条记录时照样愿意发第 3 档（配方的 `level_count`
+    仍是 3 ⇒ 越界不是被配方那一闸挡住的）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    record = _b3_record()
+    trimmed = dict(record, thinking_levels=[_B3_LEVELS[0]])       # 发送时清单只剩 1 档
+
+    assert providers._thinking_view(record)["thinking_status"] == "verified"
+    assert providers._thinking_view(trimmed)["thinking_status"] == "verified"
+    assert providers.thinking_request_index(record, _B3_LEVELS[2]) == 3
+    assert thinking_profiles.build_thinking_kwargs(_B3_PROFILE, 3) == {_B3_KEY: 3}
+
+    assert providers.thinking_kwargs_for(trimmed, 3) == {}, \
+        "清单只剩 1 档还把序号 3 发出去 = 发给一个这条记录没有的档位（F3 要求 fail-closed）"
+    assert providers.thinking_kwargs_for(record, 2) == {_B3_KEY: 2}, \
+        "清单没变、序号 2 必须照带，否则这一格是恒真"
+
+
+def _b3_thinking_fallback_lines(caplog):
+    """把回落留痕从 caplog 里挑出来（认那句固定文案，不认 logger 名——名字换了也该红）。"""
+    import logging
+
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.DEBUG and _B3_FALLBACK_PHRASE in r.getMessage()]
+
+
+_B3_FALLBACK_PHRASE = "思考档位未发送"
+_B3_KEY_SHAPE = re.compile(r"\b(?:sk|pk|key|api|secret|token|auth)[-_][A-Za-z0-9_.\-]{5,}", re.I)
+
+
+def test_the_scope_fallback_leaves_one_debug_line_and_names_nothing_inside_the_record(
+        caplog, monkeypatch):
+    """F4（I-R2-4）：回落不再是静默的——一行 debug 留痕，字段只有 id/status/序号/固定文案。
+
+    "这条记录没被核实到"今天是一次无声的回落：用户点了档位没反应，事后无法复盘。
+    留痕的射程按裁决逐字收紧：**只许** provider id、`thinking_status`、`thinking_index`
+    （或越界标记）和一句不含记录内部信息的固定文案；档位清单原文、配方名、base_url 全文、
+    任何凭据形状都不许进去（写之前过 `scrub_secrets` + `hide_paths` 那一层）。
+    负控两条：把 base_url 塞进日志 ⇒ 本行红；摘掉那条 `logger.debug` ⇒ 第一行就红。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    hit = _b3_record()
+    miss = _b3_record(base_url=_B3_OTHER_BASE_URL)     # host 不在任何 verified_for 里
+    trimmed = dict(hit, thinking_levels=[_B3_LEVELS[0]])
+    assert providers._thinking_view(miss)["thinking_status"] == "unverified"
+    assert providers._thinking_view(trimmed)["thinking_status"] == "verified"
+
+    with caplog.at_level(10):
+        assert providers.thinking_kwargs_for(miss, 2) == {}
+        lines = _b3_thinking_fallback_lines(caplog)
+        assert len(lines) == 1, f"作用域回落该留且只留一行 debug：{[r.levelname for r in caplog.records]}"
+
+        line = lines[0]
+        assert _B3_ID in line, f"留痕认不出是哪条记录：{line}"
+        assert "unverified" in line, f"留痕没写 status：{line}"
+        assert "2" in line, f"留痕没写序号：{line}"
+        # base_url 的**全文与主机名**都不许在（负控就塞在这里转红）；档位清单、配方名、
+        # 密钥值与密钥形状同样不许在。
+        for leak in (_B3_OTHER_BASE_URL, "other.invalid", _B3_BASE_URL, _B3_HOST,
+                     _B3_MODEL, _B3_PROFILE, _b3_record()["api_key"], "sk-"):
+            assert leak not in line, f"回落留痕把记录内部说出去了：{leak}"
+        for label in _B3_LEVELS:
+            assert label not in line, f"回落留痕进了档位清单原文：{label}"
+        assert not _B3_KEY_SHAPE.search(line), f"回落留痕里有凭据形状：{line}"
+
+    with caplog.at_level(10):
+        caplog.clear()
+        assert providers.thinking_kwargs_for(trimmed, 3) == {}
+        trimmed_lines = _b3_thinking_fallback_lines(caplog)
+        assert len(trimmed_lines) == 1, f"序号越界那一支同样要留痕：{trimmed_lines}"
+        assert not any(label in trimmed_lines[0] for label in _B3_LEVELS[1:]), trimmed_lines[0]
+
+
 def test_the_llm_client_and_react_sites_only_speak_through_the_index(client, b3_records,
                                                                      b3_wire, monkeypatch):
     """站点 3 与站点 4：`get_llm_response` 与 `ReActAgent.run` 各演"带"与"不带"。
