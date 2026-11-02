@@ -204,7 +204,8 @@ strong { font-weight: 650; }
   font-size: clamp(1.15rem, 2.4vw, 1.7rem); font-weight: 450;
   line-height: 1.5; letter-spacing: .04em;
 }
-/* 38em 是试出来的：第一行（到"联网查。"为止）36 个字，留两字余量刚好不折。
+/* 38em 是按最长的那一行定的一栏：第一句 26 个字，最宽一档也才 480px，
+   离 38em（约 700px）还有余量，br 才轮得到它决定在哪断。
    再窄，那行会自己断，br 就白写了。 */
 .lede { max-width: 38em; margin: 0 auto; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.8; }
 /* 中文没有词边界，浏览器按字符断行会把"会 / 话"拆开。宽屏用这个 br 强制在句号后
@@ -480,7 +481,13 @@ footer > .note { margin-top: 12px; }
 .archive-hero { max-width: var(--maxw); margin: 0 auto; padding: clamp(54px, 8vw, 96px) var(--gutter) clamp(36px, 5vw, 58px); }
 .archive-hero .hero-kicker { margin-bottom: 24px; }
 .archive-hero h1 { font-size: clamp(3rem, 8vw, 6.8rem); line-height: 1; letter-spacing: -.07em; }
-.archive-hero .lede { max-width: 38em; }
+/* 标题行高是 1，中文字形的墨迹几乎顶满整个 em 框，盒子底边离字底只剩 6px。
+   下面那行说明的 margin-top 原来是 0，两行之间只隔十来个像素——109px 的大字
+   配 10px 的间距，看着像撞在一起。给它留出半个字高。
+   margin 左右也从 auto 改成 0：这一页的标题是靠左的，说明文字和按钮却被
+   .lede/.cta 自带的居中推到中间，三块不在一条竖线上。 */
+.archive-hero .lede { max-width: 38em; margin: 22px 0 0; }
+.archive-hero .cta { justify-content: flex-start; }
 .archive-main { max-width: var(--maxw); margin: 0 auto; padding: 34px var(--gutter) clamp(70px, 9vw, 110px); display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 8fr); gap: clamp(28px, 5vw, 68px); border-top: 1px solid var(--line); }
 .archive-rail { position: sticky; top: 100px; align-self: start; padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; }
 .archive-rail .note { margin-top: 10px; }

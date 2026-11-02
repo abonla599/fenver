@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>Fenver：跑在你自己服务器上的 AI 智能助手</title>
-<meta name="description" content="Fenver 是个开源的 AI 助手，可以自己部署。能切换模型、读你发来的文件、记住你说过的偏好，需要时联网查。数据存在你自己那台服务器上。">
+<meta name="description" content="Fenver 是个开源的 AI 助手，可以装在自己的机器上。模型随便换，文件能读，要查东西时联网搜，聊天记录都留在那台机器里。">
 <meta name="theme-color" content="#2b3d34">
 <link rel="stylesheet" href="/site/site.css">
 </head>
@@ -19,11 +19,11 @@
     <svg class="brand-symbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.6 4.98H16.4a3.6 3.6 0 0 1 3.6 3.6V12.56a3.6 3.6 0 0 1-3.6 3.6h-1.56L4.76 19.3l3.99-3.14H7.6a3.6 3.6 0 0 1-3.6-3.6V8.58a3.6 3.6 0 0 1 3.6-3.6Z"/><circle class="brand-mint" cx="7.3" cy="10.57" r=".87"/><circle class="brand-mint" cx="10.79" cy="10.57" r="1.21"/><path class="brand-trace" d="M12.23 10.57h2.21"/><path class="brand-mint" d="M16.35 8.14l.53 1.9 1.9.53-1.9.53-.53 1.9-.53-1.9-1.9-.53 1.9-.53Z"/></svg>
     <span class="brand">Fenver</span>
   </a>
-  <p class="issue">PERSONAL AI / SELF-HOSTED</p>
+  <p class="issue">SELF-HOSTED</p>
   <button class="menubtn" id="menuBtn" type="button" aria-expanded="false" aria-controls="navlinks">菜单</button>
   <ul class="navlinks" id="navlinks">
     <li><a href="#can-do">能力</a></li>
-    <li><a href="#shell-only">移动端</a></li>
+    <li><a href="#shell-only">安卓版</a></li>
     <li><a href="#shots">真实界面</a></li>
     <li><a href="#open-source">开源</a></li>
     <li><a href="#faq">常见问题</a></li>
@@ -35,7 +35,7 @@
       <p class="hero-kicker"><span class="status-dot"></span>开源，可以自己部署</p>
       <h1 class="hero-title">Fenver</h1>
       <p class="hero-sub">数据留在你自己的服务器上。</p>
-      <p class="lede">可以切换模型，能读你发来的文件，需要的时候联网查。<br class="br-wide">聊天记录和附件都存在这台服务器上，换个模型接着聊。</p>
+      <p class="lede">模型随时能换。文件发过去它自己读，要查什么它会上网搜。<br class="br-wide">聊天记录和附件都在这台服务器上，换个模型接着聊。</p>
       <p class="cta">
         <a class="btn primary" href="https://ai.fenever.xyz/app/">打开网页版 <span aria-hidden="true">↗</span></a>
         <a class="btn" href="/site/android.apk" download>安卓版 <span aria-hidden="true">↓</span></a>
@@ -78,7 +78,7 @@
         </div>
         <div class="composer"><span>发消息或按住说话</span><b aria-hidden="true">↑</b></div>
       </div>
-      <div class="floating-card memory-float"><span>MEMORY</span><strong>你的偏好，它记得</strong></div>
+      <div class="floating-card memory-float"><span>MEMORY</span><strong>它记着你的偏好</strong></div>
       <div class="floating-card model-float"><span>MODEL</span><strong>随时换个模型</strong></div>
       <p class="stage-note">PRODUCT PREVIEW</p>
   </div>
@@ -89,7 +89,7 @@
     <header class="section-head">
       <p class="section-no">01 / CAPABILITIES</p>
       <h2>它能做什么</h2>
-      <p>六项都在线上跑着，注册完就能用。</p>
+      <p>现在能用的都在这儿，注册完直接试。</p>
       <span class="sig-strip" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
     </header>
     <ul class="feature-grid">
@@ -97,7 +97,7 @@
         <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg></span>
         <span class="feature-no">01</span>
         <h3>多模型切换</h3>
-        <p>在设置里换模型，每个模型的额度也在这里看。默认用哪个由管理员配好。</p>
+        <p>模型在设置里换，每个还剩多少额度也在那儿看。默认用哪个，由管理员配好。</p>
         <div class="model-pills" aria-hidden="true"><span>快速</span><span>深度</span><span>视觉</span></div>
       </li>
       <li class="feature">
@@ -116,7 +116,7 @@
         <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a7 7 0 0 0-7 7c0 2 1 3.5 2.5 4.7L7 20h10l-.5-4.3A7 7 0 0 0 12 4Z"/><path d="M9 11h6M10 14h4"/></svg></span>
         <span class="feature-no">04</span>
         <h3>长期记忆</h3>
-        <p>你说过的偏好会存下来，下次聊到相关的事自动带上。存了什么在设置里能看能删。</p>
+        <p>你说过的偏好会存下来，下次聊到相关的事自动带上。存了哪些，在设置里能看也能删。</p>
       </li>
       <li class="feature">
         <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5M8 10.5h5M10.5 8v5"/></svg></span>
@@ -137,14 +137,14 @@
     <header class="section-head">
       <p class="section-no">02 / ON ANDROID</p>
       <h2>安卓版</h2>
-      <p>除了网页能做的，安卓版还加了提醒、系统分享和桌面小组件。它会申请「精准闹钟」权限；不给也能用，只是提醒时间可能差几分钟。</p>
+      <p>安卓版比网页多三样：到点提醒、系统分享、桌面小组件。装的时候会问要不要给「精准闹钟」权限，不给也能用，只是提醒可能晚几分钟。</p>
       <a class="btn primary" href="/site/android.apk" download>下载安卓版 <span aria-hidden="true">↓</span></a>
       <span class="sig-strip" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
     </header>
     <ul class="mobile-list">
-      <li><span class="mobile-no">01</span><div><h3>到点提醒</h3><p>在设置页创建提醒，到时推送系统通知；提醒本地存储，不上传云端。</p></div></li>
-      <li><span class="mobile-no">02</span><div><h3>直接分享</h3><p>相册、PDF 直接点分享发送至助手，文件自动作为附件；能否识别内容取决于当前模型的视觉能力。</p></div></li>
-      <li><span class="mobile-no">03</span><div><h3>桌面小组件</h3><p>展示当日提醒，可一键发起识图提问、新建对话；需要视觉模型支持。</p></div></li>
+      <li><span class="mobile-no">01</span><div><h3>到点提醒</h3><p>在设置里定个时间，到点手机弹通知。提醒只存在手机里，不传到服务器。</p></div></li>
+      <li><span class="mobile-no">02</span><div><h3>直接分享</h3><p>在相册或文件里点分享，选 Fenver，文件就作为附件发过去。看不看得懂内容，取决于当前模型有没有视觉能力。</p></div></li>
+      <li><span class="mobile-no">03</span><div><h3>桌面小组件</h3><p>放桌面上看今天的提醒，点一下就能新建对话，或者发张图问它。识图要模型支持视觉。</p></div></li>
     </ul>
   </section>
 
@@ -158,7 +158,7 @@
       <figure class="shot">
         <p class="shot-tag">对话</p>
         <div class="shot-frame"><img src="/site/img/chat.jpg" alt="对话页实拍：当前版本的 Fenver 回答账号隔离与记忆入口" width="780" height="1688" fetchpriority="high"></div>
-        <figcaption><strong>聊完还记得</strong><span>对话、记忆和当前模型在同一页。</span></figcaption>
+        <figcaption><strong>聊完还记得</strong><span>对话、记忆、当前模型都在同一屏。</span></figcaption>
       </figure>
       <figure class="shot">
         <p class="shot-tag">注册</p>
@@ -173,7 +173,7 @@
       <figure class="shot">
         <p class="shot-tag">设置</p>
         <div class="shot-frame"><img src="/site/img/settings.jpg" alt="设置页实拍：账户、模型、搜索与对话入口" width="780" height="1688" loading="lazy"></div>
-        <figcaption><strong>设置都在一处</strong><span>模型、搜索、账号集中在这。</span></figcaption>
+        <figcaption><strong>设置都在一处</strong><span>模型、搜索、账号都在这儿。</span></figcaption>
       </figure>
     </div>
   </section>
@@ -187,23 +187,23 @@
     </header>
     <ol class="steps" role="list">
       <li><span class="step-no">01</span><strong>打开 Fenver</strong><p>访问 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a>，安卓版可直接跳转。</p></li>
-      <li><span class="step-no">02</span><strong>注册账号</strong><p>填写用户名、密码，设置密保问题用于找回密码。</p></li>
-      <li><span class="step-no">03</span><strong>开始用</strong><p>更换设备登录同一账号，聊天记录与记忆可同步。</p></li>
+      <li><span class="step-no">02</span><strong>注册账号</strong><p>起个用户名，设个密码，再填几个只有你知道答案的问题——忘了密码靠它找回。</p></li>
+      <li><span class="step-no">03</span><strong>开始用</strong><p>换台设备登同一个账号，聊天记录和记忆都还在。</p></li>
     </ol>
-    <p class="note">如果提示没有可用模型，是管理员还没配模型，跟你的账号没关系。</p>
+    <p class="note">要是提示没有可用模型，那是管理员还没配，跟你账号没关系。</p>
   </section>
 
   <section id="not-now">
     <header class="section-head">
-      <p class="section-no">05 / CLEAR BOUNDARIES</p>
+      <p class="section-no">05 / LIMITS</p>
       <h2>现在做不到的</h2>
-      <p>三件事目前都用不了，原因写在每一张下面。</p>
+      <p>三件事现在都用不了，原因写在每一张下面。</p>
       <span class="sig-strip" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
     </header>
     <ul class="boundary-list">
-      <li><span aria-hidden="true">×</span><div><h3>代码执行（沙箱）</h3><p>代码里有，但需要宿主机上的 Docker，当前没开。</p></div></li>
-      <li><span aria-hidden="true">×</span><div><h3>扫描版 PDF</h3><p>图片式的 PDF 要先经过 OCR，今天还不行。有文字层的 PDF 可以直接读。</p></div></li>
-      <li><span aria-hidden="true">×</span><div><h3>离线使用</h3><p>没有。界面和数据都在线上，断网就只能等着。</p></div></li>
+      <li><span aria-hidden="true">×</span><div><h3>代码执行（沙箱）</h3><p>功能写好了，但要在服务器上装 Docker 才跑得起来，现在没装。</p></div></li>
+      <li><span aria-hidden="true">×</span><div><h3>扫描版 PDF</h3><p>整页是扫描图的 PDF 读不了，得先过 OCR，这一步还没接。有文字层的 PDF 直接读。</p></div></li>
+      <li><span aria-hidden="true">×</span><div><h3>离线使用</h3><p>不行。界面和数据都在服务器上，断网就打不开。</p></div></li>
     </ul>
   </section>
 
@@ -211,7 +211,7 @@
     <header class="section-head">
       <p class="section-no">06 / OPEN SOURCE</p>
       <h2>源码</h2>
-      <p>后端、网页版、安卓外壳都公开，Apache-2.0 协议。你可以继续用在线这份，也可以自己部署一套。</p>
+      <p>后端、网页版、安卓外壳都在仓库里，Apache-2.0。在线这份你可以接着用，也可以在自己机器上装一套。</p>
       <span class="sig-strip" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
     </header>
     <div class="source-grid">
@@ -227,7 +227,7 @@ cd fenver
       <div class="source-copy">
         <span class="source-badge">Apache-2.0</span>
         <h3>自己部署</h3>
-        <p>仓库 <span class="plain-url">github.com/abonla599/fenver</span> 里的 docs/INSTALL.md 把 venv 与 Docker 两条路都写全了。开源版默认关闭自助注册：装的人就是管理员，账号由他建。</p>
+        <p>仓库 <span class="plain-url">github.com/abonla599/fenver</span> 里的 docs/INSTALL.md 写了 venv 和 Docker 两条路。开源版默认关闭自助注册：装的人就是管理员，账号由他自己建。</p>
         <h3>直接用在线版</h3>
         <p>不用动任何代码。更新通道已经指向新仓库，老用户照常收更新，不需要重装。</p>
         <p class="source-actions"><a class="btn primary" href="/changelog">查看更新日志 <span aria-hidden="true">↗</span></a><a class="btn" href="/site/android.apk" download>下载安卓版</a></p>
@@ -239,16 +239,16 @@ cd fenver
     <header class="section-head">
       <p class="section-no">07 / FAQ</p>
       <h2>常见问题</h2>
-      <p>下面六个是问得最多的。</p>
+      <p>常被问到的六个问题。</p>
       <span class="sig-strip" aria-hidden="true"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b></span>
     </header>
     <div class="faq-list">
-      <details><summary><span>01</span>要自己配 API 密钥吗？</summary><p>不用。模型由这台助手的管理员配，普通人什么都不用填。</p></details>
-      <details><summary><span>02</span>换手机 / 重装 App，记录会丢吗？</summary><p>不会丢。聊天记录、附件、长期记忆都在服务器上你这个账号里，用同一个用户名再登录一次就回来。提醒存在旧手机本机，不跟着账号走。</p></details>
-      <details><summary><span>03</span>谁能看到我的数据？</summary><p>只有你。会话、附件、记忆按账号隔离，别的注册用户看不到你的。</p></details>
-      <details><summary><span>04</span>怎么删干净？</summary><p>设置里删会话与记忆条目。要注销整个账号，联系这台助手的管理员做删除；记忆库里哪些会一起被抹掉，删之前当面问清。</p></details>
-      <details><summary><span>05</span>有 iOS 吗？</summary><p>没有壳，但 Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用，加到主屏幕后接近全屏体验，只是没有提醒、分享入口和桌面组件。</p></details>
-      <details><summary><span>06</span>打不开怎么办？</summary><p>这台助手跑在一台个人电脑上。机器关机、断网，或者重启后没人登录，它就会暂时够不着。那不是你的账号出了问题，等一会儿再试。</p></details>
+      <details><summary><span>01</span>要自己配 API 密钥吗？</summary><p>不用。模型由管理员配好，你什么都不用填。</p></details>
+      <details><summary><span>02</span>换手机 / 重装 App，记录会丢吗？</summary><p>不会。聊天记录、附件、记忆都挂在你这个账号下，换台设备用同一个用户名登录就都在。提醒存在旧手机本地，不跟账号走。</p></details>
+      <details><summary><span>03</span>谁能看到我的数据？</summary><p>只有你。会话、附件、记忆都按账号分开存，别的注册用户碰不到你的。</p></details>
+      <details><summary><span>04</span>怎么删干净？</summary><p>会话和记忆条目在设置里逐条删。要连账号一起注销，得找管理员；记忆库里哪些会跟着删，删之前先问清楚。</p></details>
+      <details><summary><span>05</span>有 iOS 吗？</summary><p>没做。Safari 打开 <a href="https://ai.fenever.xyz/app/">ai.fenever.xyz/app/</a> 一样能用，加到主屏幕后基本满屏，只是没有提醒、分享入口和桌面组件。</p></details>
+      <details><summary><span>06</span>打不开怎么办？</summary><p>这台助手跑在我的一台电脑上。关机、断网，或者重启后没人登录，它就连不上。不是你的账号出了问题，过一会儿再试。</p></details>
     </div>
   </section>
 </main>
