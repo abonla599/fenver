@@ -1310,7 +1310,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 val clientKAtSend = clientCtx().let { it.personaTokens + it.historyTokens }
                 val atts = messages.lastOrNull { it.role == "user" }?.attachments
                     ?.map { it.id } ?: emptyList()
-                val payload = Api.chatPayload(pid, pid, outboundMsgs(pid.orEmpty()), atts, sessionId)
+                // 档位这一格走发送路径上那同一个闸（pid 与它读的是同一条 currentProvider()
+                // 记录，两次读数中间没有挂起点，不会分叉）。空串在这里转成 null——
+                // Api.chatPayload 的 obj() 跳过 null 键，于是"不发"是整格省略而不是发个空值。
+                val payload = Api.chatPayload(pid, pid, outboundMsgs(pid.orEmpty()), atts, sessionId,
+                    thinkingLevelForSend(currentProvider()).takeIf { it.isNotEmpty() })
                 // v0.39 性能 A 包：content 帧不再逐条写 streamText——只进 acc；屏上由
                 // 这条 40ms 的 ticker 发布最新快照（无变化不写，省一次整页重组）。
                 // mine() 为假立刻停笔：A 的孤儿流不许把字画到 B 的卡上——守卫比"照发"
@@ -3246,6 +3250,61 @@ private fun thinkingStateReason(status: String): String = when (status) {
     else -> ""
 }
 
+/* 发不发档位这一格，只由这一条路决定（网页 app.js thinkingLevelForSend 的原生对位）。
+ * 三道闸的顺序是刻意的：
+ *   1. 状态不是 verified ⇒ 不产出。prefs 是历史值、能力是服务端给的，两者可能不一致，
+ *      不一致时以服务端为准（即便本机记着"开"，今天也一条都发不出去）；
+ *   2. 本机开关没开 ⇒ 不产出（禁用态在请求构造路径上不可能产出这一格）；
+ *   3. 要发的标签必须在这条记录**当前**那份清单里（界面不缓存"有几个档"，服务端发送点
+ *      会重判序号上界，猜一份副本只会发出一个换不出参数的标签）。
+ * 返回 ""＝整格省略：调用方把它转成 null 交给 Api.chatPayload，**不许**转成 ""，
+ * 服务端把"没带这一格"和"带了一格但值是空的"当两件事。
+ * 写成块体：本仓那把剥注释尺子按"锚点到第一个 `{`"抓函数体，表达式体会抓歪。 */
+private fun thinkingLevelForSend(item: ModelInfo?): String {
+    if (item == null || item.thinking_status != "verified") return ""
+    val levels = item.thinking_levels
+    if (levels.isEmpty()) return ""
+    if (!Prefs.thinkingEnabled(item.id)) return ""
+    val pick = Prefs.thinkingLevel(item.id, levels, item.thinking_default)
+    return if (levels.contains(pick)) pick else ""
+}
+
+/* §5.2：回落要能复盘。"点了档位没生效"在服务端只是一条 debug 留痕，客户端看不见，
+ * 所以这句必须由这张卡自己说：只有 prefs 记着"开"而状态不许发时才有这一句，
+ * 否则常驻一句警告等于没有警告。措辞与网页 thinkingInactiveNote 同句，受 §0 禁句清单
+ * 约束——只说"参数不生效"，不许写成「思考已关闭」那种今天没有对照支持的话。 */
+private fun thinkingInactiveNote(item: ModelInfo?): String {
+    if (item == null) return ""
+    if (!Prefs.thinkingEnabled(item.id)) return ""
+    if (item.thinking_status == "verified") return ""
+    val level = Prefs.thinkingLevel(item.id, item.thinking_levels, item.thinking_default)
+    return "这台设备记着你要开思考（档位「${level.ifEmpty { "默认档" }}」），但" +
+        (if (item.thinking_status == "unverified") "这条记录未核实" else "这条记录不支持思考") +
+        "，参数不生效：这一轮请求里不会带上档位，发出去的回答与开关无关。"
+}
+
+/* §5.3：prefs 里的标签在这条记录当前的清单里找不到 ⇒ 回到默认档，并把这件事说出来。
+ * 13A 复审 Finding 2 的原生不复现版：那句"这一轮按默认档发"只许在闸真的产出标签时说
+ * （willSend 直接取自 thinkingLevelForSend，不自己判一份真相），发不出去就老实说不发这一格。
+ * 与网页的差集登记：网页用 state.thinkingStaleLevel 记"这句已经印过"，原生这张卡是点开
+ * 才有的弹层，说明随条件常驻在卡上，所以这边没有那份一次性状态。 */
+private fun thinkingStaleLevelNote(item: ModelInfo?): String {
+    if (item == null) return ""
+    val levels = item.thinking_levels
+    val saved = Prefs.thinkingLevelSaved(item.id)
+    if (saved.isEmpty() || levels.contains(saved)) return ""
+    val level = Prefs.thinkingLevel(item.id, levels, item.thinking_default)
+    val willSend = thinkingLevelForSend(item)
+    val head = "偏好里存的档位「$saved」在这条记录当前的清单里已经没有了，"
+    if (willSend.isEmpty()) {
+        var why = "这条记录当前的清单里没有可发的档位"
+        if (!Prefs.thinkingEnabled(item.id)) why = "本机开关没开"
+        else if (item.thinking_status != "verified") why = "这条记录未核实"
+        return head + "界面回到默认档「${level.ifEmpty { "无" }}」，但这一轮不发档位这一格（$why）。"
+    }
+    return head + "这一轮按默认档「$willSend」发（且只在服务端说这条记录已核实时才发）。"
+}
+
 /* 档位标签：只清洗（去空/去重）**不截断**——界面悄悄砍掉第 4 档等于把"没配上"演成
  * "配上了"，长度上限由服务端拒收并把那句理由写在卡上。分隔符与后端 _clean_levels 同尺：
  * 后端拿到的已经是列表、对每项只 strip，从不按空格劈开一项，所以这里也不能把 \s 当分隔符
@@ -3545,14 +3604,24 @@ private fun ModelCard(item: ModelInfo, card: ModelCardUi, onToggleManage: (Boole
                     Prefs.setThinkingLevel(item.id, lv)
                 }
             }
+            // 「本轮会带上什么」问的是发送路径上那同一个判据，不是卡片自己再算一遍
+            // （网页 app.js 同一纪律）：卡上说会带上、请求里没有那一格，就是界面说谎。
+            val willSendLevel = thinkingLevelForSend(item)
             Text(if (ctlEnabled)
-                    "本轮会带上「${if (thinkingOn) levelPick.ifEmpty { "默认档" } else "不带上思考参数"}」：" +
-                        // 修复轮 Minor 8：这一段与网页 app.js 逐字对齐（上一版这里是顿号，
-                        // 网页是逗号；按网页为准改原生）。同锁跨端抠串比对。
-                        "开关与档位是这台设备自己的偏好，服务端不存，换设备不同步；" +
-                        "这一档今天还没接进请求体（Task 12/13），界面不声称已经生效。"
+                    "本轮会带上「${willSendLevel.ifEmpty { "不带上思考参数" }}」：" +
+                        // 这一段与网页 app.js 逐字对齐（跨端抠串比对见本仓 :384 那枚锁）。
+                        // 13B 之后这一格确实进了请求体，旧那句"还没接进请求体"已是假话，撤掉。
+                        "开关与档位是这台设备自己的偏好，服务端不存，换设备不同步。"
                 else thinkingStateReason(item.thinking_status),
                 fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
+
+            // §5.2 回落要能复盘 + §5.3 旧标签被清单甩掉要说得清归位：两句都由同一个闸回答。
+            val inactiveNote = thinkingInactiveNote(item)
+            if (inactiveNote.isNotEmpty())
+                Text(inactiveNote, fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
+            val staleNote = thinkingStaleLevelNote(item)
+            if (staleNote.isNotEmpty())
+                Text(staleNote, fontSize = 11.5.sp, color = text3Color(), maxLines = 4)
 
             Text("模型上限 $capK K · 发送按本会话预算截断（预算是本机设置，上限由服务端存）",
                 fontSize = 11.5.sp, color = text3Color(), maxLines = 3)

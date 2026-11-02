@@ -556,7 +556,8 @@ object Api {
     /* payload 形状与网页一致：{model, provider, messages, attachments, session_id}。
        providerId 传 null 时整个键省略（服务端用它自己的默认）。 */
     fun chatPayload(providerId: String?, model: String?, messages: List<ChatMessageDto>,
-                    attachments: List<String>, sessionId: String?): String {
+                    attachments: List<String>, sessionId: String?,
+                    thinkingLevel: String? = null): String {
         val msgs = JsonArray(messages.map { m ->
             buildJsonObject {
                 put("role", JsonPrimitive(m.role))
@@ -569,6 +570,10 @@ object Api {
             "messages" to msgs,
             "attachments" to arr(attachments),
             "session_id" to s(sessionId),
+            // 整格省略而不是发空值：obj() 跳过 null 键，服务端把"没带这一格"与"带了一格
+            // 但值是空的"当两件事。调用方负责把"没什么要发的"传成 null（见 ChatUi 那唯一
+            // 的发送点），这一格不许在这里有缺省值。
+            "thinking_level" to thinkingLevel?.let { s(it) },
         ))
     }
 

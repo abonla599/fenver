@@ -19,6 +19,7 @@
 # Task 10（模型卡 / 模型管理 / 设置页迁移）另起一段：设置页那只 CtxRow 已撤，
 # 原 `test_settings_ctxrow_writes_per_provider_budget` 按网页 Task 9 的同方向重钉成
 # `test_settings_page_gives_up_the_budget_slider_to_the_model_card`（撤入口不撤真相）。
+import re
 from pathlib import Path
 
 from tests.test_apk_release_discipline import _code
@@ -848,4 +849,162 @@ def test_m2_clamp_comment_states_the_native_reason_not_the_web_one():
     assert "不夹模型上限" in doc and "1..10000" in doc, "没交代原生 contextBudgetK 夹的是什么"
     assert raw.count("恒不成立") == 1, \
         "「恒不成立」这句网页理由又被抄开了：原生读数不夹模型上限，这条不成立"
+
+
+# ================ Task 13B（原生）：档位只在已核实时发送 ================
+# 网页那半在 b029759e + d44c3399 已落地，下面四枚照它的形状对位，不另起口径：
+# 三道闸的**顺序**（状态 → 本机开关 → 这条记录当前的清单）、"整格省略而不是发
+# null/空串"那一格的序列化形状、§0 禁句清单、以及"卡上那句'本轮会带上什么'必须由
+# 发送路径上同一个判据回答"（网页 app.js:1869 同一条纪律）。
+#
+# 射程（改这段之前先读）：本文件这些 Kotlin 锁**全是静态源码形状**判据（`_c` 剥注释
+# + `_block`/`_between`），仓库里没有 Kotlin 测试运行器，所以它们认的是**文本形状**、
+# 不是运行时行为；"真的能编译"由 :app:compileDebugKotlin 那一步证明，不由这几枚证明。
+# 每条新锁都配一次"故意写坏会红"的实测（变异只在仓库外克隆里做，见 task-13b-report.md）。
+
+# 禁句清单的唯一出处是 `task-12-amendment.md` §2 那一条。那份文档被
+# `.superpowers/sdd/.gitignore:1` 整目录排除、CI 上读不到，所以把裁决原文抄进锁里、
+# 由它现抠「」内容当清单来源，再用**句数 + 集合**两道比对钉住扫描实际吃的那份——
+# 少一味、多一味、抄错一味，当场红（13A 复审 Finding 1：手抄 tuple 会悄悄变短）。
+_AMENDMENT_S2_BANNED_LINE = (
+    "界面/发版说明/文档里不许出现「可关闭思考」「思考已关闭」「支持关闭」「三档强度」"
+    "这类今天没有对照支持的句子"
+)
+# §2 那一条点名的句数（裁决原文就是四味；这个数字是清单的体检尺）。
+_AMENDMENT_S2_BANNED_COUNT = 4
+# 裁决 §2 现抠出来的那份（清单来源）
+_AMENDMENT_S2_BANNED = tuple(re.findall(r"「([^「」]+)」", _AMENDMENT_S2_BANNED_LINE))
+# 原生扫描实际吃的那份（被改窄会撞上下面两道断言）
+NATIVE_BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭", "三档强度")
+
+
+def test_native_send_gate_emits_a_level_only_for_a_verified_record():
+    """§2.1/§2.2：三道闸按顺序钉死，两半都写（否则在"今天一条都不发"的基线上恒绿）。
+
+    网页 `thinkingLevelForSend` 的原生对位。两半的含义：unverified 那半钉"状态不是
+    verified 就 return 空"，verified 那半钉"状态对且开关开且标签在当前清单里就产出标签"
+    ——只写前一半的话，今天所有记录都是 unverified，锁永远绿，而"以后 verified 了发不发"
+    没人管（brief §4.1 点名的恒绿形状）。
+    第二道闸的理由：prefs 是历史值、能力是服务端给的，两者可能不一致，不一致时以服务端为准
+    ——所以状态闸必须排在 Prefs 读数**之前**（顺序也钉住，见下面 index 比较）。
+    变异：① 删掉/放宽 verified 那道闸 → 第一、二条红；② 把 `Prefs.thinkingEnabled` 那道
+    闸删了 → 第三条红（开关关着也发＝界面在替用户做他没说过的决定）；③ 去掉
+    `levels.contains(pick)` 复检 → 第四条红（§5.3：清单改了照发旧标签）；
+    ④ 把 Prefs 读数挪到状态闸前面 → 第五条红（本机值盖过服务端能力）。
+    射程：判的是函数体文本形状，不判 SharedPreferences 真读到什么——那是 Android 运行时，
+    本机没有宿主，真跑列进手测清单。
+    """
+    chat = _c("ui/ChatUi.kt")
+    g = _block(chat, "private fun thinkingLevelForSend(")
+    assert 'if (item == null || item.thinking_status != "verified") return ""' in g, \
+        "状态闸不在了（或换了判据）：unverified 也能产出标签，界面就开始说谎"
+    assert "Prefs.thinkingEnabled(" in g, "本机开关那道闸没了：关着也发"
+    assert "Prefs.thinkingLevel(" in g, "档位没走 Prefs 那唯一的归一口"
+    assert "levels.contains(pick)" in g and 'return if (levels.contains(pick)) pick else ""' in g, \
+        "没在这条记录**当前**那份清单里复检标签：会发出一个换不出参数的旧标签"
+    assert g.index('!= "verified"') < g.index("Prefs.thinkingEnabled("), \
+        "Prefs 读数排在状态闸之前：本机历史值盖过服务端能力（§2.2 第二道闸失效）"
+    # 清单不留副本：闸函数只读 item.thinking_levels，不许自己缓存条数
+    for cache in ("thinkingLevelCount", "levelCount", "cachedLevels", "levelsCache"):
+        assert cache not in chat, f"原生缓存了「这条记录有几个档」的副本：{cache}"
+
+
+def test_native_body_omits_the_key_rather_than_sending_null_or_empty():
+    """§2.1 + 13A 复审：不发就**整格省略**——不是 null、不是 ""、不是 0。
+
+    形状靠 `obj()` 那把既有尺子：值为 null 的键根本不进序列化结果（`email` 那格是同一族
+    先例），所以发送点必须把空串转成 null（`takeIf { it.isNotEmpty() }`），而 chatPayload
+    的形参必须是**可空**且缺省为 null——写成 `String = ""` 就等于把"没带这一格"演成
+    "带了一格但值是空的"，服务端把这两件事当两件事。
+    变异：① `thinkingLevel: String? = null` 改成 `String = ""` → 第二条红；
+    ② `"thinking_level" to thinkingLevel?.let { s(it) }` 改成 `to s(thinkingLevel.orEmpty())`
+    → 第三、四条红（未核实那一轮会带上 ""）；③ 换成 `put("thinking_level", …)` 无条件写 →
+    第五条红；④ 在 ChatUi 另开第二个 `Api.chatPayload(` 发送点 → 第六条红（第二条路
+    会静默少发这一格，网页 app.js 同一条锁）。
+    射程：静态判"这一格只从条件插入那一条路出来"；真出网的字节要真机抓包（手测清单）。
+    """
+    api = _c("Api.kt")
+    chat = _c("ui/ChatUi.kt")
+    sig = _between(api, "fun chatPayload(", "return obj(")
+    assert "thinkingLevel: String? = null" in sig, \
+        "形参不是可空+缺省 null：缺省值会被序列化成空的一格"
+    assert 'thinkingLevel: String = ""' not in sig, "形参缺省写成了空串"
+    assert '"thinking_level" to thinkingLevel?.let { s(it) }' in api, \
+        "这一格不是条件插入：没走 obj() 的 null 跳过，就会带出一个空值"
+    for shape in ('put("thinking_level"', '"thinking_level" to JsonPrimitive',
+                  "thinkingLevel?.let { JsonPrimitive", '"thinking_level" to JsonNull'):
+        assert shape not in api, f"请求体里出现了无条件/空值形状：{shape}"
+    assert "JsonNull" not in api, "用 JsonNull 占位＝发了一个 null 格而不是省略"
+    rs = _block(chat, "fun streamInto(")
+    assert "thinkingLevelForSend(currentProvider())" in rs, \
+        "发送点没现读这条记录再问闸（用了缓存副本或干脆没问）"
+    assert ".takeIf { it.isNotEmpty() }" in rs, "空串没转成 null：省略会退化成发 \"\""
+    assert chat.count("Api.chatPayload(") == 1, "原生开了第二个发送点：第二条路没人闸这一格"
+
+
+def test_native_card_promise_comes_from_the_same_gate_and_never_promises_a_lie():
+    """§5.2/§5.3 + 13A 复审 Finding 2：卡上"会带上什么"必须问发送路径那同一个判据。
+
+    网页 13A 那枚 bug 的形状是：`thinkingStaleLevelNote` 不看状态也不看开关，于是同一张卡
+    上两句相邻说明自相矛盾（一句说"按默认档发"，另一句说"参数不生效"），而 `thinkingLevelForSend`
+    当轮返回空。原生这边**不许复现**：那句"这一轮按默认档…发"只许出现在闸真的产出标签的
+    分支里，所以判据吃两样东西——函数体里 `willSend` 取自 `thinkingLevelForSend`，且
+    "不发档位这一格"那条分支排在承诺句**之前**（顺序即牙：把承诺挪到判空前面就红）。
+    措辞与网页同句，别在原生改字（跨端逐字比对已有先例见上面 :384 那枚）。
+    变异：① 卡片自己再算一遍（把 `willSendLevel` 换成 `levelPick`）→ 第一、二条红；
+    ② 去掉 `if (willSend.isEmpty())` 那道分支（承诺常驻）→ 第三、四条红；
+    ③ 把 `thinkingInactiveNote` 那句"参数不生效"删掉 → 第五条红（§5.2 回落不可复盘）；
+    ④ 保留"这一档今天还没接进请求体"那句旧实话 → 第六条红（接线后它就变成假话）。
+    射程：与网页的差集登记清楚——网页用 `state.thinkingStaleLevel` 记"这句已经印过"，
+    原生这张卡是点开才有的弹层，说明随条件常驻在卡上（不是常驻在整个页面上），所以这边
+    没有那份一次性状态；"用户真的看见这句"仍属渲染时机，不在静态锁射程内（真机手测）。
+    """
+    chat = _c("ui/ChatUi.kt")
+    card = _block(chat, "private fun ModelCard(")
+    assert "val willSendLevel = thinkingLevelForSend(item)" in card, \
+        "卡片自己算了一遍会带什么：卡上说会带上、请求里没有那一格就是界面说谎"
+    assert '本轮会带上「${willSendLevel.ifEmpty { "不带上思考参数" }}」' in card, \
+        "verified 那一支的承诺没接闸：开关关着也承诺要带"
+    assert "这一档今天还没接进请求体" not in chat, \
+        "旧实话还留着：13B 之后这一格确实进了请求体，这句已是假话"
+    note = _block(chat, "private fun thinkingStaleLevelNote(")
+    assert "thinkingLevelForSend(" in note, "回落说明没问发送判据，自己判了一份真相"
+    assert "if (willSend.isEmpty())" in note, "少了一道「本轮不发」的分支"
+    assert note.index("不发档位这一格") < note.index("这一轮按默认档"), \
+        "承诺句排在不发那支之前：Finding 2 那个自相矛盾在原生复现了"
+    assert "这一轮按默认档" in note and "本机开关没开" in note and "这条记录未核实" in note, \
+        "回落那句没交代为什么不发"
+    inactive = _block(chat, "private fun thinkingInactiveNote(")
+    assert "参数不生效：这一轮请求里不会带上档位" in inactive, \
+        "§5.2 回落不可复盘：prefs 记着开而状态不许发时没实话"
+    assert 'if (item.thinking_status == "verified") return ""' in inactive, \
+        "已核实那一支还说「参数不生效」：两句相邻说明自相矛盾"
+
+
+def test_native_kotlin_copy_is_free_of_banned_thinking_phrases():
+    """§0 禁句：原生三份 Kotlin 语料（Api.kt / ui/ChatUi.kt / Prefs.kt）一句都不许出现。
+
+    13A 复审点名的洞：网页侧这条扫描落地时，原生侧覆盖是**零**（grep 这四味无命中）。
+    清单从裁决 §2 那行现抠，再与扫描实际吃的那份比**句数 + 集合**——手抄 tuple 少一味
+    不再是"安静地少扫一句"，而是当场红。
+    变异：① tuple 摘掉「三档强度」→ 第三条红（基数不同）；② 往 ChatUi.kt 的某句 Text
+    里注入"这款模型支持三档强度。"→ 最后的扫描红；③ 把 §2 那一行原文抄窄（少一个「」）
+    → 第一条红。
+    射程：语料走 `_c`（剥注释），所以判的是**给用户看的字符串**里有没有这些句子；注释里
+    出现同词不判（与网页 `_js()`/`_html()` 那把尺子同口径）。
+    """
+    assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
+        f"裁决 §2 那一行只抠出 {len(_AMENDMENT_S2_BANNED)} 味，点名应是 " \
+        f"{_AMENDMENT_S2_BANNED_COUNT} 味：清单来源本身被改窄了（{_AMENDMENT_S2_BANNED}）"
+    assert len(NATIVE_BANNED_THINKING_PHRASES) == len(_AMENDMENT_S2_BANNED), \
+        f"扫描只吃了 {len(NATIVE_BANNED_THINKING_PHRASES)} 味，裁决 §2 点名 " \
+        f"{len(_AMENDMENT_S2_BANNED)} 味：漏掉的那句写进界面没有任何锁会红"
+    assert set(NATIVE_BANNED_THINKING_PHRASES) == set(_AMENDMENT_S2_BANNED), \
+        f"扫描清单与裁决 §2 不同：只扫 {set(NATIVE_BANNED_THINKING_PHRASES)} / " \
+        f"§2 点名 {set(_AMENDMENT_S2_BANNED)}"
+    corpora = {"Api.kt": _c("Api.kt"), "ui/ChatUi.kt": _c("ui/ChatUi.kt"),
+               "Prefs.kt": _c("Prefs.kt")}
+    for banned in NATIVE_BANNED_THINKING_PHRASES:
+        for name, text in corpora.items():
+            assert banned not in text, f"{name} 里出现禁句「{banned}」：今天没有一条记录能说关闭"
 

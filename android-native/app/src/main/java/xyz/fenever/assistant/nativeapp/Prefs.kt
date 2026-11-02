@@ -159,6 +159,11 @@ object Prefs {
         return if (levels.contains(thinkingDefault)) thinkingDefault else levels.first()
     }
 
+    /** 本机**原样**存着的那个标签（不做归一）：§5.3 那句"偏好里的标签已经没有了"
+     *  必须拿它跟当前清单比，用 thinkingLevel 的归一结果比就恒成立、永远说不出这句话。 */
+    fun thinkingLevelSaved(providerId: String): String =
+        thinkingMap()[thinkingSlot(providerId)]?.level.orEmpty()
+
     fun setThinkingEnabled(providerId: String, enabled: Boolean) {
         if (providerId.isEmpty()) return
         val map = thinkingMap()
