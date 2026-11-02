@@ -876,6 +876,124 @@ _AMENDMENT_S2_BANNED_COUNT = 4
 _AMENDMENT_S2_BANNED = tuple(re.findall(r"「([^「」]+)」", _AMENDMENT_S2_BANNED_LINE))
 # 原生扫描实际吃的那份（被改窄会撞上下面两道断言）
 NATIVE_BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭", "三档强度")
+# §R4 探针那把锁（`test_v0391_thinking_mapping.py:1917`）用的是它自己的措辞「已关闭思考」，
+# 不在 §2 那四味里；而探针**不覆盖**§2 的哪两味也必须写死在册——三处清单的互钉见
+# `test_banned_phrase_lists_are_cross_pinned_across_web_native_and_probe`。
+_PROBE_SIDE_OWN_PHRASES = ("已关闭思考",)
+_PROBE_SIDE_NOT_COVERED = ("可关闭思考", "三档强度")
+
+# ---- 本单硬化的两把尺（13B 复审两枚 Critical：省略锁只钉子串、禁句锁只扫三份文件）----
+# 发送点档位实参的**完整**形状。只判子串 `in` 的话，在这串后面补一个 `?: ""`（把 null 又
+# 变回空串）完全不被识别——复审 M1 实测 `40 passed`，而线上真会带上 `"thinking_level": ""`。
+_LEVEL_ARG_CANON = "thinkingLevelForSend(currentProvider()).takeIf { it.isNotEmpty() }"
+# 「把空值补成空串」的尾巴，显式列成一味都不许接的负判清单。这几味不是臆想的靶子：全树现存
+# `orEmpty()` 41 处、`ifEmpty` 25 处、`getOrDefault` 6 处——都是下一个接手的人写得出的形状。
+_LEVEL_ARG_EMPTY_BACKFILL = ("?: \"\"", "?: ''", "orEmpty()", "ifEmpty", "ifBlank",
+                             "getOrDefault", "defaultIfBlank")
+
+NATIVE_ROOT = REPO / "android-native"
+
+
+def _tracked_android_kt():
+    """`git ls-files android-native` 里那份 .kt 集合——基数钉的**仓库事实**一侧。
+
+    问不到 git 或返回空一律红，不 skip：本仓老规矩，读不到来源的锁等于没有锁。
+    """
+    import subprocess
+
+    g = subprocess.run(["git", "ls-files", "-z", "android-native"], cwd=str(REPO),
+                       capture_output=True, timeout=60)
+    assert g.returncode == 0, "问不到 `git ls-files android-native`：同集合比对不许 skip 后当绿"
+    tracked = {p.decode() for p in g.stdout.split(b"\0") if p.endswith(b".kt")}
+    assert tracked, "`git ls-files android-native` 返回 0 份 .kt：基数钉读不到仓库事实"
+    assert not [p for p in tracked if "/build/" in p], f"版本库里躺着 build 中间产物的 .kt：{sorted(tracked)}"
+    return tracked
+
+
+def _native_kt_corpus():
+    """全树 `android-native/**/*.kt` 的剥注释语料（写死三份就是 M6 那个洞）。
+
+    两侧必须**同一个集合**：rglob 少一份（改名/挪走/walk 进空目录）、多一份（没入库的游离
+    .kt）都红——"扫不到"和"守住了"不许长得一样（`test_native_android_discipline.py:105`
+    那句自述）。构建中间产物按 `/build/` 段排除，同一枚锁里钉住 git 侧一份 build 产物都没有。
+    """
+    on_disk = {p.relative_to(REPO).as_posix() for p in sorted(NATIVE_ROOT.rglob("*.kt"))
+               if "/build/" not in p.relative_to(REPO).as_posix()}
+    tracked = _tracked_android_kt()
+    assert on_disk == tracked, (
+        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(tracked)} 份，"
+        f"只在磁盘={sorted(on_disk - tracked)} 只在 git={sorted(tracked - on_disk)}")
+    inside = {p.split("nativeapp/", 1)[-1] for p in on_disk}
+    assert {"Api.kt", "ui/ChatUi.kt", "Prefs.kt"} <= inside, \
+        "13B 点名的三份已不在语料里：禁句扫描的射程比那天还短了"
+    return {rel: _code(REPO / rel) for rel in sorted(on_disk)}
+
+
+def _call_inner_args(code, anchor):
+    """**每一个** `anchor(` 的圆括号内文（跳字符串里的括号，跨行算；括号不闭合就红）。
+
+    与 `_call` 的差别就是射程：`_call` 只看第一处，于是"第二个发送点开在别的文件里"
+    这种形状在文本上是隐形的（复审 :91 点名的同源窄射程）。
+    """
+    spans, at = [], 0
+    while True:
+        k = code.find(anchor, at)
+        if k < 0:
+            return spans
+        i = code.index("(", k)
+        depth, j, quote, esc = 0, i, None, False
+        while j < len(code):
+            c = code[j]
+            if quote:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == quote:
+                    quote = None
+            elif c in "\"'":
+                quote = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        assert depth == 0, f"{anchor} 的圆括号没闭合：实参尺子滑出了函数"
+        spans.append(code[i + 1:j])
+        at = k + len(anchor)
+
+
+def _split_top_level_args(inner):
+    """按**顶层**逗号切实参列表（`()`/`[]`/`{}`/字符串里的逗号不算分隔）。"""
+    out, cur, depth, quote, esc = [], [], 0, None, False
+    for c in inner:
+        if quote:
+            cur.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == quote:
+                quote = None
+            continue
+        if c in "\"'":
+            quote = c
+            cur.append(c)
+        elif c in "([{":
+            depth += 1
+            cur.append(c)
+        elif c in ")]}":
+            depth -= 1
+            cur.append(c)
+        elif c == "," and depth == 0:
+            out.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(c)
+    out.append("".join(cur).strip())
+    return out
 
 
 def test_native_send_gate_emits_a_level_only_for_a_verified_record():
@@ -919,8 +1037,10 @@ def test_native_body_omits_the_key_rather_than_sending_null_or_empty():
     变异：① `thinkingLevel: String? = null` 改成 `String = ""` → 第二条红；
     ② `"thinking_level" to thinkingLevel?.let { s(it) }` 改成 `to s(thinkingLevel.orEmpty())`
     → 第三、四条红（未核实那一轮会带上 ""）；③ 换成 `put("thinking_level", …)` 无条件写 →
-    第五条红；④ 在 ChatUi 另开第二个 `Api.chatPayload(` 发送点 → 第六条红（第二条路
-    会静默少发这一格，网页 app.js 同一条锁）。
+    第五条红；④ 在**任意一份 .kt** 另开第二个 `Api.chatPayload(` 发送点 → 全树计数那条红
+    （不再是 `chat.count(...)`：第二条路开在别的文件里今天不会再隐形）；⑤ 在档位实参尾巴上
+    补任意一味"空值回补"（`?: ""` / `?: ''` / `orEmpty()` / `ifEmpty` / `ifBlank` /
+    `getOrDefault`）→ 整串钉与负判那两条红（复审 M1 在 350ddb07 上是 `40 passed` 全绿）。
     射程：静态判"这一格只从条件插入那一条路出来"；真出网的字节要真机抓包（手测清单）。
     """
     api = _c("Api.kt")
@@ -939,7 +1059,22 @@ def test_native_body_omits_the_key_rather_than_sending_null_or_empty():
     assert "thinkingLevelForSend(currentProvider())" in rs, \
         "发送点没现读这条记录再问闸（用了缓存副本或干脆没问）"
     assert ".takeIf { it.isNotEmpty() }" in rs, "空串没转成 null：省略会退化成发 \"\""
-    assert chat.count("Api.chatPayload(") == 1, "原生开了第二个发送点：第二条路没人闸这一格"
+    # 「只有一个出处」这句要**全树**数才成立：调用点搬到别的 .kt 里，`chat.count(...)` 数不到它；
+    # 而且整串钉住之后，尾巴上再补一层"空值回补"也当场红（复审 M1 今天能带着空串绿）。
+    corpus = _native_kt_corpus()
+    slots = [(rel, " ".join(_split_top_level_args(inner)[-1].split()))
+             for rel, text in corpus.items()
+             for inner in _call_inner_args(text, "Api.chatPayload(")]
+    assert len(slots) == 1, \
+        f"全树 `Api.chatPayload(` 的发送点应是 1 处，实得 {len(slots)} 处：{[r for r, _ in slots]}"
+    where, slot = slots[0]
+    assert slot == _LEVEL_ARG_CANON, \
+        f"发送点档位实参不是那一整串（{where}）：这一格只许『闸产出 → 空串转 null』，尾巴不接加工：{slot}"
+    for shape in _LEVEL_ARG_EMPTY_BACKFILL:
+        assert shape not in slot, \
+            f"档位实参接了『把空值补成空串』的尾巴 {shape}（{where}）：请求体会带上空的 thinking_level"
+    assert sum(t.count("fun chatPayload(") for t in corpus.values()) == 1, \
+        "chatPayload 的定义开了第二份签名：两处各自决定这一格发不发"
 
 
 def test_native_card_promise_comes_from_the_same_gate_and_never_promises_a_lie():
@@ -982,16 +1117,22 @@ def test_native_card_promise_comes_from_the_same_gate_and_never_promises_a_lie()
 
 
 def test_native_kotlin_copy_is_free_of_banned_thinking_phrases():
-    """§0 禁句：原生三份 Kotlin 语料（Api.kt / ui/ChatUi.kt / Prefs.kt）一句都不许出现。
+    """§0 禁句：语料是**全树** `android-native/**/*.kt`（本树 21 份，随仓库事实浮动），不是三份。
 
-    13A 复审点名的洞：网页侧这条扫描落地时，原生侧覆盖是**零**（grep 这四味无命中）。
-    清单从裁决 §2 那行现抠，再与扫描实际吃的那份比**句数 + 集合**——手抄 tuple 少一味
-    不再是"安静地少扫一句"，而是当场红。
-    变异：① tuple 摘掉「三档强度」→ 第三条红（基数不同）；② 往 ChatUi.kt 的某句 Text
-    里注入"这款模型支持三档强度。"→ 最后的扫描红；③ 把 §2 那一行原文抄窄（少一个「」）
-    → 第一条红。
-    射程：语料走 `_c`（剥注释），所以判的是**给用户看的字符串**里有没有这些句子；注释里
-    出现同词不判（与网页 `_js()`/`_html()` 那把尺子同口径）。
+    13A 复审点名的洞：网页侧这条扫描落地时，原生侧覆盖是**零**。清单从裁决 §2 那行现抠，
+    再与扫描实际吃的那份比**句数 + 集合**——手抄 tuple 少一味不再是"安静地少扫一句"，而是当场红。
+    13B 复审的第二枚 Critical 是同一个失败类的另一半：**语料写死三份**。往 `ui/SettingsUi.kt`
+    注入「这款模型支持三档强度」在 350ddb07 上是 `40 passed`（M6），因为那三份之外的 18 份
+    根本不在射程里。改全树之后，还补一枚**基数钉**：磁盘扫到的集合与 `git ls-files
+    android-native` 的 .kt 集合必须**同一个集合**，少一份（改名/挪走/walk 进空目录）
+    多一份（没入库的游离 .kt）都红；git 问不到或返回空一律红，不 skip 后当绿。
+    变异（实测见 task-13b-report.md §修复轮 1）：① tuple 摘掉「三档强度」→ 第三条红；
+    ② 注入 `ui/ChatUi.kt` 或 `ui/SettingsUi.kt` 或任意一份别的 .kt → 最后的扫描红；
+    ③ §2 原文抄窄一味 → 第一条红；④ 把 `ui/UpdateUi.kt` 改名/挪走 → 基数钉红；
+    ⑤ 新增一份没入库的 .kt → 基数钉红。
+    射程：语料走 `_code`（剥注释），判的是**给用户看的字符串**里有没有这些句子；注释里出现
+    同词不判（与网页 `_js()`/`_html()` 同口径）。`/build/` 段下的中间产物不参与比对，
+    同一枚锁里钉住 git 侧没有 build 产物，所以这条排除面吃不进真源码。
     """
     assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
         f"裁决 §2 那一行只抠出 {len(_AMENDMENT_S2_BANNED)} 味，点名应是 " \
@@ -1002,9 +1143,49 @@ def test_native_kotlin_copy_is_free_of_banned_thinking_phrases():
     assert set(NATIVE_BANNED_THINKING_PHRASES) == set(_AMENDMENT_S2_BANNED), \
         f"扫描清单与裁决 §2 不同：只扫 {set(NATIVE_BANNED_THINKING_PHRASES)} / " \
         f"§2 点名 {set(_AMENDMENT_S2_BANNED)}"
-    corpora = {"Api.kt": _c("Api.kt"), "ui/ChatUi.kt": _c("ui/ChatUi.kt"),
-               "Prefs.kt": _c("Prefs.kt")}
+    corpora = _native_kt_corpus()
+    assert len(corpora) >= 20, f"全树只扫到 {len(corpora)} 份 .kt：walk 到空目录也算『没有违规』"
     for banned in NATIVE_BANNED_THINKING_PHRASES:
         for name, text in corpora.items():
             assert banned not in text, f"{name} 里出现禁句「{banned}」：今天没有一条记录能说关闭"
+
+
+def test_banned_phrase_lists_are_cross_pinned_across_web_native_and_probe():
+    """票 #240 + 13B 复审 Minor：§2 清单在三处各有一份消费者，本单把它们互钉。
+
+    原状：网页与原生各自抄一份 §2 原文、各抠各的集合——谁把**两边同时**改成另外四味
+    （句数仍是 4），两把锁一起绿，裁决 §2 换了脸而没人红。这里加等式：两份抄写的**原文行**
+    逐字相等，两份 tuple 与 §2 抠出的集合三者相等、且都是 `_AMENDMENT_S2_BANNED_COUNT` 味。
+    探针那侧（`test_v0391_thinking_mapping.py:1917`，三味）**取 (b) 明确窄射程**：它只判
+    `probe_thinking_profile.py` 的 verdict label 与 `proved` 文案，界面与原生由那两把全扫锁
+    覆盖；它的措辞「已关闭思考」是 §R4 自己的、不在 §2 四味里，所以等式在这里退化成两条：
+    探针清单 ⊆（§2 四味 ∪ 登记在册的探针自有措辞），且 §2 里探针**不覆盖**的那两味必须
+    正好是 `_PROBE_SIDE_NOT_COVERED`。探针再摘窄一味、或 §2 加了味而探针没跟上 → 红。
+    读不到探针那份锁（改名/挪走/换了写法）一律红，不 skip。
+    天花板登记：§2 的原件在被 gitignore 的 `task-12-amendment.md` 里，CI 读不到，所以"三处
+    同时改成另外四味"这一枚只能靠每份文件自己的句数钉 + 本条的逐字原文等式兜，无法对原件比。
+    """
+    from tests import test_v0391_web_cockpit_ui as web
+
+    assert web._AMENDMENT_S2_BANNED_LINE == _AMENDMENT_S2_BANNED_LINE, \
+        "网页与原生抄的裁决 §2 原文行已经分叉：两份清单从此各自解释"
+    assert set(web.BANNED_THINKING_PHRASES) == set(NATIVE_BANNED_THINKING_PHRASES) == \
+        set(_AMENDMENT_S2_BANNED), \
+        f"三份清单不再是同一份：网页 {set(web.BANNED_THINKING_PHRASES)} / 原生 " \
+        f"{set(NATIVE_BANNED_THINKING_PHRASES)} / §2 {set(_AMENDMENT_S2_BANNED)}"
+    assert len(web.BANNED_THINKING_PHRASES) == len(NATIVE_BANNED_THINKING_PHRASES) == \
+        _AMENDMENT_S2_BANNED_COUNT, "某一端被改窄/改宽：跨端等式的基数不再一致"
+    src = (REPO / "backend" / "tests" / "test_v0391_thinking_mapping.py").read_text(
+        encoding="utf-8")
+    at = src.index("def test_no_label_or_proved_claim_says_the_switch_is_off(")
+    found = re.search(r"banned = \(([^)]*)\)", src[at:at + 1200])
+    assert found, "读不到探针那把禁句锁的清单（改名/挪走/换了写法）：互钉不许 skip 后当绿"
+    probe_list = tuple(a or b for a, b in
+                       re.findall(r'"([^"]*)"|\'([^\']*)\'', found.group(1)))
+    assert probe_list, "探针那份禁句清单是空的"
+    assert set(probe_list) <= set(_AMENDMENT_S2_BANNED) | set(_PROBE_SIDE_OWN_PHRASES), \
+        f"探针禁句冒出没登记过的措辞：{sorted(set(probe_list) - set(_AMENDMENT_S2_BANNED) - set(_PROBE_SIDE_OWN_PHRASES))}"
+    assert set(_AMENDMENT_S2_BANNED) - set(probe_list) == set(_PROBE_SIDE_NOT_COVERED), \
+        f"探针的射程变了：现在它不覆盖 {sorted(set(_AMENDMENT_S2_BANNED) - set(probe_list))}，" \
+        f"登记的是 {sorted(_PROBE_SIDE_NOT_COVERED)}——谁少了谁都得写进这两份登记，别让它静默漂"
 
