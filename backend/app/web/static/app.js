@@ -1547,7 +1547,12 @@ function thinkingInactiveNote(item, choice) {
 /* §5.3：偏好里的标签在这条记录当前的清单里找不到 ⇒ 回到默认档，并**说一次**。
  * "一次"照 state.budgetClamped 那一组的口径：本机态记着"这句已经印给这张卡了"，
  * 印过就认，换身份清（resetViewForIdentity）。归回动作本身在 thinkingChoice 里，
- * 这里只负责把它讲出来——沉默是不行的，用户看到的是"我点的档位自己变了"。 */
+ * 这里只负责把它讲出来——沉默是不行的，用户看到的是"我点的档位自己变了"。
+ * 13A 复审 Finding 2：讲的内容必须与「这一轮到底发不发」一致。发不发由
+ * thinkingLevelForSend 那三道闸说了算，所以"按默认档发"只许在**状态 verified 且本机开关
+ * 开着**（也就是真会产出一格）时说；未核实与开关关这两种情况一整格都不出网，这里就
+ * 老实说不发这一格——开关关着时卡上只有这一句可说（thinkingInactiveNote 那条对
+ * enabled !== true 直接返回空），它更不能承诺要发。措辞同样受 §2 禁句清单约束。 */
 function thinkingStaleLevelNote(item, choice) {
   const id = (item && item.id) || "";
   const saved = readThinkingPrefs()[id] || {};
@@ -1557,8 +1562,18 @@ function thinkingStaleLevelNote(item, choice) {
   const hit = state.thinkingStaleLevel;
   if (hit && hit.id === id && hit.level === wanted) return "";
   state.thinkingStaleLevel = { id, level: wanted };
-  return "偏好里存的档位「" + wanted + "」在这条记录当前的清单里已经没有了，"
-    + "这一轮按默认档「" + ((choice && choice.level) || "无") + "」发"
+  const head = "偏好里存的档位「" + wanted + "」在这条记录当前的清单里已经没有了，";
+  const level = (choice && choice.level) || "无";
+  const status = (item && item.thinking_status) || "";
+  const willSend = status === "verified" && !!choice && choice.enabled === true
+    && levels.indexOf(choice.level) >= 0;
+  if (!willSend) {
+    let why = "这条记录当前的清单里没有可发的档位";
+    if (!choice || choice.enabled !== true) why = "本机开关没开";
+    else if (status !== "verified") why = "这条记录未核实";
+    return head + "界面回到默认档「" + level + "」，但这一轮不发档位这一格（" + why + "）。";
+  }
+  return head + "这一轮按默认档「" + level + "」发"
     + "（且只在服务端说这条记录已核实时才发）。";
 }
 

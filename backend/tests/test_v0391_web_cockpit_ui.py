@@ -1247,6 +1247,103 @@ def test_a_fall_back_says_why_the_click_did_nothing():
     _no_html_sinks(detail, "模型卡（含回落说明）")
 
 
+# 13A 复审 Finding 2 的现场：同一张卡上两句相邻说明自相矛盾。这里把
+# thinkingStaleLevelNote 在**三态**下各跑一次（旧标签「深度」都不在当前清单里，所以三态
+# 都会触发那句回落说明），逐格问它「现在到底发不发」：
+#   verified+开关开 → thinkingLevelForSend 真会产出一格 ⇒ 允许承诺「这一轮按默认档…发」；
+#   unverified+开关开 → 一整格都不出网 ⇒ 同一张卡的 thinkingInactiveNote 正在说「不会带上档位」；
+#   verified+开关关 → 同样不发，而 thinkingInactiveNote 这一格是空的 ⇒ 全靠这句讲真话。
+# 每格前把 state.thinkingStaleLevel 复位，否则「只说一次」那把锁会把后两格吞成空串。
+_STALE_TRUTH_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+const mem = new Map();
+ctx.localStorage = {
+  getItem: (k) => mem.has(k) ? mem.get(k) : null,
+  setItem: (k, v) => mem.set(k, String(v)),
+};
+ctx.pref = { userId: "u1" };
+ctx.state = {};
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const unverified = { id: "p1", thinking_status: "unverified",
+                     thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+const verified = { id: "p1", thinking_status: "verified",
+                   thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+const arm = (patch) => {
+  ctx.state.thinkingStaleLevel = null;
+  ctx.writeThinkingPref("p1", { enabled: true, level: "深度" });
+  if (patch) ctx.writeThinkingPref("p1", patch);
+};
+out = {};
+arm();
+out.verifiedOn = ctx.thinkingStaleLevelNote(verified, ctx.thinkingChoice("p1", verified));
+arm();
+out.unverifiedOn = ctx.thinkingStaleLevelNote(unverified, ctx.thinkingChoice("p1", unverified));
+arm({ enabled: false });
+out.verifiedOff = ctx.thinkingStaleLevelNote(verified, ctx.thinkingChoice("p1", verified));
+arm();
+out.unverifiedOnInactive = ctx.thinkingInactiveNote(unverified, ctx.thinkingChoice("p1", unverified));
+arm({ enabled: false });
+out.verifiedOffInactive = ctx.thinkingInactiveNote(verified, ctx.thinkingChoice("p1", verified));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_the_stale_note_promises_a_send_only_when_a_level_is_sent():
+    """13A 复审 Finding 2：那句「这一轮按默认档发」不许在**根本不发**的两格里出现。
+
+    §5.2 的红线是"界面说的话与请求体一致"。今天未核实的记录一整格都不出网、开关关着同样
+    不出网，而原句把这两种都说成要发——同一张卡上 `thinkingInactiveNote` 还在说「不会带上
+    档位」，两句当面打架。修法口径：只有 `choice.enabled === true && 状态 verified`
+    才许说"按默认档发"，其余分支改成"回到默认档、本轮不发这一格"。
+    """
+    out = _run_js(("thinkingPrefsKey", "readThinkingPrefs", "writeThinkingPref",
+                   "thinkingChoice", "thinkingInactiveNote", "thinkingStaleLevelNote"),
+                  _STALE_TRUTH_HARNESS, "stale-truth")
+    promise = "这一轮按默认档"
+    # ① 真会发：承诺可以存在，而且要讲清发的是回落后的那个默认档
+    assert promise in out["verifiedOn"], out["verifiedOn"]
+    assert "深度" in out["verifiedOn"] and "均衡" in out["verifiedOn"], out["verifiedOn"]
+    # ②③ 不发的那两态：同一句承诺必须消失，并老实说这一轮不发
+    for key in ("unverifiedOn", "verifiedOff"):
+        assert out[key] != "", f"{key}：旧标签回落一句都不说了，用户只看到档位自己变了"
+        assert promise not in out[key], \
+            f"{key} 根本不发这一格，却仍然承诺「{promise}发」：界面与请求体不一致（§5.2）"
+        assert "不发" in out[key], f"{key}：不发就要说不发，别留一句含糊的归回：{out[key]}"
+    # 未核实那格由既有那句「不生效」一起说，两句不得互相矛盾
+    assert "不会带上档位" in out["unverifiedOnInactive"], out["unverifiedOnInactive"]
+    # 开关关着时既有那句「不生效」今天不出场（enabled !== true 直接返回空），
+    # 所以这一格卡上**只有**回落那一句可说——它必须自己讲真话。
+    assert out["verifiedOffInactive"] == "", \
+        "开关本来没开，没有「没生效」要解释；此时卡上只剩回落那一句，它更不许承诺要发"
+    for key in ("verifiedOn", "unverifiedOn", "verifiedOff"):
+        for banned in BANNED_THINKING_PHRASES:
+            assert banned not in out[key], f"{key} 里出现 §2 禁句「{banned}」"
+
+
+# ---------------- 13A 复审 Finding 1：禁句清单本身少一味 ----------------
+# 清单的唯一出处是 `task-12-amendment.md` §2 那一条，点名的句子共**四味**：
+# 「可关闭思考」「思考已关闭」「支持关闭」「三档强度」。原先这里是一份手抄 tuple，
+# 少抄了「三档强度」——审查员往 app.js 注入 `return "这款模型支持三档强度。"` 后
+# 跑整份文件得到 32 passed / 0 failed，等于这句话今天写进界面没有任何一把锁会红。
+# 修法不是再手抄一遍（手抄的东西会再次悄悄变短），而是把 §2 那一行原文抄进锁里、
+# 由它现抠「」内容当清单来源，再用**句数 + 集合**两道比对钉住扫描实际吃的那份：
+# 少一味、多一味、抄错一味，当场红。
+# （那份 amendment 文档被 `.superpowers/sdd/.gitignore:1` 整目录排除，CI 上读不到，
+# 所以抄原文而不是运行时去读它——读不到就 skip 的锁等于没有锁。）
+_AMENDMENT_S2_BANNED_LINE = (
+    "界面/发版说明/文档里不许出现「可关闭思考」「思考已关闭」「支持关闭」「三档强度」"
+    "这类今天没有对照支持的句子"
+)
+# §2 那一条点名的句数（裁决原文里就是四味；这个数字是清单的体检尺，见锁里第一道断言）。
+_AMENDMENT_S2_BANNED_COUNT = 4
+# 裁决 §2 现抠出来的那份（清单来源）
+_AMENDMENT_S2_BANNED = tuple(re.findall(r"「([^「」]+)」", _AMENDMENT_S2_BANNED_LINE))
+# 扫描实际吃的那份（谁被改窄了都会撞上下面两道断言）
+BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭", "三档强度")
+
+
 def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
     """§1.3 + §5.3 + §0：偏好一份真相、不缓存"这条记录有几个档"、禁句不出现在两端文案里。
 
@@ -1270,6 +1367,17 @@ def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
     assert "thinkingStaleLevel: null" in state_block, \
         "那次性说明的本机态没在 state 里声明：换身份清它就成了清一个不存在的键"
     corpora = {"app.js": _js(), "api.js": _js("api.js"), "index.html": _html()}
-    for banned in ("可关闭思考", "思考已关闭", "支持关闭"):
+    # 两道体检：先确认清单来源本身是完整的（§2 那一行被改窄就红），再确认扫描吃的那份
+    # 与它**同基数同内容**——手写 tuple 少一味不再是"安静地少扫一句"，而是当场红。
+    assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
+        f"裁决 §2 那一行只抠出 {len(_AMENDMENT_S2_BANNED)} 味，点名应是 " \
+        f"{_AMENDMENT_S2_BANNED_COUNT} 味：清单来源本身被改窄了（{_AMENDMENT_S2_BANNED}）"
+    assert len(BANNED_THINKING_PHRASES) == len(_AMENDMENT_S2_BANNED), \
+        f"扫描只吃了 {len(BANNED_THINKING_PHRASES)} 味，裁决 §2 点名 " \
+        f"{len(_AMENDMENT_S2_BANNED)} 味：漏掉的那句写进界面没有任何锁会红"
+    assert set(BANNED_THINKING_PHRASES) == set(_AMENDMENT_S2_BANNED), \
+        f"扫描清单与裁决 §2 不同：只扫 {set(BANNED_THINKING_PHRASES)} / " \
+        f"§2 点名 {set(_AMENDMENT_S2_BANNED)}"
+    for banned in BANNED_THINKING_PHRASES:
         for name, text in corpora.items():
             assert banned not in text, f"{name} 里出现禁句「{banned}」：今天没有一条记录能说关闭"
