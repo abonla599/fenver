@@ -2118,3 +2118,183 @@ def test_the_line_numbers_the_header_cites_still_point_at_those_functions():
         seen_names.add(name)
     assert {"read_provider_record", "assert_store_quarantined", "files_digest"} <= seen_names, \
         "三层读面保护必须逐层点名（brief §F2），少一层就是文案没跟上判据"
+
+
+# ---- 12. Task 12A：生产登记表——机制先于条目（M1 记录作用域 + 出网参数唯一写者） ----
+#
+# 7 次真实调用之后没有任何配方够格，所以 `thinking_profiles.PROFILES` 今天仍然只有
+# `none`（上面 :337-344 那格继续绿是**结论**，它变红就是有人偷偷登记）。这一节因此全部
+# 靠 monkeypatch 的 synthetic 条目把两侧演出来：判据必须在"没有真条目"的现状下也已经
+# 有牙，否则下一个人加条目时加的就是全局假话。零出站。
+
+SYNTH_HOST = "api.example.invalid"
+SYNTH_MODEL = "synth-flash"
+
+
+def _synth_entry(**over):
+    """一条 synthetic **生产**条目：只进 monkeypatch 的内存表，绝不进生产数据。
+
+    形状就是登记契约（A1）：`label` / `verified` / `level_count` / `verified_for` /
+    `kwargs`。缺任何一格都必须在下面某格里被判出来，不是靠运气。
+    """
+    entry = {
+        "label": "合成配方",
+        "verified": True,
+        "level_count": 3,
+        "verified_for": [{"host": SYNTH_HOST, "model": SYNTH_MODEL}],
+        "kwargs": lambda level: {"synth_level": level},
+    }
+    entry.update(over)
+    return entry
+
+
+def test_production_table_shape_and_the_none_entry_declaration():
+    """A1 的表形状：`none` 自己必须声明"没有档位、没有核实射程"，且 `kwargs` 给空字典。
+
+    `level_count=None` 与 `verified_for=None` 不是偷懒：M2 的档位判据靠前者跳过 `none`，
+    M1 的记录判据靠后者把 `none` 挡在 verified 之外（它不发参数，本就不该亮）。
+    """
+    assert thinking_profiles.DEFAULT_PROFILE == "none"
+    assert set(thinking_profiles.PROFILES) == {"none"}
+    entry = thinking_profiles.PROFILES["none"]
+    assert entry["verified"] is True
+    assert entry["level_count"] is None
+    assert entry["verified_for"] is None
+    assert entry["kwargs"](1) == {}
+
+
+def test_unknown_profile_is_refused_before_anything_else():
+    """① 表里没有的名字（含候选表那五支）一律 ValueError——候选表不是生产白名单。"""
+    for name in ("openai_reasoning_effort", "deepseek_thinking_type", "dashscope_enable_thinking",
+                 "nope", "", None):
+        with pytest.raises(ValueError, match="未知的思考参数配置"):
+            thinking_profiles.build_thinking_kwargs(name, 1)
+
+
+def test_unverified_profile_is_refused_and_that_gate_can_go_green(monkeypatch):
+    """② 表里有但 `verified` 不为真 ⇒ "思考参数未核实"；同一形状翻成 verified 必须放行。
+
+    两侧都跑：只演拒的一面，判据写成"永远 raise"也能绿，那条函数就成了一段散文。
+    """
+    monkeypatch.setitem(thinking_profiles.PROFILES, "synth_unverified",
+                        _synth_entry(verified=False))
+    monkeypatch.setitem(thinking_profiles.PROFILES, "synth_verified", _synth_entry())
+    with pytest.raises(ValueError, match="思考参数未核实"):
+        thinking_profiles.build_thinking_kwargs("synth_unverified", 1)
+    # 判序：越界的档位不许抢在"未核实"前面报错
+    with pytest.raises(ValueError, match="思考参数未核实"):
+        thinking_profiles.build_thinking_kwargs("synth_unverified", 99)
+    assert thinking_profiles.build_thinking_kwargs("synth_verified", 1) == {"synth_level": 1}
+
+
+def test_none_returns_empty_dict_after_the_verified_gate(monkeypatch):
+    """③ `none` 返回 `{}`，档位 irrelevant——它没有档位，所以越界也轮不到它报错。"""
+    assert thinking_profiles.build_thinking_kwargs("none", 1) == {}
+    assert thinking_profiles.build_thinking_kwargs("none", 99) == {}
+    assert thinking_profiles.build_thinking_kwargs("none", None) == {}
+    # 反例：把 none 自己改成未核实，必须回落到"未核实"而不是"返回空字典"
+    monkeypatch.setitem(thinking_profiles.PROFILES, "none",
+                        {"label": "不发思考参数", "verified": False,
+                         "level_count": None, "verified_for": None,
+                         "kwargs": lambda level: {}})
+    with pytest.raises(ValueError, match="思考参数未核实"):
+        thinking_profiles.build_thinking_kwargs("none", 1)
+
+
+def test_level_outside_the_declared_wire_values_is_refused_on_both_sides(monkeypatch):
+    """④ 档位只在 `1..level_count` 里活着：三档配方拒 0/4，布尔配方拒 2/3 且第 1 档必须过。
+
+    两侧都跑（防恒真）：布尔条目（g2 实测"三档同一个出网值"那一形）第 1 档放行、
+    第 2 档拒绝；三档条目 1..3 放行、4 拒绝。
+    """
+    monkeypatch.setitem(thinking_profiles.PROFILES, "synth_three", _synth_entry(level_count=3))
+    monkeypatch.setitem(thinking_profiles.PROFILES, "synth_bool", _synth_entry(level_count=1))
+    for level in (1, 2, 3):
+        assert thinking_profiles.build_thinking_kwargs("synth_three", level) == {"synth_level": level}
+    for level in (4, 0, -1, None, "", "快速"):
+        with pytest.raises(ValueError, match="该模型不支持这个思考强度"):
+            thinking_profiles.build_thinking_kwargs("synth_three", level)
+    assert thinking_profiles.build_thinking_kwargs("synth_bool", 1) == {"synth_level": 1}
+    for level in (2, 3):
+        with pytest.raises(ValueError, match="该模型不支持这个思考强度"):
+            thinking_profiles.build_thinking_kwargs("synth_bool", level)
+
+
+def test_build_thinking_kwargs_hands_back_a_fresh_dict_each_call():
+    """出网参数是每次调用自己的一份：改返回值不许污染下一次（表是全局事实来源）。"""
+    first = thinking_profiles.build_thinking_kwargs("none", 1)
+    assert first == {} and first is not thinking_profiles.PROFILES["none"]["kwargs"](1)
+    first["reasoning_effort"] = "minimal"
+    assert thinking_profiles.build_thinking_kwargs("none", 1) == {}
+
+
+def test_production_whitelist_is_the_same_object_as_the_registration_table(monkeypatch):
+    """A2：`providers.THINKING_PROFILES` 必须是 `thinking_profiles.PROFILES` 的**别名**。
+
+    这不是风格问题：既有测试是**就地** `monkeypatch.setitem` 往 `providers.THINKING_PROFILES`
+    里塞 synthetic 条目（`test_v0391_provider_capabilities.py:318/:349/:351`）。抄一份的
+    话测试改的那份没人读、判据读的那份没人改，那几条锁当场失牙变成恒绿——这一格就是
+    专门来抓这件事的正面锁。
+    """
+    assert providers.THINKING_PROFILES is thinking_profiles.PROFILES
+    assert providers.DEFAULT_THINKING_PROFILE == thinking_profiles.DEFAULT_PROFILE
+    monkeypatch.setitem(providers.THINKING_PROFILES, "alias_probe", _synth_entry(verified=False))
+    assert "alias_probe" in thinking_profiles.PROFILES
+    assert thinking_profiles.PROFILES["alias_probe"] is providers.THINKING_PROFILES["alias_probe"]
+
+
+def test_thinking_status_verified_needs_the_record_host_and_model(monkeypatch):
+    """M1 的四条件：supports ∧ profile≠default ∧ 表里 verified ∧ host+model 命中 verified_for。
+
+    少任何一个条件都不许亮 verified，而且**不许**演成 unsupported——"这条记录没被核实到"
+    与"这个模型不会思考"是两件事。`verified_for` 比的是 hostname（不是整条 URL）：
+    换 scheme/path 不该让核实作废，换 host 或换 model 才该。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_verified", _synth_entry())
+    hit = providers._thinking_status(True, "synth_verified", SYNTH_HOST, SYNTH_MODEL)
+    assert hit == "verified"
+
+    # ④ 缺参就降级：忘记传参的那一方必须输得安全，不能输成"亮"
+    for host, model in ((None, None), (None, SYNTH_MODEL), (SYNTH_HOST, None), ("", ""),
+                        ("", SYNTH_MODEL), (SYNTH_HOST, "")):
+        got = providers._thinking_status(True, "synth_verified", host, model)
+        assert got == "unverified", (host, model, got)
+
+    # 换 host / 换 model 各一跑：同 model 换 host、同 host 换 model 都不算命中
+    assert providers._thinking_status(True, "synth_verified",
+                                      "other.example.invalid", SYNTH_MODEL) == "unverified"
+    assert providers._thinking_status(True, "synth_verified",
+                                      SYNTH_HOST, "other-model") == "unverified"
+
+    # host 小写比对（urlparse().hostname 本就小写，登记表里手写大小写混着不该作废）
+    assert providers._thinking_status(True, "synth_verified", SYNTH_HOST.upper(),
+                                      SYNTH_MODEL) == "verified"
+
+    # 清单里多项：命中任意一项即算核实
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_multi",
+                        _synth_entry(verified_for=[{"host": "a.example.invalid", "model": "m"},
+                                                   {"host": SYNTH_HOST, "model": SYNTH_MODEL}]))
+    assert providers._thinking_status(True, "synth_multi", SYNTH_HOST, SYNTH_MODEL) == "verified"
+
+    # supports=False 压过一切：全命中也是 unsupported
+    assert providers._thinking_status(False, "synth_verified",
+                                      SYNTH_HOST, SYNTH_MODEL) == "unsupported"
+    # 默认配方永远不亮（它不发参数，本来就不该 verified）
+    assert providers._thinking_status(True, "none", SYNTH_HOST, SYNTH_MODEL) == "unverified"
+
+
+def test_empty_or_missing_verified_for_never_means_unrestricted(monkeypatch):
+    """负控常驻版：`verified_for` 填 `[]` 或缺这一格 ⇒ 一律 unverified，不是"不限"。
+
+    "空清单 = 全部放行"是这一格最自然的误读，而它正好把 M1 想挡的那句全局假话
+    原样放出去：条目一登记，所有填了该配方的记录一起亮。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_empty_scope",
+                        _synth_entry(verified_for=[]))
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_no_scope",
+                        _synth_entry(verified_for=None))
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bare",
+                        {"label": "登记时忘了写 verified_for", "verified": True})
+    for name in ("synth_empty_scope", "synth_no_scope", "synth_bare"):
+        got = providers._thinking_status(True, name, SYNTH_HOST, SYNTH_MODEL)
+        assert got == "unverified", (name, got)

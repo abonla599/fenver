@@ -1,22 +1,33 @@
-"""思考参数配方**候选表**（v0.39.1 Task 11 探针用，不是生产白名单）。
+"""思考参数配方表：探针**候选表** + 生产**登记表**。
 
-分工一句话：生产白名单是 `providers.THINKING_PROFILES`——写路径校验与界面三态
-（`_thinking_status`）只认那一份；这里放的是**待核实**的配方候选，供
-`tools/probe_thinking_profile.py` 按 (profile, level) 组装上游 kwargs。Task 12 拿探针
-结论往 `THINKING_PROFILES` 里加条目并补 `verified: True`，本文件不进任何写路径。
+分工一句话：`PROBE_PROFILES` 是待核实的候选形状，供 `tools/probe_thinking_profile.py`
+按 (profile, 档位标签) 组装上游 kwargs；`PROFILES` 是生产登记表，`providers.THINKING_PROFILES`
+从 v0.39.1 Task 12A 起就是它的**别名**（同一个对象，不是拷贝），写路径校验与界面三态
+（`providers._thinking_status`）认的就是这一份。原来那句"本文件不进任何写路径"
+从派生关系建立的那一刻起就是假话，删掉；但今天表里除 `none` 之外**没有条目**——
+7 次真实调用（g1 4 次 + g2 3 次）之后没有任何配方够格，登记的门槛才是本文件的存在理由。
+
+`PROFILES` 每一格都是**契约**而不是一个名字：`verified` 说"这条配方被真调用坐实过"、
+`verified_for` 说"坐实它的那些 (host, model) 记录"、`level_count` 说"这条配方出网有几个
+不同取值"、`kwargs(level)` 是唯一被允许组装出网格子的 callable。三道判据全部读这几格：
+`build_thinking_kwargs`（未核实不发）、`providers._thinking_status`（核实结论绑到记录作用域）、
+`providers._thinking_fields`（档位条数必须等于出网不同取值数）。所以"以后加一条"这件事
+**不需要**有人记得去改判据——判据先于条目在场，漏写 `verified_for` 的结果是这一格永远
+判 unverified，不是所有填了该配方的记录一起亮。这一条是 Task 12A 的全部动机。
 
 为什么候选形状要先钉成代码，而不是探针里手写 kwargs：真调用额度是**一次性**的
 （授权不是一句话也不是一次数，而是 `tools/probe_thinking_profile.py` 里那张
  `AUTHORIZED_GRANTS` **授权轮次表**：g1 那一轮 4 次已在 2026-11-01 花完，
- g2 那一轮 3 次冲着 OFF 方向、还没花），拼错一个字段名就白烧一次；而拼错的形状在
+ g2 那一轮 3 次冲着 OFF 方向、也已花完），拼错一个字段名就白烧一次；而拼错的形状在
  fake client 上测不出来，只有钉成表 + 逐档断言才能在零网络时就发现"第三档我忘了映射"。
 
-为什么本文件**不 import app.core.providers**：那个模块末尾有进程级单例
-（providers.py:1059 `store = ProviderStore()`），import 它就等于跑 `_load()`，而
-`_load()` 在记录文件缺失时会 `_seed_from_env()`（读 `DEEPSEEK_API_KEY`）、只要播种出
-非空列表就 `_flush()` 回写 `providers.json` 与 keys 两份文件——本仓的开发机同时就是
+为什么本文件**不 import app.core.providers**：① 派生方向是 providers → thinking_profiles，
+反过来就是循环 import（`test_v0391_thinking_mapping.py` 的 AST 锁盯着这一条）；② 那个模块
+末尾有进程级单例（模块级 `store = ProviderStore()`，行号会漂所以不写死），import 它就等于
+跑 `_load()`，而 `_load()` 在记录文件缺失时会 `_seed_from_env()`（读 `DEEPSEEK_API_KEY`）、
+只要播种出非空列表就 `_flush()` 回写 `providers.json` 与 keys 两份文件——本仓的开发机同时就是
 生产机，那一下写的就是线上那份配置（Task 11 修复轮 1 实测过这条路径：先 import 再判
-重叠，等于先把文件开进声明只读的那棵树）。所以这里保持零依赖：纯数据 + 一个查表函数，
+重叠，等于先把文件开进声明只读的那棵树）。所以这里保持零依赖：纯数据 + 两个查表函数，
 测试里可以随便 import。（`tools/probe_thinking_profile.py` 确实要用 providers，它在
  import **之前**先把 `PROVIDERS_DB_PATH` 指到仓库外、并先判完重叠，判据见那个文件的
  `run_probe` 闸 2 与 `isolate_runtime_env`。）
@@ -174,3 +185,67 @@ def body_fragment(kwargs: dict) -> dict:
     out = {key: value for key, value in given.items() if key != "extra_body"}
     out.update(given.get("extra_body") or {})
     return copy.deepcopy(out)
+
+
+# ------------------------------------------------ 生产登记表（providers 从这里派生） --
+DEFAULT_PROFILE = "none"
+
+# 每一条 verified 都必须同时写 `verified_for`：一组 `{host, model}` 对，只覆盖探针真
+# 调用打过的那几条记录。射程是「单条 provider 记录 + 它当时的 base_url + 它当时的
+# model」，**不是模型级、不是厂商级**——写成厂商级就等于把一次逐条观察说成全局结论，
+# 而 `providers._thinking_status` 会把这句直接画到用户眼前。
+PROFILES = {
+    DEFAULT_PROFILE: {
+        "label": "不发思考参数",
+        "verified": True,
+        "level_count": None,     # 不适用：none 没有档位
+        "verified_for": None,    # 不适用：它不发参数，本就不该亮 verified
+        "kwargs": lambda level: {},
+    },
+    # 探针坐实一条才加一条，且必须同时写 verified_for。今天没有。
+}
+
+
+def build_thinking_kwargs(profile, level) -> dict:
+    """唯一被允许往出网参数里写思考格子的函数。未核实一律 `ValueError`。
+
+    判序是刻意的，四步不许互换（每步都有反例锁在 `test_v0391_thinking_mapping.py` §12）：
+
+    1. `profile` 不在登记表里 → `ValueError("未知的思考参数配置")`。候选表
+       （`PROBE_PROFILES`）里那些名字**不算**：探针观察到过 ≠ 生产已核实。
+    2. 表里有但 `verified` 不为真 → `ValueError("思考参数未核实")`。这一步在档位之前：
+       一条没核实的配方哪怕档位填对了也不许发，报错必须先说"没核实"。
+    3. `profile == none` → 返回 `{}`。`none` 没有档位，所以这一步在 verified 之后、
+       档位校验之前——否则"不发任何参数"这一形会被第 4 步误拒。
+    4. `level` 不在 `1..level_count` 对应的档位里 → `ValueError("该模型不支持这个思考强度")`。
+       `level_count` 缺失或为 None 的非默认配方按"没有可用档位"处理（fail-closed），
+       登记时忘了声明不会换来一个默认放行。
+
+    `level` 是**档位序号**（1 起），不是 UI 标签：记录里那份 `thinking_levels` 是用户
+    自己写的字符串，同一个配方在不同记录上的第 2 档可能是完全不同的词；能把
+    "第 N 档"和"出网第 N 个不同取值"对齐的坐标只有序号。调用方（Task 12B 的请求侧）
+    负责先过 `providers._thinking_status(supports, profile, host, model)`——**记录作用域
+    不在本函数判**（本函数手里没有那条记录的 base_url/model），但那条判据不通过时
+    调用方必须压根不调到这里来。
+
+    返回值每次都是新字典：这份参数会直接进 `chat.completions.create(**kwargs)`，
+    调用方改它不该把登记表改脏。
+    """
+    name = str(profile or "").strip()
+    entry = PROFILES.get(name)
+    if entry is None:
+        raise ValueError("未知的思考参数配置")
+    if not entry.get("verified"):
+        raise ValueError("思考参数未核实")
+    if name == DEFAULT_PROFILE:
+        return {}
+    if isinstance(level, bool) or not isinstance(level, (int, str)):
+        raise ValueError("该模型不支持这个思考强度")
+    try:
+        ordinal = int(level)
+    except ValueError:
+        raise ValueError("该模型不支持这个思考强度") from None
+    level_count = entry.get("level_count") or 0
+    if not 1 <= ordinal <= level_count:
+        raise ValueError("该模型不支持这个思考强度")
+    return dict(entry["kwargs"](ordinal))

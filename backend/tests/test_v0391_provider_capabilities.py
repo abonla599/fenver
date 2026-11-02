@@ -345,11 +345,20 @@ def test_read_status_uses_the_profile_whitelist(tmp_path):
 
 
 def test_verified_requires_the_whitelist_entry_to_say_so(tmp_path, monkeypatch):
-    """verified 只来自白名单那一格的 verified 为真——两格假档案把判据钉死。"""
+    """verified 要白名单那一格说"verified"，**并且**这条记录的 host+model 在 verified_for 里。
+
+    M1（task-12-amendment）把核实结论从"配方级"收到"记录级"：探针的射程是「单条 provider
+    记录 + 它当时的 base_url + 它当时的 model」，不是模型级也不是厂商级。所以
+    `{"label", "verified"}` 这一份旧形状从这里起**不再够格**亮 verified——四向都跑：
+    host+model 命中 → verified；同 model 换 host → unverified；同 host 换 model →
+    unverified；不传 host/model（读不到 base_url 或 model 的老记录）→ unverified。
+    回落一律是 unverified，**不是** unsupported："这条没核实到"≠"这个模型不会思考"。
+    """
+    scope = [{"host": "1.1.1.1", "model": "m"}]          # _old() 那条记录的 hostname + model
     monkeypatch.setitem(providers.THINKING_PROFILES, "fake_verified",
-                        {"label": "x", "verified": True})
+                        {"label": "x", "verified": True, "verified_for": scope})
     monkeypatch.setitem(providers.THINKING_PROFILES, "fake_unverified",
-                        {"label": "y", "verified": False})
+                        {"label": "y", "verified": False, "verified_for": scope})
     for profile, expected in (("fake_verified", "verified"),
                               ("fake_unverified", "unverified"),
                               ("nope", "unverified"),
@@ -358,9 +367,102 @@ def test_verified_requires_the_whitelist_entry_to_say_so(tmp_path, monkeypatch):
         assert s.catalog()[0]["thinking_status"] == expected, profile
         assert ProviderStore._public(s.get("p1"))["thinking_status"] == expected, profile
 
-    # supports=False 压过 profile：已核实的配方摆在关掉思考的模型上也是 unsupported
+    # 同 model 换 host：核实过的端点换掉了，结论必须跟着退回未核实
+    s = _store(tmp_path, [_old(base_url="https://2.2.2.2/v1", supports_thinking=True,
+                               thinking_profile="fake_verified")])
+    assert s.catalog()[0]["thinking_status"] == "unverified"
+
+    # 同 host 换 model：换一个 model 就是没核实过，不许吃邻居的核实结论
+    s = _store(tmp_path, [_old(model="other-model", supports_thinking=True,
+                               thinking_profile="fake_verified")])
+    assert s.catalog()[0]["thinking_status"] == "unverified"
+    assert ProviderStore._public(s.get("p1"))["thinking_status"] == "unverified"
+
+    # 缺 host 或缺 model（老记录/手工写坏的记录）：调用方没把坐标传齐 ⇒ 降级，不亮
+    for broken in (_old(base_url="", supports_thinking=True, thinking_profile="fake_verified"),
+                   _old(model="", supports_thinking=True, thinking_profile="fake_verified"),
+                   _old(base_url="1.1.1.1/v1", supports_thinking=True,
+                        thinking_profile="fake_verified")):
+        s = _store(tmp_path, [broken])
+        assert s.catalog()[0]["thinking_status"] == "unverified", broken["base_url"]
+
+    # supports=False 压过记录作用域：全命中也是 unsupported
     s2 = _store(tmp_path, [_old(supports_thinking=False, thinking_profile="fake_verified")])
     assert s2.catalog()[0]["thinking_status"] == "unsupported"
+
+
+def test_status_read_path_derives_the_host_from_the_records_base_url(tmp_path, monkeypatch):
+    """调用方算 host 的口径必须是 `urlparse(base_url).hostname`，不是整条 URL。
+
+    记录里那份是 `rstrip("/")` 过的（`https://api.deepseek.com/v1`），登记表里写的也
+    该是 hostname。整串比对的话，一次换 scheme（http↔https）或换 path 就把已核实的
+    结论洗成未核实——反过来如果拿 `endswith`/子串去宽容，换 host 也能亮。两侧都钉。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "scope_verified",
+                        {"label": "x", "verified": True,
+                         "verified_for": [{"host": "api.deepseek.com", "model": "deepseek-flash"}]})
+    record = dict(_old(base_url="https://api.deepseek.com/v1", model="deepseek-flash",
+                       supports_thinking=True, thinking_profile="scope_verified"))
+    s = _store(tmp_path, [record])
+    assert s.catalog()[0]["thinking_status"] == "verified"
+
+    # 换 scheme 与 path 不作废（比的是 hostname）
+    s2 = _store(tmp_path, [dict(record, base_url="http://api.deepseek.com/chat/completions")])
+    assert s2.catalog()[0]["thinking_status"] == "verified"
+
+    # 换 hostname 立刻作废，哪怕尾巴上带着原来那串
+    s3 = _store(tmp_path, [dict(record, base_url="https://evil.example/api.deepseek.com/v1")])
+    assert s3.catalog()[0]["thinking_status"] == "unverified"
+
+
+def test_level_count_is_the_wire_value_count_and_only_judges_brought_levels(tmp_path, monkeypatch):
+    """M2：条目声明了 `level_count` 时，请求带来的 `thinking_levels` 条数必须等于它。
+
+    两侧都跑（防这条判据恒真）：布尔条目（g2 实测"三档同一个出网值"那一形）填 3 档被拒、
+    填 1 档通过；三档条目填 1 档同样被拒（不是"只许少不许多"）；`none` 不声明
+    `level_count` ⇒ 这一条不判，3 档照存。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": False, "level_count": 1})
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_three",
+                        {"label": "三档", "verified": False, "level_count": 3})
+    s = _store(tmp_path, [_old()])
+
+    with pytest.raises(ProviderError,
+                       match="思考档位数量必须与该配方出网的不同取值数一致（应为 1 个）"):
+        s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_bool",
+                  "thinking_levels": ["一", "二", "三"]})
+
+    saved = s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_bool",
+                      "thinking_levels": ["一"], "thinking_default": "一"})
+    assert saved["thinking_levels"] == ["一"]
+
+    with pytest.raises(ProviderError, match="应为 3 个"):
+        s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_three",
+                  "thinking_levels": ["一", "二"]})
+
+    none_case = s.upsert({**_old(), "supports_thinking": True,
+                          "thinking_profile": DEFAULT_THINKING_PROFILE,
+                          "thinking_levels": ["一", "二", "三"]})
+    assert none_case["thinking_levels"] == ["一", "二", "三"], "none 不声明档位上限，这条判据不许碰它"
+
+
+def test_inherited_levels_never_hit_the_level_count_gate(tmp_path, monkeypatch):
+    """M2 不许破 Task 8 裁决 A：库里那份档位是**继承**来的，一次改名不许被拒收。
+
+    库里躺着一份 `thinking_profile=synth_bool, thinking_levels=4 档` 的畸形老记录
+    （档位条数与出网值数都不符），一次只带 label 的 PUT 必须存得下去——严格判据只打在
+    请求真正带来的那一格上，继承来的做宽容归一（与 `思考档位最多 3 个` 同一口径）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": False, "level_count": 1})
+    legacy = _old(supports_thinking=True, thinking_profile="synth_bool",
+                  thinking_levels=["一", "二", "三", "四"], thinking_default="四")
+    s = _store(tmp_path, [legacy])
+    renamed = s.upsert({**_old(), "label": "改个名"})
+    assert renamed["label"] == "改个名"
+    assert renamed["thinking_profile"] == "synth_bool"
+    _assert_self_consistent(renamed)
 
 
 # ---------- Minor：同一把尺子量两侧 + 读侧候选化 + 单源 + 共享面 ----------

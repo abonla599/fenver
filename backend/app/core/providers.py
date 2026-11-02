@@ -20,6 +20,7 @@ import httpx
 from openai import OpenAI
 
 from app.core import credits, net_guard
+from app.core import thinking_profiles as _thinking_profiles
 from app.core.atomic_write import write_json_atomic
 from app.core.paths import data_root, load_project_env
 from app.core.pinned_http import install_pins
@@ -292,14 +293,21 @@ def normalize_max_context_k(value) -> int:
     return max(1, min(MAX_CONTEXT_K_CEIL, k))
 
 
-# ---------- 思考能力（v0.39.1 Task 8）----------
-# "这个模型能不能思考"和"选了某档之后到底往上游发什么参数"是两件事。本版只解决
-# 第一件：P0b 的白名单里只有 `none`（不带任何思考参数），所以 supports=True 的条目
-# 状态只能是 unverified——界面据此显示"支持思考（参数未核实）"，而不是假装已配好。
-# P0c（Task 12）核实完真实配方后才往 THINKING_PROFILES 里加已验证的 profile，
-# _thinking_status 的 verified 一支届时才可达。
-DEFAULT_THINKING_PROFILE = "none"
-THINKING_PROFILES = {"none": {"label": "不使用思考", "verified": True}}
+# ---------- 思考能力（v0.39.1 Task 8；登记表自 Task 12A 起住在 thinking_profiles）----------
+# "这个模型能不能思考"和"选了某档之后到底往上游发什么参数"是两件事。本版仍然只有
+# `none`（不带任何思考参数）：7 次真实探针调用之后没有任何配方够格进登记表，所以
+# supports=True 的条目状态只能到 unverified——界面据此显示"支持思考（参数未核实）"。
+# Task 12A 交付的是**登记机制**：`verified` 从此绑在「配方 + 这条记录的 host+model」
+# 两格上（`_thinking_status`），`level_count` 从此约束档位条数（`_thinking_fields`），
+# 出网参数只有一个写者（`thinking_profiles.build_thinking_kwargs`）。以后往表里加条目
+# 的人不需要改这里的判据——判据已经在，漏写 `verified_for` 只会得到 unverified。
+DEFAULT_THINKING_PROFILE = _thinking_profiles.DEFAULT_PROFILE
+# **必须是别名，不是拷贝**：既有测试是就地 `monkeypatch.setitem(providers.THINKING_PROFILES, …)`
+# 塞 synthetic 条目的（test_v0391_provider_capabilities.py:318/:349/:351）。抄一份就变成
+# "测试改的那份没人读、判据读的那份没人改"，那几条锁当场失牙变成恒绿。
+# 正面锁在 test_v0391_thinking_mapping.py §12：`providers.THINKING_PROFILES is
+# thinking_profiles.PROFILES`。
+THINKING_PROFILES = _thinking_profiles.PROFILES
 MAX_THINKING_LEVELS = 3
 THINKING_LEVEL_LABEL_MAX = 16
 
@@ -336,23 +344,73 @@ def _clean_levels(value) -> list:
     return out
 
 
-def _thinking_status(supports: bool, profile: str) -> str:
-    """给前端的三态结论：不支持 / 支持但参数未核实 / 支持且参数已核实。
+def _record_host(record: dict) -> str:
+    """这条记录的 hostname（小写），登记表比对用的那一个坐标。
 
-    不重新判 supports 的来源，只把"supports + profile"这两格合成一句人话——
-    合成口径只在这一个函数里，两个展示面共用，别各写一份。
+    记录里存的是 `base_url.rstrip("/")` 过的整条 URL（例如
+    `https://api.deepseek.com/v1`），而 `verified_for` 里写的是**主机名**：换 scheme
+    或换 path 不该让一次核实作废，换 host 或换 model 才该。反过来用整串比对或
+    子串匹配都不行——前者会把已核实的事实洗掉，后者会让 `https://evil/api.deepseek.com`
+    这种地址亮起来。取不到主机名（老记录里根本不是 URL）返回空串，判据那边据此降级。
+    """
+    return urlparse(str((record or {}).get("base_url") or "")).hostname or ""
 
-    "核实"这个结论只认白名单那一格自己说的 `verified`，别把"profile 不是 none"
+
+def _verified_scope_hit(pairs, host, model) -> bool:
+    """`verified_for` 命中判据：host 与 model **同时**在场且成对命中。
+
+    三条硬规矩（M1，逐条有反例锁）：
+    - 缺参就降级：`host` 或 `model` 为空 ⇒ 一律不命中。忘记传参的那一方必须输得安全，
+      不能输成"亮"。
+    - 空清单 / 缺这一格 / 不是清单 ⇒ 不命中。**"空清单"绝不等于"不限"**，那正是
+      "登记一条、全站变绿"那句假话的入口。
+    - host 小写比对（`urlparse().hostname` 本就小写，登记表里手写大小写混着不该作废）；
+      model 逐字比对（model 名在真调用里是大小写敏感的标识符，不做模糊化）。
+    """
+    h = str(host or "").strip().lower()
+    m = str(model or "").strip()
+    if not h or not m:
+        return False
+    for pair in (pairs or []):
+        if not isinstance(pair, dict):
+            continue
+        ph = str(pair.get("host") or "").strip().lower()
+        pm = str(pair.get("model") or "").strip()
+        if ph and pm and ph == h and pm == m:
+            return True
+    return False
+
+
+def _thinking_status(supports: bool, profile: str, host=None, model=None) -> str:
+    """给前端的三态结论：不支持 / 支持但参数未核实 / 支持且参数**在这条记录上**已核实。
+
+    不重新判 supports 的来源，只把"supports + profile + 这条记录的 host/model"合成
+    一句人话——合成口径只在这一个函数里，两个展示面共用，别各写一份。
+
+    `verified` 一支的成立条件**四者全齐**（M1，缺任何一个都回落 unverified）：
+    ① `supports` 为真；② `profile` 不是默认配方；③ 登记表里有这一条且 `verified` 为真；
+    ④ `entry["verified_for"]` 里存在一项 `host` 与 `model` 同时命中**这条记录**。
+    第 ④ 格是本版新增的全部理由：`thinking_profile` 是每条记录各有一格的字段，
+    只绑配方名的话，将来任何一条 `verified` 条目一登记，**所有**填了该配方的记录
+    都会一起亮——包括探针从没打过的那个端点、那个 model。探针自陈的射程是
+    「单条 provider 记录 + 它当时的 base_url + 它当时的 model」，判据必须和它一样窄。
+
+    "核实"这个结论只认登记表那一格自己说的 `verified`，别把"profile 不是 none"
     当成核实：盘上/历史里出现过一个谁都没验过的 profile 时，界面会说谎。
-    `DEFAULT_THINKING_PROFILE` 必须先单独排除——`none` 在白名单里也标了
-    verified: True（"不带参数"这件事本身是确定的），但它不等于"思考参数已核实"。
+    `DEFAULT_THINKING_PROFILE` 必须先单独排除——`none` 在表里也标了 verified: True
+    （"不带参数"这件事本身是确定的），但它不等于"思考参数已核实"，它也没有档位可言。
+
+    回落一律是 unverified，**不是** unsupported："这条记录没被核实到"与"这个模型不会
+    思考"是两件事，别把前者演成后者。
     """
     if not supports:
         return "unsupported"
     if profile == DEFAULT_THINKING_PROFILE:
         return "unverified"
     entry = THINKING_PROFILES.get(profile)
-    if entry is not None and entry.get("verified"):
+    if entry is None or not entry.get("verified"):
+        return "unverified"
+    if _verified_scope_hit(entry.get("verified_for"), host, model):
         return "verified"
     return "unverified"
 
@@ -371,9 +429,14 @@ def _thinking_view(p: dict) -> dict:
         "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
         # default 与 levels 用同一把尺子量（同一个 20 字串不该当档位收、当默认档拒）
         "thinking_default": str(p.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX],
+        # 记录作用域（M1）：核实结论要绑到"这条记录的 hostname + 这个 model"上，两个坐标
+        # 由**调用方**算好传进去（host 不在记录的独立字段上，只在 base_url 里）。
+        # 对外视图的键一个字都不许多给：catalog 与 _public 的键集有锁
+        # （test_v0391_native_cockpit.py / test_v0391_web_cockpit_ui.py）。
         "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
                                             str(p.get("thinking_profile")
-                                                or DEFAULT_THINKING_PROFILE)),
+                                                or DEFAULT_THINKING_PROFILE),
+                                            _record_host(p), str(p.get("model") or "")),
     }
     if not view["supports_thinking"]:
         # 库里自洽的那一份必然空着；读到"关着思考却带着候选"说明是手工写坏的，
@@ -396,7 +459,8 @@ def _thinking_fields(record: dict, requested=None) -> dict:
     统统存不下去。宽容也不等于丢掉不变式——归一之后的结果照样自洽，库里存的
     那一份永远合法。
 
-    判序是刻意的：先 `profile` 白名单、再档位条数、最后 supports 与参数的组合。
+    判序是刻意的：先 `profile` 白名单、再档位条数（先是通用的「最多 3 个」，后是这一
+    配方自己声明的 `level_count` 相等判据）、最后 supports 与参数的组合。
     一个不认识的值摆在面前时，第一句该说的是"这个值我不认"，而不是"你不支持思考"。
 
     关掉思考（显式 `supports_thinking=False`）时档位与默认**清空**而不是报错：
@@ -416,6 +480,17 @@ def _thinking_fields(record: dict, requested=None) -> dict:
         if "thinking_levels" in brought:
             raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
         levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
+    # 档位条数必须等于这一配方**出网的不同取值数**（M2）。判据只对"请求真正带来的
+    # 那一格"生效，与上面 思考档位最多 3 个 同一口径：继承来的畸形值永远不许抛
+    # （Task 8 裁决 A 的遗产，见 `test_malformed_legacy_record_accepts_three_writes`）。
+    # 为什么是**拒收**而不是截断：悄悄砍掉第 3 档等于把"没配上"演成"配上了"——
+    # 布尔配方三档同一个出网值（g2 实测）时，界面给三个档而线上只有一个值，
+    # 用户点第 3 档什么也没变。这里选择响亮地拒绝，让它去改成 1 档。
+    # `level_count is None`（含 `none`）不判这一条：今天不可达，但两侧都有锁
+    # （synthetic 布尔条目填 3 档被拒、填 1 档通过），不许它恒真。
+    level_count = (THINKING_PROFILES.get(profile) or {}).get("level_count")
+    if level_count is not None and "thinking_levels" in brought and len(levels) != level_count:
+        raise ProviderError(f"思考档位数量必须与该配方出网的不同取值数一致（应为 {level_count} 个）")
     default = str(record.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX]
     if not supports:
         levels, default = [], ""
