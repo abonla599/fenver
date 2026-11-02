@@ -1299,12 +1299,38 @@ try {
     # Warn, never silently continue: if something still listens on the port it is a
     # live handle on the directory we are about to move, and we would rather learn
     # it HERE than as a half-completed rename.
-    $stillListening = @(netstat -ano | Select-String -Pattern (':{0}\s' -f $Port) | Select-String -Pattern 'LISTENING')
-    if ($stillListening.Count -gt 0) {
-        Write-Output ('WARN port-' + $Port + '-still-listening count=' + $stillListening.Count)
-        $stillListening | ForEach-Object { Write-Output ('  ' + $_.Line.Trim()) }
-    } else {
-        Write-Output ('PORT state=clear port=' + $Port)
+    #
+    # WHY THIS PROBE IS WRAPPED, AND WHY ITS OWN FAILURE MUST NOT ABORT (2026-11-02):
+    # everything above says WARN - the branch below prints a token and the run goes
+    # on. The probe itself used to sit bare inside the step 2/3 try, so a probe that
+    # could not even START threw into the catch and landed on Stop-AfterFailure
+    # 'stop' - AFTER Stop-Process had already taken production down. That is the
+    # worst pairing available: a diagnostic that gates a swap, failing on the one
+    # side of the rename where the package is still fine but the service is not.
+    # Measured case: the invoking shell host had PATHEXT trimmed to '.CPL', so the
+    # bare name `netstat` raised CommandNotFoundException ('not recognized as the
+    # name of a cmdlet'), and the absolute path was then treated as a DOCUMENT to
+    # ShellExecute ('cannot run a document in the middle of a pipeline'). Same exe,
+    # same machine, answers fine from Git Bash. An environment fault has to degrade
+    # to a token here, not to a stopped service.
+    # Second, quieter reason: even with netstat working, this host's view can omit
+    # the listener (observed: 8000 listening to curl and to Git Bash's netstat, yet
+    # absent from this host's table). So 'clear' is not proof - it is the absence of
+    # a warning. Nothing downstream may be built on it.
+    # The exception is collapsed to one physical line per #48.
+    $portProbe = $null
+    try {
+        $portProbe = @(netstat -ano | Select-String -Pattern (':{0}\s' -f $Port) | Select-String -Pattern 'LISTENING')
+    } catch {
+        Write-Output ('WARN port-check-unavailable port=' + $Port + ' verdict=unproven error=' + (($_.Exception.Message -split "`r?`n") -join ' '))
+    }
+    if ($null -ne $portProbe) {
+        if ($portProbe.Count -gt 0) {
+            Write-Output ('WARN port-' + $Port + '-still-listening count=' + $portProbe.Count)
+            $portProbe | ForEach-Object { Write-Output ('  ' + $_.Line.Trim()) }
+        } else {
+            Write-Output ('PORT state=clear port=' + $Port)
+        }
     }
     Start-Sleep -Seconds 1
 } catch {
