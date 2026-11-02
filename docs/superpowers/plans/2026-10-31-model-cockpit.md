@@ -1422,9 +1422,27 @@ Ask exactly: “是否授权对 provider `<id>` 发起一次 `max_tokens=8` 的�
 
 - [ ] **Step 4 (after authorization): Run the probe for each candidate**
 
+> 这一段是修复轮 1（M-6）重写的。旧示例少 `--data-dir`、`--grant`、`--ledger`、`--attempt`
+> 四样，还拿 `openai_reasoning_effort` 举例——它不在两轮授权的任何 `allowed_shapes` 里。
+> 照抄旧示例的结果是 `rc=2` 响亮拒发（**不会烧钱**），但会被读成"探针坏了"。
+> live 模式现在有四样必填，缺一即 rc=2、零出站：`--data-dir`、`--grant <轮次 id>`、
+> `--ledger`（basename 必须等于那一轮表里的 `ledger_name`，且三次调用同一路径）、
+> `--attempt`（"我以为这是这一轮的第几格"，与账本序号对不上就拒发）。
+
 ```bash
-"$PY" tools/probe_thinking_profile.py --provider <id> --profile openai_reasoning_effort --level <label>
-"$PY" tools/probe_thinking_profile.py --provider <id> --profile dashscope_enable_thinking --level <label>
+# 先 dry-run 绿（假 client，零网络、不记账），才许真发。
+"$PY" tools/probe_thinking_profile.py --dry-run --data-dir <现网 data 目录> \
+    --provider deepseek-chat --profile deepseek_thinking_disabled --level 均衡 \
+    --grant g2-20261102 --ledger <仓库外固定目录>/call-ledger-g2-20261102.jsonl --attempt 1
+
+# §R5 预登记的三格（OFF 方向）；--ledger 三次同一路径，--attempt 依次 1 / 2 / 3。
+"$PY" tools/probe_thinking_profile.py --data-dir <现网 data 目录> \
+    --provider deepseek-chat --profile deepseek_thinking_disabled --level 均衡 \
+    --grant g2-20261102 --ledger <仓库外固定目录>/call-ledger-g2-20261102.jsonl --attempt 1
+"$PY" tools/probe_thinking_profile.py --data-dir <现网 data 目录> \
+    --provider p_55a83a43 --profile dashscope_enable_thinking_off --level 均衡 \
+    --grant g2-20261102 --ledger <仓库外固定目录>/call-ledger-g2-20261102.jsonl --attempt 2
+# 第 3 格按 §R5 三选一（同轮 ON 对照 / 或 none 基线），仍必须带 --attempt 3 与同一份 --ledger。
 ```
 Record the safe JSON outputs in the plan execution log. A rejected/unknown parameter is **not** 「不支持」; it stays unverified.
 
