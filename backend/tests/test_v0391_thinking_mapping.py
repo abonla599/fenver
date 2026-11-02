@@ -31,6 +31,15 @@ Task 11b（第二轮授权机制化）新增 §10，并按 §R1 改写 §8 那�
 判据改成方向感知——OFF 方向"痕迹消失"是要的证据，旧分类器在那里给的是**反结论**
 （§10 那两格心脏用例演的就是这件事）。本节**零出站**：客户端一律是注入的替身或
 `--dry-run`，三条 paid 调用由主控人过审后手工执行。
+
+修复轮 2（审查员 round 2 的阻塞项 C-1）新增 §11：那条"另一棵 checkout 就拒"的闸按
+现在的接法把本工具唯一的用途（**读**现网那条 provider 记录）一起禁掉了，三次调用一次
+都发不出去。F1 把它收到真正要挡的动作上——预检里针对 `--data-dir` 的那一次调用删掉，
+针对 `--ledger` 的那一次保留。所以 §11 的重点不是"新闸有多严"而是**改窄之后牙还在**：
+读那一面有新的正面锁（§3.1），写的那三面（账本进别树 / 账本进只读树 / 隔离目录进只读树）
+逐条还咬，只读尺子与单例名单在新放行面上照样生效，外加一行"变异 #7 就是让 §3.2 变红的"。
+本节同样**零出站**，且"另一棵 checkout"一律是 tmp_path 下现造的假树——主工作树那份
+`data/` 连读都不必读。
 """
 import ast
 import hashlib
@@ -38,6 +47,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -1170,45 +1180,38 @@ def test_transport_is_only_stamped_when_the_call_is_actually_attempted(tmp_path,
     assert dry["scope"]["simulated"] is True, "同一行必须有一格显式的模拟标记，而不是只靠 live"
 
 
-def test_data_dir_of_another_checkout_is_refused_without_being_read(tmp_path, monkeypatch):
-    """Minor：`inside_dir(target, REPO_ROOT)` 只挡"发起这一跑的那棵树"——从工作树跑、
-    `--data-dir` 指主工作树的 `data/`（AGENTS.md §1 的受保护运行期资产）这个形状原本靠
-    的是另一格判据。现在把它显式列入禁止名单：宿主目录里有 `.git` 而宿主又不是本工具
-    这棵树 ⇒ 拒。**只加判据，绝不去读那份目录**（这里连 stat 都只打在宿主和它的 `.git` 上）。"""
+def test_the_other_checkout_predicate_judges_writes_not_reads(tmp_path, monkeypatch):
+    """修复轮 2（C-1/F1）把这条判据的**口径**改了：它现在判的是「这个路径会不会被本工具
+    写」，不再是「它属于哪棵树」。`--data-dir`（只读面）不再走它，`--ledger`（每发一次就
+    写一笔的那一面）照旧走它。**函数本身保留**，所以这里锁的是它的返回值仍然诚实：
+    另一棵 checkout 的顶层 `data/`、以及 N4 那棵深层子树（`<other>/data/swap-snapshots/
+    snap-1/data`，同样一份 providers.json + provider_keys.json）都必须报 True——判据只看
+    各级祖先目录有没有 `.git`，沿**整条父链**上溯，只查一层等于换个子目录就绕开。
+    运行形状那一半（读放行 / 写还咬）在本文件 §11。"""
     other = tmp_path / "checkout"
     (other / ".git").mkdir(parents=True)
     live = other / "data"
     live.mkdir()
-    calls = []
-
-    def spy_isolate(isolation_dir=None):
-        calls.append(isolation_dir)
-        raise AssertionError("--data-dir 属于另一棵 checkout 时不许开始隔离")
-
-    monkeypatch.setattr(probe, "isolate_runtime_env", spy_isolate)
-    config = probe.make_config(["--data-dir", str(live), "--provider", "p_probe_deep",
-                                "--profile", "none", "--dry-run",
-                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
-                                "--isolation-dir", str(tmp_path / "iso")])
-    build, seen = _never()
-    payload, rc, _ = probe.run_probe(config, client_factory=build)
-    assert rc == probe.RC_BLOCKED and seen == [] and calls == []
-    assert any("checkout" in note for note in payload["notes"]), payload["notes"]
-    # 修复轮 2（N4）：原判据只看 `target.parent` 一层——`<other>/data` 拒了，
-    # `<other>/data/swap-snapshots/snap-1/data`（同样一份 providers.json + provider_keys.json，
-    # 而本机 `data\swap-snapshots` 真实存在）却**放行**并一路读到 credential_fp。
-    # 现在沿父链上溯找 `.git`，深树那一格必须同样被拒。
     deep = live / "swap-snapshots" / "snap-1" / "data"
     deep.mkdir(parents=True)
     (deep / "providers.json").write_text("[]", encoding="utf-8")
     (deep / "provider_keys.json").write_text("{}", encoding="utf-8")
     assert probe.data_dir_belongs_to_another_checkout(deep) is True, "只查一层 = 换个子目录就绕开"
-    # （整条链那一跑单独成格见 §9 `test_another_checkout_deep_data_dir_run_is_refused`：
-    #  本格挂着 spy_isolate，deep 那一跑会被它掩盖，判不出新旧差别。）
+    assert probe.data_dir_belongs_to_another_checkout(live) is True
     # 负控：本工具自己那棵树里的 data/、以及宿主没有 .git 的夹具目录都必须放行
     assert probe.data_dir_belongs_to_another_checkout(REPO_ROOT / "data") is False
     assert probe.data_dir_belongs_to_another_checkout(_write_config(tmp_path)) is False
+
+    def _no_open(*a, **kw):
+        raise AssertionError("这条判据只许对祖先目录做 exists()，不许打开那棵树里的任何文件")
+
+    # 「只加判据，绝不去读那份目录」这一句从散文变成锁：判据若在树上开任何一个文件句柄，
+    # 下面四调用立刻红（它只做 `.exists()` 与 `.parent`，走的是 os.stat，不碰 Path.open）。
+    monkeypatch.setattr(Path, "open", _no_open)
+    assert probe.data_dir_belongs_to_another_checkout(deep) is True
     assert probe.data_dir_belongs_to_another_checkout(live) is True
+    assert probe.data_dir_belongs_to_another_checkout(REPO_ROOT / "data") is False
+    assert probe.data_dir_belongs_to_another_checkout(tmp_path / "checkout" / "data") is True
 
 
 # ------------- 9. 修复轮 2：N1–N4 + concerns.1 残余 + concerns.3 软硬拆分 ----------
@@ -1328,10 +1331,13 @@ def test_ledger_of_another_checkout_is_refused(tmp_path):
     assert any("checkout" in n for n in payload["notes"]), payload["notes"]
 
 
-def test_another_checkout_deep_data_dir_run_is_refused(tmp_path):
-    """N4 的整链那一跑：`<other>/data/swap-snapshots/snap-1/data` 放着同样一份
-    providers.json + provider_keys.json——旧判据只查 target.parent 一层，这一形状
-    **放行**并一路读到 credential_fp。新判据沿父链上溯找 .git ⇒ 预检就拒。"""
+def test_another_checkout_deep_tree_is_readable_but_still_not_writable(tmp_path):
+    """N4 的两半在修复轮 2（C-1/F1）之后**分成两件事**，不再是"整棵树一律拒"：
+    ① `<other>/data/swap-snapshots/snap-1/data` 这份配置**可以读**——F1 删掉的正是
+       预检里针对 `--data-dir` 的那一次判据，而读现网记录是本工具唯一的用途；
+    ② 往这棵**别的 checkout** 里**写**（`--ledger`）仍然 rc=2，N4"沿整条父链上溯找
+       `.git`"那一半牙还在——深树正是旧判据（只看 `target.parent` 一层）放行的形状。
+    零出站：① 走 `--dry-run`（脚本自带的假 client），② 撞闸用的工厂是被碰就抛的哨兵。"""
     other = tmp_path / "other-checkout"
     (other / ".git").mkdir(parents=True)
     deep = other / "data" / "swap-snapshots" / "snap-1" / "data"
@@ -1339,16 +1345,32 @@ def test_another_checkout_deep_data_dir_run_is_refused(tmp_path):
     (deep / "providers.json").write_text(json.dumps(
         [{"id": "p_probe_deep", "base_url": FAKE_HOST, "model": "probe-flash"}]), encoding="utf-8")
     (deep / "provider_keys.json").write_text(json.dumps({"p_probe_deep": SHAPEY}), encoding="utf-8")
+    before = _tree_sha_listing(deep)
+    # ① 读：预检放行，且 `credential_fp` 必须在场——不然"放行"只是没炸，不是办成了用途。
+    #     这一跑**不注入**任何注入口，走的就是 CLI 那条 dry-run（`--fake quiet`），
+    #     所以 `transport` 是那一条 `fake_client`；注入替身那一格在 §3.1 正面锁里演。
+    dry, rc, _ = probe.run_probe(probe.make_config(
+        ["--data-dir", str(deep), "--provider", "p_probe_deep", "--profile", "none",
+         "--dry-run", "--fake", "quiet", "--isolation-dir", str(tmp_path / "iso")]))
+    assert rc == probe.RC_VERIFIED and dry["transport"] == "fake_client"
+    assert dry["credential_fp"], "读不到那条记录 = 这个工具没有用途（审查员 C-1 的形状）"
+    assert not any("checkout" in n for n in dry["notes"]), dry["notes"]
+    assert _tree_sha_listing(deep) == before, "读这一趟不许动那棵树一个字节"
+    # ② 写：同一棵别的 checkout 里放账本 ⇒ 仍然拒，且一个字节都不许多。
+    #    落点刻意选在 `--data-dir`（那棵深树）**之外**、`other/.git` 父链**之内**——
+    #    于是三条 `--ledger` 判据里只剩 N4 那条"沿整条父链上溯找 .git"在说话。
+    ledger = other / "data" / "swap-snapshots" / probe.AUTHORIZED_GRANTS[GRANT2]["ledger_name"]
+    other_before = _tree_sha_listing(other)
     build, seen = _never()
-    # 夹具 `_argv` 不接受改 --data-dir，所以这格走 make_config 直给命令行。
-    config = probe.make_config(["--data-dir", str(deep), "--provider", "p_probe_deep",
-                                "--profile", "none", "--dry-run",
-                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
-                                "--isolation-dir", str(tmp_path / "iso")])
-    payload, rc, _ = probe.run_probe(config, client_factory=build)
-    assert rc == probe.RC_BLOCKED and seen == []
-    assert payload["credential_fp"] is None, "拒了就不该已经把另一棵树里密钥的指纹读进内存"
-    assert any("checkout" in n for n in payload["notes"]), payload["notes"]
+    blocked_payload, rc2, _ = probe.run_probe(probe.make_config(
+        ["--data-dir", str(deep), "--provider", "p_probe_deep", "--profile", "none",
+         "--grant", GRANT2, "--attempt", "1", "--ledger", str(ledger),
+         "--isolation-dir", str(tmp_path / "iso")]), client_factory=build)
+    assert rc2 == probe.RC_BLOCKED and seen == [] and not ledger.exists()
+    assert blocked_payload["transport"] is None and blocked_payload["call_slot"] is None
+    assert any("checkout" in n for n in blocked_payload["notes"]), blocked_payload["notes"]
+    assert _tree_sha_listing(deep) == before
+    assert _tree_sha_listing(other) == other_before, "拒发那一支不许在别人的树里留一个字节"
 
 
 def test_fresh_ledger_run_declares_the_gate_counts_per_file(tmp_path):
@@ -1864,3 +1886,235 @@ def test_the_candidate_table_stops_claiming_a_flat_four_calls():
     doc = thinking_profiles.__doc__ or ""
     assert "本单授权 4 次" not in doc
     assert "授权轮次" in doc, "要说清授权是分批的，并指向探针里那张表"
+
+
+# ------- 11. 修复轮 2（C-1/F1）：闸收到「会不会写」上——读放行、写还咬 --------------
+#
+# 审查员 round 2 唯一的阻塞项：BASE 上 `--data-dir` 指主工作树那份现网 `data/` 会被
+# 预检里针对 `--data-dir` 的那一次 `data_dir_belongs_to_another_checkout()` 直接 rc=2 拒掉，
+# 而**读那一条 provider 记录是本工具唯一的用途**——三次授权一次都发不出去。
+# F1 只删那一次调用，保留 `--ledger` 那一次；本节是"改窄之后牙还在"的全部证据：
+#   §3.1 新的放行面（正面锁，BASE 上必红 = 阻塞项的证据）
+#   §3.2 账本写进另一棵 checkout 还咬（变异 #7 就是让这一格红的那枚）
+#   §3.3 账本写进 `--data-dir` 里面还咬
+#   §3.4 隔离目录与 `--data-dir` 重叠还咬，且顺序判据不许改成事后判
+#   §3.5 只读尺子在新的放行面上照样硬判（多一个路径 ⇒ 结论作废）
+#   §3.6 `assert_store_quarantined` 吃的名单里 `data_dir` 还在
+#   文案 F2：模块 docstring 那句"不许对另一个 checkout 运行"改完就是假话，必须改口径，
+#        并且它引用的三个行号必须真的指着那三个函数。
+# 全部**零出站**：客户端一律是注入的替身（`transport` 必须等于 `test_double`）或
+# `--dry-run`（`fake_client`）。"另一棵 checkout"一律是 tmp_path 下现造的假树
+# （`.git` 目录 + 合成 key + RFC 2606 的 `probe.invalid`），绝不把主工作树那份 `data/`
+# 交给探针——那一棵是现网资产，本单只读它都不必。
+
+def _fake_checkout(tmp_path: Path, *, provider_id=DEEPSEEK, key=SHAPEY) -> Path:
+    """在仓库外造一棵"**别的 checkout**"：`.git` 目录 + 一份长得像现网的 `data/`。
+    形状是真的（两个文件名、列表结构、`base_url`/`model` 齐），值是合成的。"""
+    other = tmp_path / "other-checkout"
+    (other / ".git").mkdir(parents=True, exist_ok=True)
+    data_dir = other / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    record = {"id": provider_id, "label": "replica", "base_url": FAKE_HOST,
+              "model": "probe-flash", "max_context_k": 64, "supports_vision": False}
+    (data_dir / "providers.json").write_text(json.dumps([record]), encoding="utf-8")
+    (data_dir / "provider_keys.json").write_text(json.dumps({provider_id: key}), encoding="utf-8")
+    return data_dir
+
+
+def _replica_argv(tmp_path: Path, data_dir, *extra: str, grant=GRANT2, ledger=None,
+                  isolation=None, attempt="1") -> list:
+    """指向那棵假树的 live 命令行。夹具 `_argv` 把 `--data-dir` 写死成它自己那份
+    `live-data`、改不了，所以这一节直接给 argv（与 §9 那两格同样的做法）。
+    账本与隔离目录默认落在 `tmp_path/iso`——**所有 checkout 之外**，父链上没有 `.git`，
+    于是这一跑只剩"被测的那一条判据"在说话。"""
+    argv = ["--data-dir", str(data_dir)]
+    if grant:
+        argv += ["--grant", grant]
+    argv += ["--ledger", str(ledger or _ledger(tmp_path / "iso")),
+             "--isolation-dir", str(isolation or tmp_path / "iso")]
+    if "--dry-run" not in extra and attempt is not None:
+        argv += ["--attempt", str(attempt)]
+    return argv + list(extra)
+
+
+def test_reading_the_live_record_in_another_checkout_is_allowed_and_booked(tmp_path):
+    """§3.1 正面锁（**BASE 上这一格必红**）：`--data-dir` 指另一棵 checkout ⇒ 预检放行、
+    记账成功、`transport == "test_double"`（注入替身，零出站），而那棵树逐字节没动。
+    这就是审查员 C-1 说的那件事：不放开这一格，这三次调用一次都发不出去。"""
+    data_dir = _fake_checkout(tmp_path)
+    before = _tree_sha_listing(data_dir)
+    ledger = _ledger(tmp_path / "iso")
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK,
+        "--profile", "deepseek_thinking_disabled", "--level", "均衡")),
+        client_factory=lambda r: probe.FakeClient("quiet"))
+    assert rc == probe.RC_VERIFIED, payload["notes"]
+    assert payload["transport"] == "test_double", "live 形状一律注入替身，本单零出站"
+    assert payload["call_slot"] == 1 and len(probe.read_ledger(ledger)) == 1, "记账必须成功"
+    assert payload["credential_fp"], "读不到那条记录 ⇒ 放行只是没炸，不是办成了用途"
+    assert payload["verdict"] == "switch_off_observed" and payload["isolation_ok"] is True
+    assert not any("checkout" in n for n in payload["notes"]), payload["notes"]
+    assert _tree_sha_listing(data_dir) == before, "读这一趟不许动那棵树一个字节"
+    # 负控：放行不是"什么都放行"——同一条命令行少了 `--grant` 仍然 rc=2、账本不涨。
+    build, seen = _never()
+    refused, rc2, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK,
+        "--profile", "deepseek_thinking_disabled", "--level", "均衡",
+        grant=None)), client_factory=build)
+    assert rc2 == probe.RC_BLOCKED and seen == [] and refused["call_slot"] is None
+    assert len(probe.read_ledger(ledger)) == 1, "被拒的那一格不许在账上留痕"
+
+
+def test_ledger_inside_another_checkout_is_refused_even_under_the_authorized_name(tmp_path):
+    """§3.2 写面还咬（**变异 #7 让它红的那一格**）：账本落在另一棵 checkout 里 ⇒ rc=2、
+    账本没长、零出站。这一格刻意把 basename 写成该轮授权的权威账本名，并把目录放在
+    `--data-dir` 之外、仓库之外——三条 `--ledger` 落盘判据里只剩"属于另一棵 checkout"
+    这一条还站着。把它删掉（F1 若顺手删了整条闸）这一跑就会走通、并把账本写进别人的树。"""
+    data_dir = _fake_checkout(tmp_path)
+    other = data_dir.parent
+    before = _tree_sha_listing(other)
+    ledger = other / probe.AUTHORIZED_GRANTS[GRANT2]["ledger_name"]
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none",
+        "--ledger", str(ledger))), client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["transport"] is None and payload["call_slot"] is None
+    assert not ledger.exists(), "拒发那一支不许在别人的树里留下一个字节"
+    assert _tree_sha_listing(other) == before
+    assert any("checkout" in n and "--ledger" in n for n in payload["notes"]), payload["notes"]
+    # 负控：同一跑把账本挪回所有 checkout 之外 ⇒ 放行（否则这条闸是恒红的装饰）
+    ok, rc2, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none")),
+        client_factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
+
+
+def test_ledger_inside_another_checkouts_read_only_data_dir_is_refused(tmp_path):
+    """§3.3：账本落在**本次声明只读**的那棵 `--data-dir` 里面 ⇒ 预检就拒（`overlaps`），
+    而且它排在 checkout 判据**之前**——所以这条不依赖 F1 留着的那一支，是独立的一格。"""
+    data_dir = _fake_checkout(tmp_path)
+    before = _tree_sha_listing(data_dir)
+    ledger = data_dir / probe.AUTHORIZED_GRANTS[GRANT2]["ledger_name"]
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none",
+        "--ledger", str(ledger))), client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == [] and not ledger.exists()
+    assert _tree_sha_listing(data_dir) == before
+    assert any("--ledger" in n and "--data-dir" in n for n in payload["notes"]), payload["notes"]
+
+
+def test_isolation_dir_overlapping_another_checkout_data_dir_is_refused_before_import(
+        tmp_path, monkeypatch):
+    """§3.4：放行面变大之后，"隔离目录不许开进我只读的这棵树"这条**顺序**判据还在。
+    牙沿用既有的 spy 口径：`load_backend_modules` 一次都不许被调（import 本身就是那次
+    写盘，把它改成事后判等于先把文件开进只读树、再宣布这里不许有文件）。"""
+    data_dir = _fake_checkout(tmp_path)
+    before = probe.files_digest(data_dir)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", SHAPEY)     # 播种燃料：没有它 `_seed_from_env` 返回空表
+    imported = []
+
+    def spy(isolation_dir):
+        imported.append(isolation_dir)
+        raise AssertionError("重叠时一次都不许走到 import app.core.providers")
+
+    monkeypatch.setattr(probe, "load_backend_modules", spy)
+    build, seen = _never()
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none", "--dry-run",
+        "--isolation-dir", str(data_dir / "iso"))), client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert imported == [], "重叠判据必须在 import 之前——这一句不许改成事后判"
+    assert not (data_dir / "iso").exists()
+    assert probe.files_digest(data_dir) == before
+    assert payload["isolation_ok"] is False
+
+
+def test_a_new_path_in_the_another_checkout_tree_still_voids_the_conclusion(tmp_path):
+    """§3.5：读被放行 ⇒ 那把只读尺子必须在**新的放行面**上照样硬判。替身被调用的那一刻
+    往那棵树里多开一个路径 ⇒ rc=2、结论作废、点名是哪个路径。
+    BASE 上这一格也红，但红的是另一件事：那一跑根本没走到尺子就被宽闸拒了（notes 里只有
+    checkout 那一句）——旧的宽判据把这条真判据的射程整个遮住了。"""
+    data_dir = _fake_checkout(tmp_path)
+
+    def build(record):
+        (data_dir / "seeded-by-nobody.json").write_text("{}", encoding="utf-8")
+        return probe.FakeClient("quiet")
+
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK,
+        "--profile", "deepseek_thinking_disabled", "--level", "均衡")), client_factory=build)
+    assert rc == probe.RC_BLOCKED
+    assert payload["verdict"] != "preflight_failed", "结论是跑完再作废的，不是没跑"
+    assert any("只读承诺被打破" in n and "seeded-by-nobody.json" in n
+               for n in payload["notes"]), payload["notes"]
+    assert payload["call_slot"] == 1, "作废结论不退款：那一格已经先记在账上了（§R1 先记账后发）"
+
+
+def test_the_quarantine_guard_still_eats_the_data_dir_it_just_read(tmp_path, monkeypatch):
+    """§3.6：F1 明写"不许把 `data_dir` 从 `assert_store_quarantined` 的禁止名单里拿掉"。
+    这一格两头都钉：① 调用点喂进去的名单里 `data_dir` 与 `REPO_ROOT` 都必须在场（拿
+    spy 把实参抄下来，不看源码猜）；② 真把一个指着刚读的那棵树的单例喂进去 ⇒ rc=2、
+    零出站、零记账。①缺了就等于"名单悄悄改窄而行为测试全绿"。"""
+    data_dir = _fake_checkout(tmp_path)
+    ledger = _ledger(tmp_path / "iso")
+    captured = []
+    real = probe.assert_store_quarantined
+
+    def spy(providers_mod, forbidden_dirs):
+        captured.append([probe._norm(str(p)) for p in forbidden_dirs])
+        return real(providers_mod, forbidden_dirs)
+
+    monkeypatch.setattr(probe, "assert_store_quarantined", spy)
+    payload, rc, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none")),
+        client_factory=lambda r: probe.FakeClient("quiet"))
+    assert rc == probe.RC_VERIFIED
+    assert captured, "预检放行以后这一句一次都没被调用 = 名单锁成了空话"
+    booked = len(probe.read_ledger(ledger))
+    for names in captured:
+        assert probe._norm(str(REPO_ROOT)) in names, names
+        assert probe._norm(str(data_dir)) in names, \
+            "把 data_dir 从禁止名单里拿掉了：单例可以指临时目录，绝不能指现网"
+    # ② 反例：单例指进刚被读过的那棵树 ⇒ 隔离闸拒，且一次都没发、账本一行都不许多
+    monkeypatch.setattr(providers, "store",
+                        FakeStore(str(data_dir / "providers.json"),
+                                  str(data_dir / "provider_keys.json"),
+                                  str(data_dir / "provider_prefs.json")))
+    build, seen = _never()
+    refused, rc2, _ = probe.run_probe(probe.make_config(_replica_argv(
+        tmp_path, data_dir, "--provider", DEEPSEEK, "--profile", "none")), client_factory=build)
+    assert rc2 == probe.RC_BLOCKED and seen == []
+    assert refused["isolation_ok"] is False and refused["transport"] is None
+    assert len(probe.read_ledger(ledger)) == booked, "隔离没过关就不许多记一笔账"
+
+
+def test_the_header_describes_the_write_gate_and_its_residual_risk():
+    """F2「不许留假话」：闸改窄之后，模块 docstring 那句"本工具不许对另一个 checkout
+    运行"就成了假话，必须删；同时三层读面保护与这一轮换来的残留风险必须点名在场。
+    这一格只锁**话**，行为那一半在上面六格里。"""
+    doc = probe.__doc__ or ""
+    assert "本工具不许对另一个 checkout 运行" not in doc, "改完闸还留这句就是假话"
+    assert "`--data-dir` 属于另一棵 checkout" not in doc, "退出码表里那条 rc=2 理由已经不存在了"
+    for needle in ("「读现网那条 provider 记录」是用途", "「写进另一棵 checkout」是禁区",
+                   "残留风险", "json.load", "allowed_shapes"):
+        assert needle in doc, needle
+
+
+def test_the_line_numbers_the_header_cites_still_point_at_those_functions():
+    """F2 要求三层读面保护"含 `:行号`"点名。行号会漂，所以这一格把它做成会红的锁：
+    docstring 里每出现一处 `` `名字`（:NNN） ``，那个函数在**当前这份文件**里的 def 行
+    必须等于 NNN。挪了函数忘了改文档 ⇒ 红（比"引用不存在的行号"更响）。"""
+    doc = probe.__doc__ or ""
+    cited = re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`（:(\d+)）", doc)
+    assert len(cited) >= 3, cited
+    seen_names = set()
+    for name, line in cited:
+        fn = getattr(probe, name, None)
+        assert fn is not None, f"docstring 引用了 {name}（:{line}），但模块里没有这个名字"
+        start = inspect.getsourcelines(fn)[1]
+        assert start == int(line), f"{name} 的 def 实际在第 {start} 行，docstring 写的是 :{line}"
+        seen_names.add(name)
+    assert {"read_provider_record", "assert_store_quarantined", "files_digest"} <= seen_names, \
+        "三层读面保护必须逐层点名（brief §F2），少一层就是文案没跟上判据"

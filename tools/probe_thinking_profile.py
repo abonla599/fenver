@@ -119,11 +119,26 @@ g2 那一轮 3 次怎么花——**预登记**（§R5，写在这里就是为了
    - 若两次都因异常没结论，第 3 次**照发不省**，但只能挑上面三种之一；用完 3 格即停。
    这一节实现不判（判它要读上游结论，不是命令行能定的），但它必须落在这个文件里。
 
-本工具不许对另一个 checkout 运行（修复轮 1，Minor；修复轮 2 补 N3/N4）：`inside_dir(…, REPO_ROOT)`
-只挡发起这一跑的那棵树，所以 `--data-dir`（以及 live 必填的 `--ledger`——账本同样是落盘，
-N3）若沿父链上溯碰到 `.git` 且不是本工具这棵树，直接拒。N4：原判据只看父级一层，
-`<other>/data/swap-snapshots/snap-1/data` 这种深树形状曾放行并一路读到密钥指纹——现在沿
-**整条父链**上溯（判据只 stat 各级祖先目录有没有 `.git`，**绝不去读树里那份 data/**）。
+「读现网那条 provider 记录」是用途，「写进另一棵 checkout」是禁区（修复轮 2，C-1/F1）
+------------------------------------------------------------------------
+上一版这一段的标题那句「不许对另一个 checkout 运行」（主语是本工具）现在**是假话**，
+所以删掉，按实际判据重写：能读到活密钥的那两份
+`providers.json`/`provider_keys.json` 恰好只住在主工作树那份 `data/` 里，从工作树发起时
+它的父链上先撞上**主工作树自己的** `.git` ⇒ 三次授权一次都发不出去。为了防写
+把读禁掉了，这个探针就只能核实测试夹具里的假上游。所以 F1 把闸收到它真正要挡的动作上：
+`--data-dir` 允许指另一棵 checkout（**只读**），`--ledger` 与 `--isolation-dir` 这两个会落盘
+的面照旧 rc=2。读的那一面由这三层守着，点名在这里，动它们之前先想清楚：
+① 记录只用 `json.load` 读出来——`read_provider_record`（:490），不走会写盘的 `providers.store`；
+② 那个模块级单例的 `path`/`keys_path`/`prefs_path` 三个落点都不许指进 `--data-dir`，
+   也不许指进本仓——`assert_store_quarantined`（:465）；**名单里的 `data_dir` 不许拿掉**：
+   单例可以指临时目录，绝不能指现网；
+③ `files_digest`（:536）在**隔离之前**取 `before` 快照、跑完比对，store 三件套变了或
+   树里多/少路径一律**硬判 rc=2 作废结论**（无关文件的 mtime/size 漂移才走软判加 note）。
+**这一轮换来的残留风险（不藏）**：允许 `--data-dir` 指别树 ⇒ 误用的形状从"发不出去"
+变成"发到另一条上游去烧额度"。机器那一半只有授权表里的 `allowed_shapes`（只认这两条
+provider id 与它们的配方）和 `--grant`/`--ledger` 文件名绑死那两条；操作者把 `--data-dir`
+指到另一棵也有这两条 id 的树、形状又恰好在白名单里，**代码拦不住，这一格靠的是人**
+（以及跑批记录里那一句"这一跑用的是哪一棵树"）。
 
 退出码（全文只此一份。修复轮 1，M-1：这里原本还留着第二份 §R4 之前的旧说明，那句 rc=0 只认
 `verified`/`baseline_ok`、rc=1 只认 `unverified`/`form_unverifiable`/基线失败，与下面直接矛盾——
@@ -136,8 +151,8 @@ N3）若沿父链上溯碰到 `.git` 且不是本工具这棵树，直接拒。N
     2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / **`--attempt` 没显式给**
        （修复轮 1，I-2：live 必填）/ 授权轮次没显式给 /
        账本文件名不是那一轮授权表里的那一份 / (provider, profile) 不在该轮 `allowed_shapes`
-       里 / 候选行缺 `direction` / 账本落在仓库内或属于另一棵 checkout / 形状越出授权 /
-       `--data-dir` 属于另一棵 checkout；
+       里 / 候选行缺 `direction` / 账本落在仓库内或属于另一棵 checkout（**只有写面**：
+       `--data-dir` 从修复轮 2 F1 起允许指另一棵 checkout，见上面那一段）/ 形状越出授权；
        或隔离、重叠、账本、配方、记录任一条不成立），要么只读承诺被**硬**打破
        （跑完之后 store 三件套变了，或 `--data-dir` 树里多/少了路径；无关文件只是
        mtime/size 漂移走软判：追加 note 点名，rc 按原判据走。修复轮 2，concerns.3）
@@ -356,20 +371,32 @@ def overlaps(a, b) -> bool:
 
 
 def data_dir_belongs_to_another_checkout(data_dir) -> bool:
-    """`data_dir`（或账本文件路径）是不是落在**另一棵 checkout** 里。
+    """这个路径**会不会被本工具写**进另一棵 checkout —— 是就返回 True。
 
-    为什么要有这一条：`inside_dir(target, REPO_ROOT)` 只挡得住"发起这一跑的那棵树"。
-    从 `.qoder/worktrees/<x>` 跑、而 `--data-dir` 指主工作树 `data/` 这个形状，
-    原本只靠别的判据兜着——而 AGENTS.md §1 把 `data/` 列为受保护运行期资产，
-    主工作树那一份**就是现网正在用的那一份**。所以把它显式列入禁止名单。
+    口径从修复轮 2（C-1/F1）起改了。它原来被挂在 `--data-dir` 上，于是名字里的
+    "belongs to another checkout" 听起来像"它属于哪棵树"，实际判的事也确实是"它属于哪棵树"；
+    但本工具对 `--data-dir` **只做 `json.load` 只读**（`read_provider_record`），拿"属于别树"
+    去禁它，禁掉的正是本工具唯一的用途。所以现在：
+
+    * **走它的**：`--ledger`（每发一次就在那棵树里写一笔）。
+    * **不走它的**：`--data-dir`（只读；由 `files_digest` + `assert_store_quarantined` 守）。
+    * 参数名仍叫 `data_dir` 是因为它是从 N3/N4 那一版继承下来的位置参数，改名会让
+      两处调用点与既有测试一起漂；**读这一句口径，别读变量名**。
+
+    为什么还要有这一条：`inside_dir(target, REPO_ROOT)` 只挡得住"发起这一跑的那棵树"。
+    从 `.qoder/worktrees/<x>` 跑、而 `--ledger` 指主工作树里某个目录这个形状，除了这里
+    没有别处挡——而 AGENTS.md §1 把 `data/` 列为受保护运行期资产，主工作树那一份**就是
+    现网正在用的那一份**。
 
     修复轮 2（N4）：原判据只看 `target.parent` 一层——`<other>/data` 拒了，
     `<other>/data/swap-snapshots/snap-1/data`（同样一份 providers.json + provider_keys.json）
-    却放行并一路读到 `credential_fp`。现在沿**整条父链**上溯：先撞见 `REPO_ROOT` ⇒ 放行
-    （那是咱们自己这棵树），先撞见 `.git` ⇒ 拒。
+    却放行。现在沿**整条父链**上溯：先撞见 `REPO_ROOT` ⇒ 放行（那是咱们自己这棵树），
+    先撞见 `.git` ⇒ 判定"这会被写进别树"。
 
     **只加判据，不去读它**：这里只对各级祖先目录的存在性与 `.git` 做 `exists()`，
-    既不打开树里任何文件，也不 `stat` 它们的内容。
+    既不打开树里任何文件，也不 `stat` 它们的内容（有锁：
+    `test_the_other_checkout_predicate_judges_writes_not_reads` 里把 `Path.open` 换成
+    一碰就抛的哨兵，判据照样跑完）。
     """
     root_norm = _norm(REPO_ROOT)
     current = Path(_norm(data_dir)).parent
@@ -393,10 +420,12 @@ def isolate_runtime_env(isolation_dir=None) -> Path:
     `PROVIDERS_DB_PATH` 一个变量就够了——这也是为什么这里不再单独设它们：
     两处事实来源迟早会漂。
 
-    **本工具不许对另一个 checkout 运行**：这里挡的是发起这一跑的那棵树
-    （`REPO_ROOT`）。从工作树跑而 `--data-dir` 指另一棵树（例如主工作树那份
-    现网 `data/`）的形状，由 `data_dir_belongs_to_another_checkout()` 在调用本函数
-    **之前**拒掉——那道判据在 `run_probe` 的预检里，不在这里，因为到这儿已经太晚了。
+    **这里挡的是发起这一跑的那棵树**（`REPO_ROOT`）。`--data-dir` 指另一棵 checkout
+    （例如主工作树那份现网 `data/`）从修复轮 2（C-1/F1）起是**放行**的——本工具对它只
+    做 `json.load` 只读，三层读面保护见模块 docstring 闸 2；而会往那棵树里**写**的两个面
+    （`--ledger`、`--isolation-dir`）仍由 `run_probe` 预检里的重叠判据与
+    `data_dir_belongs_to_another_checkout()` 在调用本函数**之前**拒掉——那两道在预检里，
+    不在这里，因为到这儿已经太晚了（本函数自己就会 mkdir）。
 
     另外：缺省自建的是**每次全新的 `mkdtemp`**。这正是 Critical-1 的根因——
     账本若跟着隔离目录走，每个进程都从空账本开始，"总额"永不生效。所以
@@ -914,8 +943,11 @@ def make_config(argv=None) -> dict:
                              "『加个 flag』变成『改代码 + 用户再授权』）；dry-run 可以不填，"
                              "此时 payload 的 grant 就是 None")
     parser.add_argument("--data-dir", required=True,
-                        help="provider 配置所在目录（只读；不许指向另一棵 checkout 的 data/——"
-                             "判据沿父链上溯找 .git，含 swap-snapshots 那类深层子树）")
+                        help="provider 配置所在目录，**本工具只读它**（`json.load`，不走会写盘的 "
+                             "providers.store）。从修复轮 2（C-1/F1）起**允许**指另一棵 checkout "
+                             "的那份 data/——现网那条记录只住在那里，读它就是本工具的用途；"
+                             "写面另判：--ledger 与 --isolation-dir 都不许落进这棵树，"
+                             "跑完还会用 files_digest 硬判这棵树有没有多出/少掉路径")
     parser.add_argument("--provider", required=True, help="provider_id，如 deepseek-chat")
     parser.add_argument("--profile", required=True, choices=list(thinking_profiles.probe_profile_ids()),
                         help="候选配方名；none = 基线（不发任何思考参数，不代表模型不思考）")
@@ -1027,9 +1059,14 @@ def run_probe(config, client_factory=None):
                                f"（现有 {sorted(VERDICT_DIRECTIONS)} 三种，实得 {direction!r}）："
                                f"判据不看方向就会把 OFF 那一跑判成反结论，所以**不默认成 on**，"
                                f"停在预检、一次都不发")
-        if data_dir_belongs_to_another_checkout(data_dir):
-            raise RuntimeError("--data-dir 的宿主目录是另一棵 checkout（有 .git 却不是本工具这棵树）："
-                               "本工具不许对另一个 checkout 运行，主工作树那份 data/ 是现网资产")
+        # —— 修复轮 2（C-1/F1）：这里**不再**判 `--data-dir` 属不属于另一棵 checkout。
+        #    原来那一次调用把本工具唯一的用途一起禁掉了：能读到活密钥的那两份
+        #    `providers.json`/`provider_keys.json` 恰好只住在主工作树那份 `data/` 里，
+        #    而从工作树发起时它的父链上先撞上主工作树自己的 `.git` ⇒ rc=2，
+        #    三次授权一次都发不出去（审查员 round 2 的阻塞项）。
+        #    `--data-dir` 只被 `json.load` 读（`read_provider_record`），三层读面保护见模块
+        #    docstring 闸 2 那一段；**写**的那一面照旧逐条咬——见下面三条 `--ledger` 判据
+        #    与 `isolate_runtime_env()` 之前那条重叠判据。判据本身保留，口径换成"会不会被写"。
         ledger = str(config["ledger"] or "").strip()
         if not config["dry_run"] and not ledger:
             raise RuntimeError("live 模式必须显式给 --ledger（一份跨进程稳定的账本路径）："
@@ -1059,7 +1096,8 @@ def run_probe(config, client_factory=None):
                                "AGENTS.md §1 的受保护运行期资产就在树里")
         if ledger and data_dir_belongs_to_another_checkout(ledger):
             raise RuntimeError("--ledger 落在另一棵 checkout 的树里（沿父链撞上 .git）："
-                               "账本与 --data-dir 同一条判据，不许写进别的树")
+                               "这条判据现在只管**会被本工具写**的落点，不许写进别的树"
+                               "（只读的 --data-dir 不走它，修复轮 2，F1）")
         # —— §R1：授权轮次必须点名，且账本文件名必须是那一条授权里的那一份。——
         # 这两格是"把授权做成机制"的核心：闸按账本文件计数，所以文件名不绑进授权表的话，
         # 轮换 --ledger 就还是"随手加个 flag"，计数从 0 重来。
