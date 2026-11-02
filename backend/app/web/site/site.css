@@ -204,14 +204,9 @@ strong { font-weight: 650; }
   font-size: clamp(1.15rem, 2.4vw, 1.7rem); font-weight: 450;
   line-height: 1.5; letter-spacing: .04em;
 }
-/* 38em 是按最长的那一行定的一栏：第一句 27 个字，最窄一档（760px）也才 504px，
-   离 38em（约 709px）还有余量，br 才轮得到它决定在哪断。
-   再窄，那行会自己断，br 就白写了。 */
+/* 首屏正文只剩一句 18 个字，38em 这个上限此刻够用不着；留着是因为更新日志页的导语
+   也走这一份，那边一句 25 个字，宽屏上要它来收住行宽。 */
 .lede { max-width: 38em; margin: 0 auto; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.8; }
-/* 中文没有词边界，浏览器按字符断行会把"会 / 话"拆开。宽屏用这个 br 强制在句号后
-   换行；窄屏藏起来，让文字自己流。 */
-.br-wide { display: none; }
-@media (min-width: 760px) { .br-wide { display: inline; } }
 .cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 11px; margin: 28px 0 18px; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 10px;
