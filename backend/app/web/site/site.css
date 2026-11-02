@@ -69,7 +69,12 @@ html {
 body {
   margin: 0;
   color: var(--ink);
-  background: var(--bg);
+  /* 整页底色是一块墨绿的板。一句正文都收成一行之后，大片空白只剩死色，
+     所以铺一层网点：32px 一格、1px 的点，压到 8% 不透明度——余光里感觉得到，
+     正眼看字时又不碍事。用内联 SVG 而不是那几种用不了的写法，一个字节的外链都不引。 */
+  background-color: var(--bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23f0f5f2' fill-opacity='.08'/%3E%3C/svg%3E");
+  background-size: 32px 32px;
   font: 400 var(--step-0)/1.68 var(--sans);
   font-variant-numeric: tabular-nums lining-nums;
   letter-spacing: .002em;
@@ -172,14 +177,22 @@ strong { font-weight: 650; }
   min-height: min(calc(100vh - 72px), 780px);
   padding: clamp(44px, 5.6vw, 72px) var(--gutter) clamp(44px, 6vw, 72px);
   text-align: center;
+  /* 下面那道环挂在 z-index: -1 上。body 现在带网点底图，会盖住负层，
+     所以这里必须自成层叠上下文，环才浮得出来。 */
+  isolation: isolate;
 }
+/* 一道大环，被首屏的上下边切掉，只剩下左右两段弧，像给文字加了一对括号。
+   正文收成一行以后，标题与按钮之间是一整片空，什么都不放会显得是"没做完"；
+   放个会说话的东西又抢字。环只到 8%，余光里有一点点重量，正眼看还是空的。 */
 .hero::before {
-  content: ""; position: absolute; z-index: -1;
-  width: 420px; height: 420px; left: 50%; top: -60px; margin-left: -210px;
-  border-radius: 50%; background: var(--brand-soft); filter: blur(30px); opacity: .72;
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  left: 50%; top: 50%; width: min(980px, 132vw); aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border: 1px solid color-mix(in srgb, var(--brand) 8%, transparent);
+  border-radius: 50%;
 }
-/* 46rem ≈ 736px：主标题现在只有 "Fenver" 六个字母，撑不满这么宽，但副标题和
-   正文那两行中文要这个宽度才不断得难看，按最长的内容定栏宽。 */
+/* 46rem ≈ 736px：主标题只有 "Fenver" 六个字母，撑不满这么宽，但副标题要这个宽度
+   才不断得难看，按最长的内容定栏宽。 */
 .hero-inner { max-width: 46rem; margin: 0 auto; }
 .hero-kicker {
   display: inline-flex; align-items: center; gap: 9px;
