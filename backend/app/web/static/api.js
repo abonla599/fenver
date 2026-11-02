@@ -566,6 +566,19 @@ const API = (() => {
     const open = async (lastEventId) => {
       const headers = { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") };
       if (lastEventId) headers["Last-Event-ID"] = lastEventId;   // 续播凭据：<run_id>:<seq>
+      const body = {
+        model: opts.model, provider: opts.provider, messages: opts.messages,
+        attachments: opts.attachments || [],
+        session_id: opts.sessionId,
+      };
+      // Task 13A：思考档位这一格**只在调用方给出一个非空标签时才存在**。
+      // 语义差别是服务端定的：整格省略="这一轮不参与"，带一格空值="填了但空着"，
+      // 那是两件事。所以这里不写 `opts.thinkingLevel` 直接进对象字面量的形状——
+      // 那种写法会把 undefined / null / 空串 / 0 一路发出去，而这一格的键从今天起
+      // 在源码里只有一个赋值出处，判据在 test_v0391_web_cockpit_ui.py。
+      if (typeof opts.thinkingLevel === "string" && opts.thinkingLevel !== "") {
+        body.thinking_level = opts.thinkingLevel;
+      }
       let res;
       try {
         res = await fetch("/v1/chat/stream", {
@@ -573,11 +586,7 @@ const API = (() => {
           signal: opts.signal,
           credentials: "same-origin",
           headers,
-          body: JSON.stringify({
-            model: opts.model, provider: opts.provider, messages: opts.messages,
-            attachments: opts.attachments || [],
-            session_id: opts.sessionId,
-          }),
+          body: JSON.stringify(body),
         });
       } catch (e) { NetMinder.note(e); throw e; }
       if (res.ok && res.body) NetMinder.ok();

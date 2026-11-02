@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_web_pwa import _css, _fn_text, _function_body, _html, _js
+from tests.test_web_pwa import STATIC, _css, _fn_text, _function_body, _html, _js
 
 
 # 把文本拼进 HTML 的出口不止 innerHTML 一个。本仓同类锁早就按一组 sink 判
@@ -583,12 +583,18 @@ def test_settings_form_keeps_connection_fields_and_gives_up_capability_inputs():
 # "读源码读着都对、跑起来是错的"（审查员实测的三条都是这个形状）。
 
 
-def _run_js(names, harness, prefix):
-    """把 app.js 里点名的那几个函数摘进 vm 真跑一遍，返回 JSON 结果。"""
+def _run_js(names, harness, prefix, extra=""):
+    """把 app.js 里点名的那几个函数摘进 vm 真跑一遍，返回 JSON 结果。
+
+    `extra` 给的是**从同一份 app.js 里现抓的常量源码**（见 _app_const）：被摘的函数
+    引用了模块级 const 时，测试不许自己再造一份值——那等于把被测数字换成测试的。
+    """
     node = shutil.which("node")
     if not node:
         pytest.skip("这台机器上没有 node，跑不了这段 JS")
     src = "\n".join(_fn_text(_js(), n) for n in names)
+    if extra:
+        src = extra + "\n" + src
     d = Path(tempfile.mkdtemp(prefix=f"model-cockpit-{prefix}-"))
     (d / "fns.js").write_text(src, encoding="utf-8")
     (d / "harness.cjs").write_text(harness, encoding="utf-8")
@@ -929,3 +935,341 @@ def test_model_menu_uses_group_semantics_not_menu_semantics():
     attach = html[html.index('id="attachMenu"'):html.index('id="modelMenu"')]
     assert 'role="menu"' in attach and 'role="menuitem"' in attach, \
         "附件菜单那套合法的 menu/menuitem 被顺手改掉了：本单射程只有模型菜单"
+
+
+# ==================== Task 13A：档位只在「这条记录已核实」时发送 ====================
+#
+# 今天的事实基线（brief §0）：生产登记表只有 none ⇒ 两条现网记录都是 unverified ⇒ 客户端
+# 今天没有任何一条路能把档位发出去。本单不是"以后再说"，判据现在就钉住三件事：
+#   1. 只有 verified 才产出这一格，其余一律**整格省略**（不是 null、不是空串、不是 0）；
+#   2. 发不发由服务端那条记录说了算，本机偏好只是必要条件（prefs 是历史值）；
+#   3. 界面不许替服务端做主——>3 档只说不裁（Task 8 已否过"演成配上了"那种形状）。
+# 判据一律优先 node 真跑：这一批改动的失败形状是"读源码都对、跑起来把 null 发出去了"。
+
+_SEND_GATE_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+const mem = new Map();
+ctx.localStorage = {
+  getItem: (k) => mem.has(k) ? mem.get(k) : null,
+  setItem: (k, v) => mem.set(k, String(v)),
+};
+ctx.pref = { userId: "u1" };
+ctx.state = {};
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const verified = { id: "p1", thinking_status: "verified",
+                   thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+const unverified = { id: "p1", thinking_status: "unverified",
+                     thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+const unsupported = { id: "p1", thinking_status: "unsupported",
+                      thinking_levels: [], thinking_default: "" };
+const out = {};
+out.freshVerified = ctx.thinkingLevelForSend(verified);
+ctx.writeThinkingPref("p1", { enabled: true, level: "快速" });
+out.verifiedOn = ctx.thinkingLevelForSend(verified);
+out.unverifiedOn = ctx.thinkingLevelForSend(unverified);
+out.unsupportedOn = ctx.thinkingLevelForSend(unsupported);
+out.noStatus = ctx.thinkingLevelForSend({ id: "p1" });
+out.nullItem = ctx.thinkingLevelForSend(null);
+ctx.writeThinkingPref("p1", { enabled: false });
+out.verifiedOff = ctx.thinkingLevelForSend(verified);
+ctx.writeThinkingPref("p1", { enabled: true, level: "深度" });
+out.staleLabel = ctx.thinkingLevelForSend(verified);
+out.verifiedNoLevels = ctx.thinkingLevelForSend(
+  { id: "p9", thinking_status: "verified", thinking_levels: [], thinking_default: "" });
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_the_level_is_produced_only_for_a_verified_record():
+    """§1.1 + §0：发送侧唯一判据的完整矩阵。unverified 那一格是本单的主判据——
+    服务端说没核实，本机偏好记着"开"也不能产出档位标签。"""
+    out = _run_js(("thinkingPrefsKey", "readThinkingPrefs", "writeThinkingPref",
+                   "thinkingChoice", "thinkingLevelForSend"), _SEND_GATE_HARNESS, "gate")
+    assert out["freshVerified"] == "", "开关没打开就不该发档位（默认不发）"
+    assert out["verifiedOn"] == "快速", out["verifiedOn"]
+    assert out["unverifiedOn"] == "", \
+        "unverified 产出了档位：今天两条现网记录都会被发出一格服务端换不出参数的请求"
+    assert out["unsupportedOn"] == "", out["unsupportedOn"]
+    assert out["noStatus"] == "" and out["nullItem"] == "", \
+        "状态缺失/没有记录时按最保守的一支走（省略），不许猜 verified"
+    assert out["verifiedOff"] == "", "开关关掉仍产出档位：prefs 盖过了本机意图"
+    assert out["staleLabel"] == "均衡", \
+        f"偏好里的标签已不在清单里，必须回到默认档而不是把旧标签发出去：{out['staleLabel']}"
+    assert out["verifiedNoLevels"] == "", "清单为空时没有可发的标签，只能省略"
+
+
+_API_STUB = r"""
+var __bodies = [];
+globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+globalThis.document = {
+  body: { appendChild() {}, contains: () => false },
+  createElement: () => ({ style: {}, classList: { add() {}, remove() {}, toggle() {} },
+    appendChild() {}, setAttribute() {}, addEventListener() {}, remove() {},
+    querySelector: () => null }),
+  getElementById: () => null, addEventListener() {},
+  documentElement: { style: { setProperty() {} } },
+};
+globalThis.navigator = { onLine: true };
+globalThis.location = { href: "http://127.0.0.1:8000/", pathname: "/" };
+globalThis.fetch = async (path, init) => {
+  if (path === "/v1/chat/stream") __bodies.push(JSON.parse(init.body));
+  const bytes = new TextEncoder().encode(
+    'data: {"type":"done","status":"completed","message_id":"m-1"}\n\n');
+  let sent = false;
+  return {
+    ok: true, status: 200, headers: { get: () => null }, json: async () => ({}),
+    body: { getReader: () => ({ read: async () => {
+      if (sent) return { done: true };
+      sent = true;
+      return { value: bytes, done: false };
+    } }) },
+  };
+};
+"""
+
+_API_DRIVER = r"""
+const call = async (level) => {
+  __bodies.length = 0;
+  const opts = { model: "p1", provider: "p1", sessionId: "s-1",
+                 messages: [{ role: "user", content: "hi" }] };
+  if (level !== undefined) opts.thinkingLevel = level;
+  await API.streamChat(opts, () => {});
+  return __bodies[0] || null;
+};
+return {
+  label: await call("快速"),
+  empty: await call(""),
+  nul: await call(null),
+  zero: await call(0),
+  omitted: await call(undefined),
+};
+"""
+
+
+def _run_api_js(driver: str):
+    """node 真跑仓库那份 api.js：假 fetch 收下的请求体是判据，不是 grep。
+
+    照 test_v0350_task_ui_web_contract 的口径（"导出漏一格，页面照常加载、只有点进去
+    才炸"）——发不发这一格同样是"读源码都对、跑起来发错"的形状。
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "fns.js").write_text(_API_STUB + (STATIC / "api.js").read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+        (d / "driver.js").write_text(driver, encoding="utf-8")
+        (d / "harness.cjs").write_text(
+            "const fs = require('fs');\n"
+            "const run = new Function(fs.readFileSync(process.argv[2], 'utf8')"
+            " + '\\nreturn (async () => {\\n' + fs.readFileSync(process.argv[3], 'utf8')"
+            " + '\\n})();');\n"
+            "Promise.resolve(run())"
+            ".then((v) => process.stdout.write(JSON.stringify({ ok: true, out: v })))"
+            ".catch((e) => process.stdout.write(JSON.stringify("
+            "{ ok: false, error: String((e && e.stack) || e) })));\n",
+            encoding="utf-8")
+        r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                            str(d / "driver.js")],
+                           capture_output=True, text=True, encoding="utf-8", timeout=120)
+        assert r.returncode == 0, f"node 自己就挂了：{r.stderr}"
+        line = [x for x in r.stdout.strip().splitlines() if x.startswith("{")]
+        assert line, f"node 没给出 JSON：stdout={r.stdout!r} stderr={r.stderr!r}"
+        out = json.loads(line[-1])
+        assert out["ok"], f"这段 JS 跑挂了：{out['error']}"
+        return out["out"]
+
+
+def test_the_request_body_carries_the_key_only_with_a_real_label():
+    """§1.1 的行为半边：请求体里这一格要么是非空标签，要么**整格不存在**。
+
+    服务端把"没带这一格"和"带了一格但值是空的"当两件事，省略才是"这一轮不参与"。
+    所以 null / "" / 0 / 不传 四种输入都必须让 `thinking_level` 这个键消失，
+    而其余各格（model/messages/session_id）照常——别把省略做成顺手少发别的。
+    """
+    out = _run_api_js(_API_DRIVER)
+    assert out["label"]["thinking_level"] == "快速", out["label"]
+    for case in ("empty", "nul", "zero", "omitted"):
+        body = out[case]
+        assert body is not None, f"{case}：这一枪根本没发出去"
+        assert "thinking_level" not in body, \
+            f"{case} 把「整格省略」写成了「发一个空值」：{body}"
+        for keep in ("model", "provider", "messages", "session_id", "attachments"):
+            assert keep in body, f"{case}：为了省略档位把 {keep} 也弄丢了"
+
+
+def test_no_site_can_write_a_null_or_empty_thinking_level():
+    """§1.1 的形状半边 + §1.2：禁用态在请求构造路径上不可能产出这一格。
+
+    判"没有 `thinking_level: null` / `= \"\"` 这种形状"用源码形状：这一格在 api.js 里
+    一次都不作为对象字面量的键出现（`thinking_level:` 这个写法在本仓之后不存在），
+    唯一出处是 `body.thinking_level = ...` 那一条被 typeof + 非空双闸包着的赋值。
+    """
+    js = _js()
+    api = _js("api.js")
+    assert re.search(r"thinking_level\b", js) is None, \
+        "app.js 里出现了 thinking_level 这个单数格：请求体的键只在 api.js 那一处写，两处写就两处判"
+    assert re.search(r"thinking_level\s*:", api) is None, \
+        'api.js 里以对象字面量键的写法出现 thinking_level：那等于给 null/"" 留了一个能写的地方'
+    assert api.count("body.thinking_level") == 1, \
+        f"这一格的写口不止一处（{api.count('body.thinking_level')}）：省略语义就没有唯一出处"
+    guard = _function_body(api, "streamChat")
+    assert "typeof opts.thinkingLevel === \"string\"" in guard \
+        and "opts.thinkingLevel !== \"\"" in guard, \
+        "写这一格的闸不是「非空字符串」：0 / null / 空串里总有一种能漏过去"
+    run = _function_body(js, "runStream")
+    assert "thinkingLevel: thinkingLevelForSend(" in run, \
+        "发送路径没走那一个判据：谁都能在 runStream 里再算一遍发不发"
+    assert re.search(r"thinking_level\b", run) is None, \
+        "runStream 自己拼请求体的单数那一格：发/不发就散成两处了"
+    gate = _function_body(js, "thinkingLevelForSend")
+    assert '!== "verified"' in gate, "判据里没有 verified 那道闸：unverified 也能产出标签"
+    assert "enabled !== true" in gate, "判据没看开关：禁用态也能产出标签（§1.2）"
+    assert "indexOf(" in gate and "thinking_levels" in gate, \
+        "标签没跟这条记录**当前**的清单对一遍：会发一个清单外的标签（§5.3）"
+
+
+_CAP_NOTE_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+process.stdout.write(JSON.stringify({
+  none: ctx.thinkingLevelsCapNote(null),
+  empty: ctx.thinkingLevelsCapNote([]),
+  three: ctx.thinkingLevelsCapNote(["甲", "乙", "丙"]),
+  four: ctx.thinkingLevelsCapNote(["甲", "乙", "丙", "丁"]),
+}));
+"""
+
+
+def _app_const(name: str) -> str:
+    """从 app.js 现抓一行模块级 `const name = <数字>;`，喂给 node 真跑的提取体。
+
+    抓不到就红：数字留在测试里、不留在被测代码里，是本单最不能要的那种"锁跟着改名
+    一起失效"的形状（同一口径见 test_v0350_task_ui_web_contract._task_module_source）。
+    """
+    hit = re.findall(rf"^const {name} = (\d+);", _js(), flags=re.M)
+    assert hit, f"app.js 里没有 `const {name} = <数字>;` 这一行：常量改名或数字写进了函数里"
+    assert len(hit) == 1, f"app.js 里 {name} 声明了 {len(hit)} 次：上限不止一个出处"
+    return f"const {name} = {hit[0]};"
+
+
+def test_over_cap_levels_are_announced_and_never_trimmed_in_the_browser():
+    """§5.1（12B 复审点名留给本单的）：上限在界面先说话，服务端那句拒绝原样显示。
+
+    今天管理员打四个标签 ⇒ 送出 4 档 ⇒ 收到 400。修法是把上限和那句拒绝**说出来**，
+    不是前端悄悄砍成 3——砍掉等于把"没配上"演成"配上了"（Task 8 已否过一次）。
+    既有那条 `four == ["a","b","c","d"]` 守着"不截断"，这条守着"要说话"。
+    """
+    out = _run_js(("thinkingLevelsCapNote",), _CAP_NOTE_HARNESS, "cap",
+                  extra=_app_const("THINKING_LEVELS_CAP"))
+    assert out["none"] == "" and out["empty"] == "" and out["three"] == "", \
+        "没越界也要闭嘴：常驻一句警告等于没有警告"
+    assert "思考档位最多 3 个" in out["four"], \
+        f"那句拒绝要与服务端那一条原样对上，别自己改写：{out['four']}"
+    assert "4" in out["four"], f"要说清现在有几个：{out['four']}"
+    js = _js()
+    parse = _function_body(js, "parseThinkingLevels")
+    for trim in ("slice(", "splice(", "substring("):
+        assert trim not in parse, f"清洗档位时把第 4 档砍了（{trim}）：演成配上了"
+    manage = _function_body(js, "modelManageSection")
+    assert "thinkingLevelsCapNote(" in manage, "编辑区没把这句上限话说出来：只能等 400"
+    assert "textContent" in manage, "编辑区不走 textContent"
+    _no_html_sinks(manage, "能力编辑区（含档位上限提示）")
+    # 那个数字必须与服务端同一出处（静态对照，不 import providers：本批的隔离规矩）。
+    server = (Path(__file__).resolve().parents[1] / "app" / "core" / "providers.py")
+    hit = re.search(r"^MAX_THINKING_LEVELS = (\d+)$", server.read_text(encoding="utf-8"), re.M)
+    assert hit, "服务端那句上限没扫到：providers.MAX_THINKING_LEVELS 的形状变了，界面这句话该跟着改读法"
+    assert hit.group(1) == re.findall(r"^const THINKING_LEVELS_CAP = (\d+);", js, re.M)[0], \
+        "界面说好的上限与服务端存不下的那个数不是同一个：警告会说谎，400 照样来"
+
+
+_FALLBACK_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+const mem = new Map();
+ctx.localStorage = {
+  getItem: (k) => mem.has(k) ? mem.get(k) : null,
+  setItem: (k, v) => mem.set(k, String(v)),
+};
+ctx.pref = { userId: "u1" };
+ctx.state = {};
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), ctx);
+const unverified = { id: "p1", thinking_status: "unverified",
+                     thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+const unsupported = { id: "p1", thinking_status: "unsupported",
+                      thinking_levels: [], thinking_default: "" };
+const verified = { id: "p1", thinking_status: "verified",
+                   thinking_levels: ["快速", "均衡"], thinking_default: "均衡" };
+ctx.writeThinkingPref("p1", { enabled: true, level: "快速" });
+out = {};
+out.onUnverified = ctx.thinkingInactiveNote(unverified, ctx.thinkingChoice("p1", unverified));
+out.onUnsupported = ctx.thinkingInactiveNote(
+  unsupported, ctx.thinkingChoice("p1", unsupported));
+out.onVerified = ctx.thinkingInactiveNote(verified, ctx.thinkingChoice("p1", verified));
+ctx.writeThinkingPref("p1", { enabled: false });
+out.offUnverified = ctx.thinkingInactiveNote(unverified, ctx.thinkingChoice("p1", unverified));
+ctx.writeThinkingPref("p1", { enabled: true, level: "深度" });
+out.staleFirst = ctx.thinkingStaleLevelNote(verified, ctx.thinkingChoice("p1", verified));
+out.staleAgain = ctx.thinkingStaleLevelNote(verified, ctx.thinkingChoice("p1", verified));
+ctx.writeThinkingPref("p1", { enabled: true, level: "快速" });
+out.notStale = ctx.thinkingStaleLevelNote(verified, ctx.thinkingChoice("p1", verified));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_a_fall_back_says_why_the_click_did_nothing():
+    """§5.2 + §5.3：回落要在卡上说得出口，而且同一句只说一次。
+
+    12B 的留痕是服务端一条 debug，客户端看不见——"点了档位没生效"必须在这台设备上
+    自己讲得清：① 记录未核实 ⇒ 参数不生效；② 偏好里的标签不在当前清单 ⇒ 回到默认档，
+    并且显示一次（照 state.budgetClamped 那一组"印完就清"的口径，不每帧刷一句）。
+    """
+    out = _run_js(("thinkingPrefsKey", "readThinkingPrefs", "writeThinkingPref",
+                   "thinkingChoice", "thinkingInactiveNote", "thinkingStaleLevelNote"),
+                  _FALLBACK_HARNESS, "fallback")
+    assert "未核实" in out["onUnverified"] and "参数不生效" in out["onUnverified"], \
+        out["onUnverified"]
+    assert "参数不生效" in out["onUnsupported"], out["onUnsupported"]
+    assert out["onVerified"] == "", "已核实时别再说不生效：那是说谎"
+    assert out["offUnverified"] == "", "开关本来就没开，没有「没生效」要解释"
+    assert "深度" in out["staleFirst"] and "均衡" in out["staleFirst"], out["staleFirst"]
+    assert out["staleAgain"] == "", "同一句重复刷：每渲染一次就多一行"
+    assert out["notStale"] == "", out["notStale"]
+    detail = _function_body(_js(), "renderModelDetail")
+    assert "thinkingInactiveNote(" in detail and "thinkingStaleLevelNote(" in detail, \
+        "两句回落说明没接到卡片渲染：判据只在函数里活着，界面上看不见"
+    _no_html_sinks(detail, "模型卡（含回落说明）")
+
+
+def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
+    """§1.3 + §5.3 + §0：偏好一份真相、不缓存"这条记录有几个档"、禁句不出现在两端文案里。
+
+    清单一律取服务端这一条记录的**当前**那份（thinking_levels），界面不留副本：留一份
+    条数副本就会出现"清单改了、界面还按旧条数决定发不发"那种漂移（服务端发送点现在
+    会重判序号上界，客户端猜不得）。换身份那一路：一次性说明的本机态跟着清，
+    照 Task 5 resetViewForIdentity 的对称口径补一条。
+    """
+    js = _js()
+    assert js.count('"fv.thinking.') == 1, \
+        "本机思考偏好开了第二个键：两份真相迟早不一致（§1.3）"
+    assert "state.thinkingPref" not in js, "新开了一份 state.thinkingPref：localStorage 那份是唯一真相"
+    for cache in ("thinkingLevelCount", "levelCount", "cachedLevels", "thinkingLevelsCache"):
+        assert cache not in js, f"界面缓存了「这条记录有几个档」的副本：{cache}"
+    gate = _function_body(js, "thinkingLevelForSend")
+    assert "item.thinking_levels" in gate, "判据没读这条记录当前的清单"
+    reset = _function_body(js, "resetViewForIdentity")
+    assert "state.thinkingStaleLevel" in reset, \
+        "换身份没清那句一次性回落说明：B 会看到一句关于 A 的偏好的话（§1.3 对称锁）"
+    state_block = js[js.index("const state = {"):js.index("const state = {") + 4000]
+    assert "thinkingStaleLevel: null" in state_block, \
+        "那次性说明的本机态没在 state 里声明：换身份清它就成了清一个不存在的键"
+    corpora = {"app.js": _js(), "api.js": _js("api.js"), "index.html": _html()}
+    for banned in ("可关闭思考", "思考已关闭", "支持关闭"):
+        for name, text in corpora.items():
+            assert banned not in text, f"{name} 里出现禁句「{banned}」：今天没有一条记录能说关闭"

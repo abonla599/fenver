@@ -270,6 +270,10 @@ const state = {
   // 保存成功那一句绑着**它属于哪张卡**：保存要等一次 PUT + 两次重读，期间 hover 到别的行
   // 是常事；不绑 id 的话成功句会印在别人家（模型名不同，看起来像"改完 A 结果 B 变了"）。
   modelSaved: null,         // { id, text } | null
+  // Task 13A §5.3：那句"偏好里的档位不在清单里、已回到默认档"只说一次，本机态记着
+  // 它属于哪张卡（同一张卡重复渲染不刷第二行）。它不是偏好的第二份真相——偏好仍然
+  // 只有 fv.thinking.<userId>.v1 那一份（§1.3），这里只记"这句话印过没有"。随身份清。
+  thinkingStaleLevel: null, // { id, level } | null
   // 预置（DeepSeek 那一排按钮）带来的初始上限，只在**新建**那一次随表单发出去。
   // 上限本身从此由模型卡单源持有；这一格不是"表单还能改上限"，是"新建时别把
   // PRESETS 里写好的 1000K 丢掉"（providers.py 的 PRESETS["deepseek"]，官方 v4 系 1M token）。
@@ -1509,6 +1513,55 @@ function thinkingControlState(item) {
   };
 }
 
+/* ---------------- Task 13A：发不发这一格，只由这一条路决定 ----------------
+ * 今天的事实基线：生产登记表只有 none ⇒ 两条现网记录的 thinking_status 都是 unverified
+ * ⇒ 这一格今天一次都不该出现在请求体里。返回 ""（含 null/0 之类"填了但空着"的形状）
+ * 一律由调用方**整格省略**：服务端把"没带这一格"和"带了一格但值是空的"当两件事。
+ * 三道闸的顺序是刻意的：
+ *   1. 状态不是 verified ⇒ 不产出（prefs 是历史值，能力是服务端给的，不一致时以服务端为准）；
+ *   2. 本机开关没开 ⇒ 不产出（禁用态在请求构造路径上不可能产出这一格，§1.2）；
+ *   3. 要发的标签必须在这条记录**当前**那份清单里（§5.3：界面不缓存"有几个档"，
+ *      服务端发送点现在会重判序号上界，客户端猜一份副本只会发出一个换不出参数的标签）。 */
+function thinkingLevelForSend(item) {
+  if (!item || item.thinking_status !== "verified") return "";
+  const levels = item.thinking_levels || [];
+  if (!levels.length) return "";
+  const choice = thinkingChoice(item.id || "", item);
+  if (choice.enabled !== true) return "";
+  return levels.indexOf(choice.level) >= 0 ? choice.level : "";
+}
+
+/* §5.2：回落要能复盘。12B 那句留痕是服务端一条 debug，客户端看不见，所以"点了档位
+ * 没生效"必须由这张卡自己说出来——只有 prefs 记着"开"而状态不许发时才有这一句，
+ * 否则常驻一句警告等于没有警告。措辞受 §0 禁句清单约束：只能说"参数不生效"，
+ * 不许写成「已关闭思考」「思考已关闭」「支持关闭」。 */
+function thinkingInactiveNote(item, choice) {
+  if (!item || !choice || choice.enabled !== true) return "";
+  const status = item.thinking_status || "unsupported";
+  if (status === "verified") return "";
+  return "这台设备记着你要开思考（档位「" + (choice.level || "默认档") + "」），但"
+    + (status === "unverified" ? "这条记录未核实" : "这条记录不支持思考")
+    + "，参数不生效：这一轮请求里不会带上档位，发出去的回答与开关无关。";
+}
+
+/* §5.3：偏好里的标签在这条记录当前的清单里找不到 ⇒ 回到默认档，并**说一次**。
+ * "一次"照 state.budgetClamped 那一组的口径：本机态记着"这句已经印给这张卡了"，
+ * 印过就认，换身份清（resetViewForIdentity）。归回动作本身在 thinkingChoice 里，
+ * 这里只负责把它讲出来——沉默是不行的，用户看到的是"我点的档位自己变了"。 */
+function thinkingStaleLevelNote(item, choice) {
+  const id = (item && item.id) || "";
+  const saved = readThinkingPrefs()[id] || {};
+  const wanted = saved.level || "";
+  const levels = (item && item.thinking_levels) || [];
+  if (!wanted || levels.indexOf(wanted) >= 0) return "";
+  const hit = state.thinkingStaleLevel;
+  if (hit && hit.id === id && hit.level === wanted) return "";
+  state.thinkingStaleLevel = { id, level: wanted };
+  return "偏好里存的档位「" + wanted + "」在这条记录当前的清单里已经没有了，"
+    + "这一轮按默认档「" + ((choice && choice.level) || "无") + "」发"
+    + "（且只在服务端说这条记录已核实时才发）。";
+}
+
 /* 本机思考偏好：按「用户 + provider」分键。换身份读的是自己那一格，上一个人的
  * 开关不会跟着 provider id 回来（键里带 userId，天然隔离，不需要再清一遍）。 */
 function thinkingPrefsKey() {
@@ -1558,6 +1611,23 @@ function parseThinkingLevels(text) {
     if (t && out.indexOf(t) < 0) out.push(t);
   });
   return out;
+}
+
+/* §5.1（12B 复审点名留给本单）：上限在界面先说话，而不是在前端动手。
+ * 这个数字的唯一出处是服务端 `providers.MAX_THINKING_LEVELS`，这里只借它写一句话，
+ * 不参与清洗（清洗那条路继续"只 strip、只去重、绝不截断"）：把四个标签悄悄砍成三个
+ * 等于把"没配上"演成"配上了"，而那次 PUT 其实根本没落库。那句拒绝原文照抄
+ * `ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")`，让保存失败时卡上那句
+ * `state.modelDetailError`（服务端原文）和这里预先说出的话是同一句，不用猜。 */
+const THINKING_LEVELS_CAP = 3;
+
+function thinkingLevelsCapNote(levels) {
+  const n = (levels || []).length;
+  if (n <= THINKING_LEVELS_CAP) return "";
+  return `档位清单现在有 ${n} 个，超过服务端上限 ${THINKING_LEVELS_CAP} 个：保存会被原样拒回`
+    + `「思考档位最多 ${THINKING_LEVELS_CAP} 个」。界面不替你砍掉多出来的那几档——砍掉等于把`
+    + "「没配上」演成「配上了」。请把清单删到 3 个以内再保存；真按了保存，服务端那句理由"
+    + "会原样写在这张卡下方。";
 }
 
 /* PUT 是全量语义：body = 这条记录的完整一份 + 这次要改的那几格。三格不许省：
@@ -1781,10 +1851,19 @@ async function renderModelDetail(id) {
     th.appendChild(chip);
   });
   card.appendChild(th);
+  // 「本轮会带上什么」问的是发送路径上那同一个判据（thinkingLevelForSend），不是卡片
+  // 自己再算一遍：卡上说会带上、请求里没有那一格，就是界面说谎（§5.2 的反面）。
+  // 措辞与安卓模型卡同句（test_v0391_native_cockpit.py:384 钉着两端一致）。
+  const willSendLevel = thinkingLevelForSend(item);
   card.appendChild(fvEl("p", "mm-note", ctl.enabled
-    ? `本轮会带上「${choice.enabled ? choice.level || "默认档" : "不带上思考参数"}」：`
+    ? `本轮会带上「${willSendLevel || "不带上思考参数"}」：`
       + "开关与档位是这台设备自己的偏好，服务端不存，换设备不同步。"
     : ctl.reason));
+  // 回落要说得出原因（§5.2）+ 旧标签不在清单里回到默认档，只说一次（§5.3）。
+  const inactiveNote = thinkingInactiveNote(item, choice);
+  if (inactiveNote) card.appendChild(fvEl("p", "mm-note", inactiveNote));
+  const staleLevelNote = thinkingStaleLevelNote(item, choice);
+  if (staleLevelNote) card.appendChild(fvEl("p", "mm-note", staleLevelNote));
 
   // 模型上限：只读时把话说清（谁能改、为什么不能改），可改时给管理入口。
   // 底部那颗「模型管理」对谁都给，所以这里必须给一句实话，不能点了没反应。
@@ -1877,6 +1956,10 @@ function modelManageSection(item, rec, capK) {
   levels.setAttribute("aria-label", "思考档位标签，用逗号分开，最多 3 个");
   lvRow.append(fvEl("span", "mm-lbl", "档位标签"), levels);
   sec.appendChild(lvRow);
+  // §5.1：上限这一句在按下保存**之前**就写出来，并且只说不裁——服务端那句
+  // 「思考档位最多 3 个」原样出现在这里，保存失败时卡下方那句（服务端原文）与它是同一句。
+  const capNote = fvEl("p", "mm-note", thinkingLevelsCapNote(parseThinkingLevels(levels.value)));
+  sec.appendChild(capNote);
 
   const defRow = fvEl("div", "mm-row");
   const defSel = fvEl("select", "mm-input");
@@ -1884,7 +1967,8 @@ function modelManageSection(item, rec, capK) {
   const refill = () => {
     const keep = defSel.value;
     clearNode(defSel);
-    parseThinkingLevels(levels.value).forEach((lv) => {
+    const now = parseThinkingLevels(levels.value);
+    now.forEach((lv) => {
       const opt = fvEl("option", "", lv);
       opt.value = lv;
       defSel.appendChild(opt);
@@ -1895,6 +1979,7 @@ function modelManageSection(item, rec, capK) {
       defSel.value = hit ? keep : defSel.options[0].value;
     }
     defSel.disabled = !rec || !defSel.options.length;
+    capNote.textContent = thinkingLevelsCapNote(now);
   };
   refill();
   // 默认档只能落在候选里：候选中有它就用它，没有就跟着 refill 落到的第一档。
@@ -3631,6 +3716,12 @@ async function runStream(holder) {
     const done = await API.streamChat(
       { model: providerId, provider: providerId, messages: sent, attachments,
         sessionId: pref.sessionId, signal: state.controller.signal,
+        // Task 13A：发不发这一格由那一个判据决定，取值用**这一轮真正会用的那条记录**
+        // （budgetProviderId 的同一口径），拿到 "" 时 api.js 整格省略。清单在这里现读，
+        // 不留"这条记录有几个档"的副本（§5.3）——今天两条现网记录都是 unverified，
+        // 所以这一格今天恒为 ""，那是判据不是巧合，锁在 test_v0391_web_cockpit_ui.py。
+        thinkingLevel: thinkingLevelForSend(
+          state.providers.find((p) => p.id === providerId)),
         // 记住这一轮的 run_id：停止要打服务端取消、断线续播也认它（来自 start 帧/帧元数据）。
         onRun: (runId) => { state.currentRunId = runId; },
         // 断线重连的人话状态直接落状态条；错误码不许裸奔到这一行。
@@ -4674,6 +4765,10 @@ function resetViewForIdentity() {
   // B 会看到一句关于 A 的预算的话，新建表单也会把 A 点过的预置上限发到 B 的门里。
   state.budgetClamped = null;
   state.presetMaxContextK = null;
+  // Task 13A §1.3 的对称锁：那句"档位不在清单里、已回到默认档"是一次性的本机态，
+  // 记着它属于哪张卡。换身份不清，B 就会看到一句关于 A 的偏好的话（与上面
+  // budgetClamped 同一个理由，只是它讲的不是预算而是档位）。
+  state.thinkingStaleLevel = null;
   // 接力队列同样随身份清掉（Task 5）：队列只在内存、条目是上一个人的原文，
   // 待发的"立即插话"也一起作废——绝不带着旧身份/旧会话的落点去发新轮。
   resetQueuesForIdentity();
