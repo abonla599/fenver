@@ -428,6 +428,23 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
 .boundary-list h3 { color: var(--ink); font-size: 1rem; letter-spacing: -.02em; }
 .boundary-list p { margin-top: 9px; color: var(--ink-soft); font-size: .78rem; line-height: 1.75; }
 
+/* 差异 */
+/* 三条和"同类怎么做的"对照。标题比 feature 大一档：这一节卖的不是功能，
+   是一句话；每张卡底下挂一条小字注脚，用一道 30px 短线隔开，说的是别处的情形，
+   不抢主句。注脚靠 margin-top:auto 压在卡底，三张等高时它们在同一条线上。 */
+.diff-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; list-style: none; margin: 0; padding: 0; }
+.diff-list li {
+  display: flex; flex-direction: column;
+  padding: 26px 24px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow-sm);
+}
+.diff-no { color: var(--brand); font: 550 .7rem/1 var(--mono); letter-spacing: .09em; }
+.diff-list h3 { margin: 15px 0 0; font-family: var(--display); font-size: 1.32rem; line-height: 1.35; letter-spacing: -.028em; }
+.diff-list p { margin-top: 12px; color: var(--ink-soft); font-size: .84rem; line-height: 1.8; }
+.diff-vs { margin-top: auto; padding-top: 18px; color: var(--ink-faint); font-size: .75rem; line-height: 1.72; }
+.diff-vs::before { content: ""; display: block; width: 30px; height: 1px; margin-bottom: 12px; background: var(--line-strong); }
+
+
 /* 开源 */
 .source-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: clamp(24px, 5vw, 60px); align-items: stretch; }
 .terminal { display: flex; flex-direction: column; min-width: 0; margin: 0; overflow: hidden; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow-sm); }
@@ -529,6 +546,8 @@ footer > .note { margin-top: 12px; }
   .section-head > p:not(.section-no) { max-width: 36em; }
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature { min-height: 260px; }
+  /* 三条差异不折成两列：折了两条先占满、第三条落单。宁可竖排成一列当清单读。 */
+  .diff-list { grid-template-columns: 1fr; }
   .mobile-list { grid-template-columns: 1fr; gap: 0; }
   .shot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .shot-frame img { height: clamp(390px, 66vw, 540px); }
@@ -577,6 +596,8 @@ footer > .note { margin-top: 12px; }
   .shot figcaption strong { font-size: .8rem; }
   .shot figcaption span { font-size: .66rem; }
   .steps, .boundary-list { grid-template-columns: 1fr; gap: 10px; }
+  .diff-list { gap: 10px; }
+  .diff-list li { padding: 22px; }
   .steps li { min-height: 0; padding: 22px; }
   .step-no { margin-bottom: 24px; }
   #not-now { padding-inline: var(--gutter); }
