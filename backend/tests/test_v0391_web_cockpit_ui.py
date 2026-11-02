@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_web_pwa import STATIC, _css, _fn_text, _function_body, _html, _js
+from tests.test_web_pwa import (STATIC, _css, _fn_text, _function_body, _html, _js,
+                                _strip_html_comments, _strip_js_comments)
+
+REPO = STATIC.parents[3]
 
 
 # 把文本拼进 HTML 的出口不止 innerHTML 一个。本仓同类锁早就按一组 sink 判
@@ -1343,6 +1346,68 @@ _AMENDMENT_S2_BANNED = tuple(re.findall(r"「([^「」]+)」", _AMENDMENT_S2_BAN
 # 扫描实际吃的那份（谁被改窄了都会撞上下面两道断言）
 BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭", "三档强度")
 
+# ---------------- 禁句语料的**射程**：从仓库事实派生，不写死文件名（整枝审查 B1） ----------------
+# §2 那句裁决声称的是「界面/发版说明/文档」，而这里此前写死 `app.js`/`api.js`/`index.html`
+# 三份——只罩得住 /app 那一面：管理台（admin/）、官网（site/）、发版说明（docs/releases/）
+# 与 changelog.json 全都不判。审查员的演绿证据：把「这款模型可关闭思考」写进
+# `admin/admin.js` 与 `site/site.js`，相关六份测试 235 passed / rc=0，没有任何一把锁红。
+# 与原生那把（`67e76585` 里的 `_native_kt_corpus`）同一形状：磁盘扫到的一份必须与
+# `git ls-files` 记的那一份**同一个集合**——少一份（改名/挪走/走空目录）多一份（没入库的
+# 游离文件）都红；git 问不到或返回空一律红，不 skip 后当绿。
+_WEB_COPY_ROOTS = ("backend/app/web/static", "backend/app/web/admin",
+                   "backend/app/web/site", "docs/releases")
+# 只判文本表面：`site/img/*.jpg` 那种截图不是"文案"。两侧用同一个后缀过滤，
+# 所以这层排除面吃不进真源码（与原生那把按 `/build/` 段排除同理）。
+_WEB_COPY_SUFFIXES = (".js", ".html", ".css", ".json", ".md", ".webmanifest")
+# 点名在册的四味表面各留一份代表：任何一份被挪出射程 ⇒ 语料被改窄了。
+_WEB_COPY_MINIMUM = {"backend/app/web/static/app.js", "backend/app/web/static/api.js",
+                     "backend/app/web/static/index.html", "backend/app/web/admin/admin.js",
+                     "backend/app/web/site/site.js", "backend/app/web/site/changelog.json"}
+
+
+def _tracked_web_copy() -> set:
+    """`git ls-files` 在 §2 那四个表面上记的文本文件集合——基数钉的**仓库事实**一侧。"""
+    out = subprocess.run(["git", "ls-files", "-z", *_WEB_COPY_ROOTS], cwd=str(REPO),
+                         capture_output=True, timeout=60)
+    assert out.returncode == 0, "问不到 `git ls-files`：同集合比对不许 skip 后当绿"
+    tracked = {p.decode().replace("\\", "/") for p in out.stdout.split(b"\0") if p}
+    tracked = {p for p in tracked if Path(p).suffix in _WEB_COPY_SUFFIXES}
+    assert tracked, "`git ls-files` 在这四个表面上返回 0 份文本：基数钉读不到仓库事实"
+    return tracked
+
+
+def _web_copy_text(rel: str) -> str:
+    """按表面选尺子：.js 剥 JS 注释、.html 剥 HTML 注释，其余（.md/.json/.css）原文。
+
+    与 `_js()`/`_html()` 同口径——注释里出现同词不判（`app.js` 那条"不许写成…"的说明
+    就是形状本身）。CSS 与 `_css()` 一样刻意不剥：注释掉的文案仍是给下一个接手的人看的。
+    """
+    src = (REPO / rel).read_text(encoding="utf-8")
+    if rel.endswith(".js"):
+        return _strip_js_comments(src)
+    if rel.endswith(".html"):
+        return _strip_html_comments(src)
+    return src
+
+
+def _web_copy_corpus() -> dict:
+    """§2 声称的全部表面：磁盘扫到的一份与 git 记的一份必须**同一个集合**。"""
+    on_disk = set()
+    for root in _WEB_COPY_ROOTS:
+        base = REPO / root
+        assert base.is_dir(), f"§2 声称的表面 {root} 读不到：『扫不到』不许当成『守住了』"
+        on_disk |= {p.relative_to(REPO).as_posix() for p in base.rglob("*")
+                    if p.is_file() and p.suffix in _WEB_COPY_SUFFIXES}
+    tracked = _tracked_web_copy()
+    assert on_disk == tracked, (
+        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(tracked)} 份，"
+        f"只在磁盘={sorted(on_disk - tracked)} 只在 git={sorted(tracked - on_disk)}")
+    assert _WEB_COPY_MINIMUM <= on_disk, \
+        f"§2 点名的表面已不在语料里：缺 {sorted(_WEB_COPY_MINIMUM - on_disk)}"
+    assert len(on_disk) >= 60, \
+        f"全表面只扫到 {len(on_disk)} 份：walk 进空目录也算『没有违规』，这一份读歪了"
+    return {rel: _web_copy_text(rel) for rel in sorted(on_disk)}
+
 
 def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
     """§1.3 + §5.3 + §0：偏好一份真相、不缓存"这条记录有几个档"、禁句不出现在两端文案里。
@@ -1366,7 +1431,10 @@ def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
     state_block = js[js.index("const state = {"):js.index("const state = {") + 4000]
     assert "thinkingStaleLevel: null" in state_block, \
         "那次性说明的本机态没在 state 里声明：换身份清它就成了清一个不存在的键"
-    corpora = {"app.js": _js(), "api.js": _js("api.js"), "index.html": _html()}
+    # 射程 = §2 声称的全部表面（界面 + 发版说明 + 文档），由 `git ls-files` 现取并与磁盘
+    # 扫到的一份同集合比对；写死三份是整枝审查的 B1（管理台/官网/发版说明/changelog 全不判）。
+    corpora = _web_copy_corpus()
+    assert set(corpora) >= _WEB_COPY_MINIMUM, "语料集合里没有那六份代表：射程被改窄了"
     # 两道体检：先确认清单来源本身是完整的（§2 那一行被改窄就红），再确认扫描吃的那份
     # 与它**同基数同内容**——手写 tuple 少一味不再是"安静地少扫一句"，而是当场红。
     assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
