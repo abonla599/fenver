@@ -1430,10 +1430,24 @@ Ask exactly: “是否授权对 provider `<id>` 发起一次 `max_tokens=8` 的�
 > `--attempt`（"我以为这是这一轮的第几格"，与账本序号对不上就拒发）。
 
 ```bash
-# 先 dry-run 绿（假 client，零网络、不记账），才许真发。
-"$PY" tools/probe_thinking_profile.py --dry-run --data-dir <现网 data 目录> \
+# 先 dry-run 演**两侧各一格**（假 client、零网络、不记账），才许真发。
+# 修复轮 2（F3）改了这一段：旧示例只写"先 dry-run 绿"，而 `--fake` 缺省是 `reasoning`
+# （上游仍在出推理），拿它演 OFF 那一形按退出码表就是 `switch_off_not_observed` ⇒ **rc=1**。
+# 照旧示例走永远等不到"绿"。dry-run 这一格真正要看的不是 rc，而是
+# `transport=fake_client` + `scope.simulated=true`（那是"零出站的机械凭据"）；
+# rc 由"这一格演的是哪一侧、结果对不对"决定。所以两侧各演一格：
+# 第 ① 格演 OFF 那一侧：假上游"痕迹消失"才算对 ⇒ `--fake quiet`，期望 rc=0 / `switch_off_observed`。
+"$PY" tools/probe_thinking_profile.py --dry-run --fake quiet \
+    --data-dir <现网 data 目录> \
     --provider deepseek-chat --profile deepseek_thinking_disabled --level 均衡 \
     --grant g2-20261102 --ledger <仓库外固定目录>/call-ledger-g2-20261102.jsonl --attempt 1
+# 第 ② 格演 ON 那一侧：假上游"仍在出推理"才算对 ⇒ `--fake reasoning`，期望 rc=0 / `verified`。
+"$PY" tools/probe_thinking_profile.py --dry-run --fake reasoning \
+    --data-dir <现网 data 目录> \
+    --provider deepseek-chat --profile deepseek_thinking_type --level 均衡 \
+    --grant g2-20261102 --ledger <仓库外固定目录>/call-ledger-g2-20261102.jsonl --attempt 1
+# 两格配反了（quiet 演 ON、reasoning 演 OFF）就会 rc=1，那是**预期中的红**，不是通路坏了；
+# 配对了却 rc=2 才是预检闸在说话，按 payload 的 notes 读那一句。
 
 # §R5 预登记的三格（OFF 方向）；--ledger 三次同一路径，--attempt 依次 1 / 2 / 3。
 "$PY" tools/probe_thinking_profile.py --data-dir <现网 data 目录> \
