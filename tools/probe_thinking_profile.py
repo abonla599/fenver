@@ -17,7 +17,8 @@
    （进程半路死掉也算花掉了），发之前先数账本：上限**显式取自那一条授权**
    （`AUTHORIZED_GRANTS[grant]["calls"]`，不是任何全局常量），到数了直接拒绝、一次都不发。
    `--attempt` 还要和账本序号对上——对不上说明
-   「我以为这是第 3 次」和机器要发的不是同一次，那正是重复烧额度的形状。
+   「我以为这是第 3 次」和机器要发的不是同一次，那正是重复烧额度的形状。**live 模式它必填**
+   （修复轮 1，I-2；见下面那一段的射程与诚实边界）。
    单次运行另外还有一道 `CALLS_PER_RUN = 1`；SDK 层用 `max_retries=0`，
    否则「一次调用」在传输层可以是三次 HTTP 请求。
    **live 模式必须显式给 `--ledger`**（修复轮 1，Critical-1）：账本缺省时它落在
@@ -30,6 +31,12 @@
    计数**的（上一版已把这条残余写进 note），换路径就从 0 重计。把"哪一份文件是这一轮的
    权威账本"钉进授权表之后，轮换账本文件就不再是"随手加个 flag"，而是
    **"改代码 + 用户再授权"**——这就是"把授权做成机制"的意思。
+   **live 模式还必须显式给 `--attempt`**（修复轮 1，I-2；与上面两条必填同一格、同一支判据，
+   零出站、零写盘、零记账）。它只买到两句实话，别的话它不保证：
+   ① 它把「我以为这是第几次」和「账本上下一个序号是不是这个」变成**机器对账**；
+   ② 它**不**保证换目录不能重计——上限绑的仍是文件名，换一份 `--ledger` 目录再谎报
+   `--attempt 1` 是操作者依然做得到的事；真正的权威是 **(grant, 账本路径) 这一对** 加上
+   主控人留下的跑批记录。所以这一道闸不许被读成、也不许被写成"防轮换"。
    再一道：**这一轮没批准的 (provider, profile) 形状发不出去**（`allowed_shapes` 白名单，
    rc=2、零出站、零记账）。挡的是那句「既然都开了，顺便再试个别的形状」。
    授权用尽后**不自动续**，要更多次需要用户新的明示。
@@ -112,22 +119,22 @@ g2 那一轮 3 次怎么花——**预登记**（§R5，写在这里就是为了
    - 若两次都因异常没结论，第 3 次**照发不省**，但只能挑上面三种之一；用完 3 格即停。
    这一节实现不判（判它要读上游结论，不是命令行能定的），但它必须落在这个文件里。
 
-退出码
-    0  拿到证据（`verified`、基线那一格的 `baseline_ok`，或 OFF 方向的
-       `switch_off_observed`——后者只代表"本次响应无推理痕迹"，不等于开关有效）
-    1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败 /
-       `switch_off_not_observed`：参数被接受但仍在出推理）——**不重试**
-
 本工具不许对另一个 checkout 运行（修复轮 1，Minor；修复轮 2 补 N3/N4）：`inside_dir(…, REPO_ROOT)`
 只挡发起这一跑的那棵树，所以 `--data-dir`（以及 live 必填的 `--ledger`——账本同样是落盘，
 N3）若沿父链上溯碰到 `.git` 且不是本工具这棵树，直接拒。N4：原判据只看父级一层，
 `<other>/data/swap-snapshots/snap-1/data` 这种深树形状曾放行并一路读到密钥指纹——现在沿
 **整条父链**上溯（判据只 stat 各级祖先目录有没有 `.git`，**绝不去读树里那份 data/**）。
 
-退出码
-    0  拿到证据（`verified`，或基线那一格的 `baseline_ok`）
-    1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败）——**不重试**
-    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 授权轮次没显式给 /
+退出码（全文只此一份。修复轮 1，M-1：这里原本还留着第二份 §R4 之前的旧说明，那句 rc=0 只认
+`verified`/`baseline_ok`、rc=1 只认 `unverified`/`form_unverifiable`/基线失败，与下面直接矛盾——
+花额度的人是照着这份读退出码的，矛盾就是让 TA 自己猜，所以删旧留新）
+
+    0  拿到证据（`verified`、基线那一格的 `baseline_ok`，或 OFF 方向的
+       `switch_off_observed`——后者只代表"本次响应无推理痕迹"，不等于开关有效）
+    1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败 /
+       `switch_off_not_observed`：参数被接受但仍在出推理）——**不重试**
+    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / **`--attempt` 没显式给**
+       （修复轮 1，I-2：live 必填）/ 授权轮次没显式给 /
        账本文件名不是那一轮授权表里的那一份 / (provider, profile) 不在该轮 `allowed_shapes`
        里 / 候选行缺 `direction` / 账本落在仓库内或属于另一棵 checkout / 形状越出授权 /
        `--data-dir` 属于另一棵 checkout；
@@ -914,7 +921,12 @@ def make_config(argv=None) -> dict:
                         help="候选配方名；none = 基线（不发任何思考参数，不代表模型不思考）")
     parser.add_argument("--level", default=None,
                         help="档位标签（%s）；基线不填" % "、".join(thinking_profiles.THINKING_LEVEL_LABELS))
-    parser.add_argument("--attempt", type=int, default=None, help="登记的第几次，须与账本序号一致")
+    parser.add_argument("--attempt", type=int, default=None,
+                       help="登记的第几次，须与账本序号一致。**live 模式必填**（修复轮 1，I-2）："
+                            "缺省即 rc=2 拒发，零出站零记账。射程只有两句——它把「我以为这是第几次」"
+                            "和「账本上下一个序号是不是这个」变成机器对账；它**不**保证换目录不能重计"
+                            "（换目录 + 谎报 --attempt 1 依然做得到），权威是 (grant, 账本路径) 这一对")
+
     parser.add_argument("--isolation-dir", default=None,
                         help="仓库外临时目录；缺省每次新建一个（所以账本**不再**跟着它走）")
     parser.add_argument("--ledger", default=None,
@@ -1023,6 +1035,21 @@ def run_probe(config, client_factory=None):
             raise RuntimeError("live 模式必须显式给 --ledger（一份跨进程稳定的账本路径）："
                                "缺省的账本会落进本次新建的隔离目录，每个进程都从空账本开始 ⇒ "
                                "「总额」这道闸永不生效。本次零出站")
+        # —— 修复轮 1（I-2）：live 模式 `--attempt` 从可选改成必填。它与上面那条 `--ledger`
+        #    必填是同一格、同一支判据（预检，零出站、零写盘、零记账）。为什么必填：上限绑的是
+        #    **文件名**，目录每次调用都能换（审查员实测 5 个兄弟目录 ⇒ 5 次 rc=0）。序号必填之后，
+        #    "换目录还接着计"这件事就要求操作者**主动谎报一个序号**，而不是靠记忆漂移。
+        #    措辞只许说两句真话（有禁句锁）：它把「我以为这是第几次」和「账本上下一个序号是不是
+        #    这个」变成机器对账；它**不**保证换目录不能重计，真正的权威是 (grant, 账本路径) 这一对。
+        if not config["dry_run"] and config["attempt"] is None:
+            # 这句话要跑得过 `error_excerpt` 那 180 字的截断（脱敏后截断，Important-5）：
+            # 写长了被切掉的后半句恰好是"换目录仍然重得起来"那句实话，而它是这句判据的射程。
+            # 长度由 `test_live_run_without_an_explicit_attempt_is_refused` 钉住（句尾必须在场）。
+            raise RuntimeError("live 模式必须显式给 --attempt：它把「我以为这是第几次」和"
+                               "「账本上下一个序号是不是这个」变成机器对账，对不上就不发。"
+                               "它不保证换目录不能重计（换 --ledger 目录 + 谎报 --attempt 1 "
+                               "依然做得到），真正的权威是 (grant, 账本路径) 这一对 + "
+                               "主控人的跑批记录。本次零出站")
         if ledger and overlaps(ledger, data_dir):
             raise RuntimeError("--ledger 不许落在 --data-dir 里面：那是本次声明只读的目录，"
                                "账本每发一次都要写它一笔")
@@ -1124,10 +1151,13 @@ def run_probe(config, client_factory=None):
         #    放在记账之前（零记账）、SDK 签名检查之后（各条闸的拒绝理由互不掩盖）。
         #    挡的是那一句话：「既然都开了，顺便再试个别的形状」。
         if (config["provider"], config["profile"]) not in grant_row["allowed_shapes"]:
+            # 修复轮 1，M-4：白名单是 **(provider, profile) 对**，这句话以前只打 provider 那一半、
+            # 却说自己是"provider × 配方组合"——撞闸的人拿不到合法配方名单，而 §R5 的第 3 次
+            # 怎么花正要看这份名单。按实际内容打印整份对表，话也不说大。
             return blocked(f"授权轮次 {grant} 的 allowed_shapes 白名单里没有 "
                            f"({config['provider']}, {config['profile']}) 这一格："
-                           f"本轮批准的是 {sorted(p for p, _ in grant_row['allowed_shapes'])}"
-                           " 这些 provider × 配方组合，表外形状零出站、零记账")
+                           f"本轮批准的 (provider, profile) 对是 {sorted(grant_row['allowed_shapes'])}，"
+                           "表外形状零出站、零记账")
         ledger_is_new = not Path(ledger).is_file()
         try:
             payload["call_slot"] = reserve_call_slot(

@@ -33,7 +33,6 @@ Task 11b（第二轮授权机制化）新增 §10，并按 §R1 改写 §8 那�
 `--dry-run`，三条 paid 调用由主控人过审后手工执行。
 """
 import ast
-import copy
 import hashlib
 import importlib.util
 import inspect
@@ -110,15 +109,32 @@ def _ledger(base, grant=GRANT2) -> Path:
     return Path(base) / name
 
 
+def _next_seq(ledger) -> int:
+    """账本上下一个序号（夹具用来声明"这一跑就是下一格"）。只数 `event == "attempt"` 的行，
+    与 `reserve_call_slot` 同一口径；文件不存在时是 1，**不创建任何东西**。"""
+    return len(probe.read_ledger(ledger)) + 1
+
+
+def _effective_ledger(tmp_path: Path, extra: tuple):
+    """这一跑真正会写的那份账本：命令行里最后一次 `--ledger` 说了算（argparse 取最后一个），
+    站点没指定时才是夹具那份 `_ledger(tmp_path/"iso")`。"""
+    picks = [i for i, a in enumerate(extra) if a == "--ledger"]
+    return Path(extra[picks[-1] + 1]) if picks else _ledger(tmp_path / "iso")
+
+
 def _argv(tmp_path: Path, *extra: str, provider_id=None, key=SHAPEY,
-          inline_key=None, asked=None, grant=GRANT2) -> list:
-    """夹具命令行。**live 形状（不带 --dry-run）必须有一份显式账本 + 显式授权轮次**，
-    这是 Critical-1 与 §R1 修完之后的新契约：缺省账本会落进每次新建的隔离目录 ⇒ "总额"
-    永不咬；缺 `--grant` 则"哪一份文件是这一轮的权威账本"又回到"由操作者记得"。所以这里
+          inline_key=None, asked=None, grant=GRANT2, attempt=None) -> list:
+    """夹具命令行。**live 形状（不带 --dry-run）必须有一份显式账本 + 显式授权轮次 + 显式序号**，
+    这是 Critical-1、§R1 与修复轮 1（I-2）修完之后的新契约：缺省账本会落进每次新建的隔离目录 ⇒ "总额"
+    永不咬；缺 `--grant` 则"哪一份文件是这一轮的权威账本"又回到"由操作者记得"；缺 `--attempt`
+    就没人声明"我以为这是第几次"，机器那份对账就没有左半边。所以这里
     给每格测试一条固定的持久账本（在 data_dir 之外、文件名等于该轮的 `ledger_name`），
     让既有用例继续演真调用那一段。
-    位置在 `*extra` **之前**：谁要自己指定账本/授权轮次，谁说了算（argparse 取最后一次）。
-    provider 缺省时按 profile 推（白名单只认现网那两条 provider id）。"""
+    位置在 `*extra` **之前**：谁要自己指定账本/授权轮次/序号，谁说了算（argparse 取最后一次）。
+    provider 缺省时按 profile 推（白名单只认现网那两条 provider id）。
+    `--attempt` 那一格同样：站点显式写了就按它演（对账用例全靠这一条）。缺省时 live 形状
+    由夹具按**这一跑真正那份账本**的下一个序号声明（"这一跑就是下一格"），既不夸大也不掩盖；
+    `attempt="omit"` 是留给 I-2 那条必填闸的负控开关——**故意不声明**，看闸会不会红。"""
     profile = extra[extra.index("--profile") + 1] if "--profile" in extra else "none"
     provider_id = provider_id or _provider_for(profile)
     _write_config(tmp_path, provider_id=provider_id, key=key, inline_key=inline_key)
@@ -126,8 +142,15 @@ def _argv(tmp_path: Path, *extra: str, provider_id=None, key=SHAPEY,
     if grant:                                   # `grant=None` 演"live 不给授权轮次"那一格
         argv += ["--grant", grant]
     argv += ["--ledger", str(_ledger(tmp_path / "iso")),
-             "--isolation-dir", str(tmp_path / "iso"), *extra]
-    return argv
+             "--isolation-dir", str(tmp_path / "iso")]
+    if ("--dry-run" not in extra and attempt != "omit" and "--attempt" not in extra):
+        argv += ["--attempt", str(attempt if attempt is not None
+                                   else _next_seq(_effective_ledger(tmp_path, extra)))]
+    elif attempt == "omit":                     # 必填闸的负控：什么都不声明，且不许由别处补上
+        assert "--attempt" not in extra, "attempt=\"omit\" 与站点自带 --attempt 是互相矛盾的输入"
+    elif attempt is not None:                   # 站点点名一个具体序号（不读账本，照抄）
+        argv += ["--attempt", str(attempt)]
+    return argv + list(extra)
 
 
 def _run(tmp_path: Path, *extra: str, factory=None, **kw):
@@ -797,7 +820,10 @@ def test_run_reports_the_live_config_untouched(tmp_path):
                                 "--profile", "deepseek_thinking_type", "--level", "均衡",
                                 "--grant", GRANT2,
                                 "--ledger", str(_ledger(tmp_path / "iso")),
-                                "--isolation-dir", str(tmp_path / "iso")])
+                                "--isolation-dir", str(tmp_path / "iso"),
+                                # 这格绕开夹具直给命令行（要自己造 before 摘要），所以修复轮 1
+                                # （I-2）新加的 live 必填 `--attempt` 也得在这里自己声明。
+                                "--attempt", "1"])
     # 摘要必须在 `make_config` 之后取：`_run` 那层助手会重写这份夹具，先把 before
     # 记下来就会把"夹具自己写的"当成"探针写的"——那是假红，不是证据。
     before = probe.files_digest(data_dir)
@@ -900,7 +926,14 @@ def test_authorized_live_call_count_is_the_grant_itself(tmp_path):
         for provider_id, shape in g["allowed_shapes"]:
             assert provider_id in known_providers, (gid, provider_id)
             assert shape in known_profiles, (gid, shape)
-    # 一份授权绑一份权威账本：两个名字互不相同，且各自带自己的 grant id。
+    # 一份授权绑一份权威账本。这里先钉**字面文件名**（修复轮 1，I-1）：上面那句
+    # `str(g["ledger_name"]).strip()` 只要求"非空"，夹具 `_ledger()` 又是**从表里读**这个名字的，
+    # 于是把两轮的花名一起改掉（仍含 grant id、仍互不相同）时 138 格全绿——闸还在，
+    # 但它认的那份文件被换掉了，计数从 0 开始。字面钉住之后，换名=改代码+**这一格红**。
+    assert probe.AUTHORIZED_GRANTS["g1-20261101"]["ledger_name"] == "call-ledger-g1-20261101.jsonl"
+    assert probe.AUTHORIZED_GRANTS["g2-20261102"]["ledger_name"] == "call-ledger-g2-20261102.jsonl"
+    # 两条结构判据（不是互不相同的装饰）：① 每轮的名字必须以该轮 grant id 为子串；
+    # ② 两轮互不相同。共用的话计数口径就从「这一轮」退回「这个文件」。
     names = {grants[GRANT1]["ledger_name"], grants[GRANT2]["ledger_name"]}
     assert len(names) == 2, "两轮共用一个文件名的话，计数口径就从「这一轮」退回「这个文件」"
     assert GRANT1 in grants[GRANT1]["ledger_name"] and GRANT2 in grants[GRANT2]["ledger_name"]
@@ -1426,6 +1459,70 @@ def test_live_run_without_a_grant_is_refused(tmp_path):
     assert any("--grant" in n for n in payload["notes"]), payload["notes"]
 
 
+def test_live_run_without_an_explicit_attempt_is_refused(tmp_path):
+    """I-2 的收口：live 模式 `--attempt` 从可选改成**必填**，与"live 必须显式给 `--ledger`"
+    同一格、同一支判据（预检，零出站、零写盘、零记账、连环境都不动）。
+    为什么这一格值得付"31 处既有用例补参数"的代价：上限绑的是**文件名**，目录每次调用都能换，
+    而 `--attempt` 把「我以为这是第几次」和「账本上下一个序号是不是这个」变成机器对账。
+    诚实边界（措辞有锁，见下面三条断言）：它**不**保证换目录不能重计——换目录 + 谎报
+    `--attempt 1` 仍是操作者做得到的事；真正的权威是 **(grant, 账本路径) 这一对** 加上
+    主控人留的跑批记录。这一条不是"防轮换"，谁写成防轮换谁就该红。"""
+    data_dir = _write_config(tmp_path)
+    ledger = _ledger(tmp_path / "iso")
+    argv = ["--data-dir", str(data_dir), "--provider", DEEPSEEK, "--profile", "none",
+            "--grant", GRANT2, "--ledger", str(ledger), "--isolation-dir", str(tmp_path / "iso")]
+    build, seen = _never()
+    env_before = dict(os.environ)
+    payload, rc, _ = probe.run_probe(probe.make_config(argv), client_factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["verdict"] == "preflight_failed"
+    assert payload["transport"] is None and payload["call_slot"] is None
+    assert payload["isolation_ok"] is False, "缺 --attempt 这一跑不许开始隔离"
+    assert not (tmp_path / "iso").exists(), "预检拒掉的那一支连隔离目录都不该开"
+    assert not ledger.exists(), "零记账：账本一行都不许有"
+    assert dict(os.environ) == env_before, "没走到隔离就不许改 PROVIDERS_DB_PATH / DATA_ROOT"
+    note = " ".join(payload["notes"])
+    # 判据在场，且话只说两句能说的
+    assert "--attempt" in note, payload["notes"]
+    assert "机器对账" in note and "账本上下一个序号" in note, payload["notes"]
+    assert "(grant, 账本路径)" in note, "拒绝理由必须点名真正的权威是这一对，而不是这个 flag"
+    assert "防轮换" not in note, "这一道闸不许被写成防轮换——它挡不住换目录 + 谎报序号"
+    # 那句诚实边界必须**整句到场**：`error_excerpt` 会把拒绝理由截到 180 字，写长了被切掉的
+    # 恰好是尾巴（"…这一对 + 主控人的跑批记录。本次零出站"）——那是这句判据的射程本身。
+    assert payload["notes"][-1].endswith("本次零出站"), payload["notes"][-1]
+    # 负控（这条判据不是恒红的装饰）：同一条命令行补上 --attempt 1 就走得到传输那一步
+    ok, rc2, _ = probe.run_probe(probe.make_config(argv + ["--attempt", "1"]),
+                                 client_factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
+    assert len(probe.read_ledger(ledger)) == 1
+
+
+def test_five_sibling_ledger_dirs_with_declared_attempts_book_exactly_one(tmp_path):
+    """I-2 的实测形状（审查员注入替身跑过：5 个目录 ⇒ 5 次 rc=0，只追了一条 note）。
+    这里演**对照**那一半：同一 `--grant`、同一权威花名、五个兄弟目录，但每次都按
+    「我以为这是第几次」显式声明 `--attempt 1..5` ⇒ 只成 1 次，其余四次
+    `AttemptMismatch` + `rc=2`、`call_slot=None`，五份账本合计 1 行。
+    零出站：客户端是注入替身，`--data-dir` 是夹具造的假配置（base_url 用 RFC 2606 的
+    `.invalid`）。**这条锁不声称挡住"换目录 + 谎报 --attempt 1"**——那是上一格 note
+    里明写的诚实边界，跨账本累计不在本单射程（concerns.1 的残余）。"""
+    data_dir = _write_config(tmp_path)
+    results = []
+    for index in range(1, 6):
+        ledger = _ledger(tmp_path / ("led%d" % index))
+        argv = ["--data-dir", str(data_dir), "--provider", DEEPSEEK, "--profile", "none",
+                "--grant", GRANT2, "--ledger", str(ledger),
+                "--isolation-dir", str(tmp_path / "iso"), "--attempt", str(index)]
+        payload, rc, _ = probe.run_probe(probe.make_config(argv),
+                                         client_factory=lambda r: probe.FakeClient("quiet"))
+        results.append((rc, payload["call_slot"], payload["error_class"], len(probe.read_ledger(ledger))))
+    booked = [r for r in results if r[0] == probe.RC_VERIFIED]
+    assert len(booked) == 1, "五个兄弟目录 + 各自声明的序号：只成一次 ⇒ %r" % (results,)
+    assert booked[0][1] == 1 and sum(r[3] for r in results) == 1
+    for rc, slot, error_class, lines in [r for r in results if r[0] != probe.RC_VERIFIED]:
+        assert rc == probe.RC_BLOCKED and slot is None and lines == 0
+        assert error_class == "AttemptMismatch", "换目录重计那一跑必须由序号对账挡下"
+
+
 def test_unknown_grant_id_never_reaches_the_run_layer(tmp_path):
     """表外的授权 id 在 argparse 就被 `choices` 挡掉：拿一个不存在的那一轮去发，
     连 payload 都不该有——"表里有这一轮"是这道闸的前提，不是事后检查。"""
@@ -1491,6 +1588,14 @@ def test_a_shape_outside_the_grants_whitelist_is_refused_without_booking(tmp_pat
         assert not ledger.exists(), (provider, profile, "白名单外不许占额度")
         assert payload["transport"] is None and payload["call_slot"] is None
         assert any("allowed_shapes" in n or "白名单" in n for n in payload["notes"]), payload["notes"]
+        # 修复轮 1（M-4）：拒绝理由必须把**整份 (provider, profile) 对表**说出来。
+        # 旧文案只打 provider 那一半却自称"provider × 配方组合"——撞闸的人拿不到合法配方名单，
+        # 而 §R5 第 3 次怎么花正要看它。这一格把"话说到什么程度"钉住：说得出配对才许绿。
+        note = " ".join(payload["notes"])
+        for approved_provider, approved_shape in probe.AUTHORIZED_GRANTS[GRANT2]["allowed_shapes"]:
+            assert approved_provider in note and approved_shape in note, (approved_provider,
+                                                                         approved_shape, note)
+        assert "provider × 配方组合" not in note, "旧那句把只列了 provider 的话说大了（M-4）"
     # 负控：白名单内的 (provider, profile) 必须放行，否则这道闸恒红
     ok, rc2, _ = _run(tmp_path, "--profile", "dashscope_enable_thinking_off", "--level", "快速",
                       provider_id=RELAY, factory=lambda r: probe.FakeClient("quiet"))
