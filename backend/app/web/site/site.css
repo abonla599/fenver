@@ -161,8 +161,12 @@ strong { font-weight: 650; }
    从上到下只有一条线：这是谁 → 它解决什么 → 怎么开始。 */
 .hero {
   position: relative; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: center;
   max-width: var(--maxw); margin: 0 auto;
-  padding: clamp(44px, 5.6vw, 72px) var(--gutter) clamp(52px, 7vw, 84px);
+  /* 产品示意搬出去之后，首屏只剩文字。让它占满一屏并垂直居中，上下留白对称，
+     读起来是"一屏讲完一件事"，而不是"内容太少所以显得空"。 */
+  min-height: min(calc(100vh - 72px), 780px);
+  padding: clamp(44px, 5.6vw, 72px) var(--gutter) clamp(44px, 6vw, 72px);
   text-align: center;
 }
 .hero::before {
@@ -216,10 +220,15 @@ strong { font-weight: 650; }
 .hero-assurances li { display: inline-flex; align-items: center; gap: 7px; }
 .hero-assurances li::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--brand); }
 
-/* 首屏产品示意 */
+/* 首屏产品示意单独成段。留在首屏里，900px 高的屏幕上它只能露出 250px —— 一张
+   圆角卡片被截掉大半，看着像页面没加载完；压到 250px 以内又小到看不清聊天内容。 */
+.showcase {
+  max-width: var(--maxw); margin: 0 auto;
+  padding: 0 var(--gutter) clamp(56px, 7vw, 96px);
+}
 .product-stage {
   position: relative; overflow: hidden; min-width: 0;
-  width: min(100%, 620px); min-height: 540px; margin: clamp(30px, 4vw, 52px) auto 0;
+  width: min(100%, 620px); min-height: 540px; margin: 0 auto;
   display: grid; place-items: center; padding: 40px 32px 52px;
   border: 1px solid color-mix(in srgb, var(--brand) 14%, var(--line)); border-radius: 32px;
   background: var(--brand-soft); box-shadow: var(--shadow-sm); isolation: isolate;
@@ -288,65 +297,31 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
    十几像素的小字被塞进 130px 的空栏，既够不着标题，又把标题推离内容区左缘——
    下面所有卡片都从 0 起排，只有标题缩进 180px，整块看着是偏的。
    改成编号压在标题上方、两行共用同一条左缘：左缘对齐了卡片，编号也成了标题的眉批。 */
-.section-head { --sec: var(--brand); position: relative; border-top: 2px solid var(--sec); padding-top: 15px; display: grid; grid-template-columns: minmax(0, 6fr) minmax(240px, 3.4fr); grid-template-areas: "no ." "h2 desc"; column-gap: clamp(20px, 4vw, 50px); align-items: start; margin-bottom: clamp(34px, 5vw, 58px); }
-.section-no { grid-area: no; margin-bottom: 15px; color: var(--sec); font: 550 .66rem/1.2 var(--mono); letter-spacing: .1em; }
-.section-head h2 { grid-area: h2; font-size: clamp(2.15rem, 4.2vw, 3.8rem); line-height: 1.08; letter-spacing: -.06em; }
-.section-head > p:not(.section-no) { grid-area: desc; color: var(--ink-soft); font-size: .94rem; line-height: 1.85; }
+/* 首屏居中之后，各区块头也跟着居中：上面一屏居中、下面几屏左对齐，连着往下滚像
+   两个不同的站点。标题里的 <br> 保留，居中后两行正好对称。
+   字距从 -.06em 收到 -.01em：负字距是为左对齐的编辑式版面定的，居中之后会显得挤。 */
+.section-head {
+  --sec: var(--brand);
+  position: relative; border-top: 2px solid var(--sec); padding-top: 15px;
+  display: block; text-align: center;
+  margin-bottom: clamp(34px, 5vw, 58px);
+}
+.section-no { margin-bottom: 16px; color: var(--sec); font: 550 .66rem/1.2 var(--mono); letter-spacing: .1em; }
+.section-head h2 { margin-bottom: 18px; font-size: clamp(2.15rem, 4.2vw, 3.8rem); line-height: 1.1; letter-spacing: -.01em; }
+.section-head > p:not(.section-no) { max-width: 34em; margin: 0 auto; color: var(--ink-soft); font-size: .94rem; line-height: 1.85; }
 /* 每一章的品牌色带上，右端立一组"信号刻度"：所有区块共用同一套记号，
    既替掉各区块右上角的空当，也让整页读起来是同一台机器上的读数。 */
 .sig-strip {
-  position: absolute; right: 0; bottom: 100%;
-  display: flex; align-items: flex-end; gap: 5px; height: 24px; margin-bottom: 6px;
+  position: absolute; left: 0; right: 0; bottom: 100%;
+  display: flex; align-items: flex-end; justify-content: center; gap: 5px; height: 24px; margin-bottom: 6px;
 }
 .sig-strip b { display: block; width: 1px; height: 6px; background: color-mix(in srgb, var(--sec) 26%, transparent); }
 .sig-strip b:nth-child(2n) { height: 11px; background: color-mix(in srgb, var(--sec) 44%, transparent); }
 .sig-strip b:nth-child(3n) { height: 17px; background: color-mix(in srgb, var(--sec) 66%, transparent); }
 .sig-strip b:nth-child(5n + 1) { height: 24px; background: var(--sec); }
-.section-head-narrow { display: block; }
-.section-head-narrow .section-no { display: inline-block; min-width: 130px; margin-bottom: 20px; }
-.section-head-narrow h2 { margin-bottom: 20px; }
-.section-head-narrow > p { max-width: 35em; }
 /* #shots 头部没有说明文字，右边本来空出一大片。这里把它收成一条横带：
    绿线横贯内容区，编号与标题压在左端——右侧的留白由这条线封口，
    不再是"标题孤零零挂在左上角、右边空白散着"。 */
-/* 带子右端的线稿组：四块界面站在一条发丝线上，线上再压一排长短刻度、
-   四块界面外侧套一对取景框角——整块读起来像一条"正在采集的监视带"，
-   替掉右半边的死白。纯描边、纯实色：本仓样式闸门不许出现任何渐变写法。 */
-.shots-orn {
-  position: absolute; right: 0; bottom: 0; left: 44%;
-  display: flex; justify-content: flex-end; align-items: flex-end;
-  border-bottom: 1px solid var(--line-strong);
-}
-/* 起点压一段品牌色短线，并让它缓缓呼吸：一处还在跳的采集点。 */
-.shots-orn::before {
-  content: ""; position: absolute; left: 0; bottom: -1px;
-  width: 22px; height: 2px; background: var(--brand);
-  animation: ornBeat 2.6s ease-in-out infinite;
-}
-@keyframes ornBeat { 0%, 100% { opacity: 1; } 50% { opacity: .28; } }
-.orn-stack { position: relative; display: flex; align-items: flex-end; gap: 11px; padding: 9px 9px 0; }
-.orn-stack::before, .orn-stack::after {
-  content: ""; position: absolute; top: 0; width: 13px; height: 13px; pointer-events: none;
-  border-top: 1px solid color-mix(in srgb, var(--brand) 48%, transparent);
-}
-.orn-stack::before { left: 0; border-left: 1px solid color-mix(in srgb, var(--brand) 48%, transparent); }
-.orn-stack::after { right: 0; border-right: 1px solid color-mix(in srgb, var(--brand) 48%, transparent); }
-.shots-orn i {
-  display: block; width: auto; aspect-ratio: 44 / 110; height: clamp(64px, 8vw, 116px);
-  border: 1px solid color-mix(in srgb, var(--brand) 24%, transparent);
-  border-bottom: 0; border-radius: 5px 5px 0 0;
-}
-/* 每格顶上一条短线，让四个框读成"四块界面"而不是四张加载占位图。 */
-.shots-orn i::before {
-  content: ""; display: block; width: 14px; height: 3px; margin: 9px auto 0;
-  border-radius: 2px; background: color-mix(in srgb, var(--brand) 22%, transparent);
-}
-.shots-orn i:nth-child(2) {
-  background: var(--brand-soft);
-  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
-  box-shadow: 0 0 18px color-mix(in srgb, var(--brand-bright) 26%, transparent);
-}
-.shots-orn i:nth-child(2)::before { background: color-mix(in srgb, var(--brand) 55%, transparent); }
 .note { max-width: var(--measure); color: var(--ink-soft); font-size: var(--step--1); line-height: 1.75; }
 .label { color: var(--ink-faint); font: 550 .66rem/1.2 var(--mono); letter-spacing: .13em; }
 .js .reveal { opacity: 0; transform: translateY(20px); transition: opacity var(--dur-3) var(--ease-out), transform var(--dur-3) var(--ease-out); }
@@ -374,17 +349,24 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
 .model-pills span { padding: 4px 9px; color: var(--brand); background: var(--brand-soft); border: 1px solid color-mix(in srgb, var(--brand) 13%, transparent); border-radius: var(--radius-pill); font-size: .62rem; }
 
 /* 安卓 */
+/* 这一块原来切成左右两栏：标题在左、条目竖排在右。首屏与其余区块都居中之后，
+   它是全页唯一侧着排的一处，绿线只画到左半边，看着像断了一截。
+   改成单列：标题居中，三条并排铺在下面。卡片外壳保留——它本来就是用来把
+   "装进口袋"这件事跟其他区块区分开的。 */
 #shell-only {
-  display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr);
-  gap: clamp(38px, 7vw, 88px); margin-top: 20px; margin-bottom: 20px;
+  display: block;
+  margin-top: 20px; margin-bottom: 20px;
   color: var(--ink); background: var(--surface);
   border: 1px solid var(--line); border-radius: 30px; box-shadow: var(--shadow-sm);
 }
 #shell-only .section-head { margin: 0; }
 #shell-only .section-head > .btn { margin-top: 26px; }
-.mobile-list { display: grid; align-content: start; list-style: none; margin: 0; padding: 0; }
-.mobile-list li { display: grid; grid-template-columns: 42px 1fr; gap: 16px; padding: 25px 0; border-bottom: 1px solid var(--line); }
-.mobile-list li:first-child { border-top: 1px solid var(--line); }
+.mobile-list {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 clamp(22px, 3vw, 40px); align-content: start;
+  list-style: none; margin: clamp(26px, 3.5vw, 42px) 0 0; padding: 0;
+}
+.mobile-list li { display: grid; grid-template-columns: 42px 1fr; gap: 14px; padding: 22px 0; border-bottom: 1px solid var(--line); }
 .mobile-no { display: grid; place-items: center; width: 36px; height: 36px; color: var(--brand); background: var(--brand-soft); border: 1px solid color-mix(in srgb, var(--brand) 16%, transparent); border-radius: 11px; font: 500 .65rem/1 var(--mono); }
 .mobile-list h3 { color: var(--ink); font-size: 1.1rem; letter-spacing: -.025em; }
 .mobile-list p { margin-top: 8px; color: var(--ink-soft); font-size: .8rem; line-height: 1.75; }
@@ -511,18 +493,16 @@ footer > .note { margin-top: 12px; }
 }
 @media (max-width: 900px) {
   .menubtn { display: block; justify-self: end; }
-  .shots-orn, .sig-strip { display: none; }
+  .sig-strip { display: none; }
   .topbar { grid-template-columns: auto 1fr auto auto; }
   .navlinks { display: none; position: absolute; left: var(--gutter); right: var(--gutter); top: calc(100% + 8px); flex-direction: column; align-items: stretch; gap: 3px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-lg); }
   .navlinks.is-open { display: flex; }
   .navlinks a { min-height: 46px; padding-inline: 14px; }
-  .product-stage { min-height: 500px; margin-top: 36px; padding-inline: 16px; }
-  .section-head { grid-template-columns: minmax(0, 1fr); grid-template-areas: "no" "h2" "desc"; }
-  .section-head > p:not(.section-no) { max-width: 36em; margin-top: 16px; }
+  .product-stage { min-height: 500px; padding-inline: 16px; }
+  .section-head > p:not(.section-no) { max-width: 36em; }
   .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .feature { min-height: 260px; }
-  #shell-only { grid-template-columns: 1fr; }
-  #shell-only .section-head { max-width: 580px; }
+  .mobile-list { grid-template-columns: 1fr; gap: 0; }
   .shot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .shot-frame img { height: clamp(390px, 66vw, 540px); }
   .source-grid, .archive-main { grid-template-columns: 1fr; }
@@ -535,7 +515,9 @@ footer > .note { margin-top: 12px; }
   .brand { font-size: 1.34rem; }
   .brand-symbol { width: 29px; height: 29px; }
   .menubtn { min-height: 40px; padding-inline: 11px; }
-  .hero { padding-top: 40px; padding-bottom: 56px; }
+  /* 手机上一屏本来就窄，780px 的 min-height 会让文案浮在中间、上下各空出一大截。
+     压到 620 上限，留白仍在，但不至于看着像内容没加载出来。 */
+  .hero { min-height: min(calc(100vh - 64px), 620px); padding-top: 40px; padding-bottom: 56px; }
   .hero-kicker { margin-bottom: 22px; font-size: .7rem; }
   .hero-title { font-size: clamp(2.1rem, 9vw, 2.9rem); }
   .lede { margin-top: 20px; font-size: 1rem; }
@@ -547,11 +529,10 @@ footer > .note { margin-top: 12px; }
   .app-window { width: min(100%, 350px); transform: none; }
   .window-body { min-height: 350px; }
   .floating-card { padding: 9px 11px; }
-  .memory-float { left: 5px; top: 62px; }
-  .model-float { right: 4px; bottom: 77px; }
+  .memory-float { left: 12px; top: 62px; }
+  .model-float { right: 10px; bottom: 77px; }
   main > section { padding-top: 74px; padding-bottom: 74px; }
-  .section-head { grid-template-areas: "no" "h2" "desc"; margin-bottom: 32px; }
-  .section-head > p:not(.section-no) { margin-top: 14px; }
+  .section-head { margin-bottom: 32px; }
   .section-head h2 { font-size: clamp(2.1rem, 10vw, 3rem); }
   .feature-grid { grid-template-columns: 1fr; gap: 11px; }
   .feature { min-height: 0; padding: 22px; }
