@@ -248,4 +248,7 @@ def build_thinking_kwargs(profile, level) -> dict:
     level_count = entry.get("level_count") or 0
     if not 1 <= ordinal <= level_count:
         raise ValueError("该模型不支持这个思考强度")
-    return dict(entry["kwargs"](ordinal))
+    # 深拷贝：真配方全是嵌套形状（`{"extra_body": {"thinking": {...}}}`），浅拷贝时
+    # 调用方改一层内格就把登记表改脏到进程结束——上面 docstring 那句"调用方改它不该
+    # 把登记表改脏"要靠这一行兑现，与 `probe_kwargs` 的口径一致（12A 审查员 I-R1）。
+    return copy.deepcopy(entry["kwargs"](ordinal))

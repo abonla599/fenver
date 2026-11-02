@@ -321,17 +321,88 @@ def test_level_used_flag_matches_the_table():
         assert len(values) == (3 if entry["level_used"] else 1), name
 
 
+# 反向 import 的六种形状。12A 审查员实测：旧判据只认"整条 module 以 providers 结尾"，
+# `from app.core import providers` 塞进生产文件后 220 格全绿（她的变异 F）——最自然的
+# 写法恰好漏网。这里把每一种形状都点名，`_providers_import_offenders` 必须逐形报红；
+# 负控用 tmp_path 临时文件实演，**不动生产表**（生产文件由下一格继续判真源）。
+REVERSE_IMPORT_SHAPES = [
+    ("import_providers", "import providers\n"),
+    ("import_app_core_providers", "import app.core.providers\n"),
+    ("from_app_core_import_providers", "from app.core import providers\n"),
+    ("from_app_core_import_providers_as_alias", "from app.core import providers as prov\n"),
+    ("from_app_core_providers_import_name", "from app.core.providers import PROFILES\n"),
+    ("importlib_dynamic", "import importlib\nimportlib.import_module('app.core.providers')\n"),
+]
+
+
+def _providers_import_offenders(source: str) -> list:
+    """AST 判「把 providers 拖进来」的反向 import，返回违例 (行号, 形状) 清单。
+
+    按**模块事实**判而不是数 `import x` 语句形：
+    ① `import providers` / `import app.core.providers`（Import，按段名含 providers）；
+    ② `from app.core import providers`（含 as 别名——查 `node.names`，旧版只查
+       `node.module` 漏掉的就是这一形，审查员变异 F 实证 220 格全绿）；
+    ③ `from app.core.providers import <anything>`（module 按段名判，子模块也算）；
+    ④ `importlib.import_module(...)` / `__import__(...)`：字面量能解析且不含 providers
+       才放行，**解析不出取到的是什么就 fail-closed 记违例**，不许 except 掉。
+    口径与 `git ls-files` 那套老规矩一致：取不到真源就红，不 skip（文件存在性由调用方
+    断言，这里的 ast.parse 不套 try——语法坏了的"锁"本身也不算锁）。
+    """
+    offenders = []
+
+    def flagged(dotted):
+        # 判宽不判窄：段名相等之外，任何含 providers 的名字都记下来。fail-closed 的
+        # 方向是宁误报不漏报；本树今天没有"名字里带 providers 却不是它"的模块。
+        return "providers" in (dotted or "")
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if flagged(alias.name):
+                    offenders.append((node.lineno, f"import {alias.name}"))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if flagged(node.module) or flagged(alias.name):
+                    offenders.append((node.lineno,
+                                      f"from {node.module} import {alias.name}"))
+        elif isinstance(node, ast.Call):
+            fname = (node.func.attr if isinstance(node.func, ast.Attribute)
+                     else node.func.id if isinstance(node.func, ast.Name) else None)
+            if fname in ("import_module", "__import__"):
+                first = node.args[0] if node.args else None
+                target = (first.value if isinstance(first, ast.Constant)
+                          and isinstance(first.value, str) else None)
+                if target is None:
+                    offenders.append((node.lineno,
+                                      f"{fname}(<动态取值>): 解析不出取到哪门，fail-closed"))
+                elif flagged(target):
+                    offenders.append((node.lineno, f"{fname}({target!r})"))
+    return offenders
+
+
 def test_probe_table_does_not_import_providers():
     """候选表一旦被 providers 拖住，import 它就等于 import 那个模块级 store——本单最贵
     的那条雷就是这么埋回来的。用 AST 判真 import，不逐行扫字符串（docstring 里本来就在
-    讨论 providers，扫字符串会把自己念成红）。"""
-    source = (REPO_ROOT / "backend" / "app" / "core" / "thinking_profiles.py").read_text(
-        encoding="utf-8")
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            assert not any("providers" in (alias.name or "") for alias in node.names), node.lineno
-        elif isinstance(node, ast.ImportFrom):
-            assert not (node.module or "").endswith("providers"), node.lineno
+    讨论 providers，扫字符串会把自己念成红）。取不到真源就红，不许 skip。"""
+    path = REPO_ROOT / "backend" / "app" / "core" / "thinking_profiles.py"
+    assert path.is_file(), f"AST 锁取不到真源，红而不是 skip：{path}"
+    offenders = _providers_import_offenders(path.read_text(encoding="utf-8"))
+    assert not offenders, f"thinking_profiles.py 反向 import 了 providers：{offenders}"
+
+
+@pytest.mark.parametrize("shape,source", REVERSE_IMPORT_SHAPES,
+                         ids=[name for name, _ in REVERSE_IMPORT_SHAPES])
+def test_ast_lock_is_red_on_every_reverse_import_shape(shape, source, tmp_path):
+    """AST 锁的牙锁：点名名单里每一种形状都必须被 `_providers_import_offenders` 报红。
+
+    恒绿的判据比没有判据更坏——12A 的 docstring 正指着这条锁说话（"这里零依赖，所以
+    可以随便 import"），锁不吃某一形时那句担保就是借来的信用。反向对照（干净源不许
+    报红）由上一格在生产文件上绿着来给，这一格只演"每形必红"。
+    """
+    tmp = tmp_path / "shaped_import.py"
+    tmp.write_text(source, encoding="utf-8")
+    offenders = _providers_import_offenders(tmp.read_text(encoding="utf-8"))
+    assert offenders, f"AST 锁漏掉了形状 {shape}"
 
 
 def test_probe_table_is_not_the_production_whitelist():
@@ -2226,6 +2297,29 @@ def test_build_thinking_kwargs_hands_back_a_fresh_dict_each_call():
     assert first == {} and first is not thinking_profiles.PROFILES["none"]["kwargs"](1)
     first["reasoning_effort"] = "minimal"
     assert thinking_profiles.build_thinking_kwargs("none", 1) == {}
+
+
+def test_returned_thinking_kwargs_are_a_deep_copy_of_the_table(monkeypatch):
+    """F1（审查员 I-R1）：docstring 承诺"返回值每次都是新字典……调用方改它不该把登记表
+    改脏"，但 `dict(entry[kwargs(level)])` 只拷最外层——真形状全是嵌套的
+    （`{"extra_body": {"thinking": {...}}}`），改一层内格就把表改脏到进程结束。
+    同文件给候选表用的 `probe_kwargs` 早已是 `copy.deepcopy`，两处口径必须一致。
+
+    用 synthetic 条目（只进 monkeypatch 的内存表）演嵌套形状：拿返回值改一层 → 再取一次
+    → 第二次与第一次逐字节相同，且表里那一格没动。12B 接线前这条是常驻锁。
+    """
+    shared = {"extra_body": {"thinking": {"type": "enabled"}}}
+    monkeypatch.setitem(thinking_profiles.PROFILES, "synth_nested",
+                        _synth_entry(level_count=1, kwargs=lambda level: shared))
+    first = thinking_profiles.build_thinking_kwargs("synth_nested", 1)
+    assert json.dumps(first, sort_keys=True) == json.dumps(shared, sort_keys=True)
+    first["extra_body"]["thinking"]["type"] = "被改脏了"
+    first["extra_body"]["enable_thinking"] = "不是布尔"
+    second = thinking_profiles.build_thinking_kwargs("synth_nested", 1)
+    expected = {"extra_body": {"thinking": {"type": "enabled"}}}
+    assert json.dumps(second, sort_keys=True) == json.dumps(expected, sort_keys=True), \
+        "登记表被调用方的改动污染了：docstring 的承诺兑现不了"
+    assert shared == expected, "表里那一格被改了"
 
 
 def test_production_whitelist_is_the_same_object_as_the_registration_table(monkeypatch):

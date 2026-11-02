@@ -482,7 +482,15 @@ def _thinking_fields(record: dict, requested=None) -> dict:
         levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
     # 档位条数必须等于这一配方**出网的不同取值数**（M2）。判据只对"请求真正带来的
     # 那一格"生效，与上面 思考档位最多 3 个 同一口径：继承来的畸形值永远不许抛
-    # （Task 8 裁决 A 的遗产，见 `test_malformed_legacy_record_accepts_three_writes`）。
+    # （Task 8 裁决 A 的遗产）。这件事上**真的会红**的锁按名单点名（文件 =
+    # test_v0391_provider_capabilities.py；行号是 12A 修复轮 1 的现场坐标、会漂，认锁
+    # 以名字为准；两枚变异均在仓库外克隆实测还原）：摘本行 brought 门 ⇒
+    # `test_inherited_levels_never_hit_the_level_count_gate`（:450）独红；摘本行
+    # `level_count is not None` 守卫 ⇒ `test_request_brought_invalid_values_are_still_rejected`
+    # （:300）、`test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`
+    # （:418）、`test_update_levels_without_default_renormalises_inherited_default`（:235）
+    # 等一批红。两枚变异下都不红的正是旧注释点名的
+    # `test_malformed_legacy_record_accepts_three_writes`（:267，审查员 12A M-R2）——别再指它。
     # 为什么是**拒收**而不是截断：悄悄砍掉第 3 档等于把"没配上"演成"配上了"——
     # 布尔配方三档同一个出网值（g2 实测）时，界面给三个档而线上只有一个值，
     # 用户点第 3 档什么也没变。这里选择响亮地拒绝，让它去改成 1 档。
