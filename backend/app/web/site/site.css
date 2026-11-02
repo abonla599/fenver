@@ -204,8 +204,8 @@ strong { font-weight: 650; }
   font-size: clamp(1.15rem, 2.4vw, 1.7rem); font-weight: 450;
   line-height: 1.5; letter-spacing: .04em;
 }
-/* 38em 是按最长的那一行定的一栏：第一句 26 个字，最宽一档也才 480px，
-   离 38em（约 700px）还有余量，br 才轮得到它决定在哪断。
+/* 38em 是按最长的那一行定的一栏：第一句 27 个字，最窄一档（760px）也才 504px，
+   离 38em（约 709px）还有余量，br 才轮得到它决定在哪断。
    再窄，那行会自己断，br 就白写了。 */
 .lede { max-width: 38em; margin: 0 auto; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.8; }
 /* 中文没有词边界，浏览器按字符断行会把"会 / 话"拆开。宽屏用这个 br 强制在句号后
