@@ -260,12 +260,21 @@ def test_the_android_button_downloads_through_our_own_endpoint():
 
 
 def test_the_brand_says_fenver():
-    """v0.24 定名落地：品牌位（标题、导航、首屏 h1）都得是 Fenver，
-    而描述性词「AI 智能助手」留在 title/lede 里——test_api 与 test_integration
-    还在拿它钉根路径，两处说的必须是同一件事。"""
+    """v0.24 定名落地：品牌位都得是 Fenver，描述性词「AI 智能助手」留在 title 里——
+    test_api 与 test_integration 还在拿它钉根路径，两处说的必须是同一件事。
+
+    2026-11-01 首屏 h1 从品牌名换成标语（「自己的服务器，数据不出门。」）：导航栏
+    已经有品牌名，首屏再拿 96px 写一遍，等于用最贵的一行说读者已经知道的事；页面
+    真正要讲的是"数据不出门"，那句才该是 h1。判据因此从「h1 里必须是 Fenver」
+    换成「品牌位（title / 导航）必须是 Fenver，且首屏主标题确实存在」——真正要防的
+    一直是"品牌被改成别的名字"，不是"h1 这一格必须叫 Fenver"。
+    """
     page = _page()
-    assert "<h1>Fenver</h1>" in page, "首屏大标题还没换名"
+    title = re.search(r"<title>([^<]+)</title>", page)
+    assert title and title.group(1).startswith("Fenver"), \
+        f"页面标题的品牌位变了：{title.group(1) if title else '（没有 title）'}"
     assert 'class="brand">Fenver<' in page, "导航品牌位还没换名"
+    assert '<h1 class="hero-title">' in page, "首屏主标题不见了"
     assert "AI 智能助手" in page, "描述词不该被品牌名顶掉——它还是这个产品是什么的答案"
 
 
@@ -482,36 +491,67 @@ def test_all_four_shots_are_visible_at_once():
     assert "repeat(4" in _css(), "宽屏下没有排成四列，等于还是只看得见一两张"
 
 
-def test_theme_toggle_exists_and_light_is_the_default():
-    """官网默认日间：深色首屏对访客太黑；保留深色切换，偏好落 localStorage。"""
-    page = _page()
-    assert 'data-theme="light"' in page, "默认主题不是日间"
-    assert 'aria-label="切换到深色"' in page, "缺主题切换键"
+def test_the_site_ships_one_fixed_dark_palette_with_no_toggle():
+    """官网只有一套深色，没有日间/夜间切换，也不跟随系统。
+
+    2026-11-01 按用户要求定死配色：手机上系统深色会把页面翻成黑底荧光绿，再叠一个
+    "能切回去"的开关，等于把配色的决定权交给访客的浏览器。定死之后判据不是"默认哪
+    一套"，而是"页面里根本不该有第二套"——没有主题属性、没有切换键、没有随系统走的
+    媒体查询、没有把偏好写进站点存储。
+
+    扫的是 SITE_DIR 下**所有**引用 site.css 的页面，不只是首页。首页定死了、更新日志
+    还留着旧开关的话，从首页点进去就是一次颜色跳变，等于白定一遍（第一版只查首页，
+    changelog.html 就是这么漏下去的）。probe.html 自带内联样式、不引 site.css，
+    不在管内——它本来就是深色。
+    """
+    import glob as _glob
+    import os
+    from app.web.web_router import SITE_DIR
+
+    pages = {}
+    for path in sorted(_glob.glob(os.path.join(SITE_DIR, "*.html"))):
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        if "/site/site.css" in src:
+            pages[os.path.basename(path)] = src
+    # 正向对照：这两页都得扫到，否则下面是空转。
+    assert {"index.html", "changelog.html"} <= set(pages), \
+        f"没扫到该管的页面，这条锁在空转：{sorted(pages)}"
+
+    for name, page in pages.items():
+        assert "data-theme" not in page, f"{name} 又按主题属性分套了"
+        assert "themeBtn" not in page, f"{name} 的主题切换键又回来了"
+        assert "切换到深色" not in page and "切换到浅色" not in page, \
+            f"{name} 上还留着切换键的无障碍文案"
+        assert "site-theme" not in page, f"{name} 还在首屏脚本里恢复主题偏好"
+        assert 'name="color-scheme" content="dark"' in page, \
+            f"{name} 没有向浏览器声明自己是深色"
+        assert "#f7f8fa" not in page, f"{name} 的 theme-color 还是原来的浅色底"
+
     css = _css()
-    assert "prefers-color-scheme" in css, "首屏主题口径丢了"
-    assert "localStorage" in _js(), "主题偏好要记住，不能每次回到默认"
-    # 图标不靠 JS 换 innerHTML（Blink 下赋 innerHTML 的 svg 有时不渲染），而是两个
-    # 都在 DOM 里靠 CSS 换着显示。少了这条规则，按钮里会上下叠出太阳和月亮。
-    assert "#themeBtn .i-moon" in css, "主题图标都挂在页面上，CSS 里却没有切换规则"
+    assert "prefers-color-scheme" not in css, "又在跟随系统明暗：那等于第二套配色"
+    assert "color-scheme: dark" in css, "样式表没有向浏览器声明自己是深色"
+    assert "site-theme" not in _js(), "主题偏好又被记下来了"
 
 
 def test_the_site_chrome_icons_follow_the_fenver_icon_language():
-    """v0.36.1 图标批（官网侧）：太阳/月亮/回顶三枚 UI 图标与 PWA、原生同一套语言。
+    """v0.36.1 图标批（官网侧）：UI 图标与 PWA、原生同一套语言。
 
     雪碧图不跨文档——官网与 PWA 是两份 HTML，跨文件 `<use>` 要引外链，而外链图标
-    正是这批改版要消灭的东西，所以官网这三枚直接按语言内联重画。这条锁钉的是
+    正是这批改版要消灭的东西，所以官网的图标直接按语言内联重画。这条锁钉的是
     口径而不是复制几何：24 格画板、描边 1.8、圆头圆角、不填充。
-    品牌 logo/插画（若有）不在这条管内：目前整页只有这三枚内联 svg。
+    品牌 logo/插画（若有）不在这条管内。
+    2026-11-01 定死深色后，太阳/月亮随切换键一起退场，只剩回顶这一枚。
 
     负控：旧的那枚**填充**月亮路径不许回来；画板被改成非 24 格时判据当场红。
     """
     page = _page()
     grids = re.findall(r'<svg viewBox="0 0 (\d+) (\d+)"', page)
-    assert grids, "官网找不到任何内联 svg 图标：三枚 UI 图标被搬去哪了"
+    assert grids, "官网找不到任何内联 svg 图标：回顶那枚被搬去哪了"
     assert all(g == ("24", "24") for g in grids), f"官网图标画板不再是 24 格网：{grids}"
     assert 'M21 12.8A9' not in page, "旧填充月亮回来了：语言里除状态点外不填充"
     css = _css()
-    for sel in (".iconbtn svg", ".totop svg"):
+    for sel in (".totop svg",):
         rule = re.search(re.escape(sel) + r" \{([^}]*)\}", css)
         assert rule, f"{sel} 的描边规则丢了：语言口径没人守了"
         for tooth in ("stroke-width: 1.8", "stroke-linecap: round",
