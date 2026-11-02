@@ -579,7 +579,9 @@ def thinking_request_index(record, label):
 
     1. 缺省与空串都不发。空串**不当成"第 0 档"**：档位清单是管理员自填的字符串，
        `_clean_levels` 在写路径就把空串去掉了，把它读成序号 0 只会撞上
-       `build_thinking_kwargs` 的下界，把一个"用户没填"演成一个 500。
+       `build_thinking_kwargs` 的下界，把一个"用户没填"演成一个错误响应。
+       数是实测的（收尾轮把这一形状真投了一次 `/v1/chat`）：那一下 `ValueError` 由第 4 判
+       的预检收成 `ProviderError`，`main.py` 回的是 **400**，不是这一族早先写的 500。
     2. 判据只有一份：走 `_thinking_view`（它内部就是带 host+model 的 `_thinking_status`），
        不在调用方另抄。host 取 `urlparse(base_url).hostname`，取不到就按"不匹配"走
        unverified，不猜。
@@ -652,7 +654,8 @@ def thinking_kwargs_for(record, index) -> dict:
     从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条**这条记录没有的**档位。
     这与 I-1 是同一类形状，不留到"以后"。越界一律 `{}`——fail-closed：**宁可这一轮不发
     参数，也不发一个指向错档位的值**；不许回退成"取最后一档"那种猜测，也不许 raise
-    （raise 会把一次配置改动演成 500）。`build_thinking_kwargs` 只看**配方**声明的
+    （raise 会把一次配置改动演成 5xx——摘掉下面那道 try 实测是 502，`main.py` 的
+    `模型调用失败` 那一支）。`build_thinking_kwargs` 只看**配方**声明的
     `level_count`、看不见这条记录的清单，所以这一判只能在发送点做。
 
     这一判的上界是**这条记录清单的长度**，不是配方的 `level_count`，也不是标签本身——
@@ -666,13 +669,17 @@ def thinking_kwargs_for(record, index) -> dict:
     替没带 `thinking_levels` 的 PUT 补库里那份，M2 那一闸只判请求带来的格子）能存下
     "清单 3 档 / 配方声明 `level_count=1`"这份组合，长度上界看得见它、配方看不见，
     于是 `build_thinking_kwargs` 在这里会 `ValueError`——四个站点都在 `kwargs.update(...)`
-    里裸调这一格，非流式两支会把它直接演成 500，违背的就是上面那句"不许 raise"。
+    里裸调这一格，非流式两支会把它直接演成 502（摘掉这道 try 实测：两支都回
+    `502 模型调用失败：ValueError: …`），违背的就是上面那句"不许 raise"。
     现在按同一口径收：配方拒收 ⇒ 留痕 `reason=recipe_rejected` 并回 `{}`。
 
-    两次回落都不是静默的（I-R2-4）：各留一行 debug，字段只有 provider id、status、
+    三道回落都不是静默的（I-R2-4），reason 各对应上面一道判据：`scope`（这条记录没被
+    核实到）、`ordinal_out_of_range`（序号超出这条记录此刻的清单）、`recipe_rejected`
+    （配方拒收这份组合）。每一道各留一行 debug，字段只有 provider id、status、
     序号与一句固定文案，见 `_log_thinking_fallback`。
-    组装仍交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise，`none` 它自己
-    回 `{}`，所以今天（表里只有 `none`）这四条路永远收到空字典。
+    组装仍交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise（在本格被
+    上面那道 try 接住，见 I-3），`none` 它自己回 `{}`，所以今天（表里只有 `none`）
+    这四条路永远收到空字典。
     """
     if index is None:
         return {}
@@ -689,7 +696,7 @@ def thinking_kwargs_for(record, index) -> dict:
         return _thinking_profiles.build_thinking_kwargs(profile, index)
     except Exception:
         # 只吞这一格的装配失败，且吞完必须留痕：出网路径的裁决是"不发参数"，不是"报错"
-        # 更不是把一次配置改动演成 500（见上面 I-3 那段）。
+        # 更不是把一次配置改动演成 5xx（摘掉这一层实测是 502，见上面 I-3 那段）。
         _log_thinking_fallback(record, index, status, "recipe_rejected")
         return {}
 

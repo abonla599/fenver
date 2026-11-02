@@ -2663,7 +2663,8 @@ def test_missing_or_blank_label_sends_nothing_at_all(monkeypatch):
     """缺省=没这一格，空串按没填处理——**都不发参数**。
 
     空串不当"第 0 档"的理由：档位清单是管理员自填的字符串，`_clean_levels` 早就把空串
-    去掉了，把它当序号 0 会撞上 `build_thinking_kwargs` 的下界，换来一个 500。
+    去掉了，把它当序号 0 会撞上 `build_thinking_kwargs` 的下界——收尾轮实测那一形状真投进
+    `/v1/chat` 时，ValueError 被本文件第 4 判的预检收成 `ProviderError`，路由回的是 400。
     """
     monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
     record = _b3_record()
@@ -3286,7 +3287,8 @@ def test_thinking_kwargs_for_never_raises_even_when_the_record_changed_shape(mon
     """I-3：配方拒收这份组合时，合并入口回 `{}` 并留痕，绝不许把 ValueError 送到出网路径。
 
     裁决原文（这一格自己的 docstring，`:653-656`）写的是"不许 raise，raise 会把一次配置
-    改动演成 500"，而上一版最后一条是裸调。两向都跑防恒真：同一份记录、序号 1（配方吃得住）
+    改动演成 5xx"，而上一版最后一条是裸调（收尾轮摘掉 try 实测两支非流式腿回 502）。
+    两向都跑防恒真：同一份记录、序号 1（配方吃得住）
     必须照带参数；序号 2 必须回 `{}`。
     """
     monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
@@ -3298,46 +3300,52 @@ def test_thinking_kwargs_for_never_raises_even_when_the_record_changed_shape(mon
     with pytest.raises(ValueError):
         thinking_profiles.build_thinking_kwargs(_B3_SHORT_PROFILE, 2)
     assert providers.thinking_kwargs_for(record, 2) == {}, \
-        "配方吃不住这份组合时抛出来 = 四个站点一起把一次配置改动演成 500（I-3）"
+        "配方吃不住这份组合时抛出来 = 四个站点一起把一次配置改动演成 5xx（摘掉 try 实测 502，I-3）"
     assert providers.thinking_kwargs_for(record, 1) == {_B3_KEY: 1}, \
         "配方吃得住的序号必须照带，否则上面那条是恒真"
 
 
+@pytest.mark.parametrize("leg,path,pipeline_flag", [
+    ("stream", "/v1/chat/stream", None),
+    ("pipeline", "/v1/chat", True),
+    ("llm_client", "/v1/chat", False),
+])
 def test_no_send_site_raises_when_the_recipe_rejects_the_records_shape(client, b3_records,
-                                                                       b3_wire, caplog,
-                                                                       monkeypatch):
-    """I-3 的发送点级证据：三条出网腿各演一次"校验后配方被换成吃不住的那一条"。
+                                                                      b3_wire, caplog,
+                                                                      monkeypatch, leg, path,
+                                                                      pipeline_flag):
+    """I-3 的发送点级证据：三条出网腿**各自一格**演"校验后配方被换成吃不住的那一条"。
 
-    裸调那一版下这三腿的结局是 `kwargs.update(...)` 里抛 ValueError：非流式两支直接 500，
-    流式那支在生产者线程里抛（状态码可能仍是 200，所以本单不靠状态码认它，靠留痕）。
+    三腿分格而不是排成一条 for 循环（收尾轮 R-5）：顺序循环里第一条腿一 assert 就中断，
+    后两腿在变异下根本没轮到，"三腿各演一次"只能证明到第一条。
+    裸调那一版（把这道的 try 摘掉）三腿各自的结局是 `kwargs.update(...)` 里抛 ValueError：
+    非流式两支实测直接 502（`模型调用失败：ValueError: …`，见 `main.py`），
+    流式那支在生产者线程里抛（状态码仍是 200，所以本单不靠状态码认它，靠留痕）。
     判据三件：这一腿**确实**出了网（不是空转）、出网 payload 里零思考键、回落留痕
     `reason=recipe_rejected` 恰好一行。第二次解析必须真的发生（`calls`），否则测的是同一条记录。
     """
     import app.main as main
     import logging
 
-    legs = (("stream", "/v1/chat/stream", None), ("pipeline", "/v1/chat", True),
-            ("llm_client", "/v1/chat", False))
-    for leg, path, pipeline_flag in legs:
-        if pipeline_flag is not None:
-            monkeypatch.setattr(main, "USE_PIPELINE", pipeline_flag)
-        caplog.clear()
-        calls = _b3_shortened_recipe_after_first_resolve(monkeypatch, b3_records)
-        before = len(b3_wire)
-        with caplog.at_level(logging.DEBUG):
-            res = client.post(path, json={
-                "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
-                "thinking_level": _B3_LEVELS[1]})
-        assert res.status_code == 200, f"{leg} 把一次配置改动演成了 {res.status_code}：{res.text[:200]}"
-        assert len(calls) >= 2, f"{leg} 没有第二次解析 = 发送点用的还是校验那条记录，这一腿空转"
-        assert len(b3_wire) > before, f"{leg} 这一腿根本没出网 = 下面两条断言是空的"
-        for sent in b3_wire[before:]:
-            assert _B3_KEY not in sent, f"{leg} 把一份配方吃不住的序号发了出去：{sorted(sent)}"
-            assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
-        lines = _b3_thinking_fallback_lines(caplog)
-        assert len(lines) == 1, f"{leg} 的回落不许是静默的（I-R2-4 同口径）：{lines}"
-        assert "reason=recipe_rejected" in lines[0], f"{leg} 留痕没指明是配方拒收：{lines[0]}"
-        assert _B3_PROFILE not in lines[0] and _B3_SHORT_PROFILE not in lines[0], lines[0]
+    if pipeline_flag is not None:
+        monkeypatch.setattr(main, "USE_PIPELINE", pipeline_flag)
+    caplog.clear()
+    calls = _b3_shortened_recipe_after_first_resolve(monkeypatch, b3_records)
+    before = len(b3_wire)
+    with caplog.at_level(logging.DEBUG):
+        res = client.post(path, json={
+            "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+            "thinking_level": _B3_LEVELS[1]})
+    assert res.status_code == 200, f"{leg} 把一次配置改动演成了 {res.status_code}：{res.text[:200]}"
+    assert len(calls) >= 2, f"{leg} 没有第二次解析 = 发送点用的还是校验那条记录，这一腿空转"
+    assert len(b3_wire) > before, f"{leg} 这一腿根本没出网 = 下面两条断言是空的"
+    for sent in b3_wire[before:]:
+        assert _B3_KEY not in sent, f"{leg} 把一份配方吃不住的序号发了出去：{sorted(sent)}"
+        assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
+    lines = _b3_thinking_fallback_lines(caplog)
+    assert len(lines) == 1, f"{leg} 的回落不许是静默的（I-R2-4 同口径）：{lines}"
+    assert "reason=recipe_rejected" in lines[0], f"{leg} 留痕没指明是配方拒收：{lines[0]}"
+    assert _B3_PROFILE not in lines[0] and _B3_SHORT_PROFILE not in lines[0], lines[0]
 
 
 def test_no_test_source_carries_a_machine_absolute_path():
