@@ -1346,34 +1346,71 @@ _AMENDMENT_S2_BANNED = tuple(re.findall(r"「([^「」]+)」", _AMENDMENT_S2_BAN
 # 扫描实际吃的那份（谁被改窄了都会撞上下面两道断言）
 BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭", "三档强度")
 
-# ---------------- 禁句语料的**射程**：从仓库事实派生，不写死文件名（整枝审查 B1） ----------------
-# §2 那句裁决声称的是「界面/发版说明/文档」，而这里此前写死 `app.js`/`api.js`/`index.html`
+# ---------------- 禁句语料的**射程**：从仓库事实派生，不写死文件名（整枝审查 B1 / 收尾轮 R-1·R-2） ----------------
+# §2 那句裁决声称的是「界面/发版说明/文档」。这里最早写死 `app.js`/`api.js`/`index.html`
 # 三份——只罩得住 /app 那一面：管理台（admin/）、官网（site/）、发版说明（docs/releases/）
 # 与 changelog.json 全都不判。审查员的演绿证据：把「这款模型可关闭思考」写进
 # `admin/admin.js` 与 `site/site.js`，相关六份测试 235 passed / rc=0，没有任何一把锁红。
+# 补到四棵根之后还差一截（收尾轮 R-1）：注释把射程写成"界面 + 发版说明 + 文档"，而
+# `docs/` 里 releases 之外的说明文档、`.github/` 的三份模板、仓库根那三份 .md 一律不判。
+# 现在把 §2 那三面按字面落进根集合；仍差的只有两份散在他处的 README（`android-native/`
+# 与 `backend/app/sandbox/`），不判的理由写在下面那一格。加宽那一次实测：剥注释口径
+# 零命中，原文口径仅有的两处都在 `app.js` 那句"不许写成…"的自指注释里。
 # 与原生那把（`67e76585` 里的 `_native_kt_corpus`）同一形状：磁盘扫到的一份必须与
 # `git ls-files` 记的那一份**同一个集合**——少一份（改名/挪走/走空目录）多一份（没入库的
 # 游离文件）都红；git 问不到或返回空一律红，不 skip 后当绿。
+# 根集合里 `"."` 是**仓库根那一层的散文件**（README/AGENTS/CONTRIBUTING），只问这一层、
+# 绝不递归：整仓递归会撞进 venv/、data/ 这些运行时资产。
 _WEB_COPY_ROOTS = ("backend/app/web/static", "backend/app/web/admin",
-                   "backend/app/web/site", "docs/releases")
+                   "backend/app/web/site", "docs", ".github", ".")
+# §2 三面在仓库里的**伞面**：界面住在 `backend/app/web` 之下，发版说明与其余文档住在
+# `docs`，模板住在 `.github`，仓库根的说明文档就是根那一层。伞面不参与扫描（扫的是
+# `_WEB_COPY_ROOTS`），它只用来钉住"根名单不许悄悄变窄"：伞下 git 记着的每一份跟踪文本
+# 都必须被某棵声明的根罩住，摘掉一棵根 ⇒ 它名下的文件立刻无根可归 ⇒ 当场红。
+_WEB_COPY_CLAIMED_SURFACES = ("backend/app/web", "docs", ".github", ".")
 # 只判文本表面：`site/img/*.jpg` 那种截图不是"文案"。两侧用同一个后缀过滤，
 # 所以这层排除面吃不进真源码（与原生那把按 `/build/` 段排除同理）。
 _WEB_COPY_SUFFIXES = (".js", ".html", ".css", ".json", ".md", ".webmanifest")
 # 点名在册的四味表面各留一份代表：任何一份被挪出射程 ⇒ 语料被改窄了。
+# 这一份名单只管得着"界面上那六个点名的文件"，docs 那一面由下面 `_WEB_COPY_ROOTS`
+# 的逐根代表断言管（R-2：手抄文件名管不住一整棵根）。
 _WEB_COPY_MINIMUM = {"backend/app/web/static/app.js", "backend/app/web/static/api.js",
                      "backend/app/web/static/index.html", "backend/app/web/admin/admin.js",
                      "backend/app/web/site/site.js", "backend/app/web/site/changelog.json"}
 
 
-def _tracked_web_copy() -> set:
-    """`git ls-files` 在 §2 那四个表面上记的文本文件集合——基数钉的**仓库事实**一侧。"""
-    out = subprocess.run(["git", "ls-files", "-z", *_WEB_COPY_ROOTS], cwd=str(REPO),
+def _surface_member(path: str, surface: str) -> bool:
+    """这份路径是否落在某个表面上。`"."` 只认仓库根那一层的散文件，不递归。"""
+    if surface == ".":
+        return "/" not in path
+    return path.startswith(surface + "/")
+
+
+def _tracked_text_copy() -> set:
+    """整仓跟踪的文本文件集合——git 侧唯一的来源，一次 `git ls-files` 现取。
+
+    不再按根去问 git（`git ls-files <根…>`），否则从 `_WEB_COPY_ROOTS` 摘掉一棵根会让
+    两侧**一起**变窄、集合照样相等，"射程变窄"这件事就没有任何锚能看见（R-2 的原洞）。
+    """
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=str(REPO),
                          capture_output=True, timeout=60)
     assert out.returncode == 0, "问不到 `git ls-files`：同集合比对不许 skip 后当绿"
     tracked = {p.decode().replace("\\", "/") for p in out.stdout.split(b"\0") if p}
     tracked = {p for p in tracked if Path(p).suffix in _WEB_COPY_SUFFIXES}
-    assert tracked, "`git ls-files` 在这四个表面上返回 0 份文本：基数钉读不到仓库事实"
+    assert tracked, "`git ls-files` 返回 0 份文本：基数钉读不到仓库事实"
     return tracked
+
+
+def _disk_text_copy() -> set:
+    """按 `_WEB_COPY_ROOTS` 扫磁盘上真实存在的那一份；任何一棵根读不到就红，不当"没有违规"。"""
+    found = set()
+    for root in _WEB_COPY_ROOTS:
+        base = REPO if root == "." else REPO / root
+        assert base.is_dir(), f"§2 声称的表面 {root} 读不到：『扫不到』不许当成『守住了』"
+        entries = [p for p in base.iterdir() if p.is_file()] if root == "." \
+            else [p for p in base.rglob("*") if p.is_file()]
+        found |= {p.relative_to(REPO).as_posix() for p in entries if p.suffix in _WEB_COPY_SUFFIXES}
+    return found
 
 
 def _web_copy_text(rel: str) -> str:
@@ -1392,19 +1429,30 @@ def _web_copy_text(rel: str) -> str:
 
 def _web_copy_corpus() -> dict:
     """§2 声称的全部表面：磁盘扫到的一份与 git 记的一份必须**同一个集合**。"""
-    on_disk = set()
+    tracked = _tracked_text_copy()
+    on_disk = _disk_text_copy()
+    # 牙一（R-2）：每一棵声明的根都必须在语料里有代表。遍历的是 `_WEB_COPY_ROOTS` 自己，
+    # 不列具体文件名——将来加第五棵根会自动被要求有代表，而某一棵根整个空掉
+    # （发版说明被归档搬走那一形）也当场红，不再只靠下面那个数字地板。
     for root in _WEB_COPY_ROOTS:
-        base = REPO / root
-        assert base.is_dir(), f"§2 声称的表面 {root} 读不到：『扫不到』不许当成『守住了』"
-        on_disk |= {p.relative_to(REPO).as_posix() for p in base.rglob("*")
-                    if p.is_file() and p.suffix in _WEB_COPY_SUFFIXES}
-    tracked = _tracked_web_copy()
-    assert on_disk == tracked, (
-        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(tracked)} 份，"
-        f"只在磁盘={sorted(on_disk - tracked)} 只在 git={sorted(tracked - on_disk)}")
+        assert any(_surface_member(p, root) for p in on_disk), (
+            f"根 {root} 在语料里一份代表都没有：这棵今天等于完全不判，"
+            f"§2 声称的表面正在悄悄退出射程")
+    # 牙二（R-1·R-2）：根名单本身不许变窄。伞面上 git 记着的每一份跟踪文本都必须被
+    # 某棵声明的根罩住——摘掉一棵根，它名下的文件立刻无根可归，这里先红，不用等数字地板。
+    unclaimed = sorted(p for p in tracked
+                       if any(_surface_member(p, s) for s in _WEB_COPY_CLAIMED_SURFACES)
+                       and not any(_surface_member(p, r) for r in _WEB_COPY_ROOTS))
+    assert not unclaimed, (
+        f"§2 伞面上有 {len(unclaimed)} 份跟踪文本不在任何一棵声明的根里（前几份：{unclaimed[:3]}）："
+        f"语料的射程比注释声称的窄，把根加回 _WEB_COPY_ROOTS")
+    scope = {p for p in tracked if any(_surface_member(p, r) for r in _WEB_COPY_ROOTS)}
+    assert on_disk == scope, (
+        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(scope)} 份，"
+        f"只在磁盘={sorted(on_disk - scope)} 只在 git={sorted(scope - on_disk)}")
     assert _WEB_COPY_MINIMUM <= on_disk, \
         f"§2 点名的表面已不在语料里：缺 {sorted(_WEB_COPY_MINIMUM - on_disk)}"
-    assert len(on_disk) >= 60, \
+    assert len(on_disk) >= 100, \
         f"全表面只扫到 {len(on_disk)} 份：walk 进空目录也算『没有违规』，这一份读歪了"
     return {rel: _web_copy_text(rel) for rel in sorted(on_disk)}
 
@@ -1431,8 +1479,11 @@ def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
     state_block = js[js.index("const state = {"):js.index("const state = {") + 4000]
     assert "thinkingStaleLevel: null" in state_block, \
         "那次性说明的本机态没在 state 里声明：换身份清它就成了清一个不存在的键"
-    # 射程 = §2 声称的全部表面（界面 + 发版说明 + 文档），由 `git ls-files` 现取并与磁盘
-    # 扫到的一份同集合比对；写死三份是整枝审查的 B1（管理台/官网/发版说明/changelog 全不判）。
+    # 射程 = `_WEB_COPY_ROOTS` 这六棵，把 §2 的「界面 / 发版说明 / 文档」三面按字面落齐：
+    # 界面三棵（static/admin/site）+ `docs` 整棵（发版说明与其余文档）+ `.github` 的模板 +
+    # 仓库根那一层的散 .md。仍比 §2 的字面窄一格——`android-native/README.md` 与
+    # `backend/app/sandbox/README.md` 不判：并进来要递归扫那两棵树（构建产物与沙箱临时物），
+    # 实测这两份零禁句，宁可写明"不判"也不把伞扩到产物目录里去猜。
     corpora = _web_copy_corpus()
     assert set(corpora) >= _WEB_COPY_MINIMUM, "语料集合里没有那六份代表：射程被改窄了"
     # 两道体检：先确认清单来源本身是完整的（§2 那一行被改窄就红），再确认扫描吃的那份
