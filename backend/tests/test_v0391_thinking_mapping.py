@@ -940,8 +940,11 @@ def test_default_isolation_dir_lives_outside_the_repo(tmp_path):
 #
 # 这一节守的不是上游，是**这一版探针自己的闸**。审查员的实测结论是：五条问题全在闸上，
 # 而且都能被"操作者记得"暂时掩盖过去。所以每条判据都配一条已知应当相反的输入，
-# 并当场实跑过红（变异名单与还原摘要写在 `C:/Users/34426/dl/sdd-takeover-20261101/`
-# 那份报告的「修复轮 1」一节）。本节**零出站**：客户端一律是注入的替身。
+# 并当场实跑过红（变异名单与还原摘要写在那一轮的报告
+# `.superpowers/sdd/2026-10-31-model-cockpit/task-11b-report.md` 的「修复轮 1」一节；
+# 那份目录被 `.superpowers/sdd/.gitignore` 整目录排除，所以它只在做过这一轮的机器上存在，
+# 落盘位置是逐机变动的临时目录——认**报告名 + 小节名**，不要认某个绝对路径）。
+# 本节**零出站**：客户端一律是注入的替身。
 
 def test_live_run_without_an_explicit_ledger_is_refused(tmp_path):
     """Critical-1 的一半：`--ledger` 缺省时账本落在**本次**隔离目录里，而 `isolate_runtime_env(None)`
@@ -3217,3 +3220,153 @@ def test_the_plan_doc_declares_which_branch_task_12_took():
     window = doc[at:at + 900]
     assert "task-12-amendment.md" in window, window[:300]
     assert "none" in window, "注解必须写明本轮走 none-only 那一支"
+
+
+# --------- 整枝审查后的修复轮（I-2 / I-3 / I-4）：发送点绝不抛 + 测试源码不许有机器路径 ---------
+
+_B3_SHORT_PROFILE = "synth_12b_short"        # 第二条 verified 条目：同一 host+model，只声明 1 档
+
+
+def _b3_shortened_recipe_after_first_resolve(monkeypatch, b3_records):
+    """与 `_b3_swap_after_first_resolve` 同一手法，但那次真实 PUT 换的是**配方**而且不带
+    `thinking_levels`。
+
+    不带这一格走的就是继承支：`_pending` 从库里补回 3 档，而 M2 那道"档数 == 出网不同值数"
+    只判请求**带来**的格子（Task 8 裁决 A 的口径）⇒ 库里真存下"清单 3 档 / 配方声明 1 档"。
+    发送点的长度上界看得见清单（3）看不见配方（1），`build_thinking_kwargs` 就在这里 raise。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_SHORT_PROFILE,
+                        _b3_entry(level_count=1, label="合成一档（在册且 verified）"))
+    b3_records(_b3_record())
+    real_resolve = providers.store.resolve
+    calls: list = []
+
+    def _resolve(provider_id=None, legacy_model=None, user_id=None):
+        found = dict(real_resolve(provider_id, legacy_model=legacy_model, user_id=user_id))
+        if provider_id == _B3_ID:
+            calls.append(user_id)
+            if len(calls) == 1:
+                providers.store.upsert({**{k: v for k, v in found.items()
+                                           if k != "thinking_levels"},
+                                        "thinking_profile": _B3_SHORT_PROFILE})
+        return found
+
+    monkeypatch.setattr(providers.store, "resolve", _resolve)
+    assert providers.thinking_request_index(_b3_record(), _B3_LEVELS[1]) == 2
+    return calls
+
+
+def test_the_inheritance_branch_really_stores_a_roster_longer_than_the_recipe(monkeypatch,
+                                                                              b3_records):
+    """I-3 的前提，不是假想形状：继承支今天确实存得下"清单 3 档 / 配方 1 档"。
+
+    这一格先把"这份组合真能进库"钉住，下面那格才不是空的：若 M2 把它挡在写路径，
+    发送点那道 try 就是永远走不到的死支，而 I-3 会被"修好了"这句假话关掉。
+    两侧都在：`build_thinking_kwargs` 自己仍然拒收序号 2（越界是真的），
+    而换算点 `thinking_request_index` 在**旧**那份记录上换得出一样的序号（校验时合法）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_SHORT_PROFILE,
+                        _b3_entry(level_count=1, label="合成一档"))
+    b3_records(_b3_record())
+    stored = dict(providers.store.resolve(_B3_ID))
+    providers.store.upsert({**{k: v for k, v in stored.items() if k != "thinking_levels"},
+                            "thinking_profile": _B3_SHORT_PROFILE})
+    now = dict(providers.store.resolve(_B3_ID))
+    assert now["thinking_profile"] == _B3_SHORT_PROFILE
+    assert len(now["thinking_levels"]) == 3, "继承支没把库里那 3 档带过来 = 下面全是空转"
+    assert providers.THINKING_PROFILES[_B3_SHORT_PROFILE]["level_count"] == 1
+    assert providers._thinking_view(now)["thinking_status"] == "verified"
+    with pytest.raises(ValueError):
+        thinking_profiles.build_thinking_kwargs(_B3_SHORT_PROFILE, 2)
+
+
+def test_thinking_kwargs_for_never_raises_even_when_the_record_changed_shape(monkeypatch):
+    """I-3：配方拒收这份组合时，合并入口回 `{}` 并留痕，绝不许把 ValueError 送到出网路径。
+
+    裁决原文（这一格自己的 docstring，`:653-656`）写的是"不许 raise，raise 会把一次配置
+    改动演成 500"，而上一版最后一条是裸调。两向都跑防恒真：同一份记录、序号 1（配方吃得住）
+    必须照带参数；序号 2 必须回 `{}`。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_SHORT_PROFILE,
+                        _b3_entry(level_count=1, label="合成一档"))
+    record = {**_b3_record(), "thinking_profile": _B3_SHORT_PROFILE}
+    assert providers._thinking_view(record)["thinking_status"] == "verified"
+    assert len(_B3_LEVELS) > providers.THINKING_PROFILES[_B3_SHORT_PROFILE]["level_count"]
+    with pytest.raises(ValueError):
+        thinking_profiles.build_thinking_kwargs(_B3_SHORT_PROFILE, 2)
+    assert providers.thinking_kwargs_for(record, 2) == {}, \
+        "配方吃不住这份组合时抛出来 = 四个站点一起把一次配置改动演成 500（I-3）"
+    assert providers.thinking_kwargs_for(record, 1) == {_B3_KEY: 1}, \
+        "配方吃得住的序号必须照带，否则上面那条是恒真"
+
+
+def test_no_send_site_raises_when_the_recipe_rejects_the_records_shape(client, b3_records,
+                                                                       b3_wire, caplog,
+                                                                       monkeypatch):
+    """I-3 的发送点级证据：三条出网腿各演一次"校验后配方被换成吃不住的那一条"。
+
+    裸调那一版下这三腿的结局是 `kwargs.update(...)` 里抛 ValueError：非流式两支直接 500，
+    流式那支在生产者线程里抛（状态码可能仍是 200，所以本单不靠状态码认它，靠留痕）。
+    判据三件：这一腿**确实**出了网（不是空转）、出网 payload 里零思考键、回落留痕
+    `reason=recipe_rejected` 恰好一行。第二次解析必须真的发生（`calls`），否则测的是同一条记录。
+    """
+    import app.main as main
+    import logging
+
+    legs = (("stream", "/v1/chat/stream", None), ("pipeline", "/v1/chat", True),
+            ("llm_client", "/v1/chat", False))
+    for leg, path, pipeline_flag in legs:
+        if pipeline_flag is not None:
+            monkeypatch.setattr(main, "USE_PIPELINE", pipeline_flag)
+        caplog.clear()
+        calls = _b3_shortened_recipe_after_first_resolve(monkeypatch, b3_records)
+        before = len(b3_wire)
+        with caplog.at_level(logging.DEBUG):
+            res = client.post(path, json={
+                "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+                "thinking_level": _B3_LEVELS[1]})
+        assert res.status_code == 200, f"{leg} 把一次配置改动演成了 {res.status_code}：{res.text[:200]}"
+        assert len(calls) >= 2, f"{leg} 没有第二次解析 = 发送点用的还是校验那条记录，这一腿空转"
+        assert len(b3_wire) > before, f"{leg} 这一腿根本没出网 = 下面两条断言是空的"
+        for sent in b3_wire[before:]:
+            assert _B3_KEY not in sent, f"{leg} 把一份配方吃不住的序号发了出去：{sorted(sent)}"
+            assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
+        lines = _b3_thinking_fallback_lines(caplog)
+        assert len(lines) == 1, f"{leg} 的回落不许是静默的（I-R2-4 同口径）：{lines}"
+        assert "reason=recipe_rejected" in lines[0], f"{leg} 留痕没指明是配方拒收：{lines[0]}"
+        assert _B3_PROFILE not in lines[0] and _B3_SHORT_PROFILE not in lines[0], lines[0]
+
+
+def test_no_test_source_carries_a_machine_absolute_path():
+    """I-4：入库的测试源码里不许出现"只有这一台机器才认得"的绝对路径。
+
+    整枝审查点名的死链是 `C:` 家目录后面接那一台机器的账号名（指向某台机器 `dl/` 目录里
+    那份没入库的报告）。判两形：
+    A. `[盘符]:[反/正斜杠]Users[反/正斜杠]` 后面紧跟**一串数字**的账号名——合成夹具用的
+       是 `a` 与 `someone`，真机器账号是数字名，这一形既能咬真的又不吃掉那 12 处演示样本；
+    B. 跑测试这台机器的**家目录全路径**（`Path.home()`，逐机不同所以不写死）原样出现。
+    射程由 `git ls-files backend/tests` 现取，与这份文件写了什么无关：git 问不到、返回空、
+    或读到的 .py 少到不成样子一律红——"扫不到"与"守住了"不许长得一样（B1 同一条规矩）。
+    残余形状说清楚：字母账号名 + 非本机跑测试（比如换一台机器提交）时 A 看不见它、B 也
+    不知道那台机器的家目录，这一格挡的是"把本机路径抄进仓库"这个已发生的动作，不是所有
+    绝对路径的形状。
+    """
+    out = subprocess.run(["git", "ls-files", "-z", "backend/tests"], cwd=str(REPO_ROOT),
+                         capture_output=True, timeout=60)
+    assert out.returncode == 0, "问不到 `git ls-files backend/tests`：这条锁不许 skip 后当绿"
+    tracked = {p.decode().replace("\\", "/") for p in out.stdout.split(b"\0") if p}
+    sources = {p for p in tracked if p.endswith(".py")}
+    assert sources, "`git ls-files backend/tests` 返回 0 份 .py：基数钉读不到仓库事实"
+    assert len(sources) >= 200, f"只扫到 {len(sources)} 份测试源码：这份读歪了，红话说不出坐标"
+    digit_home = re.compile(r"[A-Za-z]:" + r"[\\/]" + r"[Uu]sers" + r"[\\/]" + r"\d")
+    own_home = str(Path.home())
+    for rel in sorted(sources):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="ignore")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            assert not digit_home.search(line), \
+                f"{rel}:{line_no} 把某台机器的家目录写进了入库文件：{line.strip()[:120]}"
+            assert own_home not in line, \
+                f"{rel}:{line_no} 出现这台机器的家目录全路径：{line.strip()[:120]}"

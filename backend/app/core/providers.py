@@ -649,11 +649,25 @@ def thinking_kwargs_for(record, index) -> dict:
 
     作用域判完还要**用这条记录此刻的清单重判序号上界**（12B 修复轮 2，审查 I-R2-3，
     主控裁"要重判"）：序号是在第一次解析时换算的，管理员在那之前之后把 `thinking_levels`
-    从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条不存在（或含义已变）的档位。
+    从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条**这条记录没有的**档位。
     这与 I-1 是同一类形状，不留到"以后"。越界一律 `{}`——fail-closed：**宁可这一轮不发
     参数，也不发一个指向错档位的值**；不许回退成"取最后一档"那种猜测，也不许 raise
     （raise 会把一次配置改动演成 500）。`build_thinking_kwargs` 只看**配方**声明的
     `level_count`、看不见这条记录的清单，所以这一判只能在发送点做。
+
+    这一判的上界是**这条记录清单的长度**，不是配方的 `level_count`，也不是标签本身——
+    把话说到底（整枝审查 I-2）：它挡得住"清单变短了、旧序号落在清单外"，挡不住
+    "清单长度没变、内容重排了"。`[快, 慢]` 改成 `[慢, 快]` 之后，旧的 `index=1` 仍在界内，
+    指的却是另一个标签。要关掉这一残余形状，得让**标签**跟着走到发送点，而本批故意没有
+    那么做（换算点只有一处、出网只认序号，见 `thinking_request_index` 第 4 判）。
+    所以这里只承诺长度上界，不承诺同一性。
+
+    最后一道是**组装本身也不许把异常送到出网路径上**（整枝审查 I-3）：继承支（`_pending`
+    替没带 `thinking_levels` 的 PUT 补库里那份，M2 那一闸只判请求带来的格子）能存下
+    "清单 3 档 / 配方声明 `level_count=1`"这份组合，长度上界看得见它、配方看不见，
+    于是 `build_thinking_kwargs` 在这里会 `ValueError`——四个站点都在 `kwargs.update(...)`
+    里裸调这一格，非流式两支会把它直接演成 500，违背的就是上面那句"不许 raise"。
+    现在按同一口径收：配方拒收 ⇒ 留痕 `reason=recipe_rejected` 并回 `{}`。
 
     两次回落都不是静默的（I-R2-4）：各留一行 debug，字段只有 provider id、status、
     序号与一句固定文案，见 `_log_thinking_fallback`。
@@ -671,7 +685,13 @@ def thinking_kwargs_for(record, index) -> dict:
         _log_thinking_fallback(record, index, status, "ordinal_out_of_range")
         return {}
     profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
-    return _thinking_profiles.build_thinking_kwargs(profile, index)
+    try:
+        return _thinking_profiles.build_thinking_kwargs(profile, index)
+    except Exception:
+        # 只吞这一格的装配失败，且吞完必须留痕：出网路径的裁决是"不发参数"，不是"报错"
+        # 更不是把一次配置改动演成 500（见上面 I-3 那段）。
+        _log_thinking_fallback(record, index, status, "recipe_rejected")
+        return {}
 
 
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改
