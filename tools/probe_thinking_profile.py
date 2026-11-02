@@ -128,11 +128,11 @@ g2 那一轮 3 次怎么花——**预登记**（§R5，写在这里就是为了
 把读禁掉了，这个探针就只能核实测试夹具里的假上游。所以 F1 把闸收到它真正要挡的动作上：
 `--data-dir` 允许指另一棵 checkout（**只读**），`--ledger` 与 `--isolation-dir` 这两个会落盘
 的面照旧 rc=2。读的那一面由这三层守着，点名在这里，动它们之前先想清楚：
-① 记录只用 `json.load` 读出来——`read_provider_record`（:490），不走会写盘的 `providers.store`；
+① 记录只用 `json.load` 读出来——`read_provider_record`（:491），不走会写盘的 `providers.store`；
 ② 那个模块级单例的 `path`/`keys_path`/`prefs_path` 三个落点都不许指进 `--data-dir`，
-   也不许指进本仓——`assert_store_quarantined`（:465）；**名单里的 `data_dir` 不许拿掉**：
+   也不许指进本仓——`assert_store_quarantined`（:466）；**名单里的 `data_dir` 不许拿掉**：
    单例可以指临时目录，绝不能指现网；
-③ `files_digest`（:536）在**隔离之前**取 `before` 快照、跑完比对，store 三件套变了或
+③ `files_digest`（:537）在**隔离之前**取 `before` 快照、跑完比对，store 三件套变了或
    树里多/少路径一律**硬判 rc=2 作废结论**（无关文件的 mtime/size 漂移才走软判加 note）。
 **这一轮换来的残留风险（不藏）**：允许 `--data-dir` 指别树 ⇒ 误用的形状从"发不出去"
 变成"发到另一条上游去烧额度"。机器那一半只有授权表里的 `allowed_shapes`（只认这两条
@@ -422,7 +422,8 @@ def isolate_runtime_env(isolation_dir=None) -> Path:
 
     **这里挡的是发起这一跑的那棵树**（`REPO_ROOT`）。`--data-dir` 指另一棵 checkout
     （例如主工作树那份现网 `data/`）从修复轮 2（C-1/F1）起是**放行**的——本工具对它只
-    做 `json.load` 只读，三层读面保护见模块 docstring 闸 2；而会往那棵树里**写**的两个面
+    做 `json.load` 只读，三层读面保护见模块 docstring「读现网那条 provider 记录」那一段；
+    而会往那棵树里**写**的两个面
     （`--ledger`、`--isolation-dir`）仍由 `run_probe` 预检里的重叠判据与
     `data_dir_belongs_to_another_checkout()` 在调用本函数**之前**拒掉——那两道在预检里，
     不在这里，因为到这儿已经太晚了（本函数自己就会 mkdir）。
@@ -1065,8 +1066,8 @@ def run_probe(config, client_factory=None):
         #    而从工作树发起时它的父链上先撞上主工作树自己的 `.git` ⇒ rc=2，
         #    三次授权一次都发不出去（审查员 round 2 的阻塞项）。
         #    `--data-dir` 只被 `json.load` 读（`read_provider_record`），三层读面保护见模块
-        #    docstring 闸 2 那一段；**写**的那一面照旧逐条咬——见下面三条 `--ledger` 判据
-        #    与 `isolate_runtime_env()` 之前那条重叠判据。判据本身保留，口径换成"会不会被写"。
+        #    docstring「读现网那条 provider 记录」是用途那一段；**写**的一面照旧逐条咬——
+        #    见下面三条 `--ledger` 判据与 `isolate_runtime_env()` 之前那条重叠判据。
         ledger = str(config["ledger"] or "").strip()
         if not config["dry_run"] and not ledger:
             raise RuntimeError("live 模式必须显式给 --ledger（一份跨进程稳定的账本路径）："
