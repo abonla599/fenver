@@ -221,7 +221,7 @@
         <div class="modal hidden" id="pwModal" role="dialog" aria-modal="true" aria-label="先改掉初始密码">
           <div class="modal-card pw-card">
             <p class="pw-title">先改掉初始密码</p>
-            <p class="pw-note">这个账号是管理员建好的，你正用的是服务端生成的随机初始密码——它没留找回问题，忘了就只能再找管理员。换成自己的密码之后，随时用密码进来，这个弹窗也不会再拦你。</p>
+            <p class="pw-note">管理员给的初始密码，没设找回问题，忘了只能再找管理员。换成你自己的。</p>
             <input id="pwOld" type="password" placeholder="旧密码（就是初始密码）" autocomplete="current-password">
             <input id="pwNew" type="password" placeholder="新密码：至少 8 个字符" autocomplete="new-password">
             <input id="pwNew2" type="password" placeholder="再输入一遍新密码" autocomplete="new-password">
@@ -238,7 +238,7 @@
         <div class="modal hidden" id="reauthModal" role="dialog" aria-modal="true" aria-label="管理员二次验证">
           <div class="modal-card pw-card">
             <p class="pw-title">二次验证</p>
-            <p class="pw-note">这是高危操作，请重新输入管理员口令（5 分钟内有效）：</p>
+            <p class="pw-note">重输一次管理员口令，5 分钟内有效。</p>
             <input id="reauthPw" type="password" placeholder="管理员口令" autocomplete="current-password">
             <p class="pw-hint" id="reauthHint"></p>
             <div class="pw-actions">
@@ -519,7 +519,7 @@
 
         <!-- 角色设定 -->
         <section class="set-page hidden" data-page="persona" id="panePersona">
-          <textarea id="personaInput" rows="5" placeholder="例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。"></textarea>
+          <textarea id="personaInput" rows="5" placeholder="例如：你是一位网络安全助教，回答要给出依据和命令示例。"></textarea>
           <div class="row">
             <button class="btn btn-primary" id="savePersonaBtn">保存</button>
             <button class="btn" id="clearPersonaBtn">清除</button>
@@ -590,7 +590,7 @@
             </div>
             <p class="errbar hidden" id="taskError" role="alert"></p>
             <div class="empty hidden" id="taskEmpty">
-              <span class="big">◍</span>这里还没有编排任务<br>助手替你分几步办的事会记在这一页
+              <span class="big">◍</span>这里还没有编排任务<br>助手分步骤办的事，会记在这里
             </div>
             <ul class="task-list" id="taskList"></ul>
             <!-- 「需要你输入」卡片：形状照 v0.31 的审批卡片（一行标题 + 正文 + 动作），
@@ -648,13 +648,13 @@
           <div class="hidden" data-admin-only>
             <p class="set-group">服务端密钥（管理员维护 · 降级链在服务端用）</p>
             <div id="serverKeyList" class="prov-list"></div>
-            <p class="pane-note">这把 key 替所有人的搜索请求出头，所以只有管理员能登记；页面上永远只显示末四位。</p>
+            <p class="pane-note">这把 key 替所有人垫请求，只有管理员能登记。页面上只露末四位。</p>
           </div>
 
           <p class="set-group">服务端搜索（密钥由管理员维护）</p>
           <label class="field"><span>搜索源</span>
             <select id="sdSource" class="set-sel" aria-label="选择搜索源"></select></label>
-          <p class="pane-note" id="sdLocalNote">查询经本站服务端代理；浏览器不再保存任何搜索源 key。</p>
+          <p class="pane-note" id="sdLocalNote">查询走本站服务端，浏览器里不存 key。</p>
           <form class="row" id="sdSearchForm">
             <input id="sdQuery" type="search" placeholder="搜一下（经本站服务端）" autocomplete="off">
             <button class="btn btn-primary" type="submit">搜索</button>
@@ -740,7 +740,7 @@
            面板外——它是动画还没跑完时唯一该看得见的一行字。 -->
       <div class="auth-sheet">
       <form class="auth-form" id="authForm" autocomplete="on">
-        <p class="auth-sub" id="authSub">登录后继续；还没有账号就点下面的「立即注册」。</p>
+        <p class="auth-sub" id="authSub">登录后继续。没有账号就点「立即注册」。</p>
         <div class="auth-field">
           <input id="authUser" type="text" placeholder="请输入用户名" autocomplete="username">
         </div>
@@ -760,8 +760,7 @@
           <input id="authPass2" type="password" placeholder="再输入一遍密码" autocomplete="new-password">
         </div>
         <div class="auth-step hidden" id="regStep2">
-          <p class="auth-sub">最后一步：这三道题将来用于忘记密码时自助找回，答案只有你自己知道才对得上。
-            它们和密码一样只存这台机器上的摘要，管理员也看不到原话。</p>
+          <p class="auth-sub">最后一步。这三道题以后找回密码要用，答案只存摘要，管理员也看不到原话。</p>
           <div class="auth-qa">
             <label class="auth-q" for="regAns1"><span id="regQ1"></span></label>
             <div class="auth-field">
@@ -781,7 +780,7 @@
             </div>
           </div>
         </div>
-        <p class="auth-note">对话与记忆只存在这台机器上，不会上传到别处。</p>
+        <p class="auth-note">对话与记忆保存在你连接的服务器上。</p>
         <div class="auth-links">
           <!-- 上一步只在注册第二步出现：填错答案不该逼人重开整张表单。
                「忘记密码」在注册时被收起来：还没有账号就没有可找回的东西。 -->
@@ -801,7 +800,7 @@
         <!-- 第二步一次铺开：三道固定题 + 三个答案 + 新密码 + 确认新密码。
              答案与新密码必须同一枪提交——分开验答案就等于给外人一个 oracle。 -->
         <div class="auth-step hidden" id="rcStep2">
-          <p class="auth-sub">回答这三道题，再设一个新密码。三道全对才改得动：题目是全站固定的那三道，答案是注册第二步留的那三句。</p>
+          <p class="auth-sub">答对这三道，再设一个新密码。题目是全站固定的那三道，答案是注册第二步留的那三句。</p>
           <div class="auth-qa">
             <label class="auth-q" for="rcAns1"><span id="rcQ1"></span></label>
             <div class="auth-field">

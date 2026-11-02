@@ -277,8 +277,8 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                     if (!recovering) {
                         val reg = mode == "register"
                         // .auth-sub（登录/注册那张表单的第一句）
-                        Text(if (reg) "注册分两步：先定用户名和密码，下一步留三道找回题的答案。"
-                             else "登录后继续；还没有账号就点下面的「立即注册」。",
+                        Text(if (reg) "两步：先定用户名和密码，再留三道找回题的答案。"
+                             else "登录后继续。没有账号就点「立即注册」。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
 
@@ -296,8 +296,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
 
                         if (reg && regStep == 2) {
                             // regStep2 块：自己的 auth-sub + 三组「题面/答案」
-                            Text("最后一步：这三道题将来用于忘记密码时自助找回，答案只有你自己知道才对得上。" +
-                                "它们和密码一样在服务端只保存不可逆摘要，管理员也看不到原话。",
+                            Text("最后一步。这三道题以后找回密码要用，答案只存摘要，管理员也看不到原话。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             RECOVERY_QUESTIONS.forEachIndexed { i, q ->
@@ -357,7 +356,7 @@ fun AuthScreen(initialMode: String = "login", onBack: (() -> Unit)? = null,
                             enabled = rcStep == 1)
 
                         if (rcStep == 2) {
-                            Text("回答这三道题，再设一个新密码。三道全对才改得动：题目是全站固定的那三道，答案是注册第二步留的那三句。",
+                            Text("答对这三道，再设一个新密码。题目是全站固定的那三道，答案是注册第二步留的那三句。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             RECOVERY_QUESTIONS.forEachIndexed { i, q ->

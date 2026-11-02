@@ -33,7 +33,7 @@ public final class TaskCard {
     public static final String WAITING_TEXT = "等你回复";
     public static final String EXECUTING_TEXT = "执行中";
     /** 非属主与不存在的 id 在服务端是同一句 404；这句话要说"读不到"，不是"断网"。 */
-    public static final String GONE_TEXT = "这条任务打不开：它可能已经不在了，也可能本来就不是你的。";
+    public static final String GONE_TEXT = "这条任务打不开，可能已经不在了，或者本来就不属于你。";
     public static final String NETWORK_ERROR_TEXT = "连不上服务端，任务状态还没读到。";
     public static final String STATUS_WAITING_USER = "waiting_user";
     /** 与 backend/app/tools/response.py 的挂起前缀逐字一致；这里只当"去读一次"的触发器。 */

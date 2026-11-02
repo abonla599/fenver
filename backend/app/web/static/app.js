@@ -361,8 +361,8 @@ function needsAuth(err) {
   if (!err || err.status !== 401) return false;
   // 判据从"本机有没有令牌"换成"本机记不记得人"：方案 C 下 JS 没有令牌可看。
   setStatus(currentEntry()
-    ? "登录已失效：本机会话已被服务端拒绝（管理员撤销或轮换过），重新登录即可"
-    : "还没有登录：用用户名和密码登录，或注册一个", true);
+    ? "登录已失效，可能是管理员撤销了，重新登录即可"
+    : "还没登录，用用户名和密码进来，或者注册一个", true);
   if ($("authModal").classList.contains("hidden")) showAuth(currentEntry() ? "login" : "register");
   return true;
 }
@@ -455,8 +455,8 @@ function setAuthMode(mode) {
   // 用户就会在被拒之后对着一个看起来合规的框反复重试。
   $("authPass").placeholder = reg ? "请设置密码，至少 8 位" : "请输入密码";
   $("authSub").textContent = reg
-    ? "注册分两步：先定用户名和密码，下一步留三道找回题的答案。"
-    : "登录后继续；还没有账号就点下面的「立即注册」。";
+    ? "两步：先定用户名和密码，再留三道找回题的答案。"
+    : "登录后继续。没有账号就点「立即注册」。";
   renderRegister();
 }
 
@@ -839,7 +839,7 @@ async function loadModels() {
     // 没有可用模型时两条路都通：管理员配全站共享，普通用户也能在同一个页面
     // 用自带 key 添加"我的模型"。所以不再把普通用户挡在页外，只给指路的一句话。
     if (isAdmin()) {
-      setStatus("尚未配置可用的模型服务，请在「设置 → 模型服务」中添加", true);
+      setStatus("还没有配置模型服务，去「设置 → 模型服务」加一个", true);
       openSettings("providers");
     } else {
       setStatus("还没有可用模型：可在「设置 → 模型服务」用自己的 API Key 添加，或联系管理员配置", true);
@@ -1889,7 +1889,7 @@ const TASK_WAITING_TEXT = "等你回复";
 const TASK_EXECUTING_TEXT = "执行中";
 // 非属主与不存在的 id 在服务端是同一句 404（那是归属探测的闸）。这句话要说的是"读不到"，
 // 不是"断网"——说成断网，人就守着一颗刷新键反复敲一条永远不会有的记录。
-const TASK_GONE_TEXT = "这条任务打不开：它可能已经不在了，也可能本来就不是你的。";
+const TASK_GONE_TEXT = "这条任务打不开，可能已经不在了，或者本来就不属于你。";
 const TASK_STATUS_TEXT = {
   pending: "排队中", running: "执行中", waiting_user: "需要你输入",
   completed: "办完了", failed: "没办成", cancelled: "已停止",
@@ -2549,7 +2549,7 @@ async function pullFromHistory(holder) {
     }
     // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
     holder.transient = true;
-    setStatus("没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条", true);
+    setStatus("这一轮的结果没找到，稍后刷新看看，不用重发", true);
   } catch (e) {
     holder.transient = true;
     if (!needsAuth(e)) setStatus(e.message, true);
@@ -2580,7 +2580,7 @@ function sdEndpoints() {
   const raw = document.getElementById("paneSearchKeys").dataset.searchEndpoints;
   let eps = null;
   try { eps = JSON.parse(raw); } catch (_) { /* 落到下面那句实话 */ }
-  if (!eps || typeof eps !== "object") throw new Error("搜索源配置读不出（data-search-endpoints 坏了）");
+  if (!eps || typeof eps !== "object") throw new Error("搜索源的配置读不出来");
   return eps;
 }
 
@@ -2601,7 +2601,7 @@ function sdRenderLocal() {
       sel.appendChild(o);
     }
   }
-  $("sdLocalNote").textContent = "查询经本站服务端代理；浏览器不再保存任何搜索源 key。";
+  $("sdLocalNote").textContent = "查询走本站服务端，浏览器里不存 key。";
 }
 
 function sdSummaryVal() {
@@ -2720,7 +2720,7 @@ $("sdSearchForm").onsubmit = async (e) => {
     if (!rows.length) {
       sdSetStatus(data && data.reason === "not_enabled"
         ? `${eps.label || source} 还没有服务端密钥；请让管理员在「搜索源」里登记`
-        : "服务端返回零命中——别据此断定不存在", true);
+        : "服务端这次没搜到，不代表它不存在", true);
       return;
     }
     for (const r of rows) {
@@ -3226,7 +3226,7 @@ function reminderStatusCard(caps) {
   if (!known) {
     const note = document.createElement("p");
     note.className = "pane-note";
-    note.textContent = "这版壳读不到通知与闹钟权限，升级壳后才能看到。";
+    note.textContent = "这个版本的 App 读不到通知和闹钟权限，升级后才有。";
     card.appendChild(note);
   }
   return card;
@@ -3374,7 +3374,7 @@ async function drainShares() {
 /** 壳拒收分享的五个固定码 → 一句话。键必须与壳的 SharePolicy.Intake 小写名一一对应
  *  （钉在 backend/tests/test_web_pwa.py）；落在之外的码走 onShellEvent 的兜底句。 */
 const SHARE_REFUSAL = {
-  too_large: "分享没收下：文件太大，超出了助手的附件上限",
+  too_large: "分享没收下：文件太大，超过附件上限",
   text_too_large: "分享没收下：这段文本太长",
   unsupported_mime: "分享没收下：这种内容助手不收",
   no_stream: "分享没收下：里面没有内容",
@@ -3457,7 +3457,7 @@ async function switchTo(userId) {
     closeSettings();
     showAuth("login");
     $("authUser").value = hit.username || "";
-    setStatus("换到 " + (hit.username || hit.userId) + " 需要再输一次他的密码（会话凭据不在本机明文里）");
+    setStatus("换到 " + (hit.username || hit.userId) + " 需要再输一次他的密码，本机不存明文");
   } finally {
     state.switching = false;
   }
@@ -3532,8 +3532,8 @@ async function loadMemories() {
 
 /** "记忆服务不可用"是一句会让人去做错事的话：重启后端治不了没登录。 */
 function memoryListErrorText(e) {
-  if (e.status === 401) return "未登录或令牌已失效：请在「设置 → 账户」重新登录";
-  if (e.status === 403) return "这个账号没有读取记忆的权限，请找管理员确认";
+  if (e.status === 401) return "没登录或登录已失效，去「设置 → 账户」重新登录";
+  if (e.status === 403) return "这个账号读不了记忆，找管理员确认一下权限";
   return "记忆服务不可用：" + e.message;
 }
 
@@ -3961,7 +3961,7 @@ function schedCanLeave() {
   const pane = $("paneSchedule");
   const onSchedule = pane && !pane.classList.contains("hidden");
   if (!onSchedule || schedSnapshot() === sched.pristine) return true;
-  return confirm("有未保存的修改：离开这一页就不会保存它们。确定离开？");
+  return confirm("有未保存的修改，离开就不会保存。确定离开？");
 }
 
 /** 设置一级列表顶上的身份卡。
@@ -4024,7 +4024,7 @@ async function openCamera() {
   Layers.open("camera", hideCamera);
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    const reason = "该浏览器不支持网页相机，请使用文件选择器";
+    const reason = "这个浏览器打不开相机，换用文件选择";
     $("camHint").textContent = reason;
     setStatus(reason, true);
     closeCamera();
@@ -4252,8 +4252,8 @@ function bind() {
   $("modelSel").onchange = (e) => {
     const picked = state.providers.find((p) => p.id === e.target.value);
     if (picked && !picked.usable) {
-      setStatus(isAdmin() ? "该模型未配置密钥，请先在「设置 → 模型服务」补全"
-                          : "该模型还没配好密钥，请联系管理员处理", true);
+      setStatus(isAdmin() ? "这个模型还没配密钥，先去「设置 → 模型服务」补上"
+                          : "这个模型还没配密钥，找管理员处理", true);
       e.target.value = pref.provider;
       return;
     }

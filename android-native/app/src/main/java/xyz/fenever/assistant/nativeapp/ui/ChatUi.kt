@@ -903,7 +903,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 setStatus("")
             } else {
                 // 历史里还没有这一轮的助手消息（多半服务端还在收尾）：明说，别重发。
-                val tip = "没能在会话里找到这一轮的结果，稍后刷新再看；不用重发同一条"
+                val tip = "这一轮的结果没找到，稍后刷新看看，不用重发"
                 messages = messages + UiMsg("assistant", tip, transient = true)
                 setStatus(tip, true)
             }

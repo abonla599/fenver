@@ -666,8 +666,8 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     ModelPickRow(providers, current, identityTick, modelsLoading) { id, p ->
         // 网页 renderModelSelect 的 select：选不可用的 → 一句红字 + 弹回原值
         if (!p.usable) {
-            onNote(if (admin) "该模型未配置密钥，请先在「设置 → 模型服务」补全"
-            else "该模型还没配好密钥，请联系管理员处理", true)
+            onNote(if (admin) "这个模型还没配密钥，先去「设置 → 模型服务」补上"
+            else "这个模型还没配密钥，找管理员处理", true)
             return@ModelPickRow
         }
         onNote("", false)
@@ -1041,7 +1041,7 @@ private fun PersonaPage(onNote: (String) -> Unit, onClose: () -> Unit) {
             decorationBox = { inner ->
                 Box {
                     if (text.isEmpty()) Text(
-                        "例如：你是一位严谨的网络安全助教，回答给出依据与命令示例。",
+                        "例如：你是一位网络安全助教，回答要给出依据和命令示例。",
                         fontSize = 14.sp, color = text3Color())
                     inner()
                 }
@@ -1386,8 +1386,8 @@ private fun FormRow(placeholder: String, value: String, onValue: (String) -> Uni
 /** 网页 memoryListErrorText 的三句逐字。 */
 private fun memoryListErrorText(e: Throwable): String {
     if (e is ApiException) {
-        if (e.status == 401) return "未登录或令牌已失效：请在「设置 → 账户」重新登录"
-        if (e.status == 403) return "这个账号没有读取记忆的权限，请找管理员确认"
+        if (e.status == 401) return "没登录或登录已失效，去「设置 → 账户」重新登录"
+        if (e.status == 403) return "这个账号读不了记忆，找管理员确认一下权限"
     }
     return "记忆服务不可用：" + (e.message ?: "")
 }
