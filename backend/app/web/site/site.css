@@ -20,6 +20,11 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --display: "Helvetica Neue", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  /* 品牌名 "Fenver" 只用这一套：拉丁字母排在最前，中文那几款放在后面兜底。
+     --display / --sans 都以中文字体打头，拿去排纯字母的品牌名会先落到
+     "Helvetica Neue" 上，跟导航栏里那枚便不是同一个字形了。 */
+  --wordmark: "Segoe UI Variable Display", "Segoe UI", "Helvetica Neue", Inter, Arial,
+              "PingFang SC", "Microsoft YaHei", sans-serif;
   /* 全站只有这一套配色，没有日间/夜间切换。
      底色是偏浅的墨绿，不是黑：第一版取 #0b0f0e，跟旧深色 #0a0b0e 只差一两个色阶，
      屏幕上看不出换过；第二版提到 #151c19 仍然偏黑。这一版把明度再抬一档、绿意也
@@ -121,8 +126,7 @@ strong { font-weight: 650; }
 /* 字重收到 700、字距从 -.05em 放到 -.015em：780 在多数系统字体上会走合成加粗，
    笔画糊成一团；字距压太狠，"F" 和 "e" 会粘在一起。 */
 .brand {
-  font-family: "Segoe UI Variable Display", "Segoe UI", "Helvetica Neue", Inter, Arial,
-               "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--wordmark);
   font-size: 1.42rem; font-weight: 700; line-height: 1; letter-spacing: -.015em;
 }
 /* 导航里这枚 = 手机桌面上的那枚：深底、白描边、mint 轨迹。圆角取 16.4%，
@@ -174,7 +178,8 @@ strong { font-weight: 650; }
   width: 420px; height: 420px; left: 50%; top: -60px; margin-left: -210px;
   border-radius: 50%; background: var(--brand-soft); filter: blur(30px); opacity: .72;
 }
-/* 46rem ≈ 736px：一行 7 个中文字放在 70px 字号下正好不挤，再宽就显得散。 */
+/* 46rem ≈ 736px：主标题现在只有 "Fenver" 六个字母，撑不满这么宽，但副标题和
+   正文那两行中文要这个宽度才不断得难看，按最长的内容定栏宽。 */
 .hero-inner { max-width: 46rem; margin: 0 auto; }
 .hero-kicker {
   display: inline-flex; align-items: center; gap: 9px;
@@ -184,17 +189,21 @@ strong { font-weight: 650; }
   border-radius: var(--radius-pill); font-size: .76rem; font-weight: 650;
 }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 12%, transparent); }
-/* 参考站的主标题是 46px / 字重 400 / 字距 18.4px（0.4em）。中文拉到 0.4em 会散成
-   单个字，收在 .1em；字重取 500，再细在墨绿底上就发虚了。
-   inline-block + 负 margin-right 是为了抵消末字后面那段字距——块级居中时它会让人
-   看着整体偏左半个字距。 */
+/* 首屏主标题是软件名。标语降为副标题，跟着下面走。
+   品牌名是拉丁字母，字距要收紧（-.045em）才立得住；中文标语反过来要放开一点。
+   原先是中文标语当 h1、字距 .1em，那套参数直接套到 "Fenver" 上会散成六个字母。 */
 .hero-title {
-  display: inline-block; margin: 6px -.1em 24px 0;
+  margin: 8px 0 16px;
   color: var(--ink);
-  font-family: var(--display); font-size: clamp(2.4rem, 5.6vw, 4.4rem);
-  font-weight: 500; line-height: 1.3; letter-spacing: .1em;
+  font-family: var(--wordmark);
+  font-size: clamp(3.2rem, 8vw, 6.2rem);
+  font-weight: 700; line-height: 1; letter-spacing: -.045em;
 }
-.hero-title em { color: var(--brand); font-style: normal; }
+.hero-sub {
+  max-width: 26em; margin: 0 auto 28px; color: var(--ink-soft);
+  font-size: clamp(1.15rem, 2.4vw, 1.7rem); font-weight: 450;
+  line-height: 1.5; letter-spacing: .04em;
+}
 /* 38em 是试出来的：第一行（到"联网查。"为止）36 个字，留两字余量刚好不折。
    再窄，那行会自己断，br 就白写了。 */
 .lede { max-width: 38em; margin: 0 auto; color: var(--ink-soft); font-size: var(--step-1); line-height: 1.8; }
@@ -383,7 +392,10 @@ main > section { max-width: var(--maxw); margin: 0 auto; padding: clamp(76px, 9v
 }
 .shot:hover .shot-frame { transform: translateY(-5px); box-shadow: 0 18px 40px rgba(10, 11, 14, .1); }
 .shot-frame img { display: block; width: 100%; height: clamp(310px, 32vw, 410px); object-fit: cover; object-position: top center; border-radius: 15px; background: var(--surface-2); }
-.shot-tag { position: absolute; z-index: 2; top: 18px; left: 18px; padding: 5px 9px; color: var(--brand-ink); background: var(--brand); border-radius: var(--radius-pill); font-size: .62rem; font-weight: 700; }
+/* 角标原先压在截图左上角，正好盖住 App 自己的标题栏：设置页那一格，绿色的
+   「设置」和截图里的「设置」叠在同一条基线上，看着像排版坏了。挪到框外面，
+   当每张图的名字用——位置固定，截图换成什么都不会撞。 */
+.shot-tag { display: inline-block; margin: 0 0 9px 5px; padding: 4px 9px; color: var(--brand-ink); background: var(--brand); border-radius: var(--radius-pill); font-size: .62rem; font-weight: 700; letter-spacing: .02em; }
 .shot figcaption { display: grid; gap: 5px; padding: 15px 5px 0; }
 .shot figcaption strong { color: var(--ink); font-size: .91rem; }
 .shot figcaption span { color: var(--ink-soft); font-size: .74rem; line-height: 1.6; }
@@ -519,7 +531,10 @@ footer > .note { margin-top: 12px; }
      压到 620 上限，留白仍在，但不至于看着像内容没加载出来。 */
   .hero { min-height: min(calc(100vh - 64px), 620px); padding-top: 40px; padding-bottom: 56px; }
   .hero-kicker { margin-bottom: 22px; font-size: .7rem; }
-  .hero-title { font-size: clamp(2.1rem, 9vw, 2.9rem); }
+  /* 品牌名六个字母，窄屏上不用像中文标语那样缩那么狠：上限对齐桌面的
+     最小档（3.2rem），再小就显不出它是标题了。 */
+  .hero-title { font-size: clamp(2.8rem, 8vw, 3.2rem); }
+  .hero-sub { font-size: 1.1rem; }
   .lede { margin-top: 20px; font-size: 1rem; }
   .cta { margin-top: 25px; }
   .btn { min-height: 48px; padding-inline: 16px; }
@@ -542,7 +557,7 @@ footer > .note { margin-top: 12px; }
   .shot-grid { gap: 10px; }
   .shot-frame { padding: 5px; border-radius: 16px; }
   .shot-frame img { height: clamp(250px, 74vw, 390px); border-radius: 11px; }
-  .shot-tag { top: 12px; left: 12px; padding: 4px 7px; font-size: .56rem; }
+  .shot-tag { margin: 0 0 7px 5px; padding: 3px 7px; font-size: .56rem; }
   .shot figcaption { padding: 11px 3px 0; }
   .shot figcaption strong { font-size: .8rem; }
   .shot figcaption span { font-size: .66rem; }
@@ -563,7 +578,8 @@ footer > .note { margin-top: 12px; }
 }
 @media (max-width: 370px) {
   .brand-symbol { display: none; }
-  .hero-title { font-size: 2rem; }
+  /* 主标题不在这里另设字号：320px 宽下 2.8rem 的 "Fenver" 只占约 148px，
+     离溢出还远，上一档已经把它压到能放下的程度了。 */
   .product-stage { padding-inline: 10px; }
   .floating-card { display: none; }
   .shot-grid { grid-template-columns: 1fr; }
