@@ -24,10 +24,19 @@
 冒充真发（N1）、重叠判据走 realpath 且只读快照先于隔离（N2）、账本"仓库外"从一句话
 变成预检判据（N3）、"另一棵 checkout"沿父链上溯（N4）、新建账本必须自我声明计数口径
 （concerns.1 残余）、只读证据拆成软硬两格（concerns.3）。本节同样**零出站**。
+
+Task 11b（第二轮授权机制化）新增 §10，并按 §R1 改写 §8 那条额度锁：授权从「一个数字」
+换成**授权轮次表** `AUTHORIZED_GRANTS`，live 模式除 `--ledger` 之外还要 `--grant <id>`，
+且账本文件名绑在那一份授权上（换文件不再是加个 flag）；候选表每支显式带 `direction`，
+判据改成方向感知——OFF 方向"痕迹消失"是要的证据，旧分类器在那里给的是**反结论**
+（§10 那两格心脏用例演的就是这件事）。本节**零出站**：客户端一律是注入的替身或
+`--dry-run`，三条 paid 调用由主控人过审后手工执行。
 """
 import ast
+import copy
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -46,6 +55,15 @@ from app.core import pathmask, providers, thinking_profiles    # noqa: E402
 
 FAKE_HOST = "https://probe.invalid/v1"
 
+# —— §R1 授权轮次表带来的三个夹具常量 ——
+# 授权表里的 `allowed_shapes` 是 **provider × profile 的白名单**，且只有现网那两条
+# provider id。夹具的 provider 因此必须跟着 profile 走（dashscope 那两支住在 relay 上），
+# 否则每一格 live 用例都会先撞白名单、测不到它本来要测的那一格。
+GRANT1 = "g1-20261101"
+GRANT2 = "g2-20261102"
+DEEPSEEK = "deepseek-chat"
+RELAY = "p_55a83a43"
+
 
 def _K(*parts: str) -> str:
     """假密钥一律拼出来——和 `test_secret_scan.py` 同一约定：形态扫描器看每一行，
@@ -56,8 +74,14 @@ def _K(*parts: str) -> str:
 SHAPEY = _K("sk-", "probe", "fake", "-0123456789abcdef")       # scrub 的形状层认得出
 SHAPELESS = _K("probe", "9f3c2a77bd51e0", "46", "8a")          # 只有值级遮盖认得出
 
+# 除基线以外的**全部**候选配方——从表本身推导，不写死名单：§R3 新加的 OFF 两支、以及
+# 以后往表里补的任何一支，都会自动落进"三档齐不齐 / 表外档位必须报错 / 塞不塞得进真 SDK"
+# 这三把锁里。写死名单的话，加配方的人只要不记得改名单，这三把新锁就是假绿灯。
+NON_BASELINE_PROFILES = [p for p in thinking_profiles.probe_profile_ids()
+                         if p != thinking_profiles.NONE_PROFILE]
 
-def _write_config(tmp_path: Path, *, provider_id="p_probe_deep", key=SHAPEY,
+
+def _write_config(tmp_path: Path, *, provider_id=DEEPSEEK, key=SHAPEY,
                   inline_key=None) -> Path:
     """造一份"长得像现网"的配置目录：形状是真的，值是假的。"""
     data_dir = tmp_path / "live-data"
@@ -72,16 +96,38 @@ def _write_config(tmp_path: Path, *, provider_id="p_probe_deep", key=SHAPEY,
     return data_dir
 
 
-def _argv(tmp_path: Path, *extra: str, provider_id="p_probe_deep", key=SHAPEY,
-          inline_key=None, asked=None) -> list:
-    """夹具命令行。**live 形状（不带 --dry-run）必须有一份显式账本**，这是 Critical-1
-    修完之后的新契约：缺省账本会落进每次新建的隔离目录 ⇒ "总额 4 次"永不咬。所以这里
-    给每格测试一条固定的持久账本（在 data_dir 之外），让既有用例继续演真调用那一段。
-    位置在 `*extra` **之前**：谁要自己指定账本，谁说了算（argparse 取最后一次）。"""
+def _provider_for(profile) -> str:
+    """profile → 授权表里唯一合法的宿主 provider（见上面那三个常量的注释）。"""
+    return RELAY if str(profile or "").startswith("dashscope_") else DEEPSEEK
+
+
+def _ledger(base, grant=GRANT2) -> Path:
+    """某一轮授权的**权威账本路径**：basename 必须等于该 grant 的 `ledger_name`（§R1
+    的核心那一步）。取不到表时退回同一命名规则的字面量——这样夹具在本单实现之前依然
+    可 import，红的就是"闸不存在"那一格，而不是夹具自己炸。"""
+    name = (getattr(probe, "AUTHORIZED_GRANTS", {}) or {}).get(grant, {}) \
+        .get("ledger_name") or "call-ledger-%s.jsonl" % grant
+    return Path(base) / name
+
+
+def _argv(tmp_path: Path, *extra: str, provider_id=None, key=SHAPEY,
+          inline_key=None, asked=None, grant=GRANT2) -> list:
+    """夹具命令行。**live 形状（不带 --dry-run）必须有一份显式账本 + 显式授权轮次**，
+    这是 Critical-1 与 §R1 修完之后的新契约：缺省账本会落进每次新建的隔离目录 ⇒ "总额"
+    永不咬；缺 `--grant` 则"哪一份文件是这一轮的权威账本"又回到"由操作者记得"。所以这里
+    给每格测试一条固定的持久账本（在 data_dir 之外、文件名等于该轮的 `ledger_name`），
+    让既有用例继续演真调用那一段。
+    位置在 `*extra` **之前**：谁要自己指定账本/授权轮次，谁说了算（argparse 取最后一次）。
+    provider 缺省时按 profile 推（白名单只认现网那两条 provider id）。"""
+    profile = extra[extra.index("--profile") + 1] if "--profile" in extra else "none"
+    provider_id = provider_id or _provider_for(profile)
     _write_config(tmp_path, provider_id=provider_id, key=key, inline_key=inline_key)
-    return ["--data-dir", str(tmp_path / "live-data"), "--provider", asked or provider_id,
-            "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
-            "--isolation-dir", str(tmp_path / "iso"), *extra]
+    argv = ["--data-dir", str(tmp_path / "live-data"), "--provider", asked or provider_id]
+    if grant:                                   # `grant=None` 演"live 不给授权轮次"那一格
+        argv += ["--grant", grant]
+    argv += ["--ledger", str(_ledger(tmp_path / "iso")),
+             "--isolation-dir", str(tmp_path / "iso"), *extra]
+    return argv
 
 
 def _run(tmp_path: Path, *extra: str, factory=None, **kw):
@@ -175,8 +221,7 @@ def test_body_fragment_separates_the_call_shape_from_the_wire_shape():
         {"extra_body": {"thinking": {"type": "enabled"}}})
 
 
-@pytest.mark.parametrize("profile", ["openai_reasoning_effort", "dashscope_enable_thinking",
-                                     "deepseek_thinking_type"])
+@pytest.mark.parametrize("profile", NON_BASELINE_PROFILES)
 def test_candidate_table_covers_every_level(profile):
     """档位标签是有序 UI 值（spec §6.1）：表里少一档，界面就多一个永远点不动的选项。"""
     for level in thinking_profiles.THINKING_LEVEL_LABELS:
@@ -193,8 +238,7 @@ def test_unknown_profile_raises_value_error_without_network():
         thinking_profiles.probe_kwargs("claude_thinking_budget", "均衡")
 
 
-@pytest.mark.parametrize("profile", ["openai_reasoning_effort", "dashscope_enable_thinking",
-                                     "deepseek_thinking_type"])
+@pytest.mark.parametrize("profile", NON_BASELINE_PROFILES)
 def test_unknown_level_raises_value_error(profile):
     """断言必须钉到**那一句**错：`probe_kwargs` 里有两支 ValueError 都带"档位"字样
     （调用方传错 vs 候选表自己畸形）。只判"档位"的话，摘掉档位校验也照样绿——
@@ -320,7 +364,7 @@ def test_run_blocks_when_isolation_dir_overlaps_the_live_data(tmp_path):
     """`--isolation-dir` 指进 `--data-dir` 里面：环境变量确实设了，但"隔离"的正是那份
     现网配置。这一格必须停手，而且一次都不发。"""
     data_dir = _write_config(tmp_path)
-    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", DEEPSEEK,
                                 "--profile", "none", "--dry-run",
                                 "--isolation-dir", str(data_dir / "iso")])
     build, seen = _never()
@@ -347,27 +391,28 @@ def _fill_ledger(path: Path, n: int) -> None:
                             for i in range(1, n + 1)), encoding="utf-8")
 
 
-def test_budget_gate_refuses_the_fifth_call_without_sending(tmp_path):
-    """授权就 4 次。第 5 次不许"再试一次"——账本到数就停，停手时客户端一次都没被碰。
+def test_budget_gate_refuses_the_next_call_once_the_grant_is_full(tmp_path):
+    """授权就那么多格。多出来的那一格不许"再试一次"——账本到数就停，停手时客户端一次
+    都没被碰。
 
-    **条数写死字面量 4**（Important-2）：这一格是"第 5 次必须被拒"的那道锁，填充条数
-    若跟着 `AUTHORIZED_LIVE_CALLS` 一起漂，把常量改成 9 就变成"填满 9 条再发第 10 次"，
-    尺子和被测同源 ⇒ 全绿。常量本身由 `test_authorized_live_call_count_is_the_grant` 钉。
+    **条数写死字面量**（Important-2 的同一口径，本轮改到 g2 的 3）：这一格是"填满即拒"
+    的那道锁，填充条数若跟着判据同源漂，把上限改成 9 就变成"填满 9 条再发第 10 次"⇒
+    全绿。轮次表本身由 `test_authorized_live_call_count_is_the_grant_itself` 逐轮字面钉。
     """
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
-    _fill_ledger(ledger, 4)
+    ledger = _ledger(tmp_path / "iso")
+    _fill_ledger(ledger, 3)
     build, seen = _never()
     payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
-                          "--attempt", "5", "--ledger", str(ledger), factory=build)
+                          "--attempt", "4", "--ledger", str(ledger), factory=build)
     assert rc == probe.RC_BLOCKED and seen == []
-    assert len(probe.read_ledger(ledger)) == 4, "被拒的那一次不许在账上留痕"
+    assert len(probe.read_ledger(ledger)) == 3, "被拒的那一次不许在账上留痕"
     assert payload["verdict"] == "preflight_failed"
 
 
 def test_registered_attempt_must_match_the_ledger_sequence(tmp_path):
     """登记第 3 次而账本上下一个序号是 1：要么我记错了，要么别人已经发过。
     两种都不许发——那正是重复烧额度的形状。对不上账时还不许留半条账。"""
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     build, seen = _never()
     payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "3",
                           "--ledger", str(ledger), factory=build)
@@ -380,7 +425,7 @@ def test_the_slot_is_booked_before_the_request_goes_out(tmp_path):
     """先记账后发：进程在请求中途死掉，那一次额度也必须已经记在账上。
     判据是替身在**被调用的那一刻**回头读账本，看到 1 条才算数；把 reserve 挪到发送
     之后，这里读到的就是 0。"""
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     seen = []
 
     def build(record):
@@ -393,7 +438,7 @@ def test_the_slot_is_booked_before_the_request_goes_out(tmp_path):
 
 
 def test_live_run_consumes_exactly_one_slot(tmp_path):
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
                           "--attempt", "1", "--ledger", str(ledger),
                           factory=lambda r: probe.FakeClient("reasoning"))
@@ -405,7 +450,7 @@ def test_dry_run_never_touches_the_authorized_budget(tmp_path):
     for mode in ("reasoning", "quiet", "error_form", "error_leak"):
         assert probe.main(_argv(tmp_path, "--profile", "dashscope_enable_thinking",
                                "--level", "均衡", "--dry-run", "--fake", mode)) in (0, 1)
-    assert not (tmp_path / "iso" / "call-ledger.jsonl").exists()
+    assert not _ledger(tmp_path / "iso").exists()
 
 
 def test_second_send_in_the_same_run_is_refused(tmp_path):
@@ -454,8 +499,7 @@ def test_the_local_sdk_signature_is_what_this_table_was_written_against():
     assert "extra_body" in names and "thinking" not in names and "enable_thinking" not in names
 
 
-@pytest.mark.parametrize("profile", ["openai_reasoning_effort", "dashscope_enable_thinking",
-                                     "deepseek_thinking_type"])
+@pytest.mark.parametrize("profile", NON_BASELINE_PROFILES)
 @pytest.mark.parametrize("level", thinking_profiles.THINKING_LEVEL_LABELS)
 def test_every_candidate_shape_can_actually_reach_the_sdk(profile, level):
     """候选配方必须**塞得进**真 SDK 的 create()：表里写出一个签名不收的裸字段，
@@ -470,11 +514,11 @@ def test_sdk_gate_rejects_an_unsendable_shape_without_booking_it(tmp_path, monke
     记账**之前**——账本里没有这一格，客户端一次都没被碰。"""
     broken = dict(thinking_profiles.PROBE_PROFILES)
     broken["probe_unsendable"] = {
-        "label": "畸形", "level_used": False,
+        "label": "畸形", "level_used": False, "direction": "on",
         "levels": {lvl: {"thinking": {"type": "enabled"}}
                    for lvl in thinking_profiles.THINKING_LEVEL_LABELS}}
     monkeypatch.setattr(thinking_profiles, "PROBE_PROFILES", broken)
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     build, seen = _never()
     payload, rc, _ = _run(tmp_path, "--profile", "probe_unsendable", "--level", "均衡",
                           "--attempt", "1", "--ledger", str(ledger), factory=build)
@@ -509,6 +553,7 @@ def test_verified_via_reasoning_tokens_only(tmp_path):
         usage=SimpleNamespace(prompt_tokens=9, completion_tokens=8, total_tokens=17,
                               completion_tokens_details=SimpleNamespace(reasoning_tokens=12)))
     payload, rc, _ = _run(tmp_path, "--profile", "openai_reasoning_effort", "--level", "均衡",
+                          "--dry-run",
                           factory=lambda r: SimpleNamespace(
                               chat=SimpleNamespace(completions=SimpleNamespace(
                                   create=lambda **kw: response))))
@@ -518,9 +563,11 @@ def test_verified_via_reasoning_tokens_only(tmp_path):
 
 
 def test_unverified_when_the_upstream_accepts_but_shows_nothing(tmp_path):
-    """`quiet` 那一格演的是"200 但不是证据"：参数被接受 ≠ 它在思考。"""
+    """`quiet` 那一格演的是"200 但不是证据"：参数被接受 ≠ 它在思考。
+    （`--dry-run`：`openai_reasoning_effort` 不在两轮授权的任何 `allowed_shapes` 里，
+    live 形状会被白名单闸挡下——判据走向要演的形状用模拟那一跑才安全，见 §R1。）"""
     payload, rc, _ = _run(tmp_path, "--profile", "openai_reasoning_effort", "--level", "深入",
-                          factory=lambda r: probe.FakeClient("quiet"))
+                          "--dry-run", factory=lambda r: probe.FakeClient("quiet"))
     assert rc == probe.RC_UNVERIFIED and payload["verdict"] == "unverified"
     assert payload["accepted"] is True
     assert payload["has_reasoning_content"] is False and payload["reasoning_tokens"] == 0
@@ -529,7 +576,7 @@ def test_unverified_when_the_upstream_accepts_but_shows_nothing(tmp_path):
 def test_rejected_parameter_is_not_read_as_unsupported(tmp_path):
     """参数被拒 ≠ 模型不支持思考：这一格只能写 unverified，绝不能写 unsupported。"""
     payload, rc, _ = _run(tmp_path, "--profile", "openai_reasoning_effort", "--level", "均衡",
-                          factory=lambda r: probe.FakeClient("error_plain"))
+                          "--dry-run", factory=lambda r: probe.FakeClient("error_plain"))
     assert rc == probe.RC_UNVERIFIED and payload["verdict"] == "unverified"
     assert payload["error_class"] == "FakeBadRequestError"
     assert payload["verdict_label"] == "未核实"
@@ -710,7 +757,7 @@ def test_missing_record_blocks_without_calling_anything(tmp_path):
 def test_placeholder_key_is_refused_before_the_budget_is_spent(tmp_path):
     """`looks_placeholder` 那一形（`your-key-here`）发出去必 401，白烧一格额度。
     用 providers 那份真判据，别在探针里再抄一份规则。"""
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
                           "--ledger", str(ledger), key=_K("sk-", "your", "-", "keyhere9"),
                           factory=lambda r: probe.FakeClient("reasoning"))
@@ -746,9 +793,10 @@ def test_runtime_digest_actually_moves_when_the_file_is_written(tmp_path):
 
 def test_run_reports_the_live_config_untouched(tmp_path):
     data_dir = _write_config(tmp_path)
-    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", DEEPSEEK,
                                 "--profile", "deepseek_thinking_type", "--level", "均衡",
-                                "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
+                                "--grant", GRANT2,
+                                "--ledger", str(_ledger(tmp_path / "iso")),
                                 "--isolation-dir", str(tmp_path / "iso")])
     # 摘要必须在 `make_config` 之后取：`_run` 那层助手会重写这份夹具，先把 before
     # 记下来就会把"夹具自己写的"当成"探针写的"——那是假红，不是证据。
@@ -790,10 +838,10 @@ def test_default_isolation_dir_lives_outside_the_repo(tmp_path):
 
 def test_live_run_without_an_explicit_ledger_is_refused(tmp_path):
     """Critical-1 的一半：`--ledger` 缺省时账本落在**本次**隔离目录里，而 `isolate_runtime_env(None)`
-    每次 `mkdtemp` 一个新目录 ⇒ 每个进程从空账本开始，`used=0` 恒成立，"总额 4 次"永不咬。
+    每次 `mkdtemp` 一个新目录 ⇒ 每个进程从空账本开始，`used=0` 恒成立，"总额"永不咬。
     修法是把默认拿掉：live 模式不给显式账本就 rc=2 拒发，**零出站、零写盘、连环境都不动**。"""
     data_dir = _write_config(tmp_path)
-    argv = ["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    argv = ["--data-dir", str(data_dir), "--provider", DEEPSEEK,
             "--profile", "deepseek_thinking_type", "--level", "均衡",
             "--isolation-dir", str(tmp_path / "iso")]
     build, seen = _never()
@@ -810,17 +858,19 @@ def test_live_run_without_an_explicit_ledger_is_refused(tmp_path):
 
 
 def test_five_live_runs_against_one_persistent_ledger_stop_at_the_fourth(tmp_path):
-    """Critical-1 的另一半：给了持久账本之后，**第 5 次**必须被拒。
-    四格真发（替身，零出站），第五格连客户端都不许被构造。"""
-    ledger = tmp_path / "budget" / "call-ledger.jsonl"
+    """Critical-1 的另一半：给了持久账本之后，**超出那一轮上限的那一格**必须被拒。
+    本轮跑的是 `g1`（上限 4，事实已用尽），所以填 4 格真发（替身，零出站）后第 5 格
+    连客户端都不许被构造。g2（上限 3）那一侧由 §10 的额度锁与下面的负控清单演。"""
+    ledger = _ledger(tmp_path / "budget", grant=GRANT1)
     for seq in (1, 2, 3, 4):
-        payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", str(seq),
-                              "--ledger", str(ledger),
+        payload, rc, _ = _run(tmp_path, "--profile", "none", "--grant", GRANT1, "--attempt",
+                              str(seq), "--ledger", str(ledger),
                               factory=lambda r: probe.FakeClient("reasoning"))
         assert rc == probe.RC_VERIFIED and payload["call_slot"] == seq, seq
     assert len(probe.read_ledger(ledger)) == 4
     build, seen = _never()
-    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(ledger), factory=build)
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--grant", GRANT1,
+                          "--ledger", str(ledger), factory=build)
     assert rc == probe.RC_BLOCKED and seen == []
     assert payload["error_class"] == "BudgetExhausted"
     assert payload["transport"] is None
@@ -828,20 +878,43 @@ def test_five_live_runs_against_one_persistent_ledger_stop_at_the_fourth(tmp_pat
 
 
 def test_authorized_live_call_count_is_the_grant_itself(tmp_path):
-    """Important-2：这个数字原本只被上一格当**填充条数**用（尺子与被测同源），
-    审查员把它改成 9 ⇒ 83 条全绿。出处：用户 2026-11-01 授权的 4 次出站 =
-    两个上游 × (1 次基线 + 1 次带参数)。授权用尽后**不自动续**，要更多次得用户明示。
-    常量被改宽（哪怕只是本地实验）这一格必须红——两条都要：字面值 + 默认上限的行为。"""
-    assert probe.AUTHORIZED_LIVE_CALLS == 4, "改这个数字需要用户新的明示授权"
-    assert probe.CALLS_PER_RUN == 1, "单次运行也只许 1 条：第二条就是超授权"
-    assert probe.AUTHORIZED_MAX_TOKENS == 8, "授权形状里的 token 上限是 8，不是「反正很大」"
-    # 行为那一半：`reserve_call_slot` 不填 limit 时用的必须就是这份授权上限。
-    # 常量漂到 9 ⇒ 这一句不再抛 ⇒ 红。（上一格那条用字面量 4 填账，量的形状不跟着漂。）
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
-    _fill_ledger(ledger, 4)
+    """Important-2 → §R1：授权不再是一个数字，而是**一张授权轮次表**。这个数字原本只被
+    上一格当填充条数用（尺子与被测同源），审查员把常量改成 9 ⇒ 83 条全绿。所以逐轮字面钉：
+    格数、形状那一格、引文/目的/账本文件名，以及**每轮的 `allowed_shapes` 只能是候选表里
+    已知的 provider × profile 对**。授权用尽后不自动续，要更多次需要用户新的明示。
+    """
+    grants = probe.AUTHORIZED_GRANTS
+    assert probe.CALLS_PER_RUN == 1, "§R6：单次运行也只许 1 条，第二条就是超授权（闸原样活着）"
+    assert set(grants) == {GRANT1, GRANT2}, "新增/删除一轮授权 = 需要用户新的明示授权"
+    assert grants[GRANT1]["calls"] == 4, "g1 那一轮就是 4 次（两上游各 1 基线 + 1 带参数）"
+    assert grants[GRANT2]["calls"] == 3, "g2 那一轮就是 3 次（OFF 方向），不是 4 也不是任意数"
+    for gid in (GRANT1, GRANT2):
+        g = grants[gid]
+        assert g["max_tokens"] == 8, "§R2：两轮授权的那一格都是 8，改宽度等于换实验"
+        assert str(g["quote"]).strip(), "引文必须原样落在代码里，不然是谁授权的说不清"
+        assert str(g["purpose"]).strip(), "目的写不清，下一轮就会被读成「顺便多试一种形状」"
+        assert str(g["ledger_name"]).strip() and str(g["authorized_on"]).strip()
+        # 白名单只能是**已知 provider × 已知 profile** 的组合（不许漂到表外配方上）
+        known_providers = {DEEPSEEK, RELAY}
+        known_profiles = set(thinking_profiles.probe_profile_ids())
+        for provider_id, shape in g["allowed_shapes"]:
+            assert provider_id in known_providers, (gid, provider_id)
+            assert shape in known_profiles, (gid, shape)
+    # 一份授权绑一份权威账本：两个名字互不相同，且各自带自己的 grant id。
+    names = {grants[GRANT1]["ledger_name"], grants[GRANT2]["ledger_name"]}
+    assert len(names) == 2, "两轮共用一个文件名的话，计数口径就从「这一轮」退回「这个文件」"
+    assert GRANT1 in grants[GRANT1]["ledger_name"] and GRANT2 in grants[GRANT2]["ledger_name"]
+    # 行为那一半：判据的上限必须**显式取自轮次表**，`reserve_call_slot` 不再有自己的默认值。
+    # 常量漂到 9、或者有人把默认值加回来 ⇒ 这两句一起红。
+    signature = inspect.signature(probe.reserve_call_slot)
+    assert signature.parameters["limit"].default is inspect.Parameter.empty, \
+        "limit 不许再有默认值：判据必须显式读 AUTHORIZED_GRANTS[grant][\"calls\"]"
+    ledger = _ledger(tmp_path / "iso")
+    _fill_ledger(ledger, 3)
+    limit = grants[GRANT2]["calls"]
     with pytest.raises(probe.BudgetExhausted):
-        probe.reserve_call_slot(ledger, "p_probe_deep", "none", None, None)
-    assert len(probe.read_ledger(ledger)) == 4, "被拒的那一次不许留痕"
+        probe.reserve_call_slot(ledger, DEEPSEEK, "none", None, None, limit)
+    assert len(probe.read_ledger(ledger)) == 3, "被拒的那一次不许留痕"
 
 
 def test_overlap_with_the_live_data_is_refused_before_providers_is_imported(tmp_path, monkeypatch):
@@ -862,7 +935,7 @@ def test_overlap_with_the_live_data_is_refused_before_providers_is_imported(tmp_
         raise AssertionError("重叠时一次都不许走到 import app.core.providers")
 
     monkeypatch.setattr(probe, "load_backend_modules", spy)
-    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", DEEPSEEK,
                                 "--profile", "none", "--dry-run",
                                 "--isolation-dir", str(data_dir / "iso")])
     build, seen = _never()
@@ -915,7 +988,7 @@ def test_handoff_payload_declares_what_the_three_levels_actually_do(tmp_path):
     assert same["level_distinct_wire_values"] == 1
     # 负控：真的三档不同那一支（openai_reasoning_effort）必须报 True / 3
     three, rc2, _ = _run(tmp_path, "--profile", "openai_reasoning_effort", "--level", "深入",
-                         factory=lambda r: probe.FakeClient("reasoning"))
+                         "--dry-run", factory=lambda r: probe.FakeClient("reasoning"))
     assert rc2 == probe.RC_VERIFIED
     assert three["level_used"] is True and three["level_distinct_wire_values"] == 3
     # 负控：基线那一格没有档位可言，必须是 None 而不是 1（"1"会被读成"三档塌成一档"）
@@ -984,7 +1057,7 @@ def test_error_excerpt_is_redacted_before_it_is_truncated(tmp_path):
 def test_max_tokens_beyond_the_authorized_shape_is_refused(tmp_path):
     """Minor：授权形状是 `max_tokens=8`，而它是自由命令行值——改成 2000 也照发就是越权
     （这一格花的是钱）。live 模式越出形状就拒，且**在记账之前**拒。"""
-    ledger = tmp_path / "iso" / "call-ledger.jsonl"
+    ledger = _ledger(tmp_path / "iso")
     build, seen = _never()
     payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
                           "--ledger", str(ledger), "--max-tokens", "2000", factory=build)
@@ -1004,7 +1077,7 @@ def test_max_tokens_beyond_the_authorized_shape_is_refused(tmp_path):
     for bogus in ("0", "-5"):
         b, s = _never()
         blocked_payload, rc4, _ = _run(tmp_path, "--profile", "none", "--max-tokens", bogus,
-                                       "--ledger", str(tmp_path / "iso" / "call-ledger.jsonl"),
+                                       "--ledger", str(_ledger(tmp_path / "iso")),
                                        factory=b)
         assert rc4 == probe.RC_BLOCKED and s == [], bogus
         assert blocked_payload["request_shape"]["max_tokens"] == int(bogus)
@@ -1023,7 +1096,7 @@ def test_ledger_pointed_into_the_read_only_data_dir_is_refused(tmp_path):
     assert any("--ledger" in n and "--data-dir" in n for n in payload["notes"]), payload["notes"]
     # 负控：账本在树外时这一条必须放行（否则这道闸是恒红的装饰）
     ok, rc2, _ = _run(tmp_path, "--profile", "none",
-                      "--ledger", str(tmp_path / "out" / "l.jsonl"),
+                      "--ledger", str(_ledger(tmp_path / "out")),
                       factory=lambda r: probe.FakeClient("reasoning"))
     assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
 
@@ -1052,9 +1125,9 @@ def test_transport_is_only_stamped_when_the_call_is_actually_attempted(tmp_path,
 
     monkeypatch.setattr(probe, "build_live_client", stub)
     live, rc3, _ = _run(tmp_path, "--profile", "none",
-                        "--ledger", str(tmp_path / "b" / "l.jsonl"))
+                        "--ledger", str(_ledger(tmp_path / "b")))
     assert rc3 == probe.RC_VERIFIED and live["transport"] == "openai_sdk"
-    assert built == ["p_probe_deep"], "构造真客户端的唯一入口只许走一次"
+    assert built == [DEEPSEEK], "构造真客户端的唯一入口只许走一次"
     assert live["scope"]["simulated"] is False, "真发那一支的 simulated 必须是 False"
     # 第四格（本轮点名的那格）：CLI dry-run，不注入任何注入口，走脚本自带的假 client。
     dry, rc4, _ = _run(tmp_path, "--profile", "none", "--dry-run")
@@ -1154,7 +1227,7 @@ def test_junction_isolation_dir_into_the_data_tree_is_refused(tmp_path, monkeypa
                     "最接近的等价形状是 normcase 已挡的大小写/斜杠漂移，那条既有负控仍要过")
     before = _tree_sha_listing(data_dir)
     monkeypatch.setenv("DEEPSEEK_API_KEY", SHAPEY)   # 播种燃料：没有它 _seed_from_env 返回空表
-    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", DEEPSEEK,
                                 "--profile", "none", "--dry-run",
                                 "--isolation-dir", str(link)])
     build, seen = _never()
@@ -1179,7 +1252,7 @@ def test_the_readonly_ruler_starts_before_isolation(tmp_path, monkeypatch):
         return real_isolate(isolation_dir)
 
     monkeypatch.setattr(probe, "isolate_runtime_env", dirty_isolate)
-    config = probe.make_config(["--data-dir", str(data_dir), "--provider", "p_probe_deep",
+    config = probe.make_config(["--data-dir", str(data_dir), "--provider", DEEPSEEK,
                                 "--profile", "none", "--dry-run",
                                 "--isolation-dir", str(tmp_path / "iso")])
     payload, rc, _ = probe.run_probe(config, client_factory=lambda r: probe.FakeClient("reasoning"))
@@ -1202,7 +1275,7 @@ def test_ledger_inside_the_repository_is_refused(tmp_path):
     assert payload["transport"] is None and payload["call_slot"] is None
     assert any("--ledger" in n and "仓库外" in n for n in payload["notes"]), payload["notes"]
     # 负控：仓库外（本夹具的 tmp 树，父链上没有 .git）照旧放行
-    outside = tmp_path / "out-of-repo" / "l.jsonl"
+    outside = _ledger(tmp_path / "out-of-repo")
     ok, rc2, _ = _run(tmp_path, "--profile", "none", "--ledger", str(outside),
                       factory=lambda r: probe.FakeClient("reasoning"))
     assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
@@ -1247,10 +1320,11 @@ def test_another_checkout_deep_data_dir_run_is_refused(tmp_path):
 
 def test_fresh_ledger_run_declares_the_gate_counts_per_file(tmp_path):
     """concerns.1 的残余（审查员判可接受，但要求登记 + 一句提示）：闸绑的是"这一份账本
-    文件 ≤4"而不是"这次授权 ≤4"——换 `--ledger` 路径就从 0 重计（实测两条路径连发 8 格
-    全放行、notes=[] 零提示）。跨账本累计不修（一次性 4 格探针不值那道工程税），
-    但**新建账本**那一跑必须自己把计数口径说出来，且**只在真新建时**说。"""
-    ledger = tmp_path / "budget" / "call-ledger.jsonl"
+    文件 ≤那一轮的格数"而不是"这次授权 ≤格数"——换 `--ledger` 路径就从 0 重计（实测两条
+    路径连发 8 格全放行、notes=[] 零提示）。跨账本累计不修（一次性探针不值那道工程税），
+    换文件也不再是加个 flag：§R1 把文件名钉进了授权轮次表，要对上一轮的文件名就得改代码
+    + 用户再授权。但**新建账本**那一跑必须自己把计数口径说出来，且**只在真新建时**说。"""
+    ledger = _ledger(tmp_path / "budget")
     payload, rc, _ = _run(tmp_path, "--profile", "none", "--attempt", "1",
                           "--ledger", str(ledger),
                           factory=lambda r: probe.FakeClient("reasoning"))
@@ -1326,3 +1400,362 @@ def test_new_path_in_the_data_tree_during_the_window_is_hard(tmp_path):
     payload, rc, _ = _run(tmp_path, "--profile", "none", "--dry-run", factory=build)
     assert rc == probe.RC_BLOCKED
     assert any("iso/providers.json" in n for n in payload["notes"]), payload["notes"]
+
+
+# ------- 10. Task 11b：第二轮授权做成机制（§R1–§R5）+ 方向感知判据（§R4） --------
+#
+# 这一节守的是**发那 3 次之前的最后一道形状闸**，本身零出站：客户端一律是注入的替身或
+# `--dry-run`。为什么判据长这样：上一轮 4 次证明了两条上游不发参数也在出推理，所以
+# 「思考开关」今天没有任何一次证据证明它**关得掉**——这一轮就是冲着 OFF 方向去的，
+# 而 OFF 方向最容易死在两处：① 授权是"一个数字"，换份账本文件就能重计；② 判据不看方向，
+# 把"关成功了"读成"这次没拿到证据"。§10 的 15 格一格挡一处。
+
+# —— §R1：授权轮次表 ——
+
+def test_live_run_without_a_grant_is_refused(tmp_path):
+    """§R1：live 模式除 `--ledger` 之外还要 `--grant <id>`。缺授权轮次 ⇒ rc=2、
+    零出站、零记账、连隔离目录都不该开。"""
+    ledger = _ledger(tmp_path / "iso")
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(ledger),
+                          grant=None, factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["transport"] is None and payload["call_slot"] is None
+    assert payload["verdict"] == "preflight_failed"
+    assert not ledger.exists(), "没定授权轮次就不许记账"
+    assert any("--grant" in n for n in payload["notes"]), payload["notes"]
+
+
+def test_unknown_grant_id_never_reaches_the_run_layer(tmp_path):
+    """表外的授权 id 在 argparse 就被 `choices` 挡掉：拿一个不存在的那一轮去发，
+    连 payload 都不该有——"表里有这一轮"是这道闸的前提，不是事后检查。"""
+    with pytest.raises(SystemExit) as boom:
+        probe.make_config(_argv(tmp_path, "--profile", "none", "--grant", "g9-表外的那一轮"))
+    assert boom.value.code == 2
+
+
+def test_live_ledger_renamed_in_the_same_directory_is_refused(tmp_path):
+    """§R1 的核心那一步：这道闸本质上是**按账本文件计数**的，所以"哪一份文件是这一轮的
+    权威账本"必须绑进授权表。同一目录、同一内容、只换文件名 ⇒ rc=2、零记账、零出站。
+    以前"换一份 --ledger 就从 0 重计"是操作者的自觉（上一版只把它写进 note），
+    现在轮换文件不再是"随手加个 flag"，而是"改代码 + 用户再授权"。"""
+    canonical = _ledger(tmp_path / "iso")
+    renamed = tmp_path / "iso" / "call-ledger-换了个名字.jsonl"
+    _fill_ledger(renamed, 1)                      # 内容正常、位置也合法，只有名字不对
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(renamed), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["transport"] is None and payload["call_slot"] is None
+    assert len(probe.read_ledger(renamed)) == 1, "被拒的这一跑不许在账上留痕"
+    assert not canonical.exists()
+    assert any("账本文件名" in n for n in payload["notes"]), payload["notes"]
+    # 负控：本轮权威文件名必须放行（否则这道闸是恒红的装饰）
+    ok, rc2, _ = _run(tmp_path, "--profile", "none", "--ledger", str(canonical),
+                      factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED and ok["call_slot"] == 1
+
+
+def test_a_ledger_belonging_to_another_round_is_refused(tmp_path):
+    """拿 g1 的权威账本文件名去请求 `--grant g2-20261102` ⇒ rc=2。
+    单独演一遍是有原因的：文件名里**带着** grant id 只是"看起来对得上"，真判据是
+    "等于本轮表里那一份"；而反向（g1 用它自己的名字）必须放行，两轮各用各的账本。"""
+    g1_ledger = _ledger(tmp_path / "iso", grant=GRANT1)
+    _fill_ledger(g1_ledger, 2)
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--grant", GRANT2,
+                          "--ledger", str(g1_ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert len(probe.read_ledger(g1_ledger)) == 2, "串轮记账比不记账更糟"
+    assert payload["call_slot"] is None and payload["transport"] is None
+    ok, rc2, _ = _run(tmp_path, "--profile", "none", "--grant", GRANT1,
+                      "--ledger", str(g1_ledger),
+                      factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc2 == probe.RC_VERIFIED and ok["grant"] == GRANT1 and ok["grant_calls"] == 4
+    assert ok["call_slot"] == 3, "g1 那份账本已经记了 2 格，本轮从第 3 格接着数"
+
+
+def test_a_shape_outside_the_grants_whitelist_is_refused_without_booking(tmp_path):
+    """§R1：`allowed_shapes` 是 provider × profile 的**白名单**。拿着活密钥时最容易
+    漂出去的那句话是「既然都开了，顺便再试个别的形状」——表外组合 ⇒ rc=2、账本不涨、
+    客户端一次都没被构造。三种漂移形状各演一次：
+    ① 表内配方挂到表外 provider 上；② 整支配方不在任何一轮授权里；③ 反过来的挂法。"""
+    cases = ((DEEPSEEK, "dashscope_enable_thinking", "均衡"),
+             (DEEPSEEK, "openai_reasoning_effort", "深入"),
+             (RELAY, "deepseek_thinking_type", "快速"))
+    for index, (provider, profile, level) in enumerate(cases):
+        ledger = _ledger(tmp_path / ("iso%d" % index))
+        build, seen = _never()
+        payload, rc, _ = _run(tmp_path, "--profile", profile, "--level", level,
+                              "--ledger", str(ledger), provider_id=provider, factory=build)
+        assert rc == probe.RC_BLOCKED and seen == [], (provider, profile)
+        assert not ledger.exists(), (provider, profile, "白名单外不许占额度")
+        assert payload["transport"] is None and payload["call_slot"] is None
+        assert any("allowed_shapes" in n or "白名单" in n for n in payload["notes"]), payload["notes"]
+    # 负控：白名单内的 (provider, profile) 必须放行，否则这道闸恒红
+    ok, rc2, _ = _run(tmp_path, "--profile", "dashscope_enable_thinking_off", "--level", "快速",
+                      provider_id=RELAY, factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and ok["verdict"] == "switch_off_observed"
+
+
+def test_the_budget_refusal_names_the_grant_and_its_limit(tmp_path):
+    """§R1 的"判据必须显式取 `AUTHORIZED_GRANTS[grant]["calls"]`"那一格：
+    g2 的上限是 3，所以填满 3 格之后第 4 次必须被拒，而且**拒绝理由要说出是哪一轮的几格**
+    ——只报"额度用尽"的话，读的人不知道自己站在哪一轮上。"""
+    ledger = _ledger(tmp_path / "iso")
+    _fill_ledger(ledger, 3)
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "none", "--ledger", str(ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert payload["error_class"] == "BudgetExhausted"
+    assert payload["grant"] == GRANT2 and payload["grant_calls"] == 3
+    assert any("授权上限 3 次" in n for n in payload["notes"]), payload["notes"]
+    assert len(probe.read_ledger(ledger)) == 3
+
+
+def test_legacy_constants_are_views_and_not_the_source_of_the_gate():
+    """§R1 允许把两个旧常量留作只读视图，但不许留"名字还在、判据不看它"的中间态：
+    ① 两个视图必须**等于**当前轮次表项（漂了就红）；② `reserve_call_slot` 与
+    `classify_verdict` 都不许再有那条默认值；③ §R2：任何一轮的 max_tokens 都不许 > 8。"""
+    grants = probe.AUTHORIZED_GRANTS
+    g2 = grants[GRANT2]
+    assert probe.AUTHORIZED_LIVE_CALLS == g2["calls"], "旧名字必须只是视图，不许另存一份事实"
+    assert probe.AUTHORIZED_MAX_TOKENS == g2["max_tokens"]
+    assert probe.DEFAULT_MAX_TOKENS == 8
+    assert max(g["max_tokens"] for g in grants.values()) == 8, \
+        "§R2：OFF 方向的判据是同格从非零变 0，改宽度等于换了实验"
+    assert max(g["calls"] for g in grants.values()) == 4, "两轮里最宽的那一轮也只有 4 格"
+    for func, name in ((probe.reserve_call_slot, "limit"), (probe.classify_verdict, "direction")):
+        parameter = inspect.signature(func).parameters[name]
+        assert parameter.default is inspect.Parameter.empty, \
+            "%s 的 %s 不许有默认值：判据必须显式取授权表/候选表" % (func.__name__, name)
+
+# —— §R3：候选表加 OFF 方向，每支标 direction ——
+
+def test_every_candidate_row_declares_its_direction():
+    """§R3：遍历断言，**不写死名单**——表里每一支都必须显式带 `direction`，
+    取值 ∈ {baseline, on, off}。缺字段或值在集合外就红。为什么要有这一格：判据（§R4）
+    吃的就是它，而一支没有方向的配方落进 live 队列时，最省事的做法是"当成 on"——
+    那正是本单最容易做错的一格。"""
+    allowed = {"baseline", "on", "off"}
+    for name, entry in thinking_profiles.PROBE_PROFILES.items():
+        assert "direction" in entry, "%s 缺 direction 这一格" % name
+        assert entry["direction"] in allowed, (name, entry["direction"])
+    assert {e["direction"] for e in thinking_profiles.PROBE_PROFILES.values()} == allowed, \
+        "三个方向都得在表里有样本，否则判据的那三支分支没人演过"
+
+
+def test_the_off_candidates_carry_their_own_pinned_wire_shape():
+    """OFF 两支的逐档字面形状（与 ON 那两支同构：`level_used=False`、三档同值）。
+    写成字面量是有意的：这一格是"发出去的到底是什么"的唯一诚实记录。"""
+    for level in thinking_profiles.THINKING_LEVEL_LABELS:
+        kwargs = thinking_profiles.probe_kwargs("deepseek_thinking_disabled", level)
+        assert kwargs == {"extra_body": {"thinking": {"type": "disabled"}}}, (level, kwargs)
+        assert thinking_profiles.body_fragment(kwargs) == {"thinking": {"type": "disabled"}}
+        off = thinking_profiles.probe_kwargs("dashscope_enable_thinking_off", level)
+        assert off == {"extra_body": {"enable_thinking": False}}, (level, off)
+        assert thinking_profiles.body_fragment(off) == {"enable_thinking": False}
+    for name in ("deepseek_thinking_disabled", "dashscope_enable_thinking_off"):
+        entry = thinking_profiles.PROBE_PROFILES[name]
+        assert entry["direction"] == "off" and entry["level_used"] is False
+        assert "disabled" in entry["shape"] or "false" in entry["shape"], entry["shape"]
+    # 布尔那一格必须是**布尔**：`False == 0` 在 Python 里成立，只比字典相等会放过 0/""。
+    fragment = thinking_profiles.body_fragment(
+        thinking_profiles.probe_kwargs("dashscope_enable_thinking_off", "快速"))
+    assert fragment["enable_thinking"] is False, "必须是布尔 False，不是 0 也不是空串"
+
+
+def test_on_and_off_rows_are_paired_by_the_flipped_value():
+    """§R3 配对锁（机械可判、不靠人记）：两对 ON/OFF 的出网体必须是**同一格、取值相反**。
+    只断言"两支不相等"不够——两支一起漂到同一个错值时那条判据会笑，所以逐格钉住
+    两头的字面值，末尾再单独钉一次 disabled 的字面形状。"""
+    pairs = (("deepseek_thinking_type", "deepseek_thinking_disabled",
+              {"thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+             ("dashscope_enable_thinking", "dashscope_enable_thinking_off",
+              {"enable_thinking": True}, {"enable_thinking": False}))
+    for on_name, off_name, on_wire, off_wire in pairs:
+        for level in thinking_profiles.THINKING_LEVEL_LABELS:
+            on_frag = thinking_profiles.body_fragment(
+                thinking_profiles.probe_kwargs(on_name, level))
+            off_frag = thinking_profiles.body_fragment(
+                thinking_profiles.probe_kwargs(off_name, level))
+            assert on_frag == on_wire, (on_name, level, on_frag)
+            assert off_frag == off_wire, (off_name, level, off_frag)
+            assert set(on_frag) == set(off_frag) == set(on_wire), "出网体只许有那一格"
+            only_key = next(iter(on_wire))
+            assert on_frag[only_key] != off_frag[only_key], "反方向的值必须真的相反"
+    assert thinking_profiles.body_fragment(
+        thinking_profiles.probe_kwargs("deepseek_thinking_disabled", "快速")) == {
+        "thinking": {"type": "disabled"}}
+
+
+def test_a_row_without_a_direction_is_refused_instead_of_guessed(tmp_path, monkeypatch):
+    """§R4 的"取不到 direction 就 rc=2，**不许默认成 on**"：把 OFF 那一支的 direction 摘掉
+    （= 表畸形），探针必须停在预检——零出站、零记账，并把"缺 direction"说在 note 里。"""
+    broken = dict(thinking_profiles.PROBE_PROFILES)
+    row = dict(broken["deepseek_thinking_disabled"])
+    row.pop("direction")
+    broken["deepseek_thinking_disabled"] = row
+    monkeypatch.setattr(thinking_profiles, "PROBE_PROFILES", broken)
+    ledger = _ledger(tmp_path / "iso")
+    build, seen = _never()
+    payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                          "--ledger", str(ledger), factory=build)
+    assert rc == probe.RC_BLOCKED and seen == []
+    assert not ledger.exists(), "方向不明的配方不许占额度"
+    assert payload["verdict"] == "preflight_failed" and payload["transport"] is None
+    assert payload["direction"] is None, "取不到方向就报 None，不许偷偷填一个 on"
+    assert any("direction" in n for n in payload["notes"]), payload["notes"]
+
+# —— §R4：判据方向感知（本单的心脏）——
+
+def test_classify_verdict_takes_the_direction_and_refuses_to_guess_it():
+    """判据本体逐格钉死（§R4 那张表）：四格走向 + 基线两格 + 异常之外的一切都不许
+    被读成"关掉"。`direction` 没有默认值，表外值必须响亮报错而不是退成 on。"""
+    quiet = probe.read_evidence(probe.FakeClient("quiet")._create())
+    loud = probe.read_evidence(probe.FakeClient("reasoning")._create())
+    assert probe.classify_verdict(False, loud, "on") == "verified"
+    assert probe.classify_verdict(False, quiet, "on") == "unverified"
+    assert probe.classify_verdict(False, quiet, "off") == "switch_off_observed"
+    assert probe.classify_verdict(False, loud, "off") == "switch_off_not_observed"
+    assert probe.classify_verdict(True, loud, "baseline") == "baseline_ok"
+    assert probe.classify_verdict(True, quiet, "baseline") == "baseline_ok", \
+        "基线只看这一跑通没通：有没有痕迹是那条上游的事，不是判据的事"
+    for bogus in (None, "", "也许", "OFF"):
+        with pytest.raises(ValueError):
+            probe.classify_verdict(False, quiet, bogus)
+    # "observed" 的三个前提缺一不可：被接受、无字段级痕迹、reasoning_tokens == 0。
+    field_only = dict(quiet, has_reasoning_content=True)
+    assert probe.classify_verdict(False, field_only, "off") == "switch_off_not_observed"
+    tokens_only = dict(quiet, reasoning_tokens=7)
+    assert probe.classify_verdict(False, tokens_only, "off") == "switch_off_not_observed"
+    not_accepted = dict(quiet, accepted=False)
+    assert probe.classify_verdict(False, not_accepted, "off") == "switch_off_not_observed", \
+        "请求都没被接受，就说不上「关闭方向已观察到」"
+
+
+def test_off_direction_with_the_trace_gone_is_the_evidence_we_paid_for(tmp_path):
+    """**验收心脏（上半）**：OFF 方向 + `FakeClient("quiet")` ⇒ `switch_off_observed`、rc=0。
+    上一版的 `classify_verdict` 在这一格给的是 `unverified` + rc=1——一次成功的关闭测试
+    被标成"这次没拿到证据"，而它恰恰是这一轮唯一想要的东西（旧结论的实跑取证写在报告）。"""
+    payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                          "--dry-run", factory=lambda r: probe.FakeClient("quiet"))
+    assert rc == probe.RC_VERIFIED, "OFF 成功必须是 0：留 1 就等于对下一次说「没拿到证据」"
+    assert payload["verdict"] == "switch_off_observed"
+    assert payload["direction"] == "off" and payload["accepted"] is True
+    assert payload["has_reasoning_content"] is False and payload["reasoning_tokens"] == 0
+    assert payload["request_body"] == {"thinking": {"type": "disabled"}}
+    assert payload["transport"] == "test_double" and payload["scope"]["simulated"] is True
+    # 另一支 OFF（relay / 布尔的反方向）同方向同结论
+    other, rc2, _ = _run(tmp_path, "--profile", "dashscope_enable_thinking_off",
+                         "--level", "均衡", "--dry-run",
+                         factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and other["verdict"] == "switch_off_observed"
+    assert other["request_body"] == {"enable_thinking": False}
+
+
+def test_off_direction_that_keeps_reasoning_is_not_read_as_a_success(tmp_path):
+    """**验收心脏（下半）**：OFF 方向 + `FakeClient("reasoning")` ⇒
+    `switch_off_not_observed`、rc=1。上一版在这一格给的是 `verified` + rc=0——
+    把"关不掉"报成"参数形状已核实"，Task 12 那头的 `enabled: status === "verified"`
+    会直接把它抄成"这个开关可用"。"""
+    payload, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                          "--dry-run", factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_UNVERIFIED and payload["verdict"] == "switch_off_not_observed"
+    assert payload["accepted"] is True and payload["reasoning_tokens"] > 0
+    assert payload["verdict_label"] == probe.VERDICT_LABELS["switch_off_not_observed"]
+    assert any("对照" in n for n in payload["notes"]), payload["notes"]
+
+
+def test_on_and_baseline_directions_survive_the_new_branch(tmp_path):
+    """反向负控（摘掉方向分支、全判成 off 时这一格会红）：ON 那两支仍然**必须有痕迹**
+    才算核实，基线仍然只看这一跑通没通。新判据是加分支，不是把老分支放宽。"""
+    loud, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "快速",
+                       factory=lambda r: probe.FakeClient("reasoning"))
+    assert rc == probe.RC_VERIFIED and loud["verdict"] == "verified" and loud["direction"] == "on"
+    quiet, rc2, _ = _run(tmp_path, "--profile", "deepseek_thinking_type", "--level", "快速",
+                         factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_UNVERIFIED and quiet["verdict"] == "unverified"
+    base, rc3, _ = _run(tmp_path, "--profile", "none",
+                        factory=lambda r: probe.FakeClient("quiet"))
+    assert rc3 == probe.RC_VERIFIED and base["verdict"] == "baseline_ok"
+    assert base["direction"] == "baseline" and base["baseline_had_reasoning"] is False
+
+
+def test_an_off_call_that_threw_keeps_the_existing_verdicts(tmp_path):
+    """§R4 表格最后一行：抛异常时**沿用** `form_unverifiable` / `unverified` 两支，
+    不许因为方向是 off 就新造一个"关闭失败"——那会把"这条记录今天没打通"说成
+    "思考关不掉"，是这一单里最贵的一类假结论。"""
+    plain, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                        "--dry-run", factory=lambda r: probe.FakeClient("error_plain"))
+    assert rc == probe.RC_UNVERIFIED and plain["verdict"] == "unverified"
+    assert plain["direction"] == "off", "方向照打，结论仍然是旧的这两支之一"
+    form, rc2, _ = _run(tmp_path, "--profile", "dashscope_enable_thinking_off",
+                        "--level", "均衡", "--dry-run",
+                        factory=lambda r: probe.FakeClient("error_form"))
+    assert rc2 == probe.RC_UNVERIFIED and form["verdict"] == "form_unverifiable"
+
+
+def test_the_two_new_verdicts_carry_their_own_scope():
+    """§R4：两支新 verdict 的 label/scope 必须**自带射程**。`switch_off_observed` 只能说
+    "这一格无痕迹"，不能说"开关有效"——单看它不能排除"这条上游今天本来就不出推理"，
+    因果结论要靠同轮对照行，所以那句话必须写在 not_proved 里。"""
+    assert probe.VERDICT_LABELS["switch_off_observed"] == \
+        "本次响应无推理痕迹（同账本内的 ON/基线对照成立才等于开关有效）"
+    assert probe.VERDICT_LABELS["switch_off_not_observed"] == \
+        "参数被接受但仍在出推理：关闭方向未证实"
+    for verdict in ("switch_off_observed", "switch_off_not_observed"):
+        scope = probe.VERDICT_SCOPES[verdict]
+        assert scope["sent"] is True and scope["not_proved"], "射程字段不许空着让下游自己猜"
+        assert str(scope["tier"]).strip(), "tier 也要填：Task 12 是按这一格分层消费的"
+    observed = " ".join(probe.VERDICT_SCOPES["switch_off_observed"]["not_proved"])
+    assert "本来就不出推理" in observed and "对照" in observed, observed
+    assert "参数被接受" in probe.VERDICT_SCOPES["switch_off_not_observed"]["proved"]
+
+
+def test_no_label_or_proved_claim_says_the_switch_is_off():
+    """§R4 的禁句锁：没有对照就不许写「已关闭思考」「思考已关闭」「支持关闭」。
+    遍历所有 label 与每个 scope 的 `proved`，不写死 verdict 名单——以后加一支新结论
+    也一样落在扫描里。"""
+    banned = ("已关闭思考", "思考已关闭", "支持关闭")
+    for name, label in probe.VERDICT_LABELS.items():
+        for word in banned:
+            assert word not in label, (name, word)
+    for name, scope in probe.VERDICT_SCOPES.items():
+        for word in banned:
+            assert word not in scope["proved"], (name, word)
+
+
+def test_payload_names_the_grant_the_limit_and_the_direction(tmp_path):
+    """§R4 末尾：payload 除 `request_shape.max_tokens` 之外必须新增并钉住
+    `grant` / `grant_calls` / `direction`。dry-run 时 grant 允许是 None，
+    但 direction 必须照打——读 payload 的人不该靠自己回忆这一跑属于哪一轮。"""
+    dry, rc, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                      "--dry-run", grant=None, factory=lambda r: probe.FakeClient("quiet"))
+    assert rc == probe.RC_VERIFIED
+    assert dry["grant"] is None and dry["grant_calls"] is None
+    assert dry["direction"] == "off", "不属任何一轮授权的模拟跑，方向也照样要说清"
+    assert dry["request_shape"]["max_tokens"] == 8
+    live, rc2, _ = _run(tmp_path, "--profile", "deepseek_thinking_disabled", "--level", "快速",
+                        factory=lambda r: probe.FakeClient("quiet"))
+    assert rc2 == probe.RC_VERIFIED and live["grant"] == GRANT2 and live["grant_calls"] == 3
+    assert live["direction"] == "off"
+    assert live["request_shape"]["max_tokens"] == probe.AUTHORIZED_GRANTS[GRANT2]["max_tokens"]
+
+
+def test_the_third_call_rule_is_pre_registered_in_the_tool():
+    """§R5：三次怎么花在跑之前就钉死在文件里，跑的人不许临场改。这一格锁"话在场"
+    （实现不判它：判它要读上游结论，那不是命令行能定的），因为这一单的教训就是
+    "临场决定第 3 次花在哪"等于没有预登记。"""
+    doc = probe.__doc__ or ""
+    for needle in ("第 1 次", "第 2 次", "第 3 次", "预登记", "A/B/A", "用完 3 格即停"):
+        assert needle in doc, needle
+    assert "不省" in doc, "两次都因异常没结论时第 3 次照发不省——这条也在预登记里"
+
+
+def test_the_candidate_table_stops_claiming_a_flat_four_calls():
+    """§R3 末尾：`thinking_profiles.py` 顶部 docstring 那句「本单授权 4 次」必须改口成
+    授权轮次表的口径。留着它的后果看得见：下一个读代码的人会拿 4 去算"今天还剩几格"，
+    而 4 那一轮（g1）已经用尽了。"""
+    doc = thinking_profiles.__doc__ or ""
+    assert "本单授权 4 次" not in doc
+    assert "授权轮次" in doc, "要说清授权是分批的，并指向探针里那张表"

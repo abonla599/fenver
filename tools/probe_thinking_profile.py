@@ -9,19 +9,33 @@
 
 四条闸（都是代码，不是「记得」）
 ----------------------------------------
-1. **出站总额 4 次**。`call-ledger.jsonl` 落在仓库外——这句从修复轮 2 起**也是判据**：
+1. **出站额度是一张授权轮次表，不是一个数字**（Task 11b §R1）。每一轮授权是
+   `AUTHORIZED_GRANTS` 里的一条：格数、`max_tokens` 那一格、用户原话、目的、
+   **这一轮的权威账本文件名**、以及这一轮允许发哪些 (provider, profile) 组合。
+   `call-ledger.jsonl` 落在仓库外——这句从修复轮 2 起**也是判据**：
    账本若落在本仓树内或属于另一棵 checkout，闸 0 直接拒（N3）。每发一次**先记账再发**
-   （进程半路死掉也算花掉了），发之前先数账本：`AUTHORIZED_LIVE_CALLS` 就是上限，
-   到数了直接拒绝、一次都不发。`--attempt` 还要和账本序号对上——对不上说明
+   （进程半路死掉也算花掉了），发之前先数账本：上限**显式取自那一条授权**
+   （`AUTHORIZED_GRANTS[grant]["calls"]`，不是任何全局常量），到数了直接拒绝、一次都不发。
+   `--attempt` 还要和账本序号对上——对不上说明
    「我以为这是第 3 次」和机器要发的不是同一次，那正是重复烧额度的形状。
    单次运行另外还有一道 `CALLS_PER_RUN = 1`；SDK 层用 `max_retries=0`，
    否则「一次调用」在传输层可以是三次 HTTP 请求。
    **live 模式必须显式给 `--ledger`**（修复轮 1，Critical-1）：账本缺省时它落在
    **本次**隔离目录里，而 `isolate_runtime_env(None)` 每次 `mkdtemp` 一个新目录 ⇒
-   每个进程都从空账本开始、`used=0` 恒成立，"总额 4 次"这道闸永不生效。今天没超额度
+   每个进程都从空账本开始、`used=0` 恒成立，"总额"这道闸永不生效。今天没超额度
    纯粹因为操作者手动传了持久 `--isolation-dir`——那叫"由操作者记得"，不叫"由机制守"。
    所以：非 `--dry-run` 而不给 `--ledger` → rc=2 拒发、**零出站、零写盘、连环境变量都不动**。
+   **live 模式还必须显式给 `--grant <轮次 id>`，且 `--ledger` 的 basename 必须等于那一条
+   授权的 `ledger_name`**（Task 11b 的核心那一步）。为什么：这道闸本质上是**按账本文件
+   计数**的（上一版已把这条残余写进 note），换路径就从 0 重计。把"哪一份文件是这一轮的
+   权威账本"钉进授权表之后，轮换账本文件就不再是"随手加个 flag"，而是
+   **"改代码 + 用户再授权"**——这就是"把授权做成机制"的意思。
+   再一道：**这一轮没批准的 (provider, profile) 形状发不出去**（`allowed_shapes` 白名单，
+   rc=2、零出站、零记账）。挡的是那句「既然都开了，顺便再试个别的形状」。
    授权用尽后**不自动续**，要更多次需要用户新的明示。
+   `AUTHORIZED_LIVE_CALLS` / `AUTHORIZED_MAX_TOKENS` 这两个旧名字留着，但**只是指向
+   当前轮次（g2）的只读视图**，任何判据都不从它们取默认值——`reserve_call_slot` 的
+   `limit` 与 `classify_verdict` 的 `direction` 都没有默认值，取值路径必须写在明处。
 2. **绝不写 data/**。`app/core/providers.py:1059` 有模块级 `store = ProviderStore()`，
    import 它就跑 `_load()`，而 `_load()` 缺文件时 `_seed_from_env()`（读 `DEEPSEEK_API_KEY`）
    非空即 `_flush()` 落盘 `providers.json` + `provider_keys.json`（第三个 `provider_prefs.json`
@@ -58,7 +72,8 @@
    附带一条同样免费的检查：配方里的字段先对着 `Completions.create` 的**签名**问一遍
    （本机 openai 2.37.0 没有 `**kwargs`，裸 `thinking=` 会在本地就 TypeError——
    一次 HTTP 都不发却已经占掉一格额度），到不了上游的形状在记账前就被挡掉。
-   live 模式还多一道形状闸：`--max-tokens` 必须 ≤ `AUTHORIZED_MAX_TOKENS`（8），
+   live 模式还多一道形状闸：`--max-tokens` 必须 ≤ **该轮授权**的 `max_tokens`
+   （g1/g2 都是 8），
    越出授权形状就拒——自由命令行值不是越权的许可证。
 
 结论的射程也在设计里（修复轮 1，Important-4）：能判「已核实」的那两种证据只证明
@@ -70,7 +85,38 @@
 
 诚实结果也在设计里：DashScope 兼容模式在 `stream=False` 下可能直接拒
 `enable_thinking=true`。那种格子写成 `form_unverifiable`（「该形态今天不可核实」），
-**不改成流式再发一次**——那会超出授权的 4 次。
+**不改成流式再发一次**——那会超出那一轮授权的格数（g1 是 4 次，已用尽）。
+
+判据是**方向感知**的（Task 11b §R4，本单最容易做错的一格）
+----------------------------------------------------------
+`direction` 由候选表（`thinking_profiles.PROBE_PROFILES[*]["direction"]`）给，
+取不到就 rc=2，**不默认成 "on"**。为什么非要它：上一版 `classify_verdict` 只看
+"有没有推理痕迹"，`none` 之外一律"有痕迹=verified / 没痕迹=unverified"。拿它判 OFF
+会得出**完全反的结论**——一次成功的关闭测试（痕迹消失）被标成 `unverified` 并以 rc=1
+退出，看起来像"这次调用没拿到证据"，而它恰恰是 g2 这一轮唯一想买的东西；反过来
+"参数收下、推理照旧"会拿到 `verified` + rc=0，Task 12 那头的
+`enabled: status === "verified"` 会把它抄成"这个开关可用"。两支新 verdict 的措辞
+**自带射程**：单看一格不能排除"这条上游今天本来就不出推理"，因果结论要靠同轮对照行，
+所以 label/scope 里绝不出现「思考已关闭」「支持关闭」这类没有对照就成立的句子（有锁）。
+
+g2 那一轮 3 次怎么花——**预登记**（§R5，写在这里就是为了跑的人不许临场改）
+--------------------------------------------------------------------------
+1. 第 1 次：`deepseek-chat` × `deepseek_thinking_disabled`（默认生产 provider，OFF 方向）。
+2. 第 2 次：`p_55a83a43` × `dashscope_enable_thinking_off`（relay，OFF 方向）。
+3. 第 3 次按前两次的结果**三选一**（三个候选都在 g2 的 `allowed_shapes` 里）：
+   - 恰好一支 `switch_off_observed` → 在**那一支**上补发同 provider 的 ON 形状，
+     做同轮正对照（A/B/A，排掉"上游自己变了"）。
+   - 两支都 `switch_off_observed` → 在 `deepseek-chat`（默认生产面）补 ON 对照。
+   - 两支都 `switch_off_not_observed` → 在 `deepseek-chat` 补一发 `none` 基线，
+     用来区分"参数关不掉"与"这条上游今天本来就不出推理"。
+   - 若两次都因异常没结论，第 3 次**照发不省**，但只能挑上面三种之一；用完 3 格即停。
+   这一节实现不判（判它要读上游结论，不是命令行能定的），但它必须落在这个文件里。
+
+退出码
+    0  拿到证据（`verified`、基线那一格的 `baseline_ok`，或 OFF 方向的
+       `switch_off_observed`——后者只代表"本次响应无推理痕迹"，不等于开关有效）
+    1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败 /
+       `switch_off_not_observed`：参数被接受但仍在出推理）——**不重试**
 
 本工具不许对另一个 checkout 运行（修复轮 1，Minor；修复轮 2 补 N3/N4）：`inside_dir(…, REPO_ROOT)`
 只挡发起这一跑的那棵树，所以 `--data-dir`（以及 live 必填的 `--ledger`——账本同样是落盘，
@@ -81,8 +127,10 @@ N3）若沿父链上溯碰到 `.git` 且不是本工具这棵树，直接拒。N
 退出码
     0  拿到证据（`verified`，或基线那一格的 `baseline_ok`）
     1  没拿到证据（`unverified` / `form_unverifiable` / 基线失败）——**不重试**
-    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 账本落在仓库内或
-       属于另一棵 checkout / 形状越出授权 / `--data-dir` 属于另一棵 checkout；
+    2  闸拦停，这条结论不可采信：要么一次都没发（预检：账本没显式给 / 授权轮次没显式给 /
+       账本文件名不是那一轮授权表里的那一份 / (provider, profile) 不在该轮 `allowed_shapes`
+       里 / 候选行缺 `direction` / 账本落在仓库内或属于另一棵 checkout / 形状越出授权 /
+       `--data-dir` 属于另一棵 checkout；
        或隔离、重叠、账本、配方、记录任一条不成立），要么只读承诺被**硬**打破
        （跑完之后 store 三件套变了，或 `--data-dir` 树里多/少了路径；无关文件只是
        mtime/size 漂移走软判：追加 note 点名，rc 按原判据走。修复轮 2，concerns.3）
@@ -107,14 +155,61 @@ if str(BACKEND_DIR) not in sys.path:                       # 纯数据模块，i
 
 from app.core import thinking_profiles                      # noqa: E402  候选配方表（零依赖）
 
-AUTHORIZED_LIVE_CALLS = 4        # 用户 2026-11-01 明示授权的 4 次：两上游各 1 基线 + 1 带参数
-                                 # （用尽即停，**不自动续**；改宽这个数字需要用户新的明示。
-                                 #  字面值与它作为默认上限的行为，由
-                                 #  test_authorized_live_call_count_is_the_grant_itself 钉住）
-CALLS_PER_RUN = 1                # 单次运行最多发 1 条：第 5 次绝对不许发
+# —— 授权轮次表（Task 11b §R1）——
+# 一轮授权是表里的一条记录，而不是一行注释：
+#   calls          这一轮最多几格。**判据只数账本行**，`used` 那一格绝不参与判据。
+#   max_tokens     这一轮授权的形状那一格（§R2：两轮都是 8，不放宽——OFF 方向的判据是
+#                  "同一格 reasoning_tokens 从非零变成 0"，上一轮的基线正是在 8 这一格
+#                  拿到非零证据的，同形状 A/B 才叫对照，改宽度等于换了实验）。
+#   quote          用户原话。"谁授权的、授权了多少次"必须能在代码里对答案。
+#   purpose        这一轮买的是什么。写不清，下一轮就会被读成「顺便多试一种形状」。
+#   ledger_name    这一轮的**权威账本文件名**。这是"把授权做成机制"的核心那一步：
+#                  这道闸本质上是按账本文件计数的（上一版只把这条残余写进 note），
+#                  所以"哪一份文件算这一轮"必须绑进授权表——轮换账本从此不是
+#                  "随手加个 flag"，而是"改代码 + 用户再授权"。
+#   allowed_shapes 这一轮批准的 (provider, profile) 白名单。拿着活密钥时最容易漂出去的
+#                  就是那句「既然都开了，顺便再试个别的形状」——表外 ⇒ rc=2、零出站、零记账。
+#                  g2 里连 ON 方向与 `none` 也一并批准，是因为 §R5 预登记的第 3 次要拿它们
+#                  做同轮对照，而对照必须是同一轮授权内的合法形状。
+#   used           事实登记，给读代码的人看；**不参与判据**（判据永远只数账本行）。
+AUTHORIZED_GRANTS = {
+    "g1-20261101": {
+        "calls": 4,
+        "max_tokens": 8,
+        "authorized_on": "2026-11-01",
+        "quote": "打（两上游各 1 次基线 + 1 次带参数）",
+        "purpose": "核实三份候选配方的参数形状是否被上游接受",
+        "ledger_name": "call-ledger-g1-20261101.jsonl",
+        "allowed_shapes": {("deepseek-chat", "none"), ("deepseek-chat", "deepseek_thinking_type"),
+                           ("p_55a83a43", "none"), ("p_55a83a43", "dashscope_enable_thinking")},
+        "used": 4,   # 事实登记，不参与判据（判据只认账本行数）
+    },
+    "g2-20261102": {
+        "calls": 3,
+        "max_tokens": 8,
+        "authorized_on": "2026-11-02",
+        "quote": "再批 3 次，坐实开关 / 把授权做成机制，再跑 3 次",
+        "purpose": "核实思考参数的 OFF 方向：发 disabled/false 之后推理痕迹是否真的消失",
+        "ledger_name": "call-ledger-g2-20261102.jsonl",
+        "allowed_shapes": {("deepseek-chat", "deepseek_thinking_disabled"),
+                           ("p_55a83a43", "dashscope_enable_thinking_off"),
+                           ("deepseek-chat", "deepseek_thinking_type"),
+                           ("p_55a83a43", "dashscope_enable_thinking"),
+                           ("deepseek-chat", "none"), ("p_55a83a43", "none")},
+        "used": 0,
+    },
+}
+
+# 两个旧名字保留为**只读视图**（§R1：允许留名字，只为少改一处引用；但判据一律显式取
+# `AUTHORIZED_GRANTS[grant]["calls"] / ["max_tokens"]`，绝不从这两个视图取默认值——
+# `reserve_call_slot(limit=…)` 与 `classify_verdict(…, direction=…)` 都没有默认值）。
+# 视图与表一漂移，`test_legacy_constants_are_views_and_not_the_source_of_the_gate` 就红。
+CURRENT_GRANT = "g2-20261102"                                   # 当前那一轮（g1 已用尽）
+AUTHORIZED_LIVE_CALLS = AUTHORIZED_GRANTS[CURRENT_GRANT]["calls"]        # 现在等于 3
+AUTHORIZED_MAX_TOKENS = AUTHORIZED_GRANTS[CURRENT_GRANT]["max_tokens"]    # 现在等于 8
+CALLS_PER_RUN = 1                # 单次运行最多发 1 条：第 2 条绝对不许发
 DEFAULT_PROMPT = "ping"          # 两个上游同一句，便于对照
 DEFAULT_MAX_TOKENS = 8           # 极小：这一格花的是钱，不是结论
-AUTHORIZED_MAX_TOKENS = DEFAULT_MAX_TOKENS   # 授权形状里那一格的字面值（live 模式的上限）
 DEFAULT_TIMEOUT = 30.0
 REDACTED = "«密钥已隐去»"
 RUNTIME_DATA_FILES = ("providers.json", "provider_keys.json")
@@ -127,6 +222,10 @@ RC_UNVERIFIED = 1
 RC_BLOCKED = 2                   # 闸拦停：这条结论不可采信
 RC_LEAK_BLOCKED = 3              # 出口泄露闸：一个字都不打
 
+# 思考方向（§R3/§R4）：候选表每一支必须显式落在这里三格之一，`classify_verdict` 吃的就是它。
+# 加一格方向 = 判据表要同步补行；少一格（表里写了个这里没有的值）= 响亮报错，不猜。
+VERDICT_DIRECTIONS = frozenset({"baseline", "on", "off"})
+
 VERDICT_LABELS = {
     # 「已核实」三个字不许单独出现在结论里（Important-4）：Task 12 的消费端是
     # `enabled: status === "verified"` + 档位候选直接吃服务端 `thinking_levels`，
@@ -137,6 +236,11 @@ VERDICT_LABELS = {
     "baseline_ok": "基线通过（不代表思考已关：不发参数也在出推理）",
     "baseline_failed": "基线失败",
     "preflight_failed": "预检失败，未发出调用",
+    # ↓ 两支 OFF 方向的结论（§R4）。label 必须**自带射程**：这一格只说"本次响应无痕迹"，
+    #   开关有效与否要靠同账本里的对照行。禁句锁遍历这里所有值（不许出现「思考已关闭」
+    #   「已关闭思考」「支持关闭」——没有对照就不许这么写）。
+    "switch_off_observed": "本次响应无推理痕迹（同账本内的 ON/基线对照成立才等于开关有效）",
+    "switch_off_not_observed": "参数被接受但仍在出推理：关闭方向未证实",
 }
 
 # 结论的射程，机器可读那一层。`not_proved` 不许空着——空着就等于让下游自己猜，
@@ -176,6 +280,27 @@ VERDICT_SCOPES = {
         "proved": "无：连不带参数的基线都没打通，这一格不能当对照用",
         "not_proved": ("参数形状", "开关效果", "档位差别"),
     },
+    "switch_off_observed": {
+        "tier": "control",
+        "sent": True,
+        # `proved` 里也不许出现禁句：这一格能证的只有"这一次响应里没有推理痕迹"。
+        "proved": "参数被接受，且本次响应无推理痕迹（无 reasoning_content、reasoning_tokens=0）",
+        "not_proved": ("开关有效性：单看这一格不能排除「这条上游今天本来就不出推理」，"
+                       "因果结论要靠同账本内的对照行（同一轮的 ON 或 none）",
+                       "参数形状（这一格没有任何字段能证明上游认下了那颗参数）",
+                       "三档有没有区别（三档发的是同一个出网值）",
+                       "流式形态（本单没花额度去试）",
+                       "模型级 / 厂商级结论"),
+    },
+    "switch_off_not_observed": {
+        "tier": "shape",
+        "sent": True,
+        "proved": "参数被接受且响应里仍有推理痕迹——这一格能证的只有形状与痕迹，不是开关",
+        "not_proved": ("关闭方向（这正是本次要买的东西，没买到）",
+                       "上游是否理解那颗参数的语义（收下 ≠ 生效）",
+                       "三档有没有区别（三档发的是同一个出网值）",
+                       "模型级 / 厂商级结论"),
+    },
     "preflight_failed": {
         "tier": "none",
         "sent": False,
@@ -186,7 +311,7 @@ VERDICT_SCOPES = {
 
 
 class BudgetExhausted(RuntimeError):
-    """账本已记满 AUTHORIZED_LIVE_CALLS：再发就是超出授权。"""
+    """账本已记满**这一条授权**的 `calls`：再发就是超出授权。"""
 
 
 class AttemptMismatch(RuntimeError):
@@ -267,7 +392,7 @@ def isolate_runtime_env(isolation_dir=None) -> Path:
     **之前**拒掉——那道判据在 `run_probe` 的预检里，不在这里，因为到这儿已经太晚了。
 
     另外：缺省自建的是**每次全新的 `mkdtemp`**。这正是 Critical-1 的根因——
-    账本若跟着隔离目录走，每个进程都从空账本开始，"总额 4 次"永不生效。所以
+    账本若跟着隔离目录走，每个进程都从空账本开始，"总额"永不生效。所以
     live 模式必须由调用方显式给一条跨进程稳定的 `--ledger`（见 `run_probe` 的预检）。
     """
     if isolation_dir:
@@ -467,16 +592,22 @@ def read_ledger(ledger_path) -> list:
     return entries
 
 
-def reserve_call_slot(ledger_path, provider_id, profile, level, attempt,
-                      limit=AUTHORIZED_LIVE_CALLS) -> int:
+def reserve_call_slot(ledger_path, provider_id, profile, level, attempt, limit,
+                      grant=None) -> int:
     """先记账再发，返回这次占用的序号（从 1 数）。
 
     写在发之前是刻意的：调用中途进程死了、Ctrl+C 了、上游 hang 到超时——那一次的
     额度都已经花了，账上必须看得见。失败不重试，所以也不回头改账写什么 "result"。
+
+    `limit` **没有默认值**（§R1）：上限必须由调用方从授权轮次表里取出来传进来。
+    留一个 `=AUTHORIZED_LIVE_CALLS` 的默认值，等于把"这一轮几次"重新变回一个全局数字，
+    而这一单要买的恰恰是"它属于哪一条授权"。账本行自己也带上 `grant`，
+    事后对账时不必猜这一格是哪一轮花的。
     """
     used = len(read_ledger(ledger_path))
     if used >= limit:
-        raise BudgetExhausted(f"账本已记 {used} 次，授权上限 {limit} 次：一次都不许再发")
+        raise BudgetExhausted(f"账本已记 {used} 次，授权上限 {limit} 次：一次都不许再发"
+                              + (f"（授权轮次 {grant}）" if grant else ""))
     seq = used + 1
     if attempt is not None and int(attempt) != seq:
         raise AttemptMismatch(f"登记的是第 {attempt} 次，账本上下一个序号是 {seq}")
@@ -484,7 +615,7 @@ def reserve_call_slot(ledger_path, provider_id, profile, level, attempt,
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {"seq": seq, "event": "attempt", "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
              "provider_id": provider_id, "profile": profile, "level": level,
-             "nonce": uuid.uuid4().hex[:8]}
+             "grant": grant, "nonce": uuid.uuid4().hex[:8]}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
         fh.flush()
@@ -586,13 +717,36 @@ def read_evidence(response) -> dict:
     return evidence
 
 
-def classify_verdict(baseline: bool, evidence: dict) -> str:
-    """只有两种证据能判「已核实」，其它一律 unverified——参数被认下来不等于它在思考。"""
-    if baseline:
+def classify_verdict(baseline: bool, evidence: dict, direction: str) -> str:
+    """方向感知的判据（§R4）——上一版不看方向，OFF 那一跑会拿到**完全反**的结论。
+
+    | direction | 条件                        | verdict                  |
+    |-----------|-----------------------------|--------------------------|
+    | baseline  | 任何成功（有没有痕迹不算）  | `baseline_ok`            |
+    | on        | 有推理痕迹                    | `verified`               |
+    | on        | 无痕迹                        | `unverified`             |
+    | off       | 被接受 + 无痕迹 + rt == 0     | `switch_off_observed`    |
+    | off       | 被接受但仍在出推理            | `switch_off_not_observed`|
+
+    `direction` **没有默认值**：调用方必须从候选表把它取出来传进来，取不到就 rc=2，
+    不许在这里偷偷当成 "on"。表外取值一律 `ValueError`——宁可炸在本地，也不要拿着
+    猜出来的方向去花一格付费额度（异常那一支的 `form_unverifiable` / `unverified`
+    不走这里，见 `run_probe` 的 except 分支：请求都没打通，就谈不上"关没关掉"）。
+    """
+    if direction not in VERDICT_DIRECTIONS:
+        raise ValueError(f"未知的思考方向：{direction!r}（候选表只允许 "
+                         f"{'、'.join(sorted(VERDICT_DIRECTIONS))}，取不到就别发）")
+    if direction == "baseline" or baseline:
         return "baseline_ok"
-    if evidence.get("has_reasoning_content") or int(evidence.get("reasoning_tokens") or 0) > 0:
-        return "verified"
-    return "unverified"
+    has_trace = bool(evidence.get("has_reasoning_content")) or \
+        int(evidence.get("reasoning_tokens") or 0) > 0
+    if direction == "off":
+        # "关上了"要三个条件同时成立：请求被接受、字段级痕迹不在、reasoning_tokens 是 0。
+        # 缺任何一个都不能写成 observed——把"没打通"或"照旧在推理"说成"关掉了"，
+        # 是这一单里最贵的一类假结论。
+        return "switch_off_observed" if (evidence.get("accepted") and not has_trace) \
+            else "switch_off_not_observed"
+    return "verified" if has_trace else "unverified"
 
 
 def stamp_verdict(payload, simulated) -> None:
@@ -744,7 +898,14 @@ def send_once(client, record, kwargs, budget, prompt=DEFAULT_PROMPT,
 
 def make_config(argv=None) -> dict:
     parser = argparse.ArgumentParser(
-        description="思考参数核实探针（出站额度 4 次，一次一记；本单授权已用尽）")
+        description="思考参数核实探针（出站额度 = 一条授权轮次：--grant 选哪一轮，"
+                    "那一轮的格数、形状与权威账本文件名都写在 AUTHORIZED_GRANTS 里；"
+                    "g1-20261101 的 4 次已用尽，g2-20261102 的 3 次尚未花）")
+    parser.add_argument("--grant", default=None, choices=sorted(AUTHORIZED_GRANTS),
+                        help="本次花的是**哪一轮授权**。**live 模式必填**，且 --ledger 的"
+                             "basename 必须等于该轮表里的 ledger_name（§R1：换账本文件从"
+                             "『加个 flag』变成『改代码 + 用户再授权』）；dry-run 可以不填，"
+                             "此时 payload 的 grant 就是 None")
     parser.add_argument("--data-dir", required=True,
                         help="provider 配置所在目录（只读；不许指向另一棵 checkout 的 data/——"
                              "判据沿父链上溯找 .git，含 swap-snapshots 那类深层子树）")
@@ -758,7 +919,8 @@ def make_config(argv=None) -> dict:
                         help="仓库外临时目录；缺省每次新建一个（所以账本**不再**跟着它走）")
     parser.add_argument("--ledger", default=None,
                         help="出站账本，要一份跨进程稳定的路径。**live 模式必填**：缺省即 rc=2 拒发，"
-                             "因为跟着隔离目录走的账本每个进程都是空的，「总额 4 次」永不生效；"
+                             "因为跟着隔离目录走的账本每个进程都是空的，「总额」永不生效；"
+                             "且 basename 必须等于 --grant 那一轮表里的 ledger_name（§R1）；"
                              "也不许落在 --data-dir 里面、**不许在仓库树内、不许属于另一棵 checkout**"
                              "（修复轮 2，N3：这三条都是预检判据，不再由操作者记得）；"
                              "另注意这道闸按账本文件计数，换路径从 0 重计——路径必须钉死同一份")
@@ -788,6 +950,11 @@ def run_probe(config, client_factory=None):
     """
     baseline = config["profile"] == thinking_profiles.NONE_PROFILE
     entry = thinking_profiles.PROBE_PROFILES.get(config["profile"]) or {}
+    # 方向（§R3/§R4）：**只从候选表取，取不到就是 None**——判据后面会因此停在预检，
+    # 绝不在这里 `or "on"` 兜一下：兜一下等于把 OFF 那一跑按 ON 的规矩判，结论正好相反。
+    direction = entry.get("direction")
+    grant = str(config.get("grant") or "").strip() or None
+    grant_row = AUTHORIZED_GRANTS.get(grant)
     # 这一跑的"是不是模拟"在入口就定死（修复轮 2，N1）：dry-run 走脚本自带的 FakeClient，
     # 注入 client_factory 走测试替身——两者的行都不许被读成上游事实。真发那一支才是 False
     # （即便 build_live_client 被测试用替身顶掉，那也不是 CLI 能走出来的形状）。
@@ -804,7 +971,12 @@ def run_probe(config, client_factory=None):
         # 这里必须留 None，否则与 `live: true` 并读会被当成"发过"。
         "transport": None,
         "provider_id": config["provider"], "profile": config["profile"],
-        "level": config["level"], "authorized_live_calls": AUTHORIZED_LIVE_CALLS,
+        "level": config["level"],
+        # —— §R1/§R4：这一跑属于哪一轮授权、那一轮几格、判据按哪个方向走。
+        # 三格都必须进 payload：读结果的人（和 Task 12）不该靠回忆来对"这是哪一批授权
+        # 里的那一格"。dry-run 时 grant/grant_calls 允许是 None，但 direction 照打。
+        "grant": grant, "grant_calls": grant_row["calls"] if grant_row else None,
+        "direction": direction,
         "attempt": config["attempt"], "call_slot": None,
         "request_shape": {"prompt": DEFAULT_PROMPT, "max_tokens": config["max_tokens"],
                           "stream": False, "timeout": config["timeout"], "max_retries": 0},
@@ -834,10 +1006,15 @@ def run_probe(config, client_factory=None):
             payload["notes"].append(error_excerpt(exc, secrets, scrub, hide))
         return payload, RC_BLOCKED, secrets
 
-    # —— 闸 0：预检。四条判据全部走在这里，而不是隔离/记账之后：
+    # —— 闸 0：预检。所有判据全部走在这里，而不是隔离/记账之后：
     #    越权的命令行形状一次都不该发，也不该在磁盘上留下任何东西。
     try:
         data_dir = Path(os.path.abspath(str(config["data_dir"])))
+        if direction not in VERDICT_DIRECTIONS:
+            raise RuntimeError(f"候选表里 {config['profile']} 这一支没有合法的 direction"
+                               f"（现有 {sorted(VERDICT_DIRECTIONS)} 三种，实得 {direction!r}）："
+                               f"判据不看方向就会把 OFF 那一跑判成反结论，所以**不默认成 on**，"
+                               f"停在预检、一次都不发")
         if data_dir_belongs_to_another_checkout(data_dir):
             raise RuntimeError("--data-dir 的宿主目录是另一棵 checkout（有 .git 却不是本工具这棵树）："
                                "本工具不许对另一个 checkout 运行，主工作树那份 data/ 是现网资产")
@@ -845,7 +1022,7 @@ def run_probe(config, client_factory=None):
         if not config["dry_run"] and not ledger:
             raise RuntimeError("live 模式必须显式给 --ledger（一份跨进程稳定的账本路径）："
                                "缺省的账本会落进本次新建的隔离目录，每个进程都从空账本开始 ⇒ "
-                               "「总额 4 次」这道闸永不生效。本次零出站")
+                               "「总额」这道闸永不生效。本次零出站")
         if ledger and overlaps(ledger, data_dir):
             raise RuntimeError("--ledger 不许落在 --data-dir 里面：那是本次声明只读的目录，"
                                "账本每发一次都要写它一笔")
@@ -856,10 +1033,27 @@ def run_probe(config, client_factory=None):
         if ledger and data_dir_belongs_to_another_checkout(ledger):
             raise RuntimeError("--ledger 落在另一棵 checkout 的树里（沿父链撞上 .git）："
                                "账本与 --data-dir 同一条判据，不许写进别的树")
-        if not config["dry_run"] and not 1 <= int(config["max_tokens"]) <= AUTHORIZED_MAX_TOKENS:
+        # —— §R1：授权轮次必须点名，且账本文件名必须是那一条授权里的那一份。——
+        # 这两格是"把授权做成机制"的核心：闸按账本文件计数，所以文件名不绑进授权表的话，
+        # 轮换 --ledger 就还是"随手加个 flag"，计数从 0 重来。
+        if not config["dry_run"] and not grant:
+            raise RuntimeError("live 模式必须显式给 --grant <授权轮次 id>（"
+                               f"表里有 {', '.join(sorted(AUTHORIZED_GRANTS))}）："
+                               "没有授权轮次就没有上限、也没有权威账本，一次都不发")
+        if not config["dry_run"] and grant_row is None:
+            raise RuntimeError(f"授权轮次表里没有 {grant}：拿着一个不存在的批次去发，"
+                               "上限与形状都没有出处，一次都不发")
+        if not config["dry_run"] and ledger and \
+                Path(ledger).name != grant_row["ledger_name"]:
+            raise RuntimeError(f"账本文件名对不上授权轮次 {grant}：这一轮的权威账本叫 "
+                               f"{grant_row['ledger_name']}，给的是 {Path(ledger).name}。"
+                               "这道闸按账本文件计数，换文件名就从 0 重计——"
+                               "要换文件得改 AUTHORIZED_GRANTS 并由用户重新授权，零出站")
+        if not config["dry_run"] and not 1 <= int(config["max_tokens"]) <= grant_row["max_tokens"]:
             raise RuntimeError(f"max_tokens={config['max_tokens']} 越出授权形状"
-                               f"（授权的那一格是 {AUTHORIZED_MAX_TOKENS}，只许等于或小于它、且必须 ≥1）："
-                               f"live 模式拒发")
+                               f"（{grant} 那一轮授权的是 {grant_row['max_tokens']}，"
+                               f"只许等于或小于它、且必须 ≥1）："
+                               f"§R2 不放宽：OFF 方向的判据是同格从非零变 0，改宽度等于换实验")
     except Exception as exc:                                    # noqa: BLE001 - 闸没让过就停
         return blocked("预检闸拒绝：命令行形状不在授权范围内，一次都不发", exc)
 
@@ -922,23 +1116,34 @@ def run_probe(config, client_factory=None):
         return blocked("配方到不了上游：字段不在 create() 签名里", None)
 
     # —— 闸 1：真实调用先记账（dry-run 不进账本，它没花额度）
-    #    `--ledger` 在预检那一步已经强制存在（Critical-1）：这里**不再**回退到
-    #    `iso / "call-ledger.jsonl"`——那个默认值正是"每个进程从空账本开始"的来源。
+    #    `--ledger` 在预检那一步已经强制存在（Critical-1），且它的文件名已经绑死了
+    #    一条授权轮次（§R1）：这里**不再**回退到 `iso / "call-ledger.jsonl"`——那个
+    #    默认值正是"每个进程从空账本开始"的来源。
     if not config["dry_run"]:
+        # —— §R1 白名单：这一轮没批准的 (provider, profile) 形状发不出去。
+        #    放在记账之前（零记账）、SDK 签名检查之后（各条闸的拒绝理由互不掩盖）。
+        #    挡的是那一句话：「既然都开了，顺便再试个别的形状」。
+        if (config["provider"], config["profile"]) not in grant_row["allowed_shapes"]:
+            return blocked(f"授权轮次 {grant} 的 allowed_shapes 白名单里没有 "
+                           f"({config['provider']}, {config['profile']}) 这一格："
+                           f"本轮批准的是 {sorted(p for p, _ in grant_row['allowed_shapes'])}"
+                           " 这些 provider × 配方组合，表外形状零出站、零记账")
         ledger_is_new = not Path(ledger).is_file()
         try:
             payload["call_slot"] = reserve_call_slot(
                 ledger, config["provider"], config["profile"], config["level"],
-                config["attempt"])
+                config["attempt"], grant_row["calls"], grant)
         except (BudgetExhausted, AttemptMismatch, OSError) as exc:   # noqa: BLE001
             return blocked("账本没让过：这一次不发", exc)
         if ledger_is_new:
             # concerns.1 的残余（审查员判可接受，但要求登记 + 一句提示）：这道闸绑的是
-            # "这一份账本文件 ≤4"而不是"这次授权 ≤4"——换 --ledger 路径就从 0 重计。
-            # 跨账本累计不修（一次性 4 格探针不值那道工程税），但新建那一跑必须自己说。
+            # "这一份账本文件 ≤那一轮的格数"而不是"这次授权 ≤格数"——换 --ledger 路径就
+            # 从 0 重计。跨账本累计不修（一次性探针不值那道工程税），而 §R1 已经把
+            # "换文件"这条路挪到了"改代码 + 用户再授权"那边；新建那一跑仍要自己说清口径。
             payload["notes"].append(
                 "新建账本：这道闸按账本文件计数，跨账本不累计——换一份 --ledger 就从 0 重计；"
-                "授权上限 4 次真正的凭据是那本权威账本，路径必须钉死同一份")
+                f"授权轮次 {grant} 真正的凭据是它那份权威账本（{grant_row['ledger_name']}，"
+                f"{grant_row['calls']} 格），路径必须钉死同一份")
 
     if client_factory is not None:
         factory = client_factory
@@ -983,7 +1188,7 @@ def run_probe(config, client_factory=None):
 
     payload.update({k: v for k, v in evidence.items() if k != "accepted"})
     payload["accepted"] = True
-    payload["verdict"] = classify_verdict(baseline, evidence)
+    payload["verdict"] = classify_verdict(baseline, evidence, direction)
     if baseline:
         # 基线那一格的证据必须自己说话（Important-4 第 3 格的机器可读那一半）：
         # 不发任何思考参数而响应里仍有推理痕迹 ⇒ 界面不许把这一格写成"已关闭思考"。
@@ -994,8 +1199,14 @@ def run_probe(config, client_factory=None):
     # 软（无关既有文件被现网定时器之类的东西重写）只追加点名 note，rc 按原判据走。
     if readonly_delta_verdict(payload, before, data_dir):
         return payload, RC_BLOCKED, secrets
-    if payload["verdict"] in ("verified", "baseline_ok"):
+    if payload["verdict"] in ("verified", "baseline_ok", "switch_off_observed"):
         return payload, RC_VERIFIED, secrets
+    if payload["verdict"] == "switch_off_not_observed":
+        # OFF 那一跑的"没拿到证据"与 ON 那一跑的不是同一件事：这里参数被接受了、
+        # 痕迹也照旧，所以话只能说"关闭方向未证实"，并点名要靠同轮对照行才谈得上因果。
+        payload["notes"].append("参数被接受但仍在出推理：关闭方向未证实。这一格不能反过来"
+                                "证明参数无效——也要看同账本同一轮的 ON/基线对照行。")
+        return payload, RC_UNVERIFIED, secrets
     payload["notes"].append("没有推理字段也没有 reasoning_tokens：参数被接受 ≠ 它在思考，"
                             "这一格留 unverified")
     return payload, RC_UNVERIFIED, secrets

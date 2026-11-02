@@ -6,8 +6,10 @@
 结论往 `THINKING_PROFILES` 里加条目并补 `verified: True`，本文件不进任何写路径。
 
 为什么候选形状要先钉成代码，而不是探针里手写 kwargs：真调用额度是**一次性**的
-（本单授权 4 次），拼错一个字段名就白烧一次；而拼错的形状在 fake client 上测不出来，
-只有钉成表 + 逐档断言才能在零网络时就发现"第三档我忘了映射"。
+（授权不是一句话也不是一次数，而是 `tools/probe_thinking_profile.py` 里那张
+ `AUTHORIZED_GRANTS` **授权轮次表**：g1 那一轮 4 次已在 2026-11-01 花完，
+ g2 那一轮 3 次冲着 OFF 方向、还没花），拼错一个字段名就白烧一次；而拼错的形状在
+ fake client 上测不出来，只有钉成表 + 逐档断言才能在零网络时就发现"第三档我忘了映射"。
 
 为什么本文件**不 import app.core.providers**：那个模块末尾有进程级单例
 （providers.py:1059 `store = ProviderStore()`），import 它就等于跑 `_load()`，而
@@ -33,6 +35,13 @@ NONE_PROFILE = "none"
 # 直接抄，"这一档到底改变了什么"必须写在明处，否则界面配了三个档而 wire 上永远只有
 # 一个值，没人会报错。
 #
+# 每条还带 `direction`（Task 11b §R3 新加，取值 ∈ {"baseline","on","off"}），因为
+# **判据现在吃它**：`probe_thinking_profile.classify_verdict` 按方向决定"什么算证据"。
+# 这一格为什么必须显式写而不能由 profile 名字猜：`none` 之外一律当成 "on" 的话，
+# 一次成功的关闭测试（推理痕迹消失）会被判成 `unverified` 并以 rc=1 退出——把
+# "关掉了"记成"这次没拿到证据"，而 OFF 方向正是 g2 那一轮唯一想买的东西。取不到
+# direction 时探针停在预检（rc=2、零出站、零记账），不默认成任何方向。
+#
 # 为什么 `enable_thinking` 与 `thinking` 都得套在 `extra_body` 里：本机 SDK（实测
 # openai 2.37.0）的 `Completions.create` 签名里**没有 `**kwargs`**，裸写 `thinking=`
 # 在本地就 `TypeError: unexpected keyword argument`——一次 HTTP 都不会发出去，而账本
@@ -46,6 +55,7 @@ PROBE_PROFILES = {
         # 这一格只能说一件事：服务端这一轮不再发送那颗思考参数。
         "label": "不发思考参数（基线，不代表模型不思考）",
         "level_used": False,
+        "direction": "baseline",
         "levels": {},
         "shape": "不发任何思考参数，与今天线上的调用形状完全一致；"
                  "它只是对照组，不是「思考已关闭」的证据",
@@ -53,6 +63,7 @@ PROBE_PROFILES = {
     "openai_reasoning_effort": {
         "label": "OpenAI reasoning_effort",
         "level_used": True,
+        "direction": "on",
         "levels": {
             "快速": {"reasoning_effort": "low"},
             "均衡": {"reasoning_effort": "medium"},
@@ -63,6 +74,7 @@ PROBE_PROFILES = {
     "dashscope_enable_thinking": {
         "label": "阿里云百炼 enable_thinking",
         "level_used": False,
+        "direction": "on",
         "levels": {
             "快速": {"extra_body": {"enable_thinking": True}},
             "均衡": {"extra_body": {"enable_thinking": True}},
@@ -71,9 +83,35 @@ PROBE_PROFILES = {
         "shape": ("extra_body.enable_thinking=true；这是个布尔开关，三档当前给同一个出网值"
                   "（思考预算 thinking_budget 是另一维，本单不核实，别把它当成档位已配好）"),
     },
+    # ↓ 两支 OFF 方向（Task 11b §R3，g2 那一轮要发的形状）。结构与上面两支 ON 完全同构：
+    #   三档逐行写死、同一个出网值、`level_used=False`——"档位"在这一维没有意义，
+    #   要核实的只有"发出去之后推理痕迹还在不在"。它们与邻居的差别只有那一格取值。
+    "deepseek_thinking_disabled": {
+        "label": "DeepSeek thinking.type=disabled",
+        "level_used": False,
+        "direction": "off",
+        "levels": {
+            "快速": {"extra_body": {"thinking": {"type": "disabled"}}},
+            "均衡": {"extra_body": {"thinking": {"type": "disabled"}}},
+            "深入": {"extra_body": {"thinking": {"type": "disabled"}}},
+        },
+        "shape": ("体顶层 thinking={type: disabled}——与 deepseek_thinking_type 只差那一格取值"),
+    },
+    "dashscope_enable_thinking_off": {
+        "label": "阿里云百炼 enable_thinking=false",
+        "level_used": False,
+        "direction": "off",
+        "levels": {
+            "快速": {"extra_body": {"enable_thinking": False}},
+            "均衡": {"extra_body": {"enable_thinking": False}},
+            "深入": {"extra_body": {"enable_thinking": False}},
+        },
+        "shape": "extra_body.enable_thinking=false；布尔的反方向",
+    },
     "deepseek_thinking_type": {
         "label": "DeepSeek thinking.type",
         "level_used": False,
+        "direction": "on",
         "levels": {
             "快速": {"extra_body": {"thinking": {"type": "enabled"}}},
             "均衡": {"extra_body": {"thinking": {"type": "enabled"}}},
