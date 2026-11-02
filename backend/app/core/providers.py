@@ -478,6 +478,21 @@ def _thinking_fields(record: dict, requested=None) -> dict:
         profile = DEFAULT_THINKING_PROFILE        # 继承来的野值：归一，不挡保存
     levels = _clean_levels(record.get("thinking_levels"))
     if len(levels) > MAX_THINKING_LEVELS:
+        # M-3（12B 修复轮 1，主控已裁决：**维持拒收**，不把这一闸挪到 supports 支之后）。
+        # 结论与理由，写给下一个人，别再当"半开的边界"重新裁决一次：
+        # `MAX_THINKING_LEVELS` 是**存储形状不变量**（库里一份清单最多 3 格），判的是
+        # "这份数据能不能被存成一个自洽的形状"，与"这条记录会不会思考"无关——所以它摆
+        # 在 supports 判据之前是**对的**，不是遗漏。真正与 supports 有关的那一闸是配方声明
+        # 的 `level_count`（下面 supports=False 一支的 M-R1 注释），那一半已经按裁决挪走了。
+        # 不能一起挪的实验事实（审查员 12B §5 变异 E，仓库外克隆实测）：整块搬进
+        # supports=True 那一支会**同时**红既有锁
+        # `test_v0391_provider_capabilities.py::test_invalid_capabilities_are_rejected[bad0]`
+        # （`:40-45` 那份基座没有 `supports_thinking`，supports 落 False 却带 4 档）与
+        # 本版的 `test_the_generic_level_cap_is_still_judged_when_thinking_is_off`
+        # ⇒ 挪它等于放宽 Task 8 留下的既有断言，明令禁止。
+        # 代价可接受：UI 永远发不出 >3 档（表单最多三个候选），所以"关掉思考 + 4 档"
+        # 这一墙只有直连 API 的写法会撞到，而那次 PUT 的 400 说的是"这个形状存不下"，
+        # 不是"你不支持思考"——归因没坏。
         if "thinking_levels" in brought:
             raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
         levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
@@ -583,13 +598,25 @@ def thinking_request_index(record, label):
 def thinking_kwargs_for(record, index) -> dict:
     """四个出网站点唯一的合并入口：`index` 为 None ⇒ 一个字节都不加。
 
-    序号是调用方（`_prepare_chat` 那一段）先按 `_thinking_status` 与这条记录自己的清单
-    换算出来的——**同一个对象**从校验点一路传到这一点，中途不许换记录（`resolve()` 不带
-    参数那种"再解析一次"拿到的可能是另一条记录，见 memory_manager 那条纪律）。
-    组装一律交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise，
-    `none` 它自己回 `{}`，所以今天（表里只有 `none`）这四条路永远收到空字典。
+    **这一格自己重判记录作用域**（12B 修复轮 1，审查 I-1）。序号是调用方
+    （`_prepare_chat` → `thinking_request_index`）按那条记录换算出来的，但流式那条路
+    在生产者线程里还会**再解析一次** provider（`main.py:938-946` → `streaming.py:206`
+    的 `store.resolve(provider_id, ...)`），那一下比请求校验点（`main.py:699`）**晚**：
+    两次解析之间一次管理员 PUT 就能把这条记录换成"同一个在册且 verified 的配方、但这条
+    host+model 从没进过它的 `verified_for`"。所以"已核实"这句话必须在发送点再说一遍，
+    不能采信调用方带过来的序号是哪条记录换的——那正是 M1 那句假话（把一次逐条观察演成
+    全局结论）的出口。
+
+    判据只有一份：走 `_thinking_view`（12A 那把唯一尺子，内部就是带 host+model 的
+    `_thinking_status`），`thinking_status != "verified"` 直接返回 `{}`。**不在这里另拼
+    一份 status**，也**不接受调用方传进来的"已 verified"标记**——多一个入参就是多一条
+    "调用方自己说了算"的通道，与 B1 换算点只此一处同源。
+    组装仍交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise，`none` 它自己
+    回 `{}`，所以今天（表里只有 `none`）这四条路永远收到空字典。
     """
     if index is None:
+        return {}
+    if _thinking_view(record or {})["thinking_status"] != "verified":
         return {}
     profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
     return _thinking_profiles.build_thinking_kwargs(profile, index)

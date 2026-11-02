@@ -2411,6 +2411,12 @@ _B3_HOST = "synth.invalid"
 _B3_BASE_URL = "https://synth.invalid/v1"
 _B3_LEVELS = ["快速", "均衡", "深入"]
 _B3_ID = "p_12b_synth"
+# 修复轮 1（审查 I-1）需要的第二与第三坐标：I-1 说的是"配方在表里 verified，但**这条记录**
+# 的 host+model 从没进过它的 `verified_for`"。要演这一手，表里必须**同时**有两条 verified
+# 条目（一条覆盖这条记录、一条不覆盖），否则 `{}` 那一侧永远可能只是被"配方不在表里"挡住的。
+_B3_OUT_PROFILE = "synth_12b_out"                    # 第二条 verified 条目（作用域不覆盖被测记录）
+_B3_OUT_HOST = "third.invalid"                       # 它 `verified_for` 里写的那台主机
+_B3_OTHER_BASE_URL = "https://other.invalid/v1"      # 既不在 `_B3_PROFILE` 也不在 `_B3_OUT_PROFILE` 的清单里
 
 # 八处 chat-completion 站点的点名册（B3）。role="send" 是四个"用户选模"站点，
 # role="aux" 是四处明确**不许**被思考参数污染的辅助站点——其中
@@ -2724,10 +2730,48 @@ def test_the_shipped_table_never_yields_an_index_for_any_label():
 
 
 def test_thinking_kwargs_for_is_inert_without_an_index():
-    """合并入口的两侧：`index=None` ⇒ `{}`；出厂表下就算有人误传序号也只回 `{}`。"""
+    """合并入口的两侧：`index=None` ⇒ `{}`；出厂表下就算有人误传序号也只回 `{}`。
+
+    本格判的是"没有序号"与"配方是 `none`/记录是空 dict"这两种 fail-closed 形状；
+    "配方在册且 verified，但这条记录不在它的 `verified_for` 里"那一格是修复轮 1 加的
+    `test_the_send_helper_rejudges_this_records_own_scope`，两者不重叠。
+    """
     assert providers.thinking_kwargs_for(_b3_record(), None) == {}
     assert providers.thinking_kwargs_for(_b3_record(thinking_profile="none"), 2) == {}
     assert providers.thinking_kwargs_for({}, 2) == {}
+
+
+def test_the_send_helper_rejudges_this_records_own_scope(monkeypatch):
+    """I-1 §判据 1：表里有**两条** verified 条目时，发送点只认命中这条记录 host+model 的那一条。
+
+    审查员的事实探针是 `thinking_kwargs_for(unverified_record, 2) == {'synth_thinking_level': 2}`：
+    合并入口只看"这个配方名在表里 verified 吗"，不看"这条记录的 host+model 在不在那张清单里"。
+    今天白名单只有 `none`，它 fail-closed 成 502；表里一出现第二条 verified 条目，它就是 M1
+    那句假话（把一次逐条观察演成全局结论）的出口。
+
+    两条条目都是**在册且 verified** 的，差别只在 `verified_for` 覆不覆盖被测记录——
+    否则 `{}` 那一侧可能是被"配方不在表里"这种毫不相干的原因挡住的（恒真）。
+    两向都跑：不命中的必须 `{}`，命中的必须真带参数。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_OUT_PROFILE,
+                        _b3_entry(label="合成三档（在册且 verified，但作用域不覆盖）",
+                                  verified_for=[{"host": _B3_OUT_HOST, "model": _B3_MODEL}]))
+    hit = _b3_record()                                              # host+model 命中 _B3_PROFILE
+    miss = _b3_record(base_url=_B3_OTHER_BASE_URL, thinking_profile=_B3_OUT_PROFILE)
+    # 前提两条都要成立：配方必须在册且 verified，差别只在记录作用域。缺这一对断言，
+    # 下面的 `{}` 就可能是"名字不在表里"给的不是"没被核实到"。
+    assert miss["thinking_profile"] in providers.THINKING_PROFILES
+    assert providers.THINKING_PROFILES[miss["thinking_profile"]]["verified"] is True
+    assert providers._thinking_view(hit)["thinking_status"] == "verified"
+    assert providers._thinking_view(miss)["thinking_status"] == "unverified"
+    # 唯一写者本身仍然愿意发（它手里没有这条记录）——所以这一格判的确实是合并入口有没有重判
+    assert thinking_profiles.build_thinking_kwargs(_B3_OUT_PROFILE, 2) == {_B3_KEY: 2}
+
+    assert providers.thinking_kwargs_for(miss, 2) == {}, \
+        "发送点把'配方在册'读成了'这条记录已核实'：I-1 的通道还开着"
+    assert providers.thinking_kwargs_for(hit, 2) == {_B3_KEY: 2}, \
+        "命中作用域那条必须照样带参数，否则这一格就是恒真"
 
 
 # ---------- B2 + B3：HTTP 面（400 不是 422；verified 才带；辅助站点永不带） ----------
@@ -2812,6 +2856,51 @@ def test_the_same_label_on_a_record_that_is_not_verified_sends_nothing(client, b
     assert b3_wire == [], f"被拒的那一次不该出网：{b3_wire}"
 
 
+def test_a_record_swapped_between_validation_and_send_sends_nothing(client, b3_records,
+                                                                   b3_wire, monkeypatch):
+    """I-1 §判据 2（时序那一格，本单真正的牙）：校验与发送是**两次解析**，发送点必须自己重判。
+
+    `main.py:699` 在请求线程里用带 `user_id` 的那一次解析换算序号；流式引擎随后在
+    **生产者线程**里又解析了一次（`main.py:938-946` → `streaming.py:206`，那一次不带
+    `user_id`）。两次之间一次管理员 PUT 就能把这条记录换成"同一个在册且 verified 的配方、
+    但这条 host+model 从没进过它的 `verified_for`"——换算点看不见这次改动，只有发送点
+    重判才看得见。上面 §判据 1 那一格证不了这一段：那里没有生产者线程，也没有第二次解析，
+    送进去的是同一个对象；真把两次解析拆开跑，BASE 上 `thinking_kwargs_for` 无条件发参数。
+
+    做法是在 `store.resolve` 外面套一层：带 `user_id` 的那一次（校验点）先把**改动前**那份
+    交给调用方，随后就地做一次真实的 `upsert`（PUT 的落库动作，走 `_validate`，DNS 已被
+    conftest 桩成公网地址，零出站）；生产者线程那次不带 `user_id` 的重解析读到的就是改过的记录。
+    判据是出网**零思考键**——不是状态码，400 那一族由上面那格管。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record())                       # 校验那一刻它确实在作用域内（序号换得出来）
+
+    real_resolve = providers.store.resolve
+    swapped: list = []
+
+    def _resolve(provider_id=None, legacy_model=None, user_id=None):
+        found = dict(real_resolve(provider_id, legacy_model=legacy_model, user_id=user_id))
+        if user_id is not None and provider_id == _B3_ID and not swapped:
+            providers.store.upsert({**found, "base_url": _B3_OTHER_BASE_URL})
+            swapped.append(True)
+        return found
+
+    monkeypatch.setattr(providers.store, "resolve", _resolve)
+    # 前提要成立：改动前那条记录确实换得出序号，否则后面"零思考键"是靠根本没算出来绿的
+    assert providers.thinking_request_index(_b3_record(), _B3_LEVELS[1]) == 2
+
+    res = client.post("/v1/chat/stream", json={
+        "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+        "thinking_level": _B3_LEVELS[1]})
+    assert res.status_code == 200, res.text[:200]
+    assert swapped, "两次解析之间那次 PUT 没发生 = 这一格什么都没测"
+    assert b3_wire, "根本没出网 = 下面两条断言是空的"
+    for sent in b3_wire:
+        assert _B3_KEY not in sent, \
+            f"发送点把'配方在册'读成'这条记录已核实'，把另一段作用域的结论发了出去：{sorted(sent)}"
+        assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
+
+
 def test_the_llm_client_and_react_sites_only_speak_through_the_index(client, b3_records,
                                                                      b3_wire, monkeypatch):
     """站点 3 与站点 4：`get_llm_response` 与 `ReActAgent.run` 各演"带"与"不带"。
@@ -2870,7 +2959,7 @@ def test_the_four_auxiliary_sites_never_receive_a_thinking_key(client, b3_record
         "thinking_levels": list(_B3_LEVELS), "thinking_default": _B3_LEVELS[0],
         "thinking_profile": _B3_PROFILE}).status_code == 200
     assert b3_wire, "试稿根本没出网"
-    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+    assert all(not (_B3_THINKING_KEYS & set(c)) and _B3_KEY not in c for c in b3_wire), b3_wire
     del b3_wire[:]
 
     manager = MemoryManager.__new__(MemoryManager)     # 不跑 __init__，只演那一个方法
@@ -2878,14 +2967,14 @@ def test_the_four_auxiliary_sites_never_receive_a_thinking_key(client, b3_record
     manager._dummy_embed = False
     manager._summarize("很长的一句话。" * 40, max_length=12)
     assert b3_wire, "摘要根本没出网：这一格什么都没测"
-    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+    assert all(not (_B3_THINKING_KEYS & set(c)) and _B3_KEY not in c for c in b3_wire), b3_wire
     del b3_wire[:]
 
     agent = ReActAgent(model=_B3_MODEL, max_turns=1)
     fake = _b3_ns(chat=_b3_ns(completions=_B3Completions(b3_wire)))
     agent._force_summarize(fake, _b3_record(), [{"role": "user", "content": "x"}], "任务")
     assert b3_wire, "_force_summarize 没出网"
-    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+    assert all(not (_B3_THINKING_KEYS & set(c)) and _B3_KEY not in c for c in b3_wire), b3_wire
 
 
 # ---------- B4：桩与真实签名同步、七个位置参数的老调用者 ----------
