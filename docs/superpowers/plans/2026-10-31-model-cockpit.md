@@ -1471,6 +1471,13 @@ git commit -m "test(thinking): 思考参数核实探针与 dry-run"
 
 ## Task 12: Thinking profile registry and request mapping
 
+> **生效范围（Task 12 落地时补的一行，不改写下面的任务正文）**：本轮走 `none-only` 那一支——
+> 探针 g1+g2 共 7 次真调用之后没有任何配方够格进生产白名单，所以 Task 12 交付的是**边界本身**
+> （未核实就不发），不是"思考强度能用"。裁决与三处范围改动（M1/M2/M3）见
+> `.superpowers/sdd/2026-10-31-model-cockpit/task-12-amendment.md`；它把上面那句
+> "把探针确认通过的那一条复制进生产白名单"改写成"今天一条都不复制"。
+> 拆单与验收：`task-12a-brief.md`（登记表机制）与 `task-12b-brief.md`（请求侧通道）。
+
 **Files:**
 - Modify: `backend/app/core/thinking_profiles.py`（Task 11 已建；这里只加 `PROFILES`/`build_thinking_kwargs`，并把探针确认通过的那一条复制进生产白名单）
 - Modify: `backend/app/core/providers.py`（把核实的 profile 加进 `THINKING_PROFILES`）

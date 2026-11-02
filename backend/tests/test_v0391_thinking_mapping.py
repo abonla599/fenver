@@ -2392,3 +2392,584 @@ def test_empty_or_missing_verified_for_never_means_unrestricted(monkeypatch):
     for name in ("synth_empty_scope", "synth_no_scope", "synth_bare"):
         got = providers._thinking_status(True, name, SYNTH_HOST, SYNTH_MODEL)
         assert got == "unverified", (name, got)
+
+
+# ---- 13. Task 12B：请求侧档位通道与发送边界（字段存在，未核实一个字节都不发） ----
+#
+# 六条裁决在这一节各有一格（B1 换算与越界、B2 的 400-不是-422、B3 的源码守卫 + 行为抓包、
+# B4 桩与真实签名同步、B6 两句会变旧的话）。判据形状照 brief 的要求成对：
+# **verified 时确实会带**（synthetic 条目 + 抓包替身），**出厂那张表里确实不带**
+# （`PROFILES` 只有 `none` ⇒ 任何标签都换不到序号）。
+# 全程零网络：八处 `chat.completions.create` 站点的 `build_client` 一律换成抓包替身；
+# 本单不往登记表里登记任何真实配方（`:337-344` 那格继续绿是这一节的**前提**）。
+
+_B3_APP = REPO_ROOT / "backend" / "app"
+_B3_KEY = "synth_thinking_level"          # synthetic 配方出网的那一格（不叫三个真名，见守卫的说明）
+_B3_PROFILE = "synth_12b"
+_B3_MODEL = "synth-flash-12b"
+_B3_HOST = "synth.invalid"
+_B3_BASE_URL = "https://synth.invalid/v1"
+_B3_LEVELS = ["快速", "均衡", "深入"]
+_B3_ID = "p_12b_synth"
+
+# 八处 chat-completion 站点的点名册（B3）。role="send" 是四个"用户选模"站点，
+# role="aux" 是四处明确**不许**被思考参数污染的辅助站点——其中
+# `memory/memory_manager.py` 的 `_summarize` 调 `resolve()` **不带任何参数**，
+# 拿的是全局默认那条记录，和被校验那条不是同一个对象，所以它是本单最容易出事的地方。
+_B3_ROSTER = {
+    ("core/streaming.py", "stream_chat_events"): "send",
+    ("pipeline.py", "_call_model_with_tool_loop"): "send",
+    ("core/llm_client.py", "get_llm_response"): "send",
+    ("agents/react_agent.py", "run"): "send",
+    ("agents/react_agent.py", "_force_summarize"): "aux",
+    ("core/providers.py", "ping"): "aux",
+    ("main.py", "_test_draft"): "aux",
+    ("memory/memory_manager.py", "_summarize"): "aux",
+}
+_B3_THINKING_KEYS = {"reasoning_effort", "enable_thinking", "thinking"}
+
+
+def _b3_entry(level_count=3, **over):
+    """一条 synthetic **生产**条目：只进 monkeypatch 的内存表，绝不进生产数据。"""
+    entry = {"label": "合成三档", "verified": True, "level_count": level_count,
+             "verified_for": [{"host": _B3_HOST, "model": _B3_MODEL}],
+             "kwargs": lambda level: {_B3_KEY: level}}
+    entry.update(over)
+    return entry
+
+
+def _b3_record(**over):
+    base = {"id": _B3_ID, "label": "合成 12B", "base_url": _B3_BASE_URL,
+            "api_key": "sk-test-000111222333",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+            "model": _B3_MODEL, "supports_vision": False, "is_default": False,
+            "supports_thinking": True, "thinking_levels": list(_B3_LEVELS),
+            "thinking_default": _B3_LEVELS[0], "thinking_profile": _B3_PROFILE}
+    base.update(over)
+    return base
+
+
+def _b3_ns(**kw):
+    from types import SimpleNamespace
+    return SimpleNamespace(**kw)
+
+
+class _B3Completions:
+    """抓 kwargs 的假 completions：按 `stream` 那一格决定回流式还是回整包。"""
+
+    def __init__(self, sink):
+        self._sink = sink
+
+    def create(self, **kwargs):
+        self._sink.append(kwargs)
+        if kwargs.get("stream"):
+            chunks = [_b3_ns(choices=[_b3_ns(delta=_b3_ns(content="好的"),
+                                              finish_reason=None)])]
+            return iter(chunks)
+        message = _b3_ns(content="好的", tool_calls=None,
+                         model_dump=lambda: {"role": "assistant", "content": "好的"})
+        return _b3_ns(choices=[_b3_ns(message=message)], usage=None)
+
+
+@pytest.fixture
+def b3_records():
+    """往进程内那份 provider 单例里放记录，用完删掉（单例跨用例，不清就是串味）。
+
+    记录是在**用例体内**调用本夹具才落库的，所以要 synthetic 条目的用例必须先把
+    `providers.THINKING_PROFILES` 那一格登记好——`upsert` 走 `_thinking_fields`，
+    profile 不在表里根本存不下去（红先输出里那条 `ProviderError: 未知的思考参数配置`
+    演的就是这一手，别把顺序写反了）。
+    """
+    created = []
+
+    def _install(*records):
+        for record in records:
+            providers.store.upsert(dict(record))
+            created.append(record["id"])
+        return records
+
+    yield _install
+    for pid in created:
+        providers.store.delete(pid)
+
+
+@pytest.fixture
+def b3_wire(monkeypatch):
+    """把八处出网站点的 `build_client` 全换成同一个抓包替身（零出站）。
+
+    流式那条必须 `reload` 才拿得到真引擎——autouse 的 `_stub_llm_calls` 已经把
+    `streaming.stream_chat_events` 换成文本桩了，不 reload 抓到的是桩的形参而不是真 kwargs
+    （与 `test_stream_tools.py` 的 `real_stream_chat` 同一手法）。
+    """
+    import app.core.llm_client as llm_client
+    import app.main as main
+    import app.memory.memory_manager as memory_manager
+    import app.agents.react_agent as react_agent
+    import app.pipeline as pipeline
+    import app.core.streaming as streaming
+
+    calls: list = []
+
+    def _factory(provider, *args, **kwargs):
+        return _b3_ns(chat=_b3_ns(completions=_B3Completions(calls)))
+
+    for mod in (providers, streaming, llm_client, pipeline, react_agent,
+                memory_manager, main):
+        monkeypatch.setattr(mod, "build_client", _factory)
+    importlib.reload(streaming)
+    monkeypatch.setattr(streaming, "build_client", _factory)
+    yield calls
+    importlib.reload(streaming)
+
+
+def _b3_sources(tree):
+    for path in sorted(tree.rglob("*.py")):
+        yield path.relative_to(tree).as_posix(), path.read_text(encoding="utf-8")
+
+
+def _b3_create_sites(tree):
+    """AST 找 `….chat.completions.create(...)`，返回 {(相对路径, 所在函数名)}。"""
+    found = set()
+    for path in sorted(tree.rglob("*.py")):
+        rel = path.relative_to(tree).as_posix()
+        root = ast.parse(path.read_text(encoding="utf-8"))
+
+        def walk(node, func):
+            for child in ast.iter_child_nodes(node):
+                inner = (child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else func)
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                        and child.func.attr == "create"
+                        and isinstance(child.func.value, ast.Attribute)
+                        and child.func.value.attr == "completions"):
+                    found.add((rel, inner))
+                walk(child, inner)
+
+        walk(root, None)
+    return found
+
+
+def _b3_key_writers(tree):
+    """生产代码里把三个思考键**当键写下来**的位置：dict 字面量的键、关键字实参、下标赋值。"""
+    writers = {}
+    for rel, src in _b3_sources(tree):
+        hit = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Dict):
+                for key in node.keys:
+                    if isinstance(key, ast.Constant) and key.value in _B3_THINKING_KEYS:
+                        hit.add(key.value)
+            elif isinstance(node, ast.keyword) and node.arg in _B3_THINKING_KEYS:
+                hit.add(node.arg)
+            elif (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                  and node.slice.value in _B3_THINKING_KEYS):
+                hit.add(node.slice.value)
+        if hit:
+            writers[rel] = tuple(sorted(hit))
+    return writers
+
+
+def _b3_function_source(rel, name):
+    src = (_B3_APP / rel).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            segment = ast.get_source_segment(src, node)
+            assert segment, f"{rel}::{name} 取不到源码"
+            return segment
+    raise AssertionError(f"{rel} 里找不到函数 {name}：站点名单过期了")
+
+
+# ---------- B3 判据形状之一：源码级守卫 ----------
+
+def test_the_eight_create_sites_are_exactly_the_roster_and_nothing_else():
+    """八处 `chat.completions.create` 必须逐点在册，第九处一出现就红。
+
+    这一格是"闸外还有一条出网路"（规划员风险 2）最便宜的抓法：名单写死在测试里，
+    新增站点必须先在这里登记角色，而登记那一刻就得回答"它接不接闸"。
+    """
+    assert _b3_create_sites(_B3_APP) == set(_B3_ROSTER), (
+        f"出网站点名单与实际代码不一致：实测多出 {sorted(_b3_create_sites(_B3_APP) - set(_B3_ROSTER))}"
+        f"、缺少 {sorted(set(_B3_ROSTER) - _b3_create_sites(_B3_APP))}")
+
+
+def test_only_the_registration_table_writes_a_thinking_key():
+    """思考键（reasoning_effort/enable_thinking/thinking）在 `backend/app/` 里只许有一个写者。
+
+    写者 = `thinking_profiles.py` 那张候选表本身。任何出网站点自己拼一份
+    `{"thinking": ...}` 或 `create(reasoning_effort=...)`，"未核实就不发"就当场变成假话——
+    那条判据住在 `build_thinking_kwargs` 里，绕过它的地方不受它管。
+    """
+    assert _b3_key_writers(_B3_APP) == {
+        "core/thinking_profiles.py": ("enable_thinking", "reasoning_effort", "thinking")}
+
+
+def test_the_four_auxiliary_sites_do_not_even_mention_thinking():
+    """B3 第二条硬要求：辅助四站点的函数体里连 `thinking` 这个字样都不许出现。
+
+    为什么判到"连字都不许出现"这么严：`memory_manager._summarize` 拿的是全局默认记录，
+    与被校验那条不是同一个对象。谁"顺手"把档位传下去，摘要就会拿着**另一条记录**的
+    verified 结论去发参数——那种改法在"不许出现思考键"这一格上还可能被 `none` 兜住，
+    在"不许出现 thinking 字样"这一格上无处藏。
+    """
+    for (rel, name), role in _B3_ROSTER.items():
+        if role != "aux":
+            continue
+        source = _b3_function_source(rel, name)
+        assert "thinking" not in source.lower(), f"{rel}::{name} 里出现了 thinking 字样"
+        assert "build_thinking_kwargs" not in source, f"{rel}::{name} 不许自己组装思考参数"
+
+
+def test_the_four_user_selected_sites_take_the_single_merge_helper():
+    """四个选模站点必须通过 `providers.thinking_kwargs_for` 这一份合并入口接闸。
+
+    合并入口只有一份的原因与 B1 同源：换算（标签→序号）与组装（序号→出网格子）各只许
+    一处，四个站点各写一份就是四种口径。
+    """
+    for (rel, name), role in _B3_ROSTER.items():
+        if role != "send":
+            continue
+        source = _b3_function_source(rel, name)
+        assert "thinking_kwargs_for" in source, f"{rel}::{name} 没接闸"
+        assert "build_thinking_kwargs" not in source, f"{rel}::{name} 绕开合并入口自己组装"
+
+
+def test_the_label_to_index_conversion_has_exactly_one_call_site():
+    """B1：换算点只此一处（`_prepare_chat` 那一段），出网站点上不许再各算一遍。"""
+    hits = [(rel, src.count("thinking_request_index("))
+            for rel, src in _b3_sources(_B3_APP) if "thinking_request_index(" in src]
+    assert hits == [("core/providers.py", 1), ("main.py", 1)], (
+        f"换算点应当是「定义一份 + 调用一份」，实测 {hits}")
+
+
+# ---------- B1 + B2：换算、缺省、越界 ----------
+
+def test_a_label_becomes_the_ordinal_of_the_records_own_roster(monkeypatch):
+    """B1 唯一正确写法：`record["thinking_levels"].index(标签) + 1`。"""
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    record = _b3_record()
+    for offset, label in enumerate(_B3_LEVELS, start=1):
+        assert providers.thinking_request_index(record, label) == offset
+
+
+def test_missing_or_blank_label_sends_nothing_at_all(monkeypatch):
+    """缺省=没这一格，空串按没填处理——**都不发参数**。
+
+    空串不当"第 0 档"的理由：档位清单是管理员自填的字符串，`_clean_levels` 早就把空串
+    去掉了，把它当序号 0 会撞上 `build_thinking_kwargs` 的下界，换来一个 500。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    record = _b3_record()
+    for label in (None, "", "   "):
+        assert providers.thinking_request_index(record, label) is None, repr(label)
+
+
+def test_a_label_outside_the_roster_is_refused(monkeypatch):
+    """B1 反例：标签不在清单里 → 拒收（HTTP 面那条 400 另有一格），且什么都不发。"""
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    record = _b3_record()
+    for label in ("第四档", "快 速", "均衡和深入"):
+        with pytest.raises(providers.ProviderError, match="思考档位"):
+            providers.thinking_request_index(record, label)
+
+
+def test_an_empty_roster_with_a_verified_entry_still_refuses_every_label(monkeypatch):
+    """B1 反例之二：verified 条目在场但清单为空 ⇒ 任何标签都拒收。
+
+    清单为空意味着服务端一个可选档位都没有，放行任何标签等于凭空发明一档——
+    那个序号会直接进 `build_thinking_kwargs`，出网一个没人配过的值。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    with pytest.raises(providers.ProviderError, match="思考档位"):
+        providers.thinking_request_index(_b3_record(thinking_levels=[]), _B3_LEVELS[0])
+
+
+def test_an_out_of_range_index_never_reaches_build_thinking_kwargs(monkeypatch):
+    """B1 最后一条：请求路径永远不把序号推到越界（越界在 12A 定的是 ValueError ⇒ 500）。
+
+    形状是"库里那份清单比配方声明的出网取值数长"的畸形记录——写路径 M2 会拒，但
+    `_load` 不跑 `_validate`，盘上手写坏的老记录照样读得进来。换算点必须拿
+    `build_thinking_kwargs` 自己预检一次，把这种记录换成 400 而不是 500。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry(level_count=2))
+    record = _b3_record()                       # 清单三档，配方只出网两个不同值
+    assert providers.thinking_request_index(record, _B3_LEVELS[0]) == 1
+    assert providers.thinking_request_index(record, _B3_LEVELS[1]) == 2
+    with pytest.raises(providers.ProviderError, match="思考档位"):
+        providers.thinking_request_index(record, _B3_LEVELS[2])
+
+
+def test_an_unverified_record_refuses_the_label_and_the_reply_leaks_nothing():
+    """M3/B2：`thinking_status != verified` ⇒ 拒收，且这句话不回显这条记录的能力字段。"""
+    record = _b3_record(thinking_profile="none")
+    assert providers._thinking_view(record)["thinking_status"] == "unverified"
+    with pytest.raises(providers.ProviderError) as caught:
+        providers.thinking_request_index(record, _B3_LEVELS[0])
+    detail = str(caught.value)
+    for leak in (_B3_LEVELS[0], _B3_PROFILE, _B3_MODEL, "3", "level"):
+        assert leak not in detail, f"错误文案回显了能力字段：{leak}"
+
+
+def test_the_shipped_table_never_yields_an_index_for_any_label():
+    """这一格把"今天一个字节都不发"钉成判据：出厂表只有 `none` ⇒ 非空标签一律拒。
+
+    它与 `:337-344` 那格（`set(THINKING_PROFILES) == {"none"}`）是一对：那格守"没人偷偷
+    登记"，这一格守"没有条目时请求侧确实换算不出序号"。少了这一格，"未核实就不发"
+    仍然只是一句希望。
+    """
+    assert set(thinking_profiles.PROFILES) == {"none"}
+    record = _b3_record(thinking_profile="none")
+    for label in _B3_LEVELS + ["第四档"]:
+        with pytest.raises(providers.ProviderError):
+            providers.thinking_request_index(record, label)
+    assert providers.thinking_request_index(record, None) is None
+
+
+def test_thinking_kwargs_for_is_inert_without_an_index():
+    """合并入口的两侧：`index=None` ⇒ `{}`；出厂表下就算有人误传序号也只回 `{}`。"""
+    assert providers.thinking_kwargs_for(_b3_record(), None) == {}
+    assert providers.thinking_kwargs_for(_b3_record(thinking_profile="none"), 2) == {}
+    assert providers.thinking_kwargs_for({}, 2) == {}
+
+
+# ---------- B2 + B3：HTTP 面（400 不是 422；verified 才带；辅助站点永不带） ----------
+
+def test_a_rejected_thinking_level_is_a_400_and_never_a_422(client, b3_records):
+    """B2 第一条硬要求：校验必须在 `_prepare_chat` 里，绝不许放进 pydantic `field_validator`。
+
+    两侧都演，少一侧这条判据就是恒绿：
+    - 值不合法（未核实/标签不在清单）⇒ **400**，detail 是那句固定的话，不回显能力字段；
+      搬进 `field_validator` 的话这一格会变成 422 + `MALFORMED_BODY_DETAIL`，M3 要的 400 就没了。
+    - 形状不合法（送的是数字）⇒ 才是 422 那一族（全局处理器的地盘，与思考判据无关）。
+    """
+    b3_records(_b3_record(thinking_profile="none"))    # 出厂表下的真实形状：supports=True 但配方 none
+    body = {"provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+            "thinking_level": _B3_LEVELS[0]}
+    res = client.post("/v1/chat/stream", json=body)
+    assert res.status_code == 400, f"要的是 400，拿到 {res.status_code}：{res.text[:200]}"
+    detail = res.json()["detail"]
+    assert "思考" in detail, detail
+    for leak in (_B3_LEVELS[0], "none", _B3_MODEL, "3"):
+        assert leak not in detail, f"400 的这句话把能力字段说出去了：{leak}"
+
+    res422 = client.post("/v1/chat/stream", json=dict(body, thinking_level=7))
+    assert res422.status_code == 422, "非字符串才是形状错误那一族（全局处理器 422）"
+
+
+def test_no_request_ever_carries_a_thinking_key_with_the_shipped_table(client, b3_records,
+                                                                      b3_wire, monkeypatch):
+    """出厂表（只有 `none`）下的三条发送路：不带档位 ⇒ 正常出话，抓到的 kwargs 里没有思考键。
+
+    这一格把"生产白名单只有 none ⇒ 任何请求在任何出网站点都不可能带思考参数"钉成行为：
+    `/v1/chat`（pipeline 开与关两支）+ `/v1/chat/stream` 各跑一次。
+    """
+    import app.main as main
+
+    b3_records(_b3_record(thinking_profile="none"))
+    body = {"provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}]}
+    assert client.post("/v1/chat", json=body).status_code == 200
+    monkeypatch.setattr(main, "USE_PIPELINE", False)
+    assert client.post("/v1/chat", json=body).status_code == 200
+    assert client.post("/v1/chat/stream", json=body).status_code == 200
+    assert b3_wire, "三支路一次都没出网 = 下面三条断言是空的"
+    for sent in b3_wire:
+        assert not (_B3_THINKING_KEYS & set(sent)), sorted(sent)
+        assert _B3_KEY not in sent, sorted(sent)
+
+
+def test_a_verified_record_carries_the_ordinal_over_both_chat_routes(client, b3_records,
+                                                                    b3_wire, monkeypatch):
+    """B3 的行为级正例：synthetic verified 条目 + 命中这条记录的 host+model ⇒ kwargs 里真的带。
+
+    `/v1/chat/stream` 与 `/v1/chat` 两支（USE_PIPELINE 开与关）都要带——少一支就是
+    "未核实就不发"只在那一条路上成立（规划员风险 2 的原话）。
+    """
+    import app.main as main
+
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record())
+    body = {"provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+            "thinking_level": _B3_LEVELS[1]}          # "均衡" = 序号 2
+    assert client.post("/v1/chat", json=body).status_code == 200
+    assert client.post("/v1/chat/stream", json=body).status_code == 200
+    monkeypatch.setattr(main, "USE_PIPELINE", False)
+    assert client.post("/v1/chat", json=body).status_code == 200
+    sent = [c for c in b3_wire if _B3_KEY in c]
+    assert len(sent) == 3, f"三支路各该带一次，实测 {len(sent)}/{len(b3_wire)}：{sorted(b3_wire)}"
+    assert {c[_B3_KEY] for c in sent} == {2}, sent
+
+
+def test_the_same_label_on_a_record_that_is_not_verified_sends_nothing(client, b3_records,
+                                                                       b3_wire, monkeypatch):
+    """作用域一失效就必须回落 400：条目在表里 verified，但这条记录的 host 不在 `verified_for`。
+
+    这一格顶住的是 M1 那句"漏写 verified_for 的结果是这一格永远判 unverified"。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record(base_url="https://other.invalid/v1"))
+    res = client.post("/v1/chat/stream", json={
+        "provider": _B3_ID, "messages": [{"role": "user", "content": "你好"}],
+        "thinking_level": _B3_LEVELS[0]})
+    assert res.status_code == 400, res.text[:200]
+    assert b3_wire == [], f"被拒的那一次不该出网：{b3_wire}"
+
+
+def test_the_llm_client_and_react_sites_only_speak_through_the_index(client, b3_records,
+                                                                     b3_wire, monkeypatch):
+    """站点 3 与站点 4：`get_llm_response` 与 `ReActAgent.run` 各演"带"与"不带"。
+
+    `/v1/agent/run` 今天**没有**档位这一格（`AgentRequest` 不带 `thinking_level`，客户端接线
+    是 Task 13 的事），所以 HTTP 面跑它时必须一格都不带；"带"的那一面只能直接传序号来演。
+    """
+    from app.agents.react_agent import ReActAgent
+    from app.core.llm_client import get_llm_response
+
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record())
+
+    get_llm_response(model=_B3_MODEL, messages=[{"role": "user", "content": "hi"}],
+                     provider_id=_B3_ID, user_id="default_user", thinking_index=3)
+    assert [c for c in b3_wire if c.get(_B3_KEY) == 3], b3_wire
+    del b3_wire[:]
+
+    ReActAgent(model=_B3_MODEL, max_turns=1).run(task="算 1+1", user_id="default_user",
+                                                 provider_id=_B3_ID, thinking_index=1)
+    assert [c for c in b3_wire if c.get(_B3_KEY) == 1], b3_wire
+    del b3_wire[:]
+
+    # 不传序号（今天 `/v1/agent/run` 的真实形状）⇒ 一条都不带
+    ReActAgent(model=_B3_MODEL, max_turns=1).run(task="算 1+1", user_id="default_user",
+                                                 provider_id=_B3_ID)
+    assert b3_wire and not any(_B3_KEY in c for c in b3_wire), b3_wire
+    del b3_wire[:]
+    res = client.post("/v1/agent/run", json={"task": "算 1+1", "model": _B3_ID})
+    assert res.status_code == 200, res.text[:200]
+    assert b3_wire and not any(_B3_KEY in c for c in b3_wire), b3_wire
+
+
+def test_the_four_auxiliary_sites_never_receive_a_thinking_key(client, b3_records, b3_wire,
+                                                              monkeypatch):
+    """B3 的行为级反面：同一条抓包替身，在辅助四处一律不带思考键。
+
+    每处都先断言"这一次真的出网了"，否则"没带"是靠根本没跑出来的假绿。
+    `memory_manager._summarize` 那一处尤其要紧：它 `resolve()` 不带参数，拿的是全局默认记录。
+    """
+    from app.agents.react_agent import ReActAgent
+    from app.memory.memory_manager import MemoryManager
+
+    monkeypatch.setitem(providers.THINKING_PROFILES, _B3_PROFILE, _b3_entry())
+    b3_records(_b3_record())
+
+    assert providers.store.ping(_B3_ID)["ok"] is True
+    assert b3_wire, "ping 根本没出网"
+    assert all(not (_B3_THINKING_KEYS & set(c)) and _B3_KEY not in c for c in b3_wire), b3_wire
+    del b3_wire[:]
+
+    assert client.post("/v1/providers/test", json={
+        "label": "合成 12B", "base_url": _B3_BASE_URL,
+        "api_key": "sk-test-000111222333",  # secret-scan:allow 测试里造的假密钥
+        "model": _B3_MODEL, "supports_thinking": True,
+        "thinking_levels": list(_B3_LEVELS), "thinking_default": _B3_LEVELS[0],
+        "thinking_profile": _B3_PROFILE}).status_code == 200
+    assert b3_wire, "试稿根本没出网"
+    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+    del b3_wire[:]
+
+    manager = MemoryManager.__new__(MemoryManager)     # 不跑 __init__，只演那一个方法
+    manager.use_local_embed = False
+    manager._dummy_embed = False
+    manager._summarize("很长的一句话。" * 40, max_length=12)
+    assert b3_wire, "摘要根本没出网：这一格什么都没测"
+    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+    del b3_wire[:]
+
+    agent = ReActAgent(model=_B3_MODEL, max_turns=1)
+    fake = _b3_ns(chat=_b3_ns(completions=_B3Completions(b3_wire)))
+    agent._force_summarize(fake, _b3_record(), [{"role": "user", "content": "x"}], "任务")
+    assert b3_wire, "_force_summarize 没出网"
+    assert all(_B3_KEY not in c for c in b3_wire), b3_wire
+
+
+# ---------- B4：桩与真实签名同步、七个位置参数的老调用者 ----------
+
+def test_the_new_parameter_is_in_both_real_signatures_and_in_both_stubs():
+    """B4：`stream_chat`/`stream_chat_events` 与 conftest 的两份桩必须一起带上这一格。
+
+    `test_stream_tools.py:254` 按它自己的 docstring 只管"桩不许比真实宽"（窄了会在调用点
+    TypeError，它说"响得很"）；本单把**双向**都钉住——桩少一个新参数也红（负控 #5 咬的就是
+    这一格），真身漏加也红。
+    """
+    import app.core.streaming as streaming
+
+    stub_chat = inspect.signature(streaming.stream_chat).parameters
+    stub_events = inspect.signature(streaming.stream_chat_events).parameters
+    importlib.reload(streaming)
+    try:
+        real_chat = inspect.signature(streaming.stream_chat).parameters
+        real_events = inspect.signature(streaming.stream_chat_events).parameters
+        assert "thinking_index" in real_chat and "thinking_index" in real_events, \
+            "真签名没接这一格：档位传不到出网站点"
+        for label, params, real in (("桩 stream_chat", stub_chat, real_chat),
+                                    ("桩 stream_chat_events", stub_events, real_events)):
+            assert "thinking_index" in params, f"{label} 没跟真实签名同步加 thinking_index"
+            assert not set(params) - set(real), f"{label} 收得下真身不认识的参数"
+    finally:
+        importlib.reload(streaming)
+
+
+def test_the_producers_forward_the_index_and_stay_position_compatible():
+    """B4 后半：转发只有一份；`launch_stream_run` 的三个七位置参数调用者不许被迫改写法。"""
+    import app.main as main
+    import app.pipeline as pipeline
+    import app.core.streaming as streaming
+
+    importlib.reload(streaming)
+    try:
+        assert "thinking_index=thinking_index" in inspect.getsource(streaming.stream_chat), \
+            "薄过滤层没把档位转给真正出网的那个函数"
+    finally:
+        importlib.reload(streaming)
+    assert "thinking_index=thinking_index" in inspect.getsource(pipeline.ChatPipeline.process)
+    assert "thinking_index=thinking_index" in inspect.getsource(main.stream_chat_endpoint)
+
+    chat_params = list(inspect.signature(main._produce_stream).parameters)
+    run_params = list(inspect.signature(main.launch_stream_run).parameters)
+    head = ["run", "provider", "messages", "user_text", "principal", "pipe", "used_memory_ids"]
+    assert chat_params[:7] == head and chat_params[-1] == "thinking_index", chat_params
+    assert run_params[:7] == head and run_params[-1] == "thinking_index", run_params
+    assert inspect.signature(main.launch_stream_run).parameters["thinking_index"].default is None
+
+
+def test_chat_request_has_the_field_and_it_defaults_to_none():
+    """B1 第一句：`ChatRequest.thinking_level` 这一格**今天必须存在**，且缺省 None。"""
+    import app.main as main
+
+    field = main.ChatRequest.model_fields["thinking_level"]
+    assert field.default is None
+    assert field.annotation is not bool, "档位是 UI 标签字符串，不是关掉思考那个布尔开关"
+
+
+# ---------- B6：两句会变旧的话 ----------
+
+def test_prefs_kt_no_longer_claims_the_field_does_not_exist_yet():
+    """B6 之一：`Prefs.kt:26` 那句"服务端今天还没有 thinking_level 这一格"从今天起是假话。
+
+    只改注释不动代码（测试侧的 `_c()` 剥注释，所以本单不挪动任何 Kotlin 锁）；
+    客户端接线仍然排在 Task 13，这句话必须同时说清"字段存在"和"还没接"。
+    """
+    text = (REPO_ROOT / "android-native/app/src/main/java/xyz/fenever/assistant/nativeapp" /
+            "Prefs.kt").read_text(encoding="utf-8")
+    assert "服务端今天还没有" not in text, "这一格已经存在了，这句话变成假话了"
+    assert "thinking_level" in text and "Task 13" in text, "注释必须说清字段存在、接线在 Task 13"
+
+
+def test_the_plan_doc_declares_which_branch_task_12_took():
+    """B6 之二：计划文档 Task 12 那一节头部要有一行指向 `task-12-amendment.md` 的注解。
+
+    这不是装饰——仓库约定（agents.md 第 4 条）要求同一版本周期里多份规划时写明"哪一版看哪份"，
+    而计划正文本身是执行合同，历史正文不许重写，只许加一行生效范围。
+    """
+    doc = (REPO_ROOT / "docs/superpowers/plans/2026-10-31-model-cockpit.md").read_text(
+        encoding="utf-8")
+    at = doc.index("## Task 12:")
+    window = doc[at:at + 900]
+    assert "task-12-amendment.md" in window, window[:300]
+    assert "none" in window, "注解必须写明本轮走 none-only 那一支"

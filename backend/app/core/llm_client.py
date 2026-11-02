@@ -11,7 +11,7 @@ streaming 里的那份重复且互不同步，是"界面模型与实际调用不
 from typing import List, Dict, Optional, Any
 
 from app.core import usage
-from app.core.providers import store, build_client
+from app.core.providers import store, build_client, thinking_kwargs_for
 
 
 def get_llm_response(
@@ -21,6 +21,7 @@ def get_llm_response(
     tools: Optional[List[Dict]] = None,
     provider_id: str = None,
     user_id: str = None,
+    thinking_index: int = None,
 ) -> str:
     """统一 LLM 调用。
 
@@ -43,6 +44,11 @@ def get_llm_response(
     }
     if tools:
         params["tools"] = tools
+    # 思考参数只有一个写者（Task 12B B3 站点 3）：`USE_PIPELINE=False` 时的 `/v1/chat`
+    # 与每一次 agent 调用都汇到这一个门口，漏掉它，"未核实就不发"就只在那两条路上成立。
+    # 序号由 `_prepare_chat` 那一段唯一换算，这里不重算；`None` 与今天（登记表里只有
+    # `none`）都得到空字典。
+    params.update(thinking_kwargs_for(provider, thinking_index))
 
     billed = {k: 0 for k in ("prompt_tokens", "completion_tokens",
                              "total_tokens", "reasoning_tokens", "cached_tokens")}

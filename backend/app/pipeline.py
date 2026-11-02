@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 # 导入路径统一用 app. 前缀：裸模块名（memory.*、tools.*）只在以脚本方式
 # 启动 backend/app/main.py 时恰好可用，打包后会 ImportError，并被上层的
 # try/except 静默吞掉，导致记忆与工具能力在 EXE 里悄悄失效。
-from app.core.providers import store, build_client
+from app.core.providers import store, build_client, thinking_kwargs_for
 from app.core import usage   # 账本：与流式那一条同一个口径，别各记一套
 from app.core import schedule   # "今天"的口径：见 _today_line
 from app.core.buildinfo import build_version   # 本部署是哪个版本：见 _env_line
@@ -97,7 +97,8 @@ class ChatPipeline:
             )
         return "" if content is None else str(content)
 
-    def process(self, model: str, messages: List[Dict], provider_id: str = None) -> Dict[str, Any]:
+    def process(self, model: str, messages: List[Dict], provider_id: str = None,
+                thinking_index: int = None) -> Dict[str, Any]:
         """
         主处理流程：
         1. 从 messages 提取用户最新输入
@@ -123,7 +124,8 @@ class ChatPipeline:
         trace: List[Dict[str, Any]] = []
         final_reply = self._call_model_with_tool_loop(model, enriched_messages,
                                                       provider_id=provider_id,
-                                                      trace_out=trace)
+                                                      trace_out=trace,
+                                                      thinking_index=thinking_index)
 
         # 4. 按信号自动保存记忆（多数轮次什么都不存，那是设计意图）
         self.save_interaction(user_input)
@@ -187,7 +189,8 @@ class ChatPipeline:
 
     def _call_model_with_tool_loop(self, model: str, messages: List[Dict], max_turns=5,
                                    provider_id: str = None,
-                                   trace_out: List[Dict[str, Any]] = None) -> str:
+                                   trace_out: List[Dict[str, Any]] = None,
+                                   thinking_index: int = None) -> str:
         """支持工具调用的对话循环，类似 ReAct 的简化版。
 
         配置缺失或调用失败一律抛异常：把故障当回复文本返回，会让错误写进会话
@@ -220,6 +223,9 @@ class ChatPipeline:
                     # 症状是"界面配得上、非流式接口 400"，只在工具全被禁用时出现。
                     kwargs["tools"] = self.tools_schema
                     kwargs["tool_choice"] = "auto"
+                # 思考参数只有一个写者（Task 12B B3 站点 2）：序号由 `_prepare_chat` 唯一
+                # 换算，这里不重算；登记表只有 `none` 的那天这一格恒为空字典。
+                kwargs.update(thinking_kwargs_for(provider, thinking_index))
                 response = client.chat.completions.create(**kwargs)
                 rounds += 1
                 u = getattr(response, "usage", None)

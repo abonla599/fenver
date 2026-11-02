@@ -459,9 +459,10 @@ def _thinking_fields(record: dict, requested=None) -> dict:
     统统存不下去。宽容也不等于丢掉不变式——归一之后的结果照样自洽，库里存的
     那一份永远合法。
 
-    判序是刻意的：先 `profile` 白名单、再档位条数（先是通用的「最多 3 个」，后是这一
-    配方自己声明的 `level_count` 相等判据）、最后 supports 与参数的组合。
-    一个不认识的值摆在面前时，第一句该说的是"这个值我不认"，而不是"你不支持思考"。
+    判序是刻意的：先 `profile` 白名单、再通用的「最多 3 档」、然后**先看 supports**：
+    关着思考就走清空那一条（不判配方声明的 `level_count`，M-R1），开着才判数量相等、
+    最后判 default 与候选的组合。一个不认识的值摆在面前时，第一句该说的是"这个值我不认"，
+    而不是"你不支持思考"；而一次"关掉思考"的保存里，档位清单该被清空，不该被审判。
 
     关掉思考（显式 `supports_thinking=False`）时档位与默认**清空**而不是报错：
     "我不再用这个模型的思考"是一次真实的用户动作，不该因为表单里还留着上一次的
@@ -480,44 +481,118 @@ def _thinking_fields(record: dict, requested=None) -> dict:
         if "thinking_levels" in brought:
             raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
         levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
-    # 档位条数必须等于这一配方**出网的不同取值数**（M2）。判据只对"请求真正带来的
-    # 那一格"生效，与上面 思考档位最多 3 个 同一口径：继承来的畸形值永远不许抛
-    # （Task 8 裁决 A 的遗产）。这件事上**真的会红**的锁按名单点名（文件 =
-    # test_v0391_provider_capabilities.py；行号是 12A 修复轮 1 的现场坐标、会漂，认锁
-    # 以名字为准；两枚变异均在仓库外克隆实测还原）：摘本行 brought 门 ⇒
-    # `test_inherited_levels_never_hit_the_level_count_gate`（:450）独红；摘本行
-    # `level_count is not None` 守卫 ⇒ `test_request_brought_invalid_values_are_still_rejected`
-    # （:300）、`test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`
-    # （:418）、`test_update_levels_without_default_renormalises_inherited_default`（:235）
-    # 等一批红。两枚变异下都不红的正是旧注释点名的
-    # `test_malformed_legacy_record_accepts_three_writes`（:267，审查员 12A M-R2）——别再指它。
-    # 为什么是**拒收**而不是截断：悄悄砍掉第 3 档等于把"没配上"演成"配上了"——
-    # 布尔配方三档同一个出网值（g2 实测）时，界面给三个档而线上只有一个值，
-    # 用户点第 3 档什么也没变。这里选择响亮地拒绝，让它去改成 1 档。
-    # `level_count is None`（含 `none`）不判这一条：今天不可达，但两侧都有锁
-    # （synthetic 布尔条目填 3 档被拒、填 1 档通过），不许它恒真。
-    level_count = (THINKING_PROFILES.get(profile) or {}).get("level_count")
-    if level_count is not None and "thinking_levels" in brought and len(levels) != level_count:
-        raise ProviderError(f"思考档位数量必须与该配方出网的不同取值数一致（应为 {level_count} 个）")
     default = str(record.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX]
     if not supports:
+        # M-R1（从 12A 审查继承的验收项）：**先看 supports**。关掉思考是一次真实的
+        # 用户动作，档位与默认按 Task 8 裁决清空，不判 `level_count`——旧写法把档位闸
+        # 排在这一步之前，于是"关掉思考"的那一次 PUT 若顺手带着一份与配方数量不符的
+        # 清单，会被"审判"而不是被"清空"。今天不可达（表里只有 `none`，它不声明
+        # level_count），但形状必须现在就对：两侧都有锁（关掉+数量不匹配 → 通过并清空；
+        # 开着+同样这份清单 → 拒收），见 test_v0391_provider_capabilities.py 那两格。
         levels, default = [], ""
         if profile != DEFAULT_THINKING_PROFILE:
             if "thinking_profile" in brought:
                 raise ProviderError("不支持思考的模型不能配置思考参数")
             profile = DEFAULT_THINKING_PROFILE
-    elif default not in levels:
-        # 只有用户此刻亲笔填的那个值才配得上一句拒收；空 default（没填或主动清空）
-        # 和继承来的旧默认越界一样，归到候选第一个，没有候选就是空串。
-        if default and "thinking_default" in brought:
-            raise ProviderError("思考默认档位不在候选里")
-        default = levels[0] if levels else ""
+    else:
+        # 档位条数必须等于这一配方**出网的不同取值数**（M2）。判据只对"请求真正带来的
+        # 那一格"生效，与上面 思考档位最多 3 个 同一口径：继承来的畸形值永远不许抛
+        # （Task 8 裁决 A 的遗产）。这件事上**真的会红**的锁按名单点名（文件 =
+        # test_v0391_provider_capabilities.py；行号是 12A 修复轮 1 的现场坐标、会漂，认锁
+        # 以名字为准；两枚变异均在仓库外克隆实测还原，那一轮的本行还在 supports 判据之前）：
+        # 摘本行 brought 门 ⇒ `test_inherited_levels_never_hit_the_level_count_gate`（:450）
+        # 独红；摘本行 `level_count is not None` 守卫 ⇒
+        # `test_request_brought_invalid_values_are_still_rejected`（:300）、
+        # `test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`（:418）、
+        # `test_update_levels_without_default_renormalises_inherited_default`（:235）
+        # 等一批红。两枚变异下都不红的正是旧注释点名的
+        # `test_malformed_legacy_record_accepts_three_writes`（:267，审查员 12A M-R2）——别再指它。
+        # 为什么是**拒收**而不是截断：悄悄砍掉第 3 档等于把"没配上"演成"配上了"——
+        # 布尔配方三档同一个出网值（g2 实测）时，界面给三个档而线上只有一个值，
+        # 用户点第 3 档什么也没变。这里选择响亮地拒绝，让它去改成 1 档。
+        # `level_count is None`（含 `none`）不判这一条：今天不可达，但两侧都有锁
+        # （synthetic 布尔条目填 3 档被拒、填 1 档通过），不许它恒真。
+        level_count = (THINKING_PROFILES.get(profile) or {}).get("level_count")
+        if (level_count is not None and "thinking_levels" in brought
+                and len(levels) != level_count):
+            raise ProviderError(f"思考档位数量必须与该配方出网的不同取值数一致（应为 {level_count} 个）")
+        if default not in levels:
+            # 只有用户此刻亲笔填的那个值才配得上一句拒收；空 default（没填或主动清空）
+            # 和继承来的旧默认越界一样，归到候选第一个，没有候选就是空串。
+            if default and "thinking_default" in brought:
+                raise ProviderError("思考默认档位不在候选里")
+            default = levels[0] if levels else ""
     return {
         "supports_thinking": supports,
         "thinking_levels": levels,
         "thinking_default": default,
         "thinking_profile": profile,
     }
+
+
+# ---------- 请求侧（v0.39.1 Task 12B）：档位标签 → 出网序号，唯一的换算点 ----------
+#
+# 这一族只在**读/请求**侧判，不写库：写路径的判据是 `_thinking_fields`（拒收非法组合），
+# 请求路径的判据是"这条记录此刻能不能吃这个档位"。两份判据共用同一份 `_thinking_view`
+# 与同一张登记表，所以界面亮绿的那一格和真正出网的那一次永远不会分叉。
+THINKING_REQUEST_REJECTED = "该模型当前不支持所选的思考档位"
+
+
+def thinking_request_index(record, label):
+    """把客户端送来的**档位标签**换算成 `build_thinking_kwargs` 要的**序号**。
+
+    返回值三种：`None` = 这次不发思考参数；`1..level_count` = 出网第 N 个不同取值；
+    其余情况一律 `ProviderError`，detail 是 `THINKING_REQUEST_REJECTED` 那一句固定的话——
+    **不回显这条记录的能力字段**（档位清单、配方名、上限都不许出现在错误里，否则一次
+    探测就能读出这条记录的思考配置，而那是管理员的内部设置）。
+
+    四条判据（B1/B2，缺一个就是让"未核实就不发"变成一句希望）：
+
+    1. 缺省与空串都不发。空串**不当成"第 0 档"**：档位清单是管理员自填的字符串，
+       `_clean_levels` 在写路径就把空串去掉了，把它读成序号 0 只会撞上
+       `build_thinking_kwargs` 的下界，把一个"用户没填"演成一个 500。
+    2. 判据只有一份：走 `_thinking_view`（它内部就是带 host+model 的 `_thinking_status`），
+       不在调用方另抄。host 取 `urlparse(base_url).hostname`，取不到就按"不匹配"走
+       unverified，不猜。
+    3. 标签必须在这条记录自己的 `thinking_levels` 里——清单为空时任何标签都拒收，
+       因为那时服务端一个可选档位都没有，放行等于凭空发明一档。
+    4. 换算出的序号必须真发得出去：拿 `build_thinking_kwargs` 原地预检一次。库里那份
+       清单可能比配方声明的出网取值数长（M2 只挡写路径，`_load` 不跑 `_validate`，
+       盘上手写坏的老记录照样读得进来），此时越界的那一格必须是 400，不能是 500。
+       这也是"请求路径永远不把序号推到越界"这条要求的实现处——判据不复制，
+       而是问唯一的写者本身。
+    """
+    text = str(label).strip() if isinstance(label, str) else label
+    if not text:
+        return None
+    view = _thinking_view(record or {})
+    if view["thinking_status"] != "verified":
+        raise ProviderError(THINKING_REQUEST_REJECTED)
+    levels = view["thinking_levels"]
+    if text not in levels:
+        raise ProviderError(THINKING_REQUEST_REJECTED)
+    index = levels.index(text) + 1
+    profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
+    try:
+        _thinking_profiles.build_thinking_kwargs(profile, index)
+    except ValueError:
+        raise ProviderError(THINKING_REQUEST_REJECTED) from None
+    return index
+
+
+def thinking_kwargs_for(record, index) -> dict:
+    """四个出网站点唯一的合并入口：`index` 为 None ⇒ 一个字节都不加。
+
+    序号是调用方（`_prepare_chat` 那一段）先按 `_thinking_status` 与这条记录自己的清单
+    换算出来的——**同一个对象**从校验点一路传到这一点，中途不许换记录（`resolve()` 不带
+    参数那种"再解析一次"拿到的可能是另一条记录，见 memory_manager 那条纪律）。
+    组装一律交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise，
+    `none` 它自己回 `{}`，所以今天（表里只有 `none`）这四条路永远收到空字典。
+    """
+    if index is None:
+        return {}
+    profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
+    return _thinking_profiles.build_thinking_kwargs(profile, index)
 
 
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改

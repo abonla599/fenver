@@ -182,9 +182,13 @@ def text_as_events(text_fn):
     def events(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
                tools=None, max_tool_turns=5, user_id=None,
                cancel_event=None, on_upstream_start=None, before_round=None,
-               usage_out=None):
+               usage_out=None, thinking_index=None):
         # usage_out 与真签名同步：端点的 producer 会传它，这里收下并忽略——
         # 纯文本桩不结 usage，done 帧自然不带（判据见 test_v0391_done_usage.py）。
+        # thinking_index 同理：这一格是"发不发思考参数"的坐标，而文本桩根本不组装 kwargs，
+        # 那条边界一律在真引擎上验（test_v0391_thinking_mapping.py §13 的抓包用例）。
+        # 桩**必须收得下**它：真签名加了形参而桩没加，端点会当场 TypeError，
+        # 红出来的信息看着像产品坏了——这正是 B4 与 `test_stream_tools.py:254` 的同一条纪律。
         for piece in text_fn(model, messages, provider_id=provider_id,
                              temperature=temperature, max_tokens=max_tokens,
                              tools=tools, max_tool_turns=max_tool_turns,
@@ -220,9 +224,12 @@ def _stub_llm_calls(monkeypatch):
     # `for chunk in ...` 当场 TypeError，而不是静默放过一次回归。
     def fake_stream(model, messages, provider_id=None, temperature=0.7, max_tokens=4096,
                     tools=None, max_tool_turns=5, user_id=None,
-                    cancel_event=None, on_upstream_start=None, before_round=None):
+                    cancel_event=None, on_upstream_start=None, before_round=None,
+                    thinking_index=None):
         # 形参要跟真函数一致：这个桩以前少两个参数，真签名一加参数，
         # 所有走流式端点的测试就一起 TypeError——而红出来的信息看着像产品坏了。
+        # thinking_index 是 v0.39.1 Task 12B 新加的那一格，本桩同样只收不用（理由见
+        # `text_as_events` 里那段）；双向签名锁在 test_v0391_thinking_mapping.py §13。
         for piece in ("（", "测试", "回复）"):
             yield piece
 

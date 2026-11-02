@@ -604,3 +604,49 @@ def test_me_providers_shared_section_hides_profile_for_writers_only(client, enfo
     for item in admin["shared"]:
         assert "thinking_profile" in item
         assert "thinking_status" in item
+
+
+# ---------- M-R1（Task 12B 从 12A 审查继承的验收项）：档位闸不许排在清空之前 ----------
+
+def test_turning_thinking_off_clears_levels_without_judging_the_count(tmp_path, monkeypatch):
+    """M-R1：一次 PUT 同时带 `supports_thinking=False` 与一份数量不匹配的档位清单时，
+    必须先按 Task 8 裁决**清空**，不许先被 `level_count` 那一闸判死。
+
+    今天不可达（出厂表里只有 `none`，它不声明 `level_count`），所以两侧都靠 synthetic
+    条目演，且两侧都得跑：
+    - 关掉 + 清单数量不匹配 ⇒ 通过并清空（12A 审查员点出的形状，改前必红）。
+    - 开着 + 同样这份清单 ⇒ 仍然拒收（防这条修复把 M2 那一闸顺手删掉，防它恒真）。
+    三条继承锁（`test_request_brought_invalid_values_are_still_rejected`、
+    `test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`、
+    `test_update_levels_without_default_renormalises_inherited_default`）在本单里必须继续绿。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": True, "level_count": 1})
+    # 库里那份是"开着思考 + 已配好布尔配方 + 1 档"的一条记录
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_profile="synth_bool",
+                               thinking_levels=["一"], thinking_default="一")])
+    off = s.upsert({**_old(), "supports_thinking": False, "thinking_levels": ["一", "二"]})
+    assert off["supports_thinking"] is False
+    assert off["thinking_levels"] == [] and off["thinking_default"] == "", \
+        "关掉思考的那一次里，档位本该被清空而不是被审判"
+    assert off["thinking_profile"] == DEFAULT_THINKING_PROFILE, \
+        "profile 是继承来的：归一回 none（Task 8 裁决 A），不是被档位闸顺手拒掉"
+    _assert_self_consistent(off)
+
+    # 另一侧：同一份不匹配的清单，开着思考时必须照样拒收
+    s2 = _store(tmp_path, [_old(supports_thinking=True, thinking_profile="synth_bool",
+                                thinking_levels=["一"], thinking_default="一")])
+    with pytest.raises(ProviderError, match="思考档位数量必须与该配方出网的不同取值数一致"):
+        s2.upsert({**_old(), "supports_thinking": True, "thinking_levels": ["一", "二"]})
+
+
+def test_the_generic_level_cap_is_still_judged_when_thinking_is_off(tmp_path):
+    """M-R1 只把 `level_count` 那一闸挪到 supports 之后，**不许**顺手把通用的「最多 3 档」
+    一起挪走：`test_invalid_capabilities_are_rejected` 第一条就是 supports 缺省（False）+
+    4 档带来的那次保存，判据必须还在。这一格是给上一条修复画的边界，防它越修越宽。
+    """
+    s = _store(tmp_path, [_old()])
+    with pytest.raises(ProviderError, match="思考档位最多 3 个"):
+        s.upsert({**_old(), "thinking_levels": ["一", "二", "三", "四"]})
+    # 库里那份仍是关着思考的（读路径口径，见 `_thinking_view`）——被拒的那一次一个字都没存
+    assert providers._thinking_view(s.get("p1"))["supports_thinking"] is False

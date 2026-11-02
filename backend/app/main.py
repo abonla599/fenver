@@ -351,6 +351,13 @@ class ChatRequest(BaseModel):
     attachments: List[str] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
     messages: list[dict]
     session_id: Optional[str] = None
+    # v0.39.1 Task 12B：思考**档位标签**（UI 上那几个管理员自填的名字，不是布尔开关）。
+    # 这一格从今天起存在，但生产登记表里只有 `none`，所以任何请求都换不出序号、也就
+    # 一个字节都发不出去——那是判据不是巧合，锁在 §13 那两格（verified 会带 / 出厂表不带）。
+    # 缺省 None 与空串都是"这一格没填"，不发参数；判据绝不许搬进 `field_validator`：
+    # 上面 :231-239 那个全局 RequestValidationError 处理器会把 ValueError 变成
+    # 422 + MALFORMED_BODY_DETAIL，那时 400 没了、也归因不到思考这一格。
+    thinking_level: Optional[str] = None
 
     @field_validator("messages")
     @classmethod
@@ -615,7 +622,8 @@ def _self_origin(request: Request) -> str:
 from app.core import stream_events
 from app.core import credits
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
-                                looks_placeholder, build_client, scrub_secrets)
+                                looks_placeholder, build_client, scrub_secrets,
+                                thinking_request_index, THINKING_REQUEST_REJECTED)
 from app.core import search_keys
 from app.core.uploads import (store as upload_store, build_user_content,
                               UploadError, MAX_UPLOAD_BYTES)
@@ -663,19 +671,34 @@ def _throttle_chat(http: Request, principal: Principal) -> None:
 
 
 def _prepare_chat(request: ChatRequest, principal: Principal):
-    """解析模型服务、拼装附件。
+    """解析模型服务、拼装附件、把思考档位标签换算成出网序号。
 
-    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本)。
+    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本, 思考档位序号)。
     历史里只记原始文本加附件名，避免把整份文件塞进会话记录。
 
     principal 一路传进来而不是在这里再取一次：附件归属必须由"谁在请求"决定，
     请求里那个 attachments 列表只是别人塞进来的 id 集合。
+
+    第四个返回值是**序号**（1..level_count）而不是标签：换算点只此一处（Task 12B B1），
+    四个出网站点各自都只把这一个数交给 `providers.thinking_kwargs_for`，谁都不许再算
+    一遍——两处各算一次就是两份口径，迟早有一份在"清单里有这个标签但配方出网值更少"
+    这种畸形记录上漂掉。`None` 表示这次不发思考参数（没填/空串/这条记录没核实过）。
+
+    判据不在这里抄：`thinking_request_index` 走的就是 12A 那一份 `_thinking_view` →
+    `_thinking_status(supports, profile, host, model)`，界面亮绿的那一格与真正出网的
+    那一次因此永远是同一个结论。不通过一律 400，detail 是那一句固定的话，
+    **不回显这条记录的能力字段**（档位清单/配方名/上限都不许出现在错误里）。
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
     provider = provider_store.resolve(request.provider, legacy_model=request.model,
                                       user_id=principal.user_id)
+
+    try:
+        thinking_index = thinking_request_index(provider, request.thinking_level)
+    except ProviderError:
+        raise HTTPException(status_code=400, detail=THINKING_REQUEST_REJECTED) from None
 
     messages = list(request.messages)
     last = messages[-1] or {}
@@ -693,7 +716,7 @@ def _prepare_chat(request: ChatRequest, principal: Principal):
             for a in request.attachments)
         history_text = (text + "\n" if text else "") + f"[附件] {names}"
 
-    return provider, messages, history_text
+    return provider, messages, history_text, thinking_index
 
 
 def _require_session_owner(session_id, principal: Principal) -> None:
@@ -733,7 +756,7 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
     _require_session_owner(request.session_id, principal)
     _shadow_gate(principal)   # 入口先过线：到线就不出网，这一次账本零增量
     try:
-        provider, messages, user_text = _prepare_chat(request, principal)
+        provider, messages, user_text, thinking_index = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
@@ -742,7 +765,8 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
         trace = []
         if USE_PIPELINE:
             result = ChatPipeline(user_id=principal.user_id).process(
-                provider["model"], messages, provider_id=provider["id"])
+                provider["model"], messages, provider_id=provider["id"],
+                thinking_index=thinking_index)
             reply = result.get("reply", "")
             used_memory_ids = result.get("used_memory_ids") or []
             trace = result.get("trace") or []
@@ -750,7 +774,8 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
             reply = get_llm_response(
                 model=provider["model"], messages=messages,
                 temperature=0.7, provider_id=provider["id"],
-                user_id=principal.user_id)   # 账要落在叫它的人头上
+                user_id=principal.user_id,   # 账要落在叫它的人头上
+                thinking_index=thinking_index)
     except HTTPException:
         raise
     except Exception as e:
@@ -810,18 +835,25 @@ def _parse_last_event_id(raw: str):
 
 
 def launch_stream_run(run: "stream_runs.StreamRun", provider, messages, user_text,
-                      principal: Principal, pipe, used_memory_ids) -> threading.Thread:
+                      principal: Principal, pipe, used_memory_ids,
+                      thinking_index: int = None) -> threading.Thread:
     """启动生产线程。与端点分开写，是为了契约测试能在不开 HTTP 流的处境下
-    装配一轮（test_v025_stream_cancel_contract 需要中途取消的确定性时机）。"""
+    装配一轮（test_v025_stream_cancel_contract 需要中途取消的确定性时机）。
+
+    `thinking_index` 只能**加在末尾并带默认值**：现有三个调用者是按七个位置参数调的
+    （test_v025_stream_cancel_contract.py、test_v025_r3b_no_reader_billing.py、
+    test_v025_r4b_credit_kernel.py），插队或改成关键字参数会把它们一起掀翻（B4）。
+    """
     t = threading.Thread(target=_produce_stream,
                          args=(run, provider, messages, user_text, principal,
-                               pipe, used_memory_ids),
+                               pipe, used_memory_ids, thinking_index),
                          daemon=True, name=f"stream-run-{run.run_id[:8]}")
     t.start()
     return t
 
 
-def _produce_stream(run, provider, messages, user_text, principal, pipe, used_memory_ids):
+def _produce_stream(run, provider, messages, user_text, principal, pipe, used_memory_ids,
+                    thinking_index=None):
     """把一轮流式对话的每一步都变成带序号的缓冲帧：生产者只此一个线程。
 
     与改造前的 generate() 的三点不同，每一点都是 R3 判据的正面：
@@ -910,7 +942,8 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                                         cancel_event=run.cancel_event,    # 停止的主判据
                                         on_upstream_start=run.attach_upstream,  # 供当场关闭
                                         before_round=before_round,       # R3b 轮次边界的钱闸
-                                        usage_out=usage_out):             # done 帧回传 usage
+                                        usage_out=usage_out,             # done 帧回传 usage
+                                        thinking_index=thinking_index):   # 档位序号（12B）
             if frame.get("type") == se.FRAME_CONTENT:
                 full_text += frame.get("text") or ""
             run.append(frame)
@@ -1025,7 +1058,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
 
     # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
     try:
-        provider, messages, user_text = _prepare_chat(request, principal)
+        provider, messages, user_text, thinking_index = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
@@ -1044,7 +1077,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
     run = stream_runs.create_run(user_id=principal.user_id,
                                  session_id=request.session_id)
     launch_stream_run(run, provider, messages, user_text, principal, pipe,
-                      used_memory_ids)
+                      used_memory_ids, thinking_index=thinking_index)
     return StreamingResponse(stream_runs.sse_frames(run, 0),
                              media_type="text/event-stream")
 

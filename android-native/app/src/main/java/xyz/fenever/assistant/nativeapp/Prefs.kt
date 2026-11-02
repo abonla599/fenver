@@ -22,8 +22,9 @@ data class Identity(val userId: String, val username: String = "", val role: Str
                     val token: String = "", val lastSessionId: String = "",
                     val providerId: String = "", val addedAt: String = "")
 
-/* 思考偏好的每格值（Task 10）：enabled 的默认值必须是 false——服务端今天还没有
- * thinking_level 这一格（Task 12/13 的活），默认开就等于界面在承诺一件发不出去的事。
+/* 思考偏好的每格值（Task 10）：enabled 的默认值必须是 false。服务端从 Task 12B 起**有**
+ * thinking_level 这一格（可发的档位仍只有登记表里核实过的那几条，今天一条都没有，所以
+ * 带了档位也发不出去）；客户端接线在 Task 13。默认开就等于界面在承诺一件发不出去的事。
  * 两格都带默认值：旧版本机 JSON 里缺任何一格都解得开，不炸启动。 */
 @Serializable
 private data class ThinkingPref(val enabled: Boolean = false, val level: String = "")
