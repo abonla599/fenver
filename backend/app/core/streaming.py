@@ -14,7 +14,7 @@ import threading
 import time
 from typing import Generator, List, Dict, Any, Optional
 
-from app.core.providers import store, build_client
+from app.core.providers import store, build_client, thinking_kwargs_for
 from app.core import usage   # 账本：两条聊天路径共用一个口径，别各记一套
 from app.core import stream_events as se
 from app.core.guardrails import RoundGuard
@@ -140,6 +140,7 @@ def stream_chat(
     cancel_event=None,
     on_upstream_start=None,
     before_round=None,
+    thinking_index: int = None,
 ) -> Generator[str, None, None]:
     """流式生成 AI 回复的**文本**薄过滤器：只把正文 piece 透出去，其余帧吞掉。
 
@@ -157,6 +158,7 @@ def stream_chat(
         max_tokens=max_tokens, tools=tools, max_tool_turns=max_tool_turns,
         user_id=user_id, cancel_event=cancel_event,
         on_upstream_start=on_upstream_start, before_round=before_round,
+        thinking_index=thinking_index,
     ):
         if ev["type"] == se.FRAME_CONTENT:
             yield ev["text"]
@@ -175,6 +177,8 @@ def stream_chat_events(
     on_upstream_start=None,
     before_round=None,
     trace_out: Optional[List[Dict[str, Any]]] = None,
+    usage_out: Optional[Dict[str, int]] = None,
+    thinking_index: int = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """唯一的流式引擎：产出**帧 dict**（类型一律来自 stream_events，绝不在这里手写字面量）。
 
@@ -190,6 +194,9 @@ def stream_chat_events(
     - cancel_event / on_upstream_start / before_round 三件套的语义、计费与检查点
       同 stream_chat（见各段内联注释），此处不再重述。
     - usage 在 finally 里结：半截消耗同样要记账，取消/故障也不例外。
+    - `thinking_index` 是**档位序号**（Task 12B）：换算与"这条记录核实过没有"的判据都在
+      `_prepare_chat`/`providers.thinking_request_index` 那一处，这里只把序号交给
+      `providers.thinking_kwargs_for`（唯一的写者）。`None` ⇒ 一个字节都不带。
 
     过程留痕：非内容帧与步除了产出/回填 trace_out，还会就地塞进本线程的 ambient sink
     （若端点 begin_trace 过）。rich 只决定**发不发帧**：工单 #76a 起两支都走
@@ -252,6 +259,10 @@ def stream_chat_events(
                 # 空数组不传：有些兼容网关对 tools=[] 直接 400
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
+            # 思考参数只有一个写者（Task 12B B3 站点 1）。序号是 `_prepare_chat` 那一段
+            # 唯一换算出来的，这里不重算、不另判：登记表只有 `none` 的那天，这一格恒为
+            # 空字典，出网形状与本行存在之前逐字节相同。
+            kwargs.update(thinking_kwargs_for(provider, thinking_index))
 
             stream = client.chat.completions.create(**kwargs)
             # 把手里的连接交给要停它的人（交接失败不影响本轮内容，吞掉即可）；
@@ -524,6 +535,8 @@ def stream_chat_events(
         # v0.25 R3 起这条路上的"读者断开"不再终结生成（生产线程抽干为止），
         # 落到 failed 的成因改为取消与真故障。半截消耗同样要记账：那一半的 token
         # 是真花出去了，只记跑完的那一次会系统性低估，也永远看不见故障率。
+        if usage_out is not None:
+            usage_out.update(billed)
         usage.record_call(user_id=user_id or "unattributed",
                           provider_id=provider["id"],
                           paid_by=provider.get("paid_by") or "operator",

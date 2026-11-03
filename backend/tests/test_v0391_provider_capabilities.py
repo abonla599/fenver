@@ -1,0 +1,652 @@
+"""v0.39.1 Task 8：provider 思考能力字段 + /v1/models 的 can_edit。
+
+判据源：.superpowers/sdd/2026-10-31-model-cockpit/task-8-brief.md。brief 内部两处
+自相矛盾按裁决落地（裁决 A/B 是 spec 第 207-237 行的口径）：
+
+  裁决 A —— 更新时四个 thinking 字段的保留发生在 `_validate` **之前**。放在校验之后
+            会出现非法组合：老记录 `supports_thinking=True, profile=verified_x`，
+            一次只带 `supports_thinking=False` 的 PUT 先以 profile=none 过了组合校验，
+            随后旧 profile 被补回来，库里落下「不支持思考却带思考参数」。
+  裁决 B —— 非法档位**拒收**，不截断不夹值。brief 的示例实现会把 4 个档位截到 3 个、
+            default 不在候选里时夹成 levels[0]，那是把"没配上"演成"配上了"。
+            只有读路径（catalog/_public）对畸形老数据防御性截断。
+
+修复轮 1（A 与 B 相撞的新口径）—— 严格判据只作用在**请求真正带来的那几格**上；
+从库里补进来的继承值只做宽容归一，永不 raise。合并在 `_validate` 之前不变（A），
+但校验层按来源分叉（B 收窄）：请求带的野 profile / 4 档 / 越界 default 照样拒收，
+继承来的同一样畸形值归一成自洽的一份。于是一次改名、一次显式关思考都存得下去，
+而"库里存的那一份永远自洽"这条不变式照样守住。
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import json
+
+import pytest
+
+from app.core import providers
+from app.core.providers import (DEFAULT_THINKING_PROFILE, ProviderError,
+                                ProviderStore)
+
+
+def _store(tmp_path, items):
+    p = tmp_path / "providers.json"
+    p.write_text(json.dumps(items), encoding="utf-8")
+    return ProviderStore(path=str(p))
+
+
+def _old(**over):
+    base = {"id": "p1", "label": "旧模型", "base_url": "https://1.1.1.1/v1",
+            "api_key": "sk-test-123456",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+            "model": "m", "supports_vision": False, "is_default": True}
+    base.update(over)
+    return base
+
+
+def test_old_records_get_safe_defaults_and_unverified_status(tmp_path):
+    s = _store(tmp_path, [_old()])
+    e = s.catalog()[0]
+    assert e["supports_thinking"] is False and e["thinking_levels"] == []
+    assert e["thinking_default"] == "" and e["thinking_status"] == "unsupported"
+
+
+def test_update_without_max_context_k_keeps_the_stored_cap(tmp_path):
+    """Task 9 的写侧前提：「上下文上限」从设置页表单搬进模型卡后，PUT 不再带这一格。
+
+    `_validate` 对缺失键兜底成 64，而 `upsert` 是整条替换——不保留的话"改一次模型
+    名字"就会把 1000K 的 DeepSeek 洗成 64K，全站预算跟着塌。保留口径与
+    pricing/paid_by/思考四格是同一条纪律：更新已有条目时，请求里缺失或为 None 的
+    那一格用库里那份；显式给值仍走 normalize_max_context_k（越界**钳制**，这里不
+    新增 raise——上限的判据只有一处）。新建路径不受这条影响（库里没有"上一份"）。
+    """
+    s = _store(tmp_path, [_old(max_context_k=1000)])
+    s.upsert({**_old(), "label": "只改个名"})
+    assert s.get("p1")["max_context_k"] == 1000, "改名把模型上限洗成了缺省 64"
+
+    # 显式 None 与"没带这一格"是同一种输入（PUT 路由走 exclude_none，直接调 store
+    # 的调用方可能给出 None）：都保留库里那份
+    s.upsert({**_old(), "label": "还是改名", "max_context_k": None})
+    assert s.get("p1")["max_context_k"] == 1000
+
+    # 显式给值照旧落库，越界只钳不拒
+    s.upsert({**_old(), "max_context_k": 256})
+    assert s.get("p1")["max_context_k"] == 256
+    s.upsert({**_old(), "max_context_k": 99999})
+    assert s.get("p1")["max_context_k"] == providers.MAX_CONTEXT_K_CEIL
+
+    # 新建（库里没有这一条）不受保留影响：没带就是缺省 64
+    s.upsert({**_old(), "id": "p_new", "label": "新建"})
+    assert s.get("p_new")["max_context_k"] == providers.DEFAULT_MAX_CONTEXT_K
+
+
+def test_route_put_without_cap_keeps_the_preset_cap(client, enforced):
+    """I-2 的路由层端到端（Minor 9 一并收掉）：不带 max_context_k 的一次 PUT，读回来仍是 1000。
+
+    上面那条 store 用例证明的是合并逻辑；这一条走的是**管理员真会发的那份 payload**：
+    形状取自 app.js 的 providerDraftFromForm（编辑路径只发连接配置七格）。只看 store
+    挡不住"路由把 exclude_none 改成 exclude_unset""表单从此又发一次上限"这类改法，
+    而现网是 PyInstaller 整包，界面与后端只有这一条 HTTP 缝——缝上没人验过就等于没验。
+    三格都要成：① 预置那份上限建得住；② 不带这一格的编辑读回来仍是 1000（不是 64）；
+    ③ /v1/models 那份目录跟着说 1000（界面封顶读的就是这一份）。
+    """
+    hdr = {"Authorization": "Bearer boot-token"}
+    created = client.post("/v1/providers", headers=hdr, json={
+        "label": "DeepSeek 预置新建", "base_url": "https://1.1.1.1/v1",
+        "api_key": "sk-test-123456",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+        "model": "deepseek-flash", "supports_vision": True, "max_context_k": 1000,
+    })
+    assert created.status_code == 200, created.text
+    pid = created.json()["provider"]["id"]
+    try:
+        assert created.json()["provider"]["max_context_k"] == 1000
+        # 表单那次 PUT：七格连接配置，没有 max_context_k（与 app.js providerDraftFromForm 同形状）
+        edited = client.put(f"/v1/providers/{pid}", headers=hdr, json={
+            "label": "DeepSeek 改个名", "base_url": "https://1.1.1.1/v1",
+            "api_key": "", "model": "deepseek-flash",
+            "supports_vision": True, "is_default": False,
+        })
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["provider"]["max_context_k"] == 1000, \
+            "改名把 1000K 洗成了缺省 64：管理员新增 DeepSeek 拿到 64K 闸门，全站预算跟着缩 16 倍"
+        back = next(p for p in client.get("/v1/providers", headers=hdr).json()["providers"]
+                    if p["id"] == pid)
+        assert back["max_context_k"] == 1000, back
+        listed = next(m for m in client.get("/v1/models", headers=hdr).json()["models"]
+                      if m["id"] == pid)
+        assert listed["max_context_k"] == 1000, \
+            "/v1/me/providers 保住了而 /v1/models 说 64：界面封顶与滑杆量程按被洗掉的那份画"
+    finally:
+        assert client.delete(f"/v1/providers/{pid}", headers=hdr).status_code == 200
+
+
+def test_thinking_fields_validate_and_old_client_put_preserves_them(tmp_path):
+    s = _store(tmp_path, [_old()])
+    s.upsert({**_old(), "supports_thinking": True,
+              "thinking_levels": ["快速", "均衡"], "thinking_default": "均衡"})
+    saved = s.get("p1")
+    assert saved["thinking_levels"] == ["快速", "均衡"]
+    # 旧客户端 PUT 不带新字段：必须保留，不许静默洗成 false
+    s.upsert({**_old(), "label": "改名"})
+    assert s.get("p1")["supports_thinking"] is True
+    assert s.get("p1")["thinking_levels"] == ["快速", "均衡"]
+
+
+# 三类非法输入各自钉死报错文本。bad2 同时钉"先判 profile 再判组合"：
+# supports=False + 野 profile 必须报"未知的思考参数配置"，而不是先到组合校验
+# 报"不支持思考的模型不能配置思考参数"——一个不认识的值摆在面前，
+# 第一句该说的是"这个值我不认"。
+@pytest.mark.parametrize("bad,msg", [
+    ({"thinking_levels": ["a", "b", "c", "d"]}, "思考档位最多 3 个"),
+    ({"supports_thinking": True, "thinking_levels": ["快速"], "thinking_default": "均衡"},
+     "思考默认档位不在候选里"),
+    ({"supports_thinking": False, "thinking_profile": "nope"}, "未知的思考参数配置"),
+])
+def test_invalid_capabilities_are_rejected(tmp_path, bad, msg):
+    s = _store(tmp_path, [_old()])
+    with pytest.raises(ProviderError, match=msg):
+        s.upsert({**_old(), **bad})
+
+
+# ---------- 裁决 B：四条组合口径逐条判，且报错而不是夹值 ----------
+
+def test_explicit_disable_clears_levels_and_normalises_inherited_profile(tmp_path):
+    """显式 False 是用户确实这么填：档位清空；继承来的野 profile 归一，不挡保存。"""
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速"],
+                               thinking_default="快速", thinking_profile="none")])
+    s.upsert({**_old(), "supports_thinking": False})
+    saved = s.get("p1")
+    assert saved["thinking_levels"] == []
+    assert saved["thinking_default"] == ""
+    assert saved["thinking_profile"] == "none"
+
+    # 盘上一条 profile 是野值的老记录：一次只改名的 PUT 不许再被它挡住（I-2）。
+    # 野值是从库里补进来的、不是这次请求填的 → 宽容归一成白名单缺省，落库自洽。
+    s2 = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速"],
+                                thinking_default="快速", thinking_profile="nope")])
+    saved2 = s2.upsert({**_old(), "label": "只改个名"})
+    assert saved2["thinking_profile"] == DEFAULT_THINKING_PROFILE
+    assert saved2["thinking_levels"] == ["快速"]
+    assert saved2["thinking_default"] == "快速"
+
+    # 同一条野值记录，请求**自己带了**野 profile 就还是拒收（严格性不许退）
+    with pytest.raises(ProviderError, match="未知的思考参数配置"):
+        s2.upsert({**_old(), "thinking_profile": "nope"})
+
+
+def test_empty_levels_means_empty_default_not_a_clamped_one(tmp_path):
+    """支持思考但没配档位：default 是空串，不是被夹出来的某个值。"""
+    s = _store(tmp_path, [_old()])
+    s.upsert({**_old(), "supports_thinking": True})
+    assert s.get("p1")["thinking_levels"] == []
+    assert s.get("p1")["thinking_default"] == ""
+
+    # 未给 default 时取清洗后的第一个候选，而不是原始输入的第一个
+    s.upsert({**_old(), "supports_thinking": True,
+              "thinking_levels": ["  快速 ", "快速", " 均衡 "]})
+    assert s.get("p1")["thinking_levels"] == ["快速", "均衡"]
+    assert s.get("p1")["thinking_default"] == "快速"
+
+    # 裁决 B 的另一格：单个标签超 16 字符截断后入库，default 跟着取截断后的那份。
+    # 这里显式给空串 = 用户主动清空默认档。**不带** default 走的是另一条口
+    # （修复轮 1）：继承来的旧默认落在新候选之外时归到新候选第一个，见
+    # test_update_levels_without_default_renormalises_inherited_default。
+    s.upsert({**_old(), "supports_thinking": True, "thinking_default": "",
+              "thinking_levels": ["一二三四五六七八九十一二三四五六七八九十"]})
+    assert s.get("p1")["thinking_levels"] == ["一二三四五六七八九十一二三四五六"]
+    assert s.get("p1")["thinking_default"] == "一二三四五六七八九十一二三四五六"
+
+
+# ---------- catalog / _public 的可见性边界 ----------
+
+def test_catalog_and_public_status_and_profile_visibility(tmp_path):
+    s = _store(tmp_path, [_old()])
+    entry = s.catalog()[0]
+    assert entry["supports_thinking"] is False
+    assert entry["thinking_levels"] == []
+    assert entry["thinking_default"] == ""
+    assert entry["thinking_status"] == "unsupported"
+
+    s.upsert({**_old(), "supports_thinking": True,
+              "thinking_levels": ["快速", "均衡"], "thinking_default": "均衡"})
+    entry = s.catalog()[0]
+    assert entry["thinking_status"] == "unverified"
+    # profile 是"怎么调参"的内部配方，普通模型清单不给它（P0c 之前它也只可能是 none）
+    assert "thinking_profile" not in entry
+
+    public = ProviderStore._public(s.get("p1"))
+    assert public["thinking_profile"] == "none"
+    assert public["thinking_status"] == "unverified"
+
+
+def test_read_path_truncates_malformed_legacy_levels_write_path_refuses(tmp_path):
+    """同一个清洗函数，两侧职责不同：读兜底截 3 个，写必须报红。"""
+    s = _store(tmp_path, [_old(supports_thinking=True,
+                               thinking_levels=["一", "二", "三", "四"])])
+    assert len(s.catalog()[0]["thinking_levels"]) == 3
+    with pytest.raises(ProviderError):
+        s.upsert({**_old(), "supports_thinking": True,
+                  "thinking_levels": ["一", "二", "三", "四"]})
+
+
+# ---------- 修复轮 1 新口径：严格只作用在「请求真正带来的值」上 ----------
+
+def test_update_levels_without_default_renormalises_inherited_default(tmp_path):
+    """I-1：只改档位、不带 default —— 继承来的旧默认越界时归一，不许 400。
+
+    旧实现把补进来的 "均衡" 当成用户显式填写去判越界，于是"改档位"这个动作
+    本身永远存不下去（严格判据打在了一盘没人碰过的旧值上）。
+    """
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速", "均衡"],
+                               thinking_default="均衡", thinking_profile="none")])
+    saved = s.upsert({**_old(), "supports_thinking": True, "thinking_levels": ["深度思考"]})
+    assert saved["thinking_levels"] == ["深度思考"]
+    assert saved["thinking_default"] == "深度思考"
+
+    # 连 supports 那一格都不带（旧表单只回填改了名的档位）同样成立
+    s2 = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速", "均衡"],
+                                thinking_default="均衡", thinking_profile="none")])
+    saved2 = s2.upsert({**_old(), "thinking_levels": ["深度思考"]})
+    assert saved2["thinking_default"] == "深度思考"
+
+
+def _assert_self_consistent(rec):
+    """一次成功 upsert 之后库里那份必须自洽——这是当初裁决 A 要保的不变式。"""
+    assert rec["thinking_profile"] in providers.THINKING_PROFILES
+    assert len(rec["thinking_levels"]) <= 3
+    if rec["thinking_levels"]:
+        assert rec["thinking_default"] in rec["thinking_levels"]
+    else:
+        assert rec["thinking_default"] == ""
+    if not rec["supports_thinking"]:
+        assert rec["thinking_levels"] == [] and rec["thinking_default"] == ""
+        assert rec["thinking_profile"] == DEFAULT_THINKING_PROFILE
+
+
+def test_malformed_legacy_record_accepts_three_writes(tmp_path):
+    """I-2：盘上一份畸形老记录（4 档 + 野 profile），三种写都得存下去。"""
+    bad = _old(supports_thinking=True, thinking_levels=["一", "二", "三", "四"],
+               thinking_default="四", thinking_profile="nope")
+
+    # ① 只改名：畸形值全是继承来的 → 宽容归一
+    s1 = _store(tmp_path, [bad])
+    renamed = s1.upsert({**_old(), "label": "改个名"})
+    assert renamed["label"] == "改个名"
+    _assert_self_consistent(renamed)
+
+    # ② 显式关思考：`_thinking_fields` 自己那句 docstring 承诺过
+    #    "关掉思考不该被上一次候选挡住"，畸形老记录也不能破这条
+    s2 = _store(tmp_path, [bad])
+    off = s2.upsert({**_old(), "supports_thinking": False})
+    _assert_self_consistent(off)
+    assert off["thinking_levels"] == [] and off["thinking_default"] == ""
+
+    # ③ 显式带合法 profile：档位仍是继承来的 → 截到 3，default 跟着落回候选
+    s3 = _store(tmp_path, [bad])
+    fixed = s3.upsert({**_old(), "thinking_profile": DEFAULT_THINKING_PROFILE})
+    _assert_self_consistent(fixed)
+    assert fixed["thinking_levels"] == ["一", "二", "三"]
+    assert fixed["thinking_default"] == "一"
+
+
+@pytest.mark.parametrize("bad,msg", [
+    ({"supports_thinking": True, "thinking_levels": ["一", "二", "三", "四"]}, "思考档位最多 3 个"),
+    ({"supports_thinking": True, "thinking_levels": ["快速"], "thinking_default": "别的"},
+     "思考默认档位不在候选里"),
+    ({"supports_thinking": True, "thinking_profile": "nope"}, "未知的思考参数配置"),
+    ({"supports_thinking": False, "thinking_profile": "nope"}, "未知的思考参数配置"),
+])
+def test_request_brought_invalid_values_are_still_rejected(tmp_path, bad, msg):
+    """严格性不许退：拿"继承宽容"当借口把拒收删掉是本任务最容易犯的错。
+
+    库里同时躺着一份畸形老记录——每条用例都既能证明"请求带的值照样判"，
+    也能证明"继承来的值没被顺手当显式填写去判"（判序仍按 profile→档位→组合）。
+    """
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["一", "二", "三", "四"],
+                               thinking_default="四", thinking_profile="nope")])
+    with pytest.raises(ProviderError, match=msg):
+        s.upsert({**_old(), **bad})
+
+
+def test_disable_with_requested_profile_raises_but_inherited_one_normalises(tmp_path, monkeypatch):
+    """supports=False + 非 none 的 profile：请求带的拒收，继承来的归一。
+
+    白名单本版只有 none，而 none 就是缺省值，所以"合法但非 none"这格只能靠
+    monkeypatch 造出来（P0c 真加 verified profile 时这条自动变成实际路径）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "low",
+                        {"label": "低", "verified": False})
+
+    fresh = _store(tmp_path, [_old()])
+    with pytest.raises(ProviderError, match="不支持思考的模型不能配置思考参数"):
+        fresh.upsert({**_old(), "supports_thinking": False, "thinking_profile": "low"})
+
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速"],
+                               thinking_default="快速", thinking_profile="low")])
+    off = s.upsert({**_old(), "supports_thinking": False})
+    assert off["thinking_profile"] == DEFAULT_THINKING_PROFILE
+    _assert_self_consistent(off)
+
+
+# ---------- I-3：读侧 verified 派生必须读白名单 ----------
+
+def test_read_status_uses_the_profile_whitelist(tmp_path):
+    """野 profile 不许在出口报 verified；none 虽被标了 verified，也不算"参数已核实"。"""
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["快速"],
+                               thinking_default="快速", thinking_profile="nope")])
+    assert s.catalog()[0]["thinking_status"] == "unverified"
+    assert ProviderStore._public(s.get("p1"))["thinking_status"] == "unverified"
+
+    s2 = _store(tmp_path, [_old(supports_thinking=True,
+                                thinking_profile=DEFAULT_THINKING_PROFILE)])
+    assert s2.catalog()[0]["thinking_status"] == "unverified"
+    assert ProviderStore._public(s2.get("p1"))["thinking_status"] == "unverified"
+
+
+def test_verified_requires_the_whitelist_entry_to_say_so(tmp_path, monkeypatch):
+    """verified 要白名单那一格说"verified"，**并且**这条记录的 host+model 在 verified_for 里。
+
+    M1（task-12-amendment）把核实结论从"配方级"收到"记录级"：探针的射程是「单条 provider
+    记录 + 它当时的 base_url + 它当时的 model」，不是模型级也不是厂商级。所以
+    `{"label", "verified"}` 这一份旧形状从这里起**不再够格**亮 verified——四向都跑：
+    host+model 命中 → verified；同 model 换 host → unverified；同 host 换 model →
+    unverified；不传 host/model（读不到 base_url 或 model 的老记录）→ unverified。
+    回落一律是 unverified，**不是** unsupported："这条没核实到"≠"这个模型不会思考"。
+    """
+    scope = [{"host": "1.1.1.1", "model": "m"}]          # _old() 那条记录的 hostname + model
+    monkeypatch.setitem(providers.THINKING_PROFILES, "fake_verified",
+                        {"label": "x", "verified": True, "verified_for": scope})
+    monkeypatch.setitem(providers.THINKING_PROFILES, "fake_unverified",
+                        {"label": "y", "verified": False, "verified_for": scope})
+    for profile, expected in (("fake_verified", "verified"),
+                              ("fake_unverified", "unverified"),
+                              ("nope", "unverified"),
+                              (DEFAULT_THINKING_PROFILE, "unverified")):
+        s = _store(tmp_path, [_old(supports_thinking=True, thinking_profile=profile)])
+        assert s.catalog()[0]["thinking_status"] == expected, profile
+        assert ProviderStore._public(s.get("p1"))["thinking_status"] == expected, profile
+
+    # 同 model 换 host：核实过的端点换掉了，结论必须跟着退回未核实
+    s = _store(tmp_path, [_old(base_url="https://2.2.2.2/v1", supports_thinking=True,
+                               thinking_profile="fake_verified")])
+    assert s.catalog()[0]["thinking_status"] == "unverified"
+
+    # 同 host 换 model：换一个 model 就是没核实过，不许吃邻居的核实结论
+    s = _store(tmp_path, [_old(model="other-model", supports_thinking=True,
+                               thinking_profile="fake_verified")])
+    assert s.catalog()[0]["thinking_status"] == "unverified"
+    assert ProviderStore._public(s.get("p1"))["thinking_status"] == "unverified"
+
+    # 缺 host 或缺 model（老记录/手工写坏的记录）：调用方没把坐标传齐 ⇒ 降级，不亮
+    for broken in (_old(base_url="", supports_thinking=True, thinking_profile="fake_verified"),
+                   _old(model="", supports_thinking=True, thinking_profile="fake_verified"),
+                   _old(base_url="1.1.1.1/v1", supports_thinking=True,
+                        thinking_profile="fake_verified")):
+        s = _store(tmp_path, [broken])
+        assert s.catalog()[0]["thinking_status"] == "unverified", broken["base_url"]
+
+    # supports=False 压过记录作用域：全命中也是 unsupported
+    s2 = _store(tmp_path, [_old(supports_thinking=False, thinking_profile="fake_verified")])
+    assert s2.catalog()[0]["thinking_status"] == "unsupported"
+
+
+def test_status_read_path_derives_the_host_from_the_records_base_url(tmp_path, monkeypatch):
+    """调用方算 host 的口径必须是 `urlparse(base_url).hostname`，不是整条 URL。
+
+    记录里那份是 `rstrip("/")` 过的（`https://api.deepseek.com/v1`），登记表里写的也
+    该是 hostname。整串比对的话，一次换 scheme（http↔https）或换 path 就把已核实的
+    结论洗成未核实——反过来如果拿 `endswith`/子串去宽容，换 host 也能亮。两侧都钉。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "scope_verified",
+                        {"label": "x", "verified": True,
+                         "verified_for": [{"host": "api.deepseek.com", "model": "deepseek-flash"}]})
+    record = dict(_old(base_url="https://api.deepseek.com/v1", model="deepseek-flash",
+                       supports_thinking=True, thinking_profile="scope_verified"))
+    s = _store(tmp_path, [record])
+    assert s.catalog()[0]["thinking_status"] == "verified"
+
+    # 换 scheme 与 path 不作废（比的是 hostname）
+    s2 = _store(tmp_path, [dict(record, base_url="http://api.deepseek.com/chat/completions")])
+    assert s2.catalog()[0]["thinking_status"] == "verified"
+
+    # 换 hostname 立刻作废，哪怕尾巴上带着原来那串
+    s3 = _store(tmp_path, [dict(record, base_url="https://evil.example/api.deepseek.com/v1")])
+    assert s3.catalog()[0]["thinking_status"] == "unverified"
+
+
+def test_level_count_is_the_wire_value_count_and_only_judges_brought_levels(tmp_path, monkeypatch):
+    """M2：条目声明了 `level_count` 时，请求带来的 `thinking_levels` 条数必须等于它。
+
+    两侧都跑（防这条判据恒真）：布尔条目（g2 实测"三档同一个出网值"那一形）填 3 档被拒、
+    填 1 档通过；三档条目填 1 档同样被拒（不是"只许少不许多"）；`none` 不声明
+    `level_count` ⇒ 这一条不判，3 档照存。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": False, "level_count": 1})
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_three",
+                        {"label": "三档", "verified": False, "level_count": 3})
+    s = _store(tmp_path, [_old()])
+
+    with pytest.raises(ProviderError,
+                       match="思考档位数量必须与该配方出网的不同取值数一致（应为 1 个）"):
+        s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_bool",
+                  "thinking_levels": ["一", "二", "三"]})
+
+    saved = s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_bool",
+                      "thinking_levels": ["一"], "thinking_default": "一"})
+    assert saved["thinking_levels"] == ["一"]
+
+    with pytest.raises(ProviderError, match="应为 3 个"):
+        s.upsert({**_old(), "supports_thinking": True, "thinking_profile": "synth_three",
+                  "thinking_levels": ["一", "二"]})
+
+    none_case = s.upsert({**_old(), "supports_thinking": True,
+                          "thinking_profile": DEFAULT_THINKING_PROFILE,
+                          "thinking_levels": ["一", "二", "三"]})
+    assert none_case["thinking_levels"] == ["一", "二", "三"], "none 不声明档位上限，这条判据不许碰它"
+
+
+def test_inherited_levels_never_hit_the_level_count_gate(tmp_path, monkeypatch):
+    """M2 不许破 Task 8 裁决 A：库里那份档位是**继承**来的，一次改名不许被拒收。
+
+    库里躺着一份 `thinking_profile=synth_bool, thinking_levels=4 档` 的畸形老记录
+    （档位条数与出网值数都不符），一次只带 label 的 PUT 必须存得下去——严格判据只打在
+    请求真正带来的那一格上，继承来的做宽容归一（与 `思考档位最多 3 个` 同一口径）。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": False, "level_count": 1})
+    legacy = _old(supports_thinking=True, thinking_profile="synth_bool",
+                  thinking_levels=["一", "二", "三", "四"], thinking_default="四")
+    s = _store(tmp_path, [legacy])
+    renamed = s.upsert({**_old(), "label": "改个名"})
+    assert renamed["label"] == "改个名"
+    assert renamed["thinking_profile"] == "synth_bool"
+    _assert_self_consistent(renamed)
+
+
+# ---------- Minor：同一把尺子量两侧 + 读侧候选化 + 单源 + 共享面 ----------
+
+def test_default_label_gets_the_same_clamp_as_levels(tmp_path):
+    """Minor-1：同一个 20 字串当档位收、当默认档拒（报错误导），default 也过一遍截断。"""
+    long_label = "一二三四五六七八九十一二三四五六七八九十"   # 20 字
+    assert len(long_label) == 20
+    s = _store(tmp_path, [_old()])
+    saved = s.upsert({**_old(), "supports_thinking": True,
+                      "thinking_levels": [long_label], "thinking_default": long_label})
+    assert saved["thinking_levels"] == [long_label[:16]]
+    assert saved["thinking_default"] == long_label[:16]
+
+
+def test_read_path_snaps_default_into_the_candidates(tmp_path):
+    """Minor-2：读侧截完档位，default 还在候选外就归到候选第一个，别甩给界面。"""
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["一", "二"],
+                               thinking_default="三")])
+    assert s.catalog()[0]["thinking_default"] == "一"
+    assert ProviderStore._public(s.get("p1"))["thinking_default"] == "一"
+
+    s2 = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=[],
+                                thinking_default="孤儿")])
+    assert s2.catalog()[0]["thinking_default"] == ""
+    assert ProviderStore._public(s2.get("p1"))["thinking_default"] == ""
+
+    # 畸形 4 档被截掉后，指着第 4 档的那个 default 也要跟着落回候选
+    s3 = _store(tmp_path, [_old(supports_thinking=True, thinking_levels=["一", "二", "三", "四"],
+                                thinking_default="四")])
+    assert s3.catalog()[0]["thinking_levels"] == ["一", "二", "三"]
+    assert s3.catalog()[0]["thinking_default"] == "一"
+
+    # 手工写坏的"关着思考却带着候选"：读侧不给界面画一个永远点不动的选项
+    s4 = _store(tmp_path, [_old(supports_thinking=False, thinking_levels=["一"],
+                                thinking_default="一")])
+    assert s4.catalog()[0]["thinking_levels"] == []
+    assert s4.catalog()[0]["thinking_default"] == ""
+    assert ProviderStore._public(s4.get("p1"))["thinking_levels"] == []
+
+
+def test_thinking_view_is_a_single_source(tmp_path):
+    """Minor-3：catalog 与 _public 的思考视图一份实现，两处数字不许各写各的。"""
+    src = Path(providers.__file__).read_text(encoding="utf-8")
+    assert "def _thinking_view(" in src
+    assert src.count('"thinking_levels": _clean_levels(') == 1
+
+    s = _store(tmp_path, [_old(supports_thinking=True,
+                               thinking_levels=["一", "二", "三", "四"],
+                               thinking_default="三", thinking_profile="nope")])
+    entry = s.catalog()[0]
+    public = ProviderStore._public(s.get("p1"))
+    for key in ("supports_thinking", "thinking_levels", "thinking_default", "thinking_status"):
+        assert public[key] == entry[key], key
+    # _public 在单源之上只多给一格 profile（管理表单回传需要）
+    assert public["thinking_profile"] == "nope"
+    assert "thinking_profile" not in entry
+
+
+# ---------- can_edit 矩阵与 /v1/models ----------
+
+def test_can_edit_matrix():
+    from app.main import _can_edit_provider
+    from app.main import Principal
+
+    admin = Principal(user_id="u0", username="a", role="admin")
+    user = Principal(user_id="u1", username="b", role="user")
+    assert _can_edit_provider(admin, {"shared": True}) is True
+    assert _can_edit_provider(admin, {"shared": False}) is True
+    assert _can_edit_provider(user, {"shared": True}) is False
+    assert _can_edit_provider(user, {"shared": False}) is True
+
+
+def test_models_endpoint_can_edit_and_hides_profile(client, enforced):
+    hdr = enforced("cap-user")
+    models = client.get("/v1/models", headers=hdr).json()["models"]
+    shared = next(m for m in models if m["shared"] is True)
+    assert shared["can_edit"] is False
+    assert "thinking_profile" not in shared
+
+    r = client.post("/v1/me/providers", headers=hdr, json={
+        "label": "我的思考模型", "base_url": "https://1.1.1.1/v1",
+        "api_key": "sk-test-123456",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+        "model": "m", "supports_vision": False,
+        "supports_thinking": True, "thinking_levels": ["快速", "均衡"],
+        "thinking_default": "均衡",
+    })
+    assert r.status_code == 200, r.text
+    pid = r.json()["provider"]["id"]
+    try:
+        models = client.get("/v1/models", headers=hdr).json()["models"]
+        mine = next(m for m in models if m["id"] == pid)
+        assert mine["can_edit"] is True
+        assert mine["thinking_status"] == "unverified"
+    finally:
+        assert client.delete(f"/v1/me/providers/{pid}", headers=hdr).status_code == 200
+
+    # 本机管理员（bootstrap 令牌）连共享条目也能改
+    admin_models = client.get("/v1/models",
+                              headers={"Authorization": "Bearer boot-token"}).json()["models"]
+    assert next(m for m in admin_models if m["shared"] is True)["can_edit"] is True
+
+
+def test_me_providers_shared_section_hides_profile_for_writers_only(client, enforced):
+    """Minor-4 + Task 9：/v1/me/providers 的 shared 段按角色剥 thinking_profile。
+
+    共享条目对普通用户根本不可写（`_can_edit_provider` 与 /v1/providers 的
+    RequireAdmin 双重挡着），把"怎么调参"发过去只会让人以为改得动；而**管理员**
+    要在模型卡里改共享模型的 cap/能力，profile 必须能回显——少这一格，模型卡那次
+    PUT 就把已核实的配方洗回 none（和 mine 段同一个理由）。
+    mine 段永远是自己的 provider，回传那一格是"改完保存别把配方洗成 none"的根据。
+    """
+    hdr = enforced("cap-owner")
+    body = client.get("/v1/me/providers", headers=hdr).json()
+    assert body["shared"], "夹具里没有共享条目的话这条断言什么都没测"
+    for item in body["shared"]:
+        assert "thinking_profile" not in item
+        assert "thinking_status" in item          # 结论照给，界面要显示"参数未核实"
+
+    pid = client.post("/v1/me/providers", headers=hdr, json={
+        "label": "我的配方", "base_url": "https://1.1.1.1/v1",
+        "api_key": "sk-test-123456",  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+        "model": "m", "supports_vision": False,
+        "supports_thinking": True, "thinking_levels": ["快速"], "thinking_default": "快速",
+    }).json()["provider"]["id"]
+    try:
+        mine = next(m for m in client.get("/v1/me/providers", headers=hdr).json()["mine"]
+                    if m["id"] == pid)
+        assert mine["thinking_profile"] == DEFAULT_THINKING_PROFILE
+        assert mine["thinking_status"] == "unverified"
+        assert mine["thinking_levels"] == ["快速"]
+    finally:
+        assert client.delete(f"/v1/me/providers/{pid}", headers=hdr).status_code == 200
+
+    # 管理员（本机 bootstrap 令牌）在同一个面上要拿得到共享条目的 profile
+    admin = client.get("/v1/me/providers",
+                       headers={"Authorization": "Bearer boot-token"}).json()
+    assert admin["shared"], "管理员面同样看得见共享条目"
+    for item in admin["shared"]:
+        assert "thinking_profile" in item
+        assert "thinking_status" in item
+
+
+# ---------- M-R1（Task 12B 从 12A 审查继承的验收项）：档位闸不许排在清空之前 ----------
+
+def test_turning_thinking_off_clears_levels_without_judging_the_count(tmp_path, monkeypatch):
+    """M-R1：一次 PUT 同时带 `supports_thinking=False` 与一份数量不匹配的档位清单时，
+    必须先按 Task 8 裁决**清空**，不许先被 `level_count` 那一闸判死。
+
+    今天不可达（出厂表里只有 `none`，它不声明 `level_count`），所以两侧都靠 synthetic
+    条目演，且两侧都得跑：
+    - 关掉 + 清单数量不匹配 ⇒ 通过并清空（12A 审查员点出的形状，改前必红）。
+    - 开着 + 同样这份清单 ⇒ 仍然拒收（防这条修复把 M2 那一闸顺手删掉，防它恒真）。
+    三条继承锁（`test_request_brought_invalid_values_are_still_rejected`、
+    `test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`、
+    `test_update_levels_without_default_renormalises_inherited_default`）在本单里必须继续绿。
+    """
+    monkeypatch.setitem(providers.THINKING_PROFILES, "synth_bool",
+                        {"label": "布尔", "verified": True, "level_count": 1})
+    # 库里那份是"开着思考 + 已配好布尔配方 + 1 档"的一条记录
+    s = _store(tmp_path, [_old(supports_thinking=True, thinking_profile="synth_bool",
+                               thinking_levels=["一"], thinking_default="一")])
+    off = s.upsert({**_old(), "supports_thinking": False, "thinking_levels": ["一", "二"]})
+    assert off["supports_thinking"] is False
+    assert off["thinking_levels"] == [] and off["thinking_default"] == "", \
+        "关掉思考的那一次里，档位本该被清空而不是被审判"
+    assert off["thinking_profile"] == DEFAULT_THINKING_PROFILE, \
+        "profile 是继承来的：归一回 none（Task 8 裁决 A），不是被档位闸顺手拒掉"
+    _assert_self_consistent(off)
+
+    # 另一侧：同一份不匹配的清单，开着思考时必须照样拒收
+    s2 = _store(tmp_path, [_old(supports_thinking=True, thinking_profile="synth_bool",
+                                thinking_levels=["一"], thinking_default="一")])
+    with pytest.raises(ProviderError, match="思考档位数量必须与该配方出网的不同取值数一致"):
+        s2.upsert({**_old(), "supports_thinking": True, "thinking_levels": ["一", "二"]})
+
+
+def test_the_generic_level_cap_is_still_judged_when_thinking_is_off(tmp_path):
+    """M-R1 只把 `level_count` 那一闸挪到 supports 之后，**不许**顺手把通用的「最多 3 档」
+    一起挪走：`test_invalid_capabilities_are_rejected` 第一条就是 supports 缺省（False）+
+    4 档带来的那次保存，判据必须还在。这一格是给上一条修复画的边界，防它越修越宽。
+    """
+    s = _store(tmp_path, [_old()])
+    with pytest.raises(ProviderError, match="思考档位最多 3 个"):
+        s.upsert({**_old(), "thinking_levels": ["一", "二", "三", "四"]})
+    # 库里那份仍是关着思考的（读路径口径，见 `_thinking_view`）——被拒的那一次一个字都没存
+    assert providers._thinking_view(s.get("p1"))["supports_thinking"] is False

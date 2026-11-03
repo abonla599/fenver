@@ -110,6 +110,12 @@ docs-internal/
 # 一句注释——清单改了锁没重编也全绿，正是这把锁要防的那一格。只用标准库 + packaging
 # （清单里已有），只读清单与锁、不写盘、不碰网络。
 !/tools/check_requirements_lock.py
+# 思考参数核实探针（Task 11）。与上面几条同一个理由：backend/tests/test_v0391_thinking_mapping.py
+# 用 importlib 直接加载它并跑它的 dry-run——`/tools/*` 把它挡在 CI 那次 checkout 之外，
+# 整批映射与脱敏判据就当场退化成一句注释，而它们是"发真调用之前先证明闸有牙"的唯一防线。
+# 它默认零出站（`--dry-run` 走假 client），真出站那几条要显式给 `--data-dir` 与 `--attempt`，
+# 且由仓库外的账本记死授权上限；密钥只进内存，出口只给 sha256 前缀与打码后的错误摘要。
+!/tools/probe_thinking_profile.py
 server.log
 tunnel.log
 PATH_backup_*.txt

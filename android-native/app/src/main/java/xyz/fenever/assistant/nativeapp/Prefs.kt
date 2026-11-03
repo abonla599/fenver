@@ -3,6 +3,7 @@ package xyz.fenever.assistant.nativeapp
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -21,6 +22,13 @@ data class Identity(val userId: String, val username: String = "", val role: Str
                     val token: String = "", val lastSessionId: String = "",
                     val providerId: String = "", val addedAt: String = "")
 
+/* 思考偏好的每格值（Task 10）：enabled 的默认值必须是 false。服务端从 Task 12B 起**有**
+ * thinking_level 这一格（可发的档位仍只有登记表里核实过的那几条，今天一条都没有，所以
+ * 带了档位也发不出去）；客户端接线在 Task 13。默认开就等于界面在承诺一件发不出去的事。
+ * 两格都带默认值：旧版本机 JSON 里缺任何一格都解得开，不炸启动。 */
+@Serializable
+private data class ThinkingPref(val enabled: Boolean = false, val level: String = "")
+
 object Prefs {
     private const val PREF_NAME = "ai_native_prefs"
     private const val IDENTITY_CAP = 5
@@ -35,6 +43,8 @@ object Prefs {
         // 续命凭据与会话令牌都进 Keystore 加密区（v0.39 M-8）
         SecretStore.init(ctx)
         migrateLegacyTokens()
+        // 旧全局预算键只搬给「已选定默认模型」的那一位；没选定就留到 loadModelsNow 后再搬。
+        migrateContextBudget()
         // 冷启动第一帧就带上外观，不闪一下深色
         xyz.fenever.assistant.nativeapp.theme.ThemeMode.value = themeMode
     }
@@ -71,10 +81,104 @@ object Prefs {
         get() = sp.getBoolean("haptics_enabled", true)
         set(value) = sp.edit().putBoolean("haptics_enabled", value).apply()
 
-    /* 上下文预算（k token），聊天发送前按它截断历史。 */
+    /* 上下文预算（k token），聊天发送前按它截断历史。
+     * v0.39.x 驾驶舱起降级为「迁移来源」：新读取一律走 contextBudgetK(providerId)，
+     * 本键只在 migrateContextBudget() 里被搬进按模型存的 map，之后不再写。 */
     var contextTokensK: Int
         get() = sp.getInt("context_tokens_k", 8)
         set(value) = sp.edit().putInt("context_tokens_k", value.coerceIn(2, 10000)).apply()
+
+    /* v0.39.x 模型驾驶舱：上下文预算按「模型（provider id）」存一份 K 值（网页端
+     * 「用户+provider」map 的本机对位——原生一台机一个登录态概念，键只到 provider）。
+     * 值一律是 K token；对模型档案 max_context_k 的 min 由读数侧再夹一次
+     *（Api.outbound 那层防线保留），这里只管存储与兜底夹逼。 */
+    private fun budgetMapKey(): String = "context_budget_map"
+
+    private fun budgetMap(): MutableMap<String, Int> =
+        runCatching {
+            json.decodeFromString<Map<String, Int>>(sp.getString(budgetMapKey(), "{}") ?: "{}")
+        }.getOrNull()?.toMutableMap() ?: mutableMapOf()
+
+    fun contextBudgetK(providerId: String): Int {
+        val cap = 10000 // 硬兜底上限：真实上限由调用方与 ModelInfo.max_context_k 取 min
+        return budgetMap()[providerId]?.coerceIn(1, cap) ?: contextTokensK.coerceIn(1, cap)
+    }
+
+    /** map 里**原始**那一份（没夹过）：上限调小时"存着的预算越过了新上限"这件事
+     *  只有拿它比才看得出来——`contextBudgetK` 读数时已经夹过，拿夹过的数比上限，
+     *  那条分支恒不成立，本机那份越界值就一直躺着（spec §3.2 禁的正是这个）。
+     *  没记过返回 0，调用方按"没什么可夹"处理。与网页 contextBudgetWantedK 同一判据。 */
+    fun contextBudgetWantedK(providerId: String): Int = budgetMap()[providerId] ?: 0
+
+    fun setContextBudget(providerId: String, k: Int) {
+        if (providerId.isEmpty()) return
+        val map = budgetMap()
+        map[providerId] = k.coerceIn(1, 10000)
+        sp.edit().putString(budgetMapKey(), json.encodeToString(map)).apply()
+    }
+
+    /** 旧全局滑杆键只搬一次：map 已存在就直接收工；还没选过模型就先留着旧键，
+     *  下次（loadModelsNow 定出默认 provider 后）再搬——不丢用户调过的预算。 */
+    fun migrateContextBudget() {
+        if (sp.contains(budgetMapKey())) return
+        val pid = defaultProviderId
+        if (pid.isEmpty()) return
+        setContextBudget(pid, contextTokensK)
+        sp.edit().remove("context_tokens_k").apply()
+    }
+
+    /* v0.39.x 驾驶舱 Task 10：思考偏好（这台设备自己的开关与档位）。
+     * 与预算同一族写法——一个 JSON map 键 + 复合内键，内键形状照 usage 表的 "sid:pid"
+     * 改成 "userId:providerId"：换身份读的是自己那一格，上一个人的开关不会跟着
+     * provider id 回来（网页端 fv.thinking.<userId>.v1 的本机对位）。
+     * 三条纪律：① 只在本机，不发服务端；② enabled 默认 **false**（不给全站悄悄改
+     * 计费行为）；③ 档位归一只有这一处——本机存的值不在候选里就落「服务端默认档」，
+     * 默认档也不在候选里就落第一档，界面上不存在"有档位但默认档为空"那种存不下的状态。 */
+    private fun thinkingMapKey(): String = "thinking_prefs_map"
+
+    private fun thinkingSlot(providerId: String): String {
+        val uid = currentEntry()?.userId ?: ""
+        return "$uid:$providerId"
+    }
+
+    private fun thinkingMap(): MutableMap<String, ThinkingPref> =
+        runCatching {
+            json.decodeFromString<Map<String, ThinkingPref>>(
+                sp.getString(thinkingMapKey(), "{}") ?: "{}")
+        }.getOrNull()?.toMutableMap() ?: mutableMapOf()
+
+    fun thinkingEnabled(providerId: String): Boolean =
+        thinkingMap()[thinkingSlot(providerId)]?.enabled ?: false
+
+    /** 当前会用的档位：候选为空给空串（"这个模型没有档位"是事实，不编一个假的）。 */
+    fun thinkingLevel(providerId: String, levels: List<String>,
+                      thinkingDefault: String): String {
+        if (levels.isEmpty()) return ""
+        val saved = thinkingMap()[thinkingSlot(providerId)]?.level.orEmpty()
+        if (levels.contains(saved)) return saved
+        return if (levels.contains(thinkingDefault)) thinkingDefault else levels.first()
+    }
+
+    /** 本机**原样**存着的那个标签（不做归一）：§5.3 那句"偏好里的标签已经没有了"
+     *  必须拿它跟当前清单比，用 thinkingLevel 的归一结果比就恒成立、永远说不出这句话。 */
+    fun thinkingLevelSaved(providerId: String): String =
+        thinkingMap()[thinkingSlot(providerId)]?.level.orEmpty()
+
+    fun setThinkingEnabled(providerId: String, enabled: Boolean) {
+        if (providerId.isEmpty()) return
+        val map = thinkingMap()
+        val slot = thinkingSlot(providerId)
+        map[slot] = (map[slot] ?: ThinkingPref()).copy(enabled = enabled)
+        sp.edit().putString(thinkingMapKey(), json.encodeToString(map)).apply()
+    }
+
+    fun setThinkingLevel(providerId: String, level: String) {
+        if (providerId.isEmpty()) return
+        val map = thinkingMap()
+        val slot = thinkingSlot(providerId)
+        map[slot] = (map[slot] ?: ThinkingPref()).copy(level = level)
+        sp.edit().putString(thinkingMapKey(), json.encodeToString(map)).apply()
+    }
 
     /* 断网提醒「今日不再显示」：存静音当天日期（yyyy-MM-dd），隔天自动失效。 */
     var offlineMuteDate: String

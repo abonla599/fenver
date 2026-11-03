@@ -566,6 +566,19 @@ const API = (() => {
     const open = async (lastEventId) => {
       const headers = { "Content-Type": "application/json", ...authHeaders(), ...csrfHeaders("POST") };
       if (lastEventId) headers["Last-Event-ID"] = lastEventId;   // 续播凭据：<run_id>:<seq>
+      const body = {
+        model: opts.model, provider: opts.provider, messages: opts.messages,
+        attachments: opts.attachments || [],
+        session_id: opts.sessionId,
+      };
+      // Task 13A：思考档位这一格**只在调用方给出一个非空标签时才存在**。
+      // 语义差别是服务端定的：整格省略="这一轮不参与"，带一格空值="填了但空着"，
+      // 那是两件事。所以这里不写 `opts.thinkingLevel` 直接进对象字面量的形状——
+      // 那种写法会把 undefined / null / 空串 / 0 一路发出去，而这一格的键从今天起
+      // 在源码里只有一个赋值出处，判据在 test_v0391_web_cockpit_ui.py。
+      if (typeof opts.thinkingLevel === "string" && opts.thinkingLevel !== "") {
+        body.thinking_level = opts.thinkingLevel;
+      }
       let res;
       try {
         res = await fetch("/v1/chat/stream", {
@@ -573,11 +586,7 @@ const API = (() => {
           signal: opts.signal,
           credentials: "same-origin",
           headers,
-          body: JSON.stringify({
-            model: opts.model, provider: opts.provider, messages: opts.messages,
-            attachments: opts.attachments || [],
-            session_id: opts.sessionId,
-          }),
+          body: JSON.stringify(body),
         });
       } catch (e) { NetMinder.note(e); throw e; }
       if (res.ok && res.body) NetMinder.ok();
@@ -684,6 +693,16 @@ const API = (() => {
     myProviders: () => request("/v1/me/providers"),
     addMyProvider: (rec) => request("/v1/me/providers", { method: "POST", body: rec }),
     updateMyProvider: (id, rec) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "PUT", body: rec }),
+    /* 模型卡的能力写口（v0.39.1 Task 9）：改的是「这个模型能吃多少上下文、会不会思考」，
+     * 与上面两个 update 是同一批路由——差别只在**调用方必须交一份完整记录**。
+     * PUT 是全量语义（服务端整条替换），所以 body 由 app.js 的 providerCapabilityBody
+     * 从 state.providerRecords 里那份完整记录合并 patch 得到，不拿 /v1/models 的目录项凑
+     * （那里没有 base_url，凑上去等于把上游洗掉）。
+     * scope 分流只认服务端给的 can_edit：admin = 管理员改共享条目（真门在 RequireAdmin），
+     * 其余走个人面（属主闸）。界面从来不是边界，这里选的是"打哪扇门"，不是"能不能打"。 */
+    updateProviderCapabilities: (scope, id, patch) =>
+      request((scope === "admin" ? "/v1/providers/" : "/v1/me/providers/")
+              + encodeURIComponent(id), { method: "PUT", body: patch }),
     deleteMyProvider: (id) => request("/v1/me/providers/" + encodeURIComponent(id), { method: "DELETE" }),
     setMyDefaultProvider: (id) => request("/v1/me/providers/default", { method: "POST", body: { provider_id: id } }),
     testMyProvider: (id) => request(`/v1/me/providers/${encodeURIComponent(id)}/test`, { method: "POST" }),

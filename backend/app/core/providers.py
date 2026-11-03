@@ -8,6 +8,7 @@
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -20,10 +21,17 @@ import httpx
 from openai import OpenAI
 
 from app.core import credits, net_guard
+from app.core import thinking_profiles as _thinking_profiles
 from app.core.atomic_write import write_json_atomic
+from app.core.pathmask import hide_paths
 from app.core.paths import data_root, load_project_env
 from app.core.pinned_http import install_pins
 from app.core.tls import system_ssl_context
+
+# 回落留痕用的 logger（12B 修复轮 2 · I-R2-4）。名字写死成 "app.core.providers"，
+# 与本仓 `core/mcp_client.py` 同一口径；除 debug 级的那一条回落线之外本模块不记任何东西
+# ——provider 记录里全是管理员的内部配置，多写一行就多一份泄露面。
+logger = logging.getLogger("app.core.providers")
 
 # 本模块可能早于其他组件被导入（app.pipeline 就会），因此自行加载 .env，
 # 否则首次运行时读不到 DEEPSEEK_API_KEY、播种不出任何模型配置。
@@ -290,6 +298,408 @@ def normalize_max_context_k(value) -> int:
     except (TypeError, ValueError):
         return DEFAULT_MAX_CONTEXT_K
     return max(1, min(MAX_CONTEXT_K_CEIL, k))
+
+
+# ---------- 思考能力（v0.39.1 Task 8；登记表自 Task 12A 起住在 thinking_profiles）----------
+# "这个模型能不能思考"和"选了某档之后到底往上游发什么参数"是两件事。本版仍然只有
+# `none`（不带任何思考参数）：7 次真实探针调用之后没有任何配方够格进登记表，所以
+# supports=True 的条目状态只能到 unverified——界面据此显示"支持思考（参数未核实）"。
+# Task 12A 交付的是**登记机制**：`verified` 从此绑在「配方 + 这条记录的 host+model」
+# 两格上（`_thinking_status`），`level_count` 从此约束档位条数（`_thinking_fields`），
+# 出网参数只有一个写者（`thinking_profiles.build_thinking_kwargs`）。以后往表里加条目
+# 的人不需要改这里的判据——判据已经在，漏写 `verified_for` 只会得到 unverified。
+DEFAULT_THINKING_PROFILE = _thinking_profiles.DEFAULT_PROFILE
+# **必须是别名，不是拷贝**：既有测试是就地 `monkeypatch.setitem(providers.THINKING_PROFILES, …)`
+# 塞 synthetic 条目的（test_v0391_provider_capabilities.py:318/:349/:351）。抄一份就变成
+# "测试改的那份没人读、判据读的那份没人改"，那几条锁当场失牙变成恒绿。
+# 正面锁在 test_v0391_thinking_mapping.py §12：`providers.THINKING_PROFILES is
+# thinking_profiles.PROFILES`。
+THINKING_PROFILES = _thinking_profiles.PROFILES
+MAX_THINKING_LEVELS = 3
+THINKING_LEVEL_LABEL_MAX = 16
+
+# 写路径合并与校验之间唯一的名单：这四格「这次没带」与「这次填了个空值」必须可区分。
+_THINKING_KEYS = ("supports_thinking", "thinking_levels",
+                  "thinking_default", "thinking_profile")
+
+
+def _requested_thinking_keys(record: dict) -> set:
+    """请求里**真正带来**的那几格思考键。
+
+    判据与 `_pending` 的合并判据是同一条（键缺失或值为 None = 这次没动它），所以
+    只写一处：显式 `False` / `[]` / `""` 都是用户真填的值，照样算"带来了"。
+    """
+    return {k for k in _THINKING_KEYS if record.get(k) is not None}
+
+
+def _clean_levels(value) -> list:
+    """把任意输入洗成思考档位标签列表：去空白、去空、去重，**不截断**。
+
+    截不截断是两个职责，不在这里判：写路径（`_thinking_fields`）清洗后看到 >3 个
+    且那 4 个是请求带来的必须拒收，读路径（`_thinking_view`）才 `[:3]` 兜老数据。
+    悄悄截掉第 4 档等于把"没配上"演成"配上了"；读的时候报错则会让畸形老记录在
+    界面上凭空消失。
+    """
+    if value is None:
+        return []
+    seq = value if isinstance(value, (list, tuple)) else []
+    out = []
+    for x in seq:
+        t = str(x or "").strip()[:THINKING_LEVEL_LABEL_MAX]
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _record_host(record: dict) -> str:
+    """这条记录的 hostname（小写），登记表比对用的那一个坐标。
+
+    记录里存的是 `base_url.rstrip("/")` 过的整条 URL（例如
+    `https://api.deepseek.com/v1`），而 `verified_for` 里写的是**主机名**：换 scheme
+    或换 path 不该让一次核实作废，换 host 或换 model 才该。反过来用整串比对或
+    子串匹配都不行——前者会把已核实的事实洗掉，后者会让 `https://evil/api.deepseek.com`
+    这种地址亮起来。取不到主机名（老记录里根本不是 URL）返回空串，判据那边据此降级。
+    """
+    return urlparse(str((record or {}).get("base_url") or "")).hostname or ""
+
+
+def _verified_scope_hit(pairs, host, model) -> bool:
+    """`verified_for` 命中判据：host 与 model **同时**在场且成对命中。
+
+    三条硬规矩（M1，逐条有反例锁）：
+    - 缺参就降级：`host` 或 `model` 为空 ⇒ 一律不命中。忘记传参的那一方必须输得安全，
+      不能输成"亮"。
+    - 空清单 / 缺这一格 / 不是清单 ⇒ 不命中。**"空清单"绝不等于"不限"**，那正是
+      "登记一条、全站变绿"那句假话的入口。
+    - host 小写比对（`urlparse().hostname` 本就小写，登记表里手写大小写混着不该作废）；
+      model 逐字比对（model 名在真调用里是大小写敏感的标识符，不做模糊化）。
+    """
+    h = str(host or "").strip().lower()
+    m = str(model or "").strip()
+    if not h or not m:
+        return False
+    for pair in (pairs or []):
+        if not isinstance(pair, dict):
+            continue
+        ph = str(pair.get("host") or "").strip().lower()
+        pm = str(pair.get("model") or "").strip()
+        if ph and pm and ph == h and pm == m:
+            return True
+    return False
+
+
+def _thinking_status(supports: bool, profile: str, host=None, model=None) -> str:
+    """给前端的三态结论：不支持 / 支持但参数未核实 / 支持且参数**在这条记录上**已核实。
+
+    不重新判 supports 的来源，只把"supports + profile + 这条记录的 host/model"合成
+    一句人话——合成口径只在这一个函数里，两个展示面共用，别各写一份。
+
+    `verified` 一支的成立条件**四者全齐**（M1，缺任何一个都回落 unverified）：
+    ① `supports` 为真；② `profile` 不是默认配方；③ 登记表里有这一条且 `verified` 为真；
+    ④ `entry["verified_for"]` 里存在一项 `host` 与 `model` 同时命中**这条记录**。
+    第 ④ 格是本版新增的全部理由：`thinking_profile` 是每条记录各有一格的字段，
+    只绑配方名的话，将来任何一条 `verified` 条目一登记，**所有**填了该配方的记录
+    都会一起亮——包括探针从没打过的那个端点、那个 model。探针自陈的射程是
+    「单条 provider 记录 + 它当时的 base_url + 它当时的 model」，判据必须和它一样窄。
+
+    "核实"这个结论只认登记表那一格自己说的 `verified`，别把"profile 不是 none"
+    当成核实：盘上/历史里出现过一个谁都没验过的 profile 时，界面会说谎。
+    `DEFAULT_THINKING_PROFILE` 必须先单独排除——`none` 在表里也标了 verified: True
+    （"不带参数"这件事本身是确定的），但它不等于"思考参数已核实"，它也没有档位可言。
+
+    回落一律是 unverified，**不是** unsupported："这条记录没被核实到"与"这个模型不会
+    思考"是两件事，别把前者演成后者。
+    """
+    if not supports:
+        return "unsupported"
+    if profile == DEFAULT_THINKING_PROFILE:
+        return "unverified"
+    entry = THINKING_PROFILES.get(profile)
+    if entry is None or not entry.get("verified"):
+        return "unverified"
+    if _verified_scope_hit(entry.get("verified_for"), host, model):
+        return "verified"
+    return "unverified"
+
+
+def _thinking_view(p: dict) -> dict:
+    """读路径的思考视图四格（supports/levels/default/status）——单源，两个出口都走它。
+
+    与写路径的分工照旧：这里只做防御性兜底，拒收是 `_thinking_fields` 的职责。
+    抄两份的下场见上面 `normalize_max_context_k` 那段：两处数字对不上时没人会报错，
+    只有界面和实际预算悄悄分叉。
+    """
+    view = {
+        "supports_thinking": bool(p.get("supports_thinking")),
+        # 读路径才截断：盘上可能有别的版本/手工写坏的畸形老记录，这里报错会让那些
+        # 模型在界面上凭空消失。
+        "thinking_levels": _clean_levels(p.get("thinking_levels"))[:MAX_THINKING_LEVELS],
+        # default 与 levels 用同一把尺子量（同一个 20 字串不该当档位收、当默认档拒）
+        "thinking_default": str(p.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX],
+        # 记录作用域（M1）：核实结论要绑到"这条记录的 hostname + 这个 model"上，两个坐标
+        # 由**调用方**算好传进去（host 不在记录的独立字段上，只在 base_url 里）。
+        # 对外视图的键一个字都不许多给：catalog 与 _public 的键集有锁
+        # （test_v0391_native_cockpit.py / test_v0391_web_cockpit_ui.py）。
+        "thinking_status": _thinking_status(bool(p.get("supports_thinking")),
+                                            str(p.get("thinking_profile")
+                                                or DEFAULT_THINKING_PROFILE),
+                                            _record_host(p), str(p.get("model") or "")),
+    }
+    if not view["supports_thinking"]:
+        # 库里自洽的那一份必然空着；读到"关着思考却带着候选"说明是手工写坏的，
+        # 界面照画就成一个永远点不动的选项。
+        view["thinking_levels"] = []
+        view["thinking_default"] = ""
+    elif view["thinking_default"] not in view["thinking_levels"]:
+        # 截掉第 4 档、或 default 本来就指着不存在的那一档：归回候选，
+        # 别把"选中值不在候选里"甩给界面去兜。
+        view["thinking_default"] = view["thinking_levels"][0] if view["thinking_levels"] else ""
+    return view
+
+
+def _thinking_fields(record: dict, requested=None) -> dict:
+    """写路径的思考四格：清洗 + 拒收非法组合，返回库里该存的那一份。
+
+    `requested` 是**这次请求真正带来的那几格**（由 `ProviderStore._pending` 一并交出来）。
+    严格判据只打在请求带的值上，从库里补进来的继承值只做宽容归一、永不 raise：
+    补进来的那份不是用户此刻的意图，拿它判越界等于让一次改名、一次显式关思考
+    统统存不下去。宽容也不等于丢掉不变式——归一之后的结果照样自洽，库里存的
+    那一份永远合法。
+
+    判序是刻意的：先 `profile` 白名单、再通用的「最多 3 档」、然后**先看 supports**：
+    关着思考就走清空那一条（不判配方声明的 `level_count`，M-R1），开着才判数量相等、
+    最后判 default 与候选的组合。一个不认识的值摆在面前时，第一句该说的是"这个值我不认"，
+    而不是"你不支持思考"；而一次"关掉思考"的保存里，档位清单该被清空，不该被审判。
+
+    关掉思考（显式 `supports_thinking=False`）时档位与默认**清空**而不是报错：
+    "我不再用这个模型的思考"是一次真实的用户动作，不该因为表单里还留着上一次的
+    候选而被挡住；但这次请求亲手带着非 `none` 的参数配方还要关掉思考才是矛盾输入，
+    拒收。
+    """
+    brought = _requested_thinking_keys(record) if requested is None else set(requested)
+    supports = bool(record.get("supports_thinking"))
+    profile = str(record.get("thinking_profile") or DEFAULT_THINKING_PROFILE).strip()
+    if profile not in THINKING_PROFILES:
+        if "thinking_profile" in brought:
+            raise ProviderError("未知的思考参数配置")
+        profile = DEFAULT_THINKING_PROFILE        # 继承来的野值：归一，不挡保存
+    levels = _clean_levels(record.get("thinking_levels"))
+    if len(levels) > MAX_THINKING_LEVELS:
+        # M-3（12B 修复轮 1，主控已裁决：**维持拒收**，不把这一闸挪到 supports 支之后）。
+        # 结论与理由，写给下一个人，别再当"半开的边界"重新裁决一次：
+        # `MAX_THINKING_LEVELS` 是**存储形状不变量**（库里一份清单最多 3 格），判的是
+        # "这份数据能不能被存成一个自洽的形状"，与"这条记录会不会思考"无关——所以它摆
+        # 在 supports 判据之前是**对的**，不是遗漏。真正与 supports 有关的那一闸是配方声明
+        # 的 `level_count`（下面 supports=False 一支的 M-R1 注释），那一半已经按裁决挪走了。
+        # 不能一起挪的实验事实（审查员 12B §5 变异 E，仓库外克隆实测）：整块搬进
+        # supports=True 那一支会**同时**红既有锁
+        # `test_v0391_provider_capabilities.py::test_invalid_capabilities_are_rejected[bad0]`
+        # （`:40-45` 那份基座没有 `supports_thinking`，supports 落 False 却带 4 档）与
+        # 本版的 `test_the_generic_level_cap_is_still_judged_when_thinking_is_off`
+        # ⇒ 挪它等于放宽 Task 8 留下的既有断言，明令禁止。
+        # 代价说清楚（12B 修复轮 2，审查 M-R2-1：上一版那句"UI 永远发不出 >3 档"是假话，
+        # 现在按实测写成事实）：这一墙**从界面就是可达的**。设置页的档位框是自由文本
+        # （`app.js:1874` 把清单 `join("，")` 写进输入框），`app.js:1554-1560` 的
+        # `parseThinkingLevels` 只做去空白/去重、**没有条数上限**，`app.js:1914` 原样提交，
+        # 而 `main.py:1460` 的 `thinking_levels: Optional[list[str]]` 没有 `max_length`
+        # ⇒ 管理员在模型卡里打四个标签、再取消勾选"支持思考"，这次 PUT 就带着 4 档走到这里，
+        # "关掉思考 + 4 档"不是什么只有直连 API 才撞得到的形状。
+        # 但拒收的裁决与上面三条理由一个字不动：撞到这一墙的人收到的是"这个形状存不下"
+        # 那句 400，不是"你不支持思考"——归因仍然没坏。剩下那半件（界面在提交前就提示上限、
+        # 关思考时顺带清档位）是 **Task 13** 的活，本单按硬约束不动 `app.js`。
+        if "thinking_levels" in brought:
+            raise ProviderError(f"思考档位最多 {MAX_THINKING_LEVELS} 个")
+        levels = levels[:MAX_THINKING_LEVELS]     # 继承来的畸形档位：与读路径同口径截 3
+    default = str(record.get("thinking_default") or "").strip()[:THINKING_LEVEL_LABEL_MAX]
+    if not supports:
+        # M-R1（从 12A 审查继承的验收项）：**先看 supports**。关掉思考是一次真实的
+        # 用户动作，档位与默认按 Task 8 裁决清空，不判 `level_count`——旧写法把档位闸
+        # 排在这一步之前，于是"关掉思考"的那一次 PUT 若顺手带着一份与配方数量不符的
+        # 清单，会被"审判"而不是被"清空"。今天不可达（表里只有 `none`，它不声明
+        # level_count），但形状必须现在就对：两侧都有锁（关掉+数量不匹配 → 通过并清空；
+        # 开着+同样这份清单 → 拒收），见 test_v0391_provider_capabilities.py 那两格。
+        levels, default = [], ""
+        if profile != DEFAULT_THINKING_PROFILE:
+            if "thinking_profile" in brought:
+                raise ProviderError("不支持思考的模型不能配置思考参数")
+            profile = DEFAULT_THINKING_PROFILE
+    else:
+        # 档位条数必须等于这一配方**出网的不同取值数**（M2）。判据只对"请求真正带来的
+        # 那一格"生效，与上面 思考档位最多 3 个 同一口径：继承来的畸形值永远不许抛
+        # （Task 8 裁决 A 的遗产）。这件事上**真的会红**的锁按名单点名（文件 =
+        # test_v0391_provider_capabilities.py；行号是 12A 修复轮 1 的现场坐标、会漂，认锁
+        # 以名字为准；两枚变异均在仓库外克隆实测还原，那一轮的本行还在 supports 判据之前）：
+        # 摘本行 brought 门 ⇒ `test_inherited_levels_never_hit_the_level_count_gate`（:450）
+        # 独红；摘本行 `level_count is not None` 守卫 ⇒
+        # `test_request_brought_invalid_values_are_still_rejected`（:300）、
+        # `test_level_count_is_the_wire_value_count_and_only_judges_brought_levels`（:418）、
+        # `test_update_levels_without_default_renormalises_inherited_default`（:235）
+        # 等一批红。两枚变异下都不红的正是旧注释点名的
+        # `test_malformed_legacy_record_accepts_three_writes`（:267，审查员 12A M-R2）——别再指它。
+        # 为什么是**拒收**而不是截断：悄悄砍掉第 3 档等于把"没配上"演成"配上了"——
+        # 布尔配方三档同一个出网值（g2 实测）时，界面给三个档而线上只有一个值，
+        # 用户点第 3 档什么也没变。这里选择响亮地拒绝，让它去改成 1 档。
+        # `level_count is None`（含 `none`）不判这一条：今天不可达，但两侧都有锁
+        # （synthetic 布尔条目填 3 档被拒、填 1 档通过），不许它恒真。
+        level_count = (THINKING_PROFILES.get(profile) or {}).get("level_count")
+        if (level_count is not None and "thinking_levels" in brought
+                and len(levels) != level_count):
+            raise ProviderError(f"思考档位数量必须与该配方出网的不同取值数一致（应为 {level_count} 个）")
+        if default not in levels:
+            # 只有用户此刻亲笔填的那个值才配得上一句拒收；空 default（没填或主动清空）
+            # 和继承来的旧默认越界一样，归到候选第一个，没有候选就是空串。
+            if default and "thinking_default" in brought:
+                raise ProviderError("思考默认档位不在候选里")
+            default = levels[0] if levels else ""
+    return {
+        "supports_thinking": supports,
+        "thinking_levels": levels,
+        "thinking_default": default,
+        "thinking_profile": profile,
+    }
+
+
+# ---------- 请求侧（v0.39.1 Task 12B）：档位标签 → 出网序号，唯一的换算点 ----------
+#
+# 这一族只在**读/请求**侧判，不写库：写路径的判据是 `_thinking_fields`（拒收非法组合），
+# 请求路径的判据是"这条记录此刻能不能吃这个档位"。两份判据共用同一份 `_thinking_view`
+# 与同一张登记表，所以界面亮绿的那一格和真正出网的那一次永远不会分叉。
+THINKING_REQUEST_REJECTED = "该模型当前不支持所选的思考档位"
+
+
+def thinking_request_index(record, label):
+    """把客户端送来的**档位标签**换算成 `build_thinking_kwargs` 要的**序号**。
+
+    返回值三种：`None` = 这次不发思考参数；`1..level_count` = 出网第 N 个不同取值；
+    其余情况一律 `ProviderError`，detail 是 `THINKING_REQUEST_REJECTED` 那一句固定的话——
+    **不回显这条记录的能力字段**（档位清单、配方名、上限都不许出现在错误里，否则一次
+    探测就能读出这条记录的思考配置，而那是管理员的内部设置）。
+
+    四条判据（B1/B2，缺一个就是让"未核实就不发"变成一句希望）：
+
+    1. 缺省与空串都不发。空串**不当成"第 0 档"**：档位清单是管理员自填的字符串，
+       `_clean_levels` 在写路径就把空串去掉了，把它读成序号 0 只会撞上
+       `build_thinking_kwargs` 的下界，把一个"用户没填"演成一个错误响应。
+       数是实测的（收尾轮把这一形状真投了一次 `/v1/chat`）：那一下 `ValueError` 由第 4 判
+       的预检收成 `ProviderError`，`main.py` 回的是 **400**，不是这一族早先写的 500。
+    2. 判据只有一份：走 `_thinking_view`（它内部就是带 host+model 的 `_thinking_status`），
+       不在调用方另抄。host 取 `urlparse(base_url).hostname`，取不到就按"不匹配"走
+       unverified，不猜。
+    3. 标签必须在这条记录自己的 `thinking_levels` 里——清单为空时任何标签都拒收，
+       因为那时服务端一个可选档位都没有，放行等于凭空发明一档。
+    4. 换算出的序号必须真发得出去：拿 `build_thinking_kwargs` 原地预检一次。库里那份
+       清单可能比配方声明的出网取值数长（M2 只挡写路径，`_load` 不跑 `_validate`，
+       盘上手写坏的老记录照样读得进来），此时越界的那一格必须是 400，不能是 500。
+       这也是"请求路径永远不把序号推到越界"这条要求的实现处——判据不复制，
+       而是问唯一的写者本身。
+    """
+    text = str(label).strip() if isinstance(label, str) else label
+    if not text:
+        return None
+    view = _thinking_view(record or {})
+    if view["thinking_status"] != "verified":
+        raise ProviderError(THINKING_REQUEST_REJECTED)
+    levels = view["thinking_levels"]
+    if text not in levels:
+        raise ProviderError(THINKING_REQUEST_REJECTED)
+    index = levels.index(text) + 1
+    profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
+    try:
+        _thinking_profiles.build_thinking_kwargs(profile, index)
+    except ValueError:
+        raise ProviderError(THINKING_REQUEST_REJECTED) from None
+    return index
+
+
+# 回落留痕（12B 修复轮 2 · I-R2-4）。"这条记录没被核实到 / 这个序号在它此刻的清单里越界"
+# 过去是一次完全静默的回落：用户点了档位没反应，事后无人能复盘。留痕只许 debug 级，
+# 字段按裁决逐字收紧成 **provider id + thinking_status + 序号 + 这一句固定文案**——
+# 档位清单原文、配方名、base_url 全文、模型名、任何凭据都不许进来（那一份记录里全是
+# 管理员的内部配置，`_thinking_view` 与 `catalog` 的对外字段名单正是同一道边界）；
+# 写之前照本仓老规矩再过一层 `scrub_secrets` → `hide_paths`，认不出来的形状由它们兜。
+# 文案本身不含任何记录内部信息，所以它同时是测试挑出这一行的锚点（改名等于缴械）。
+THINKING_FALLBACK_PHRASE = "思考档位未发送"
+
+
+def _thinking_fallback_note(record, index, status, kind) -> str:
+    """拼那一行留痕：只给四个允许字段，越界用 kind 标记而不是猜一个"最大档"。"""
+    return (f"{THINKING_FALLBACK_PHRASE} reason={kind} provider="
+            f"{str((record or {}).get('id') or '-')} status={status} index={index}")
+
+
+def _log_thinking_fallback(record, index, status, kind) -> None:
+    logger.debug(hide_paths(scrub_secrets(_thinking_fallback_note(record, index, status, kind))))
+
+
+def thinking_kwargs_for(record, index) -> dict:
+    """四个出网站点唯一的合并入口：`index` 为 None ⇒ 一个字节都不加。
+
+    **这一格自己重判记录作用域**（12B 修复轮 1，审查 I-1）。序号是调用方
+    （`_prepare_chat` → `thinking_request_index`）按那条记录换算出来的，但流式那条路
+    在生产者线程里还会**再解析一次** provider（`main.py:938-946` → `streaming.py:206`
+    的 `store.resolve(provider_id, ...)`），那一下比请求校验点（`main.py:699`）**晚**：
+    两次解析之间一次管理员 PUT 就能把这条记录换成"同一个在册且 verified 的配方、但这条
+    host+model 从没进过它的 `verified_for`"。所以"已核实"这句话必须在发送点再说一遍，
+    不能采信调用方带过来的序号是哪条记录换的——那正是 M1 那句假话（把一次逐条观察演成
+    全局结论）的出口。非流式两支（`pipeline.py:205`、`core/llm_client.py:37`）同样是
+    "校验在前、发送在后"的两次解析，这道门对三条发送路都生效。
+
+    判据只有一份：走 `_thinking_view`（12A 那把唯一尺子，内部就是带 host+model 的
+    `_thinking_status`），`thinking_status != "verified"` 直接返回 `{}`。**不在这里另拼
+    一份 status**，也**不接受调用方传进来的"已 verified"标记**——多一个入参就是多一条
+    "调用方自己说了算"的通道，与 B1 换算点只此一处同源。
+
+    作用域判完还要**用这条记录此刻的清单重判序号上界**（12B 修复轮 2，审查 I-R2-3，
+    主控裁"要重判"）：序号是在第一次解析时换算的，管理员在那之前之后把 `thinking_levels`
+    从 3 档改成 1 档，旧的 `thinking_index=3` 就指向一条**这条记录没有的**档位。
+    这与 I-1 是同一类形状，不留到"以后"。越界一律 `{}`——fail-closed：**宁可这一轮不发
+    参数，也不发一个指向错档位的值**；不许回退成"取最后一档"那种猜测，也不许 raise
+    （raise 会把一次配置改动演成 5xx——摘掉下面那道 try 实测是 502，`main.py` 的
+    `模型调用失败` 那一支）。`build_thinking_kwargs` 只看**配方**声明的
+    `level_count`、看不见这条记录的清单，所以这一判只能在发送点做。
+
+    这一判的上界是**这条记录清单的长度**，不是配方的 `level_count`，也不是标签本身——
+    把话说到底（整枝审查 I-2）：它挡得住"清单变短了、旧序号落在清单外"，挡不住
+    "清单长度没变、内容重排了"。`[快, 慢]` 改成 `[慢, 快]` 之后，旧的 `index=1` 仍在界内，
+    指的却是另一个标签。要关掉这一残余形状，得让**标签**跟着走到发送点，而本批故意没有
+    那么做（换算点只有一处、出网只认序号，见 `thinking_request_index` 第 4 判）。
+    所以这里只承诺长度上界，不承诺同一性。
+
+    最后一道是**组装本身也不许把异常送到出网路径上**（整枝审查 I-3）：继承支（`_pending`
+    替没带 `thinking_levels` 的 PUT 补库里那份，M2 那一闸只判请求带来的格子）能存下
+    "清单 3 档 / 配方声明 `level_count=1`"这份组合，长度上界看得见它、配方看不见，
+    于是 `build_thinking_kwargs` 在这里会 `ValueError`——四个站点都在 `kwargs.update(...)`
+    里裸调这一格，非流式两支会把它直接演成 502（摘掉这道 try 实测：两支都回
+    `502 模型调用失败：ValueError: …`），违背的就是上面那句"不许 raise"。
+    现在按同一口径收：配方拒收 ⇒ 留痕 `reason=recipe_rejected` 并回 `{}`。
+
+    三道回落都不是静默的（I-R2-4），reason 各对应上面一道判据：`scope`（这条记录没被
+    核实到）、`ordinal_out_of_range`（序号超出这条记录此刻的清单）、`recipe_rejected`
+    （配方拒收这份组合）。每一道各留一行 debug，字段只有 provider id、status、
+    序号与一句固定文案，见 `_log_thinking_fallback`。
+    组装仍交给 `build_thinking_kwargs`：登记表里没核实过的配方它自己 raise（在本格被
+    上面那道 try 接住，见 I-3），`none` 它自己回 `{}`，所以今天（表里只有 `none`）
+    这四条路永远收到空字典。
+    """
+    if index is None:
+        return {}
+    view = _thinking_view(record or {})
+    status = str(view["thinking_status"])
+    if status != "verified":
+        _log_thinking_fallback(record, index, status, "scope")
+        return {}
+    if index > len(view["thinking_levels"]):
+        _log_thinking_fallback(record, index, status, "ordinal_out_of_range")
+        return {}
+    profile = str((record or {}).get("thinking_profile") or DEFAULT_THINKING_PROFILE)
+    try:
+        return _thinking_profiles.build_thinking_kwargs(profile, index)
+    except Exception:
+        # 只吞这一格的装配失败，且吞完必须留痕：出网路径的裁决是"不发参数"，不是"报错"
+        # 更不是把一次配置改动演成 5xx（摘掉这一层实测是 502，见上面 I-3 那段）。
+        _log_thinking_fallback(record, index, status, "recipe_rejected")
+        return {}
+
 
 # 常见 OpenAI 兼容端点，仅作为新增表单的预填模板，用户可改
 PRESETS = {
@@ -562,8 +972,58 @@ class ProviderStore:
         return provider
 
     # ---- 变更 ----
+    def _pending(self, record: dict) -> tuple:
+        """更新已有条目时，把请求里没带的思考四格 + 模型上限从库里那份补进**待校验的 dict**。
+
+        返回 `(pending, requested)`：requested 是这次请求真正带来的那几格**思考**键名
+        （上限不在里面，它的判据只有归一一条，见下面那段注释）。
+        这半边和合并同等重要——校验层要靠它分清"用户填的"和"我们替他补的"，
+        严格拒收只配作用于前者（判据见 `_thinking_fields`）。
+
+        位置就是这条实现的全部理由（裁决 A）：必须在 `_validate` 之前。放在校验之后
+        （brief 的原写法）会造出非法组合——一条 `supports_thinking=True,
+        thinking_profile=verified_x` 的老记录，被一次只带 `supports_thinking=False`
+        的 PUT 更新时，请求里 profile 是缺的，于是先以 `none` 通过了组合校验，
+        随后旧 profile 才被补回来，库里就此存下"不支持思考却带思考参数"。
+
+        只有**键缺失或值为 None** 才算"这次没动它"（与 pricing / paid_by 同一条纪
+        律；PUT 路由因此必须走 `model_dump(exclude_none=True)`，否则旧客户端把
+        Optional 字段序列化成 None 之外的形状时这条保留会被绕过）。显式 False /
+        [] / "" 是用户确实这么填，算 requested、不覆盖。
+
+        锁只用来取那一份旧记录的拷贝：`_validate` 里有 DNS 解析，绝不能挪进锁里
+        （持锁解析会把所有 provider 的读写串成一条队伍）。
+        """
+        provider_id = str(record.get("id") or "")
+        if not provider_id:
+            return record, _requested_thinking_keys(record)
+        with self._lock:
+            existing = next((p for p in self._items if p["id"] == provider_id), None)
+            old = dict(existing) if existing is not None else None
+        if old is None:
+            return record, _requested_thinking_keys(record)
+        pending = dict(record)
+        requested = set()
+        for key in _THINKING_KEYS:
+            if pending.get(key) is None:
+                pending[key] = old.get(key)
+            else:
+                requested.add(key)
+        # 模型上限（max_context_k）走同一条纪律（v0.39.1 Task 9）：这一格从
+        # 「设置 → 模型服务」的表单搬进了模型卡，而表单那次 PUT 从此**不带**它。
+        # 不接回来的话，`_validate` 会按缺失兜底成 64、`upsert` 又是整条替换——
+        # 「改一次模型名字 = 把 1000K 的 DeepSeek 洗成 64K」，全站预算跟着塌，
+        # 而且一句错误都不说。显式给值仍走 normalize_max_context_k（越界钳制，
+        # 不在这里新增 raise）；新建路径没有"库里那一份"可保留，行为不变。
+        # 不进 requested：思考四格的"严格只判带来的值"是给 `_thinking_fields` 的，
+        # 上限的判据从头到尾只有归一这一条。
+        if pending.get("max_context_k") is None:
+            pending["max_context_k"] = old.get("max_context_k")
+        return pending, requested
+
     def upsert(self, record: dict) -> dict:
-        cleaned = self._validate(record)
+        pending, requested = self._pending(record)
+        cleaned = self._validate(pending, thinking_requested=requested)
         with self._lock:
             existing = next((i for i, p in enumerate(self._items) if p["id"] == cleaned["id"]), None)
             if existing is None:
@@ -640,7 +1100,7 @@ class ProviderStore:
             p["is_default"] = (p["id"] == keep_id)
 
     @staticmethod
-    def _validate(record: dict) -> dict:
+    def _validate(record: dict, thinking_requested=None) -> dict:
         label = str(record.get("label") or "").strip()
         base_url = str(record.get("base_url") or "").strip()
         model = str(record.get("model") or "").strip()
@@ -687,6 +1147,10 @@ class ProviderStore:
             "paid_by": paid_by,
             "owner": owner,
             "pricing": pricing,
+            # 思考四格。thinking_requested=None 只可能来自直接调 `_validate` 的调用方
+            # （没经过 `_pending` 那一步合并，也就没有"继承来的值"要宽容）：那时
+            # dict 里非 None 的那几格就是带来的值，照旧逐格严格判。
+            **_thinking_fields(record, thinking_requested),
         }
 
     # ---- 对外视图（绝不返回明文密钥）----
@@ -719,6 +1183,11 @@ class ProviderStore:
                 # 直觉"（卡片 §2.3b），不是合同价；未定价 = "?x"，绝不显示 0.00x。
                 "priced": p.get("pricing") is not None,
                 "multiplier": credits.multiplier_label(p.get("pricing")),
+                # 思考视图四格。这里**不给** thinking_profile：那是"怎么调参"的内部
+                # 配方，模型清单（下拉、卡片）用不上，而管理表单要的那一面是 _public。
+                # 读路径的兜底口径（截 3 档、default 归回候选）在 _thinking_view 一处，
+                # 与 _public 同一份，别在这里再抄一遍。
+                **_thinking_view(p),
             })
         return items
 
@@ -740,6 +1209,11 @@ class ProviderStore:
             "pricing": pricing,
             "priced": pricing is not None,
             "multiplier": credits.multiplier_label(pricing),
+            # 思考视图：与 catalog 同一份 `_thinking_view`，这一面只多给一格
+            # thinking_profile——管理表单保存时得把它原样回传，否则一次编辑就把
+            # 配方洗回 none。（共享条目对普通用户不给这一格，见 main.my_providers。）
+            **_thinking_view(p),
+            "thinking_profile": str(p.get("thinking_profile") or DEFAULT_THINKING_PROFILE),
         }
 
     # ---- 探活 ----

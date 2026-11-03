@@ -10,7 +10,7 @@ import time
 import json
 from typing import List, Dict, Any, Optional
 
-from app.core.providers import store, build_client, scrub_secrets
+from app.core.providers import store, build_client, scrub_secrets, thinking_kwargs_for
 from app.core import usage
 from app.core.guardrails import RoundGuard
 from app.tools.executor import execute_tool_detailed
@@ -55,7 +55,8 @@ class ReActAgent:
         context: Optional[List[Dict[str, str]]] = None,
         max_duration: int = 120,
         user_id: str = None,
-        provider_id: str = None
+        provider_id: str = None,
+        thinking_index: int = None
     ) -> str:
         """
         执行任务的主方法
@@ -67,6 +68,11 @@ class ReActAgent:
                 用这个值覆盖模型给的参数；不传的话这些工具只能落在 default_user 上。
                 它同时是账本上那一人（v0.25 R1：/v1/agent/run 对登录用户开放）
             provider_id: 发起人解析出的模型服务；None 时按他的默认与池子走
+            thinking_index: 思考**档位序号**（Task 12B B3 站点 4；加在参数表末尾并带默认值，
+                既有那三个位置参数调用者一个都不许改写法）。换算与"这条记录核实过没有"的
+                判据都在请求侧那一处，这里只把序号交给唯一的写者 `thinking_kwargs_for`；
+                None 与今天（登记表里只有 `none`）都得到空字典。`/v1/agent/run` 今天还没有
+                档位这一格（客户端接线是 Task 13），所以线上这条路恒为 None。
         Returns:
             最终答案字符串
         """
@@ -137,6 +143,10 @@ class ReActAgent:
                     if self.tools_schema:
                         kwargs["tools"] = self.tools_schema
                         kwargs["tool_choice"] = "auto"
+                    # 思考参数只有一个写者（Task 12B B3 站点 4）。只有工具循环里这一次
+                    # 叫模型吃档位；超时兜底那次 `_force_summarize` 是另一件事，不许拿
+                    # 用户的档位去改它的输出（判据见 test_v0391_thinking_mapping.py §13）。
+                    kwargs.update(thinking_kwargs_for(provider, thinking_index))
                     response = client.chat.completions.create(**kwargs)
                     rounds += 1
                     msg = response.choices[0].message

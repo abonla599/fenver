@@ -508,6 +508,26 @@ a.trace-result-title:hover { text-decoration: underline; }
 }
 .suggestions button:hover { border-color: var(--accent); color: var(--accent); }
 
+/* v0.39.x 驾驶舱接力队列（Task 5）：贴在输入卡上方的窄条。
+   颜色全部复用现成 token（surface-2 / line / text 三档 / accent-soft），
+   不引入新的强调色；队列为空时由 .hidden 整体收起，不占位。 */
+.queue-strip { border: 1px solid var(--line); background: var(--surface);
+  border-radius: var(--fv-radius-md); padding: 6px 10px 4px; margin-bottom: 8px; }
+.queue-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
+.queue-head button { border: 1px solid var(--line); background: transparent; color: var(--text-2);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.queue-head button:hover { border-color: var(--accent); color: var(--accent); }
+.queue-card { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  border-top: 1px dashed var(--line); margin-top: 6px; padding: 6px 0 2px; }
+.queue-text { flex: 1 1 100%; font-size: 13px; color: var(--text); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; max-height: 4.5em; overflow: hidden; }
+.queue-meta { color: var(--text-3); font-size: 11px; margin-right: auto; }
+.queue-card button { border: 1px solid var(--line); background: transparent; color: var(--text-2);
+  border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.queue-card button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.queue-edit { flex: 1 1 100%; border: 1px solid var(--accent); border-radius: 10px;
+  padding: 8px 10px; background: var(--bg); color: var(--text); resize: vertical; font-size: 13px; }
+
 .input-card {
   border: 1px solid var(--line); background: var(--surface);
   border-radius: var(--radius); box-shadow: none; padding: 8px 8px 6px;
@@ -593,6 +613,100 @@ a.trace-result-title:hover { text-decoration: underline; }
 .model-menu button:hover { background: var(--bg-hover); }
 .model-menu button.current { color: var(--accent); font-weight: 600; }
 .model-menu .mm-sub { font-size: 12px; opacity: .65; flex: none; }
+
+/* v0.39.1 Task 9：模型卡两栏。左列是可用模型行（52dp 热区，与 .set-row 同规格），
+   右列是同一张卡（16 圆角，走 --fv-radius-lg）。三态配色只认 [data-thinking]
+   这一枚属性——unsupported / unverified / verified 各一色，全部取既有 token，
+   不加第三强调色（verified=强调绿、unverified=AI 紫、unsupported=弱化灰）。
+   手机（无 hover）默认收起右栏，点行加 .card-open 才展开；桌面见文末的 hover 段。 */
+.model-menu .mm-list { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.model-menu .mm-item { display: flex; align-items: center; gap: 6px; min-height: 52px; }
+.model-menu .mm-row-main { flex: 1; min-width: 0; }
+.model-menu .mm-name { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.model-menu .mm-detail { display: none; min-width: 0; }
+.model-menu.card-open .mm-detail { display: block; }
+.mm-card { display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  padding: 10px 12px; background: var(--fv-surface-2); }
+.mm-title { margin: 0; font-weight: 600; font-size: 14px; }
+.mm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mm-chip { font-size: 11.5px; line-height: 1.5; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--fv-surface-3); color: var(--text-2); }
+.mm-chip[data-thinking="unsupported"], .mm-card[data-thinking="unsupported"] .mm-chip { color: var(--text-3); }
+.mm-chip[data-thinking="unverified"] { border-color: var(--fv-ai); color: var(--fv-ai); }
+.mm-chip[data-thinking="verified"] { border-color: var(--fv-accent); color: var(--fv-accent); }
+.mm-item { border-radius: 10px; }
+.mm-item[data-thinking="unsupported"] .mm-chip { opacity: .7; }
+/* 思考那一行（开关 + 档位 chips）在"点不动"的两态下降饱和：禁用得有禁用的样子。
+   只降不隐藏——原因那句人话（thinkingStateReason）仍在下面，看得懂为什么不能点。
+   Task 9 修复轮 Minor 6：这一档 data-thinking 之前没有任何 CSS 消费，属性白挂。 */
+.mm-thinking[data-thinking="unsupported"],
+.mm-thinking[data-thinking="unverified"] { opacity: .55; }
+.mm-manage { display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 8px; }
+.mm-h { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.mm-card .mm-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.mm-card .mm-lbl { flex: none; color: var(--text-2); }
+.mm-card .mm-val { font-size: 13px; }
+.mm-quick { display: flex; flex-wrap: wrap; gap: 4px; }
+.mm-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.model-menu .mm-mini, .model-menu .mm-pick, .model-menu .mm-manage-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
+  border-radius: 10px; padding: 4px 10px; font-size: 12px; cursor: pointer; flex: none; }
+.model-menu .mm-mini:hover { background: var(--bg-hover); }
+.model-menu .mm-mini.on { border-color: var(--fv-accent); color: var(--fv-accent); }
+.model-menu .mm-mini:disabled, .model-menu .mm-pick:disabled,
+.model-menu .mm-input:disabled, .model-menu .mm-switch:disabled { opacity: .5; cursor: not-allowed; }
+.model-menu .mm-pick { border-color: var(--fv-accent); color: var(--fv-accent); font-weight: 600; }
+.model-menu .mm-manage-btn { align-self: stretch; justify-content: center; min-height: 36px; }
+.model-menu .mm-manage-btn.on { border-color: var(--fv-accent); color: var(--fv-accent); }
+.model-menu .mm-input { flex: 1; min-width: 0; background: var(--fv-surface-3);
+  border: 1px solid var(--line); border-radius: 8px; color: var(--text);
+  padding: 4px 8px; font-size: 12.5px; }
+.model-menu .mm-range { flex: 1; min-width: 0; accent-color: var(--accent); }
+.model-menu .mm-switch { flex: none; accent-color: var(--accent); }
+.mm-note { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+.mm-err { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--danger); }
+.mm-ok { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--accent); }
+
+/* v0.39.x 驾驶舱：上下文环 + 账本。环 24dp，conic-gradient 由 app.js 写的
+   --ctx-pct/--ctx-color 两个自定义属性直接驱动（--fv-warn 是留给未来警示色的
+   空位，本版没有第三强调色，兜到 --fv-danger）；账本沿用卡面/线/圆角同一套 token。 */
+.model-cockpit { display: inline-flex; align-items: center; gap: 6px;
+  flex: none; margin-left: auto; max-width: 56vw; }
+.model-cockpit .model-chip { margin-left: 0; }
+.ctx-ring-btn { width: 24px; height: 24px; border-radius: 50%; position: relative;
+  padding: 0; border: 0; flex: none; cursor: pointer;
+  background: conic-gradient(var(--ctx-color, var(--fv-accent)) calc(var(--ctx-pct, 0) * 1%),
+                             var(--fv-surface-3) 0); }
+.ctx-ring-btn::after { content: ""; position: absolute; inset: 4px; border-radius: 50%;
+  background: var(--fv-surface); }
+.ctx-ring-btn.warn { --ctx-color: var(--fv-warn, var(--fv-danger)); }
+.ctx-ring-btn.danger { --ctx-color: var(--fv-danger); }
+.context-panel { display: flex; flex-direction: column; gap: 8px;
+  max-width: 780px; margin: 0 auto 8px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--fv-radius-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: pop var(--fv-dur-standard) var(--fv-ease); font-size: 13px; }
+.ctx-head { margin: 0; font-weight: 600; }
+.ctx-note { margin: 0; font-size: 12px; color: var(--text-3, var(--text)); opacity: .8; }
+.ctx-seg-bar { display: flex; gap: 2px; height: 10px; border-radius: 5px;
+  overflow: hidden; background: var(--fv-surface-3); }
+.ctx-seg { display: block; height: 100%; min-width: 0; }
+.ctx-seg-persona { background: var(--accent-soft); }
+.ctx-seg-history { background: var(--accent); }
+.ctx-seg-input { background: var(--bg-hover); }
+.ctx-seg-residual { background: var(--danger); opacity: .55; }
+/* Task 9：账本里那行预算改用了 .set-row 骨架（读数为啥与滑杆同一行见 index.html），
+   旧的 .ctx-panel-row 两条随迁走一起删掉，不留尸。 */
+.ctx-panel-actions { display: flex; gap: 8px; }
+.ctx-preview { display: flex; flex-direction: column; gap: 4px; }
+.ctx-preview-row { display: flex; gap: 8px; align-items: baseline; }
+.ctx-preview-role { flex: none; font-size: 11.5px; opacity: .6; }
+.ctx-preview-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; }
 .attach-tile {
   display: flex; align-items: center; gap: 10px;
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
@@ -1126,3 +1240,26 @@ a.trace-result-title:hover { text-decoration: underline; }
 #netMinder .nm-mute { color: var(--text-2); }
 #netMinder .nm-btn:hover { text-decoration: underline; }
 
+
+/* ---------- v0.39.1 Task 9：模型卡两栏与账本里的预算行 ---------- */
+
+/* 账本里那一行「预算/上限 + 滑杆」沿用了 .set-row 的骨架（同一套行高/读数排布），
+   在这张面板里收一档：不留设置页那套 52dp 热区与分隔线，滑杆给足宽度。
+   这条必须写在 .set-row 基础规则**之后**——test_web_pwa 用第一个 `.set-row {`
+   量热区下限，抢先匹配到这条就等于把那条锁改窄了。 */
+.context-panel .set-row { min-height: 48px; padding: 0; border-bottom: 0; gap: 8px;
+  cursor: default; }
+.context-panel .set-row:hover { background: transparent; }
+.context-panel .ctx-budget-row .set-val input[type="range"] { width: 148px; }
+
+/* 桌面（有 hover 的设备）：清单与卡片并成两栏，「模型管理」横跨整行。
+   hover 左行只换右栏内容——JS 侧那条纪律（不重渲染整张清单）在这里兑现成布局。
+   手机没有 hover，右栏默认收起、点行加 .card-open 展开，所以这一栏只在
+   (hover: hover) 下常开；两栏都吃 max-height 让长清单在弹层里能滚。 */
+@media (hover: hover) {
+  .model-menu { display: grid; grid-template-columns: minmax(230px, 44%) minmax(280px, 1fr);
+    gap: 10px 14px; align-items: start; }
+  .model-menu .mm-detail { display: block; }
+  .model-menu .mm-list { max-height: 58vh; overflow-y: auto; }
+  .model-menu .mm-manage-btn { grid-column: 1 / -1; }
+}

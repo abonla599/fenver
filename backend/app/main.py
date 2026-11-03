@@ -351,6 +351,13 @@ class ChatRequest(BaseModel):
     attachments: List[str] = Field(default_factory=list, max_length=MAX_CHAT_ATTACHMENTS)
     messages: list[dict]
     session_id: Optional[str] = None
+    # v0.39.1 Task 12B：思考**档位标签**（UI 上那几个管理员自填的名字，不是布尔开关）。
+    # 这一格从今天起存在，但生产登记表里只有 `none`，所以任何请求都换不出序号、也就
+    # 一个字节都发不出去——那是判据不是巧合，锁在 §13 那两格（verified 会带 / 出厂表不带）。
+    # 缺省 None 与空串都是"这一格没填"，不发参数；判据绝不许搬进 `field_validator`：
+    # 上面 :231-239 那个全局 RequestValidationError 处理器会把 ValueError 变成
+    # 422 + MALFORMED_BODY_DETAIL，那时 400 没了、也归因不到思考这一格。
+    thinking_level: Optional[str] = None
 
     @field_validator("messages")
     @classmethod
@@ -615,7 +622,8 @@ def _self_origin(request: Request) -> str:
 from app.core import stream_events
 from app.core import credits
 from app.core.providers import (store as provider_store, ProviderError, PRESETS,
-                                looks_placeholder, build_client, scrub_secrets)
+                                looks_placeholder, build_client, scrub_secrets,
+                                thinking_request_index, THINKING_REQUEST_REJECTED)
 from app.core import search_keys
 from app.core.uploads import (store as upload_store, build_user_content,
                               UploadError, MAX_UPLOAD_BYTES)
@@ -663,19 +671,34 @@ def _throttle_chat(http: Request, principal: Principal) -> None:
 
 
 def _prepare_chat(request: ChatRequest, principal: Principal):
-    """解析模型服务、拼装附件。
+    """解析模型服务、拼装附件、把思考档位标签换算成出网序号。
 
-    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本)。
+    返回 (provider, 发给模型的消息列表, 写入会话历史的用户文本, 思考档位序号)。
     历史里只记原始文本加附件名，避免把整份文件塞进会话记录。
 
     principal 一路传进来而不是在这里再取一次：附件归属必须由"谁在请求"决定，
     请求里那个 attachments 列表只是别人塞进来的 id 集合。
+
+    第四个返回值是**序号**（1..level_count）而不是标签：换算点只此一处（Task 12B B1），
+    四个出网站点各自都只把这一个数交给 `providers.thinking_kwargs_for`，谁都不许再算
+    一遍——两处各算一次就是两份口径，迟早有一份在"清单里有这个标签但配方出网值更少"
+    这种畸形记录上漂掉。`None` 表示这次不发思考参数（没填/空串/这条记录没核实过）。
+
+    判据不在这里抄：`thinking_request_index` 走的就是 12A 那一份 `_thinking_view` →
+    `_thinking_status(supports, profile, host, model)`，界面亮绿的那一格与真正出网的
+    那一次因此永远是同一个结论。不通过一律 400，detail 是那一句固定的话，
+    **不回显这条记录的能力字段**（档位清单/配方名/上限都不许出现在错误里）。
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages 不能为空")
 
     provider = provider_store.resolve(request.provider, legacy_model=request.model,
                                       user_id=principal.user_id)
+
+    try:
+        thinking_index = thinking_request_index(provider, request.thinking_level)
+    except ProviderError:
+        raise HTTPException(status_code=400, detail=THINKING_REQUEST_REJECTED) from None
 
     messages = list(request.messages)
     last = messages[-1] or {}
@@ -693,7 +716,7 @@ def _prepare_chat(request: ChatRequest, principal: Principal):
             for a in request.attachments)
         history_text = (text + "\n" if text else "") + f"[附件] {names}"
 
-    return provider, messages, history_text
+    return provider, messages, history_text, thinking_index
 
 
 def _require_session_owner(session_id, principal: Principal) -> None:
@@ -733,7 +756,7 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
     _require_session_owner(request.session_id, principal)
     _shadow_gate(principal)   # 入口先过线：到线就不出网，这一次账本零增量
     try:
-        provider, messages, user_text = _prepare_chat(request, principal)
+        provider, messages, user_text, thinking_index = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
@@ -742,7 +765,8 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
         trace = []
         if USE_PIPELINE:
             result = ChatPipeline(user_id=principal.user_id).process(
-                provider["model"], messages, provider_id=provider["id"])
+                provider["model"], messages, provider_id=provider["id"],
+                thinking_index=thinking_index)
             reply = result.get("reply", "")
             used_memory_ids = result.get("used_memory_ids") or []
             trace = result.get("trace") or []
@@ -750,7 +774,8 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
             reply = get_llm_response(
                 model=provider["model"], messages=messages,
                 temperature=0.7, provider_id=provider["id"],
-                user_id=principal.user_id)   # 账要落在叫它的人头上
+                user_id=principal.user_id,   # 账要落在叫它的人头上
+                thinking_index=thinking_index)
     except HTTPException:
         raise
     except Exception as e:
@@ -810,18 +835,25 @@ def _parse_last_event_id(raw: str):
 
 
 def launch_stream_run(run: "stream_runs.StreamRun", provider, messages, user_text,
-                      principal: Principal, pipe, used_memory_ids) -> threading.Thread:
+                      principal: Principal, pipe, used_memory_ids,
+                      thinking_index: int = None) -> threading.Thread:
     """启动生产线程。与端点分开写，是为了契约测试能在不开 HTTP 流的处境下
-    装配一轮（test_v025_stream_cancel_contract 需要中途取消的确定性时机）。"""
+    装配一轮（test_v025_stream_cancel_contract 需要中途取消的确定性时机）。
+
+    `thinking_index` 只能**加在末尾并带默认值**：现有三个调用者是按七个位置参数调的
+    （test_v025_stream_cancel_contract.py、test_v025_r3b_no_reader_billing.py、
+    test_v025_r4b_credit_kernel.py），插队或改成关键字参数会把它们一起掀翻（B4）。
+    """
     t = threading.Thread(target=_produce_stream,
                          args=(run, provider, messages, user_text, principal,
-                               pipe, used_memory_ids),
+                               pipe, used_memory_ids, thinking_index),
                          daemon=True, name=f"stream-run-{run.run_id[:8]}")
     t.start()
     return t
 
 
-def _produce_stream(run, provider, messages, user_text, principal, pipe, used_memory_ids):
+def _produce_stream(run, provider, messages, user_text, principal, pipe, used_memory_ids,
+                    thinking_index=None):
     """把一轮流式对话的每一步都变成带序号的缓冲帧：生产者只此一个线程。
 
     与改造前的 generate() 的三点不同，每一点都是 R3 判据的正面：
@@ -880,6 +912,9 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
     status = "failed"
     full_text = ""
     trace: list = []
+    # 引擎在 finally 里把 billed 结进这个字典：cancelled 分支的 done 也要带 usage，
+    # 所以它必须在 try: 之前定义（半截消耗同样是真花出去的钱）。
+    usage_out: dict = {}
 
     begin_trace()
     try:
@@ -906,7 +941,9 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                                         user_id=principal.user_id,        # 账本要落在人头上
                                         cancel_event=run.cancel_event,    # 停止的主判据
                                         on_upstream_start=run.attach_upstream,  # 供当场关闭
-                                        before_round=before_round):       # R3b 轮次边界的钱闸
+                                        before_round=before_round,       # R3b 轮次边界的钱闸
+                                        usage_out=usage_out,             # done 帧回传 usage
+                                        thinking_index=thinking_index):   # 档位序号（12B）
             if frame.get("type") == se.FRAME_CONTENT:
                 full_text += frame.get("text") or ""
             run.append(frame)
@@ -929,7 +966,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
                       file=sys.stderr, flush=True)
 
         run.append({**se.done_frame(full_text, run.message_id, provider["model"],
-                                    trace or None),
+                                    trace or None, usage=usage_out or None),
                     "status": "completed", "resumable": False})
         status = "completed"
     except StreamCancelled:
@@ -954,7 +991,7 @@ def _produce_stream(run, provider, messages, user_text, principal, pipe, used_me
         # R3b-3 的收尾 done：旧客户端从 cancelled 身上得不到"结束"，必须给一条
         # 它今天就认的 done；停的信息只加新字段，不改旧骨架。
         run.append({**se.done_frame(full_text, run.message_id, provider["model"],
-                                    trace or None),
+                                    trace or None, usage=usage_out or None),
                     "status": "cancelled",
                     "stopped_reason": run.stop_cause or "user_cancel",
                     "resumable": False})
@@ -1021,7 +1058,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
 
     # 解析放在返回流之前：否则配置错误只能混在流里，HTTP 状态仍是 200
     try:
-        provider, messages, user_text = _prepare_chat(request, principal)
+        provider, messages, user_text, thinking_index = _prepare_chat(request, principal)
     except (ProviderError, UploadError) as e:
         raise HTTPException(status_code=400, detail=hide_paths(str(e)))
 
@@ -1040,7 +1077,7 @@ def stream_chat_endpoint(request: ChatRequest, http: Request,
     run = stream_runs.create_run(user_id=principal.user_id,
                                  session_id=request.session_id)
     launch_stream_run(run, provider, messages, user_text, principal, pipe,
-                      used_memory_ids)
+                      used_memory_ids, thinking_index=thinking_index)
     return StreamingResponse(stream_runs.sse_frames(run, 0),
                              media_type="text/event-stream")
 
@@ -1349,6 +1386,17 @@ def redeem_export_ticket(ticket_id: str):
 from fastapi import UploadFile, File
 from fastapi.responses import FileResponse
 
+def _can_edit_provider(principal, item) -> bool:
+    """这条模型在这个人手里能不能改。
+
+    判据只有归属，没有角色之外的例外：共享条目是全站的上游与账本，改它等于改
+    所有人的对话（所以只有管理员能改）；私有条目本来就是主人自己的 key 和自己的
+    上游，属主永远能改。这一格是给模型清单的消费端（网页/安卓后续接）决定编辑
+    入口亮不亮用的，但界面从来不是边界——真正的门在 /v1/providers（RequireAdmin）
+    与 /v1/me/providers（属主闸）。
+    """
+    return principal.role == "admin" or not item.get("shared")
+
 @app.get("/v1/models")
 def list_models(principal: Principal = CurrentPrincipal):
     """模型清单：前端那个下拉就靠它渲染。
@@ -1365,9 +1413,16 @@ def list_models(principal: Principal = CurrentPrincipal):
     （tests/test_route_auth_contract.py）不接受没有身份的 /v1 端点，且这是中间件
     之外多出来的一把锁。完整理由见下面 providers 段那段注释。
     key masking 原样保留——catalog() 只报 usable/reason，密钥永不出这道门。
+
+    can_edit 在这一层现算而不是塞进 catalog()：归属是"这个人能不能改"，是请求方
+    的身份属性，存储层那份清单里没有 principal，也不该有。
     """
+    models = []
+    for item in provider_store.catalog(principal.user_id):
+        item["can_edit"] = _can_edit_provider(principal, item)
+        models.append(item)
     return {
-        "models": provider_store.catalog(principal.user_id),
+        "models": models,
         "default": (provider_store.default_for(principal.user_id) or {}).get("id"),
         "presets": PRESETS,
     }
@@ -1397,6 +1452,14 @@ class ProviderRequest(BaseModel):
     # 这里只开一格传送。None（没填）= 不改（与 paid_by 同一条"旧表单不许洗值"
     # 纪律，见 update 路由的 exclude_none）；显式 {} = 主动取消定价（回到未定价）。
     pricing: Optional[dict] = None
+    # v0.39.1 Task 8：思考能力四格。四格全 Optional=None 是这条设计的要害——
+    # "这次请求没提到它" 与 "用户把它关掉了" 必须是两种可区分的输入，否则一次
+    # 普通的改名保存就会把思考配置洗成默认值。清洗/拒收的判据一律在
+    # providers._thinking_fields，这里只开传送（与 pricing 同一个分工）。
+    supports_thinking: Optional[bool] = None
+    thinking_levels: Optional[list[str]] = None
+    thinking_default: Optional[str] = None
+    thinking_profile: Optional[str] = None
 
 def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
     """取一条 provider 并验证归属。require_own=True 时只有主人过闸。
@@ -1528,9 +1591,22 @@ class ProviderDefaultRequest(BaseModel):
 
 @app.get("/v1/me/providers")
 def my_providers(principal: Principal = CurrentPrincipal):
-    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。"""
+    """这个人视角的模型服务面：共享清单（只读）+ 我的清单（可编辑）+ 我的默认。
+
+    shared 段**只在调用者不是管理员时**剥掉 thinking_profile：那一格是"选了某档之后
+    往上游发什么参数"的内部配方，普通用户在模型卡里对共享条目既看不到也改不动
+    （`can_edit=false`，真门在 /v1/providers 的 RequireAdmin），把配方发过去只会让人
+    以为改得动。管理员要在模型卡里改共享模型的能力/上限，PUT 是全量语义——少了这一格
+    回显，一次保存就把已核实的配方洗回 none（与 mine 段同一个理由）。
+    思考结论本身照给（thinking_status，界面要显示"支持思考（参数未核实）"）。
+    mine 段保留：那几格是他自己的 provider，PUT 回传时缺了它就把配方洗回 none。
+    """
+    shared = provider_store.public_list(None)
+    if principal.role != "admin":
+        shared = [{k: v for k, v in item.items() if k != "thinking_profile"}
+                  for item in shared]
     return {
-        "shared": provider_store.public_list(None),
+        "shared": shared,
         "mine": provider_store.mine_public(principal.user_id),
         "default": provider_store.get_pref(principal.user_id),
         "presets": PRESETS,

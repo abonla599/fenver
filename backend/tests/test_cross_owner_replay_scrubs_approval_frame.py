@@ -657,6 +657,12 @@ _SCHEMA_SHAPE_KEYS = {("tools/builtin_tools.py", "string"), ("tools/builtin_tool
                       ("tools/registry.py", "function"), ("core/streaming.py", "function"),
                       ("agents/react_agent.py", "function"), ("core/uploads.py", "text"),
                       ("core/uploads.py", "image_url")}
+# 思考配方表的档位取值 `extra_body.thinking.type`：这两个字面量是**出网**请求体里的字段值
+# （我们把 payload 递给上游 provider），不是流上的一帧，永远到不了客户端，所以没有隐私立场
+# 可表。与 _SCHEMA_SHAPE_KEYS 同族（都发给上游），仍单列一组：那一组钉 JSON Schema 的类型名，
+# 这一组钉思考档位的开关取值，两类各自增减，并成一组只会让过期的一半拖着另一半。
+_THINKING_BODY_VALUES = {("core/thinking_profiles.py", "enabled"),
+                         ("core/thinking_profiles.py", "disabled")}
 _GUARD_INTERNAL_EVENTS = ("cost_cap_rounds", "cost_cap_tokens", "output_budget_exhausted",
                           "output_truncated", "duplicate", "suspend", "fail_backoff")
 
@@ -668,6 +674,9 @@ DECLARED_HAND_WRITTEN = {
         "带的是本轮正文，与 done 同一立场（跨属主本来就看得见回答本身）",
     **{k: "给上游 provider 的 schema / 消息分片，不是流上的帧"
        for k in _SCHEMA_SHAPE_KEYS},
+    **{k: "思考配方的档位取值 extra_body.thinking.type，随请求体递给上游 provider，"
+          "不在给客户端的流上，字段值本身也不带任何用户内容"
+       for k in _THINKING_BODY_VALUES},
     ("core/mcp_stdio.py", "object"):
         "MCP 工具 inputSchema 与内部占位条目的 JSON Schema 类型字面量，"
         "只进工具注册表，不是流上的帧",

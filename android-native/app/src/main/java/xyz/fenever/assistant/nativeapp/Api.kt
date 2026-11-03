@@ -65,17 +65,50 @@ private val SELF_HEAL_EXEMPT = setOf("/v1/auth/login", "/v1/auth/register",
 @Serializable data class SessionDetail(val session_id: String = "", val title: String = "新对话",
                                        val created_at: String = "", val model: String = "",
                                        val messages: List<StoredMessage> = emptyList())
+/* v0.39.x 驾驶舱 Task 10：模型卡的原料。新增的思考五格全部带默认值——旧服务端
+ * （Task 8/9 之前构建的包）的 /v1/models 根本没有这些键，缺省必须解得开、且不能
+ * 替服务端说话：默认态只能是「不支持思考 + 改不动」。这与 Done.usage 同一容错纪律
+ * （锁：backend/tests/test_v0391_native_cockpit.py 逐格钉 `= 默认值`）。
+ * priced/multiplier 是 v0.25 R4b 就在目录里的两格，本单只是把它们接进模型行
+ * （选模型时真正比的两个数：能带多少历史、花多少）。
+ *
+ * 修复轮 1（I-1）：`multiplier` 必须是**可空** `String? = null`。服务端那一格出自
+ * `credits.multiplier_label`，它对 `per_call` 定价**返回 None**（`credits.py` 里明写
+ * "per_call → None（不显示倍率，D24）"），而下面的 `json` 只开了 `ignoreUnknownKeys`、
+ * **没有**开 `coerceInputValues` ⇒ 显式 `null` 撞非空 `String` 会抛 JsonDecodingException
+ * ⇒ 整份 `/v1/models` 解不开 ⇒ 手机端「没有可用的模型」，选模型与预算全废。
+ * 现网两条今天都是 `priced=false, multiplier="?x"`，所以这颗雷还没被踩到，但只要有
+ * 人建一条 per_call 定价就会炸。同一纪律的既有落点：`ModelsResult.default`、
+ * `StoredMessage.message_id/model`、`Done.usage`——它们正是为这条规则才写成可空。
+ * 不在这里开 `coerceInputValues`：那会一次性改掉全站所有 DTO 的"null 当缺省值"语义，
+ * 需要单独一票（本单只把这一格的形状钉对）。 */
 @Serializable data class ModelInfo(val id: String = "", val name: String = "",
                                    val model: String = "", val supports_vision: Boolean = false,
                                    val usable: Boolean = true, val default: Boolean = false,
                                    val shared: Boolean = true, val reason: String = "",
-                                   val max_context_k: Int = 0)
+                                   val max_context_k: Int = 0,
+                                   val supports_thinking: Boolean = false,
+                                   val thinking_levels: List<String> = emptyList(),
+                                   val thinking_default: String = "",
+                                   val thinking_status: String = "unsupported",
+                                   val can_edit: Boolean = false,
+                                   val priced: Boolean = false,
+                                   val multiplier: String? = null)
 @Serializable data class ModelsResult(val models: List<ModelInfo> = emptyList(),
                                       val default: String? = null)
 @Serializable data class UploadInfo(val id: String = "", val name: String = "",
                                     val kind: String = "", val mime: String = "",
                                     val size: Long = 0)
 @Serializable data class ChatReply(val reply: String = "", val message_id: String = "")
+/* v0.39.x 驾驶舱：done 帧的可选 usage（本轮计费口径的结算值，
+   backend/app/core/stream_events.py 的 done_frame(usage=…) 是发端）。
+   字段与服务端 streaming.billed 的键一一对应；老服务端不发 usage 键——
+   ChatEvent.Done.usage 就是 null，收尾链路一律不依赖它。
+   注意单位：这些是 **token 原值**，与预算的 K 之间换算只许出现在显式的
+   ×1000 / ÷1000 处（见 outbound 与 ChatUi 的环）。 */
+@Serializable data class Usage(val prompt_tokens: Int = 0, val completion_tokens: Int = 0,
+                               val total_tokens: Int = 0, val reasoning_tokens: Int = 0,
+                               val cached_tokens: Int = 0)
 @Serializable data class ExportTicket(val path: String = "")
 /* 意见反馈提交回执：服务端给回那条反馈的独立编号 + 落库时间（见 core 的
    user_feedback_storage.submit）。编号是 FB-xxxxxx 形，用户自己留存、管理员按它定位。 */
@@ -140,9 +173,12 @@ sealed class ChatEvent {
     // 这条连接追不上服务端缓冲（这一轮续不上了）：同样等随后的 done 收尾，不单独终结。
     data class CannotResume(val message: String) : ChatEvent()
     // trace：服务端裁过的权威步序（含 omitted），老服务端不发这字段就是空表。
+    // usage（v0.39.x 驾驶舱）：本轮计费口径的结算值；老服务端不发就是 null，
+    // 收尾与落账都不许依赖它（context_meter 的校准读它只为画环）。
     data class Done(val fullText: String, val messageId: String, val model: String,
                     val status: String, val stoppedReason: String, val resumable: Boolean,
-                    val trace: List<JsonObject> = emptyList()) : ChatEvent()
+                    val trace: List<JsonObject> = emptyList(),
+                    val usage: Usage? = null) : ChatEvent()
     data class Failed(val message: String) : ChatEvent()
     // 认不出的帧类型：不静默丢——上报一次，同时不打断正常收尾（网页 onUnknown 同语义）。
     data class Unknown(val type: String) : ChatEvent()
@@ -476,20 +512,52 @@ object Api {
     }
 
     /** 组装出站消息：本机历史（去掉空/瞬时条）按预算截断，角色设定置顶为 system。
-     *  budgetK 读数时对模型上限再取一次 min（与网页 outbound() 同一条防线）。 */
-    fun outbound(history: List<ChatMessageDto>, persona: String, contextTokensK: Int,
+     *  budgetK 是调用方读到的 per-provider 预算（K token）；读数时对模型上限再取一次
+     *  min（与网页 outbound() 同一条防线）。K 在这里才第一次 ×1000 换成 token 原值。 */
+    fun outbound(history: List<ChatMessageDto>, persona: String, budgetK: Int,
                  modelCapK: Int): List<ChatMessageDto> {
         val reserve = if (persona.isNotEmpty()) estimateTokens(persona) + 4 else 0
-        val budgetK = minOf(contextTokensK, modelCapK)
+        val effK = minOf(budgetK, modelCapK)
         val msgs = truncateWithin(history.filter { it.content.isNotEmpty() },
-            maxOf(500, budgetK * 1000 - reserve))
+            maxOf(500, effK * 1000 - reserve))
         return if (persona.isNotEmpty()) listOf(ChatMessageDto("system", persona)) + msgs else msgs
     }
+
+    /* ---------------- 驾驶舱纯函数（Task 6，与网页 app.js 同一公式） ----------------
+     * 单位口径钉死：下面三个函数的入参与返回一律是 **token 原值**（estimateTokens
+     * 的量纲）；K 只出现在调用方的显示与预算读数处，换算必须显式 ×1000 / 除 1000。
+     * 函数名沿用网页的 calibrateUsedK——名里的 K 是历史包袱，语义是 token，别被名字带偏。 */
+
+    /** 校准：客户端估算与上一轮服务端真实 prompt_tokens 的比值夹在 [1,4] 内乘回读数。
+     *  没有上一轮锚点（首条消息、或服务端没回 usage）时不校准，原样返回。 */
+    fun calibrateUsedK(clientTokens: Int, lastPromptTokens: Int, lastClientTokens: Int): Int {
+        val c = maxOf(0, clientTokens)
+        val lp = maxOf(0, lastPromptTokens)
+        val lc = maxOf(0, lastClientTokens)
+        if (lp <= 0 || lc <= 0) return c
+        val ratio = (lp.toDouble() / lc).coerceIn(1.0, 4.0)
+        return Math.round(c * ratio).toInt()
+    }
+
+    /** 轻量整理：整段历史按 token 预算从最近一条往回收（truncateWithin 的规则），
+     *  返回保留清单——丢了多少条由调用方按「条数差」算（重建过对象，按引用比会全数错）。
+     *  下限取 0 不取 500：这是"整理"不是"发送"，小预算也得真吐出差额；
+     *  最后一条仍由 truncateWithin 的"必带"规则兜住，与 outbound 同一口径。 */
+    fun dropOldestToBudget(list: List<ChatMessageDto>, budgetTokens: Int): List<ChatMessageDto> =
+        truncateWithin(list, maxOf(0, budgetTokens))
+
+    /** 分段：已知段（角色设定/历史/输入）之外的一切——系统提示、检索注入、校准差额——
+     *  收进 residual 返回，客户端不猜服务端注入了什么。 */
+    fun contextSegments(usedTokens: Int, personaTokens: Int,
+                        historyTokens: Int, inputTokens: Int): Int =
+        maxOf(0, usedTokens - maxOf(0, personaTokens) -
+            maxOf(0, historyTokens) - maxOf(0, inputTokens))
 
     /* payload 形状与网页一致：{model, provider, messages, attachments, session_id}。
        providerId 传 null 时整个键省略（服务端用它自己的默认）。 */
     fun chatPayload(providerId: String?, model: String?, messages: List<ChatMessageDto>,
-                    attachments: List<String>, sessionId: String?): String {
+                    attachments: List<String>, sessionId: String?,
+                    thinkingLevel: String? = null): String {
         val msgs = JsonArray(messages.map { m ->
             buildJsonObject {
                 put("role", JsonPrimitive(m.role))
@@ -502,6 +570,10 @@ object Api {
             "messages" to msgs,
             "attachments" to arr(attachments),
             "session_id" to s(sessionId),
+            // 整格省略而不是发空值：obj() 跳过 null 键，服务端把"没带这一格"与"带了一格
+            // 但值是空的"当两件事。调用方负责把"没什么要发的"传成 null（见 ChatUi 那唯一
+            // 的发送点），这一格不许在这里有缺省值。
+            "thinking_level" to thinkingLevel?.let { s(it) },
         ))
     }
 
@@ -758,8 +830,14 @@ object Api {
                 // trace：服务端裁过的权威步序（落盘回放同一份形状），原样收进 JsonObject。
                 val steps = (o["trace"] as? JsonArray)
                     ?.mapNotNull { it as? JsonObject } ?: emptyList()
+                // usage：全量读法（缺键/非对象/值畸变都不抛）——没有 usage 键就是 null。
+                val usage = (o["usage"] as? JsonObject)?.let { u ->
+                    Usage(iOf(u, "prompt_tokens"), iOf(u, "completion_tokens"),
+                        iOf(u, "total_tokens"), iOf(u, "reasoning_tokens"),
+                        iOf(u, "cached_tokens"))
+                }
                 col.emit(ChatEvent.Done(str("full_text"), str("message_id"), str("model"),
-                    str("status"), str("stopped_reason"), resumable, steps))
+                    str("status"), str("stopped_reason"), resumable, steps, usage))
             }
             "error" -> {
                 st.terminal = true
