@@ -1359,6 +1359,13 @@ BANNED_THINKING_PHRASES = ("可关闭思考", "思考已关闭", "支持关闭",
 # 与原生那把（`67e76585` 里的 `_native_kt_corpus`）同一形状：磁盘扫到的一份必须与
 # `git ls-files` 记的那一份**同一个集合**——少一份（改名/挪走/走空目录）多一份（没入库的
 # 游离文件）都红；git 问不到或返回空一律红，不 skip 后当绿。
+# 磁盘侧唯一一处与原生的差别：比集合前先扣掉"被 `.gitignore` 判定**有意不入库**"的那一份
+# （判据见下面的 `_deliberately_ignored`）。理由是仓库事实而不是省事：主树（这个目录同时
+# 是生产机）在 `docs/` 下躺着六份本机私有文档，`.gitignore:139` 与 :184-188 两族点名它们
+# 不入库 ⇒ 它们永远只出现在磁盘侧 ⇒ 同集合钉在 CI 与干净克隆绿、偏偏在主树红，而 AGENTS.md
+# §5 的"本地全量复跑"只能在主树做，等于换包前给任何人一次假警报。
+# 这一句必须与代码一致：被 `.gitignore` 判定有意不入库的那一份**不算"多一份"**；未被它
+# 点名的游离文件照旧红——那才是这枚钉的原意（工单 #265 牙二/牙三分别实跑过正反两面）。
 # 根集合里 `"."` 是**仓库根那一层的散文件**（README/AGENTS/CONTRIBUTING），只问这一层、
 # 绝不递归：整仓递归会撞进 venv/、data/ 这些运行时资产。
 _WEB_COPY_ROOTS = ("backend/app/web/static", "backend/app/web/admin",
@@ -1413,6 +1420,52 @@ def _disk_text_copy() -> set:
     return found
 
 
+def _deliberately_ignored(paths: set, tracked: set) -> set:
+    """磁盘这一份里，被 `.gitignore` 点名**有意不入库**的那一部分（git 侧本来就不记它们）。
+
+    为什么磁盘侧要扣：现网那棵树（仓库目录同时是生产机）在 `docs/` 下躺着六份本机私有
+    文档，`.gitignore:139`（`/docs/项目规划书.md`）与 :184-188（`docs/v0.24-*.md`、
+    代码体检/复检报告、安全与稳定性隐患排查报告、待修复清单）两族把它们挡在库外。它们
+    只在磁盘上、永不在 `git ls-files` 里 ⇒ 同集合比对在 CI 与干净克隆绿、偏偏在主树红，
+    而 AGENTS.md §5 的本地全量复跑只能在主树做：一次看起来像"产品坏了"的假警报。
+
+    判据只有一个来源，就是 `.gitignore` 自己（现问 git），不在这里再抄一张"哪些文档算
+    本机私有"的名单——手挑的名单是第二份真相，比 `.gitignore` 先腐烂，同一撤表口径见
+    `test_machine_read_pointers.py:22-27`。**没被它点名的游离文件一律不扣**，所以这枚钉
+    抓"未入库的 stray 文案"的原意一分没少（工单 #265 牙二）。
+
+    三条不许踩的形状：
+    - 批量问具体**文件**路径，绝不带尾斜杠问目录：本仓 `.gitignore` 里有一枚裸 CR 空行
+      （:175 那一族），`git check-ignore -v <路径>/` 会被它恒判成"已忽略"。拿那个形状当
+      豁免＝把整条判据改成恒真，而且绿得毫无痕迹（`test_machine_read_pointers.py:315-323`
+      记过同一个假阳性）。
+    - fail-closed：`git check-ignore` 的 rc 只认 0（有命中）与 1（无命中）；128、超时、
+      问不到一律当场红。不许"读不到就当没有豁免、继续比集合"——那会让"什么都没判"和
+      "判过了"长得一模一样。
+    - 反向自查：不带 `--no-index` 时 git 永远不会把**已跟踪**的路径说成已忽略。真说成了，
+      就是这一问答歪了（假阳性形状），照它扣会静默吃掉真文案 ⇒ 红。
+    """
+    if not paths:
+        return set()                      # 磁盘一份都没有：没什么可豁免，交给下面的集合比对红
+    payload = b"\0".join(p.encode("utf-8") for p in sorted(paths)) + b"\0"
+    try:
+        out = subprocess.run(["git", "check-ignore", "--stdin", "-z"],
+                             cwd=str(REPO), input=payload, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AssertionError(f"问不到 `git check-ignore`：豁免判据读不到时不许退化成『没有豁免』：{exc!r}")
+    assert out.returncode in (0, 1), (
+        f"`git check-ignore` 回了 rc={out.returncode}（只认 0=有命中 / 1=无命中）："
+        f"读不到判据还继续比集合，等于把『漏扫』洗成『扣掉了』")
+    ignored = {p.decode("utf-8") for p in out.stdout.split(b"\0") if p}
+    assert ignored <= paths, (
+        f"`git check-ignore` 报了一份没问过的路径：{sorted(ignored - paths)[:3]}——判据的来源不可信")
+    wrongly = sorted(ignored & tracked)
+    assert not wrongly, (
+        f"git 把已跟踪的文案说成有意不入库（前几份：{wrongly[:3]}）：这一问答歪了，"
+        f"照它扣会静默把真语料移出射程")
+    return ignored
+
+
 def _web_copy_text(rel: str) -> str:
     """按表面选尺子：.js 剥 JS 注释、.html 剥 HTML 注释，其余（.md/.json/.css）原文。
 
@@ -1428,9 +1481,14 @@ def _web_copy_text(rel: str) -> str:
 
 
 def _web_copy_corpus() -> dict:
-    """§2 声称的全部表面：磁盘扫到的一份与 git 记的一份必须**同一个集合**。"""
+    """§2 声称的全部表面：磁盘上的一份（扣掉 `.gitignore` 点名有意不入库的那些）与
+    git 记的一份必须**同一个集合**。"""
     tracked = _tracked_text_copy()
-    on_disk = _disk_text_copy()
+    on_disk_all = _disk_text_copy()
+    # 磁盘侧先扣掉"被 `.gitignore` 判定有意不入库"的那一份（判据与理由见 `_deliberately_ignored`
+    # 的 docstring）。扣完才是可比的那一份；未被 `.gitignore` 点名的游离文件全留在下面比对里。
+    ignored_on_disk = _deliberately_ignored(on_disk_all, tracked)
+    on_disk = on_disk_all - ignored_on_disk
     # 牙一（R-2）：每一棵声明的根都必须在语料里有代表。遍历的是 `_WEB_COPY_ROOTS` 自己，
     # 不列具体文件名——将来加第五棵根会自动被要求有代表，而某一棵根整个空掉
     # （发版说明被归档搬走那一形）也当场红，不再只靠下面那个数字地板。
@@ -1448,8 +1506,10 @@ def _web_copy_corpus() -> dict:
         f"语料的射程比注释声称的窄，把根加回 _WEB_COPY_ROOTS")
     scope = {p for p in tracked if any(_surface_member(p, r) for r in _WEB_COPY_ROOTS)}
     assert on_disk == scope, (
-        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(scope)} 份，"
-        f"只在磁盘={sorted(on_disk - scope)} 只在 git={sorted(scope - on_disk)}")
+        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份（另有 "
+        f"{len(ignored_on_disk)} 份被 .gitignore 点名有意不入库、已扣掉，不是漏扫："
+        f"{sorted(ignored_on_disk)[:6]}）/ git 记 {len(scope)} 份，"
+        f"只在磁盘（且未被忽略）={sorted(on_disk - scope)} 只在 git={sorted(scope - on_disk)}")
     assert _WEB_COPY_MINIMUM <= on_disk, \
         f"§2 点名的表面已不在语料里：缺 {sorted(_WEB_COPY_MINIMUM - on_disk)}"
     assert len(on_disk) >= 100, \
