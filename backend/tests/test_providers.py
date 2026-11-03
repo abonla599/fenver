@@ -136,6 +136,144 @@ def test_invalid_base_url_rejected():
     assert "base_url" in res.json()["detail"]
 
 
+# ---------- #224：创建面不接受客户端自带的 id ----------
+# 审查员在 BASE 上实测跑通的那条：POST /v1/providers 曾经把 req.id 原样送进
+# upsert，而 upsert 见到已存在的 id 走的是**更新分支**（只沿用库内那份 owner，
+# base_url/model/api_key/label 整条替换）。于是「创建」= 「改别人的那一条」：
+# 共享 id 人人可从 /v1/models 枚举，改一次就把全站聊天换到攻击者的上游，
+# 顺带把管理员垫在后面的密钥换成攻击者那把。PUT 两侧本来有 _owner_gate，
+# POST 没有这道门——守卫因此落在创建路由上，而不是存储层（存储层仍要能
+# 被 seeded/内部路径显式指定 id，见 test_v033_ssrf_guards 直接调 upsert 那几条）。
+
+_MUTABLE_FIELDS = ("label", "base_url", "model", "api_key_masked", "has_key",
+                   "shared", "paid_by")
+
+
+def _shared_entry(pid):
+    return next(p for p in client.get("/v1/providers").json()["providers"]
+                if p["id"] == pid)
+
+
+def test_post_with_existing_shared_id_is_rejected_and_that_row_untouched():
+    before = _shared_entry("fake-model")
+    res = client.post("/v1/providers", json=_payload(
+        id="fake-model", label="劫持共享", base_url="https://evil.invalid/v1",
+        model="evil-chat", api_key="sk-attacker-key-4321"))  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+    assert res.status_code == 400, f"带已有 id 的创建本该被拒，实际 {res.status_code}：{res.text}"
+    assert "id" in res.json()["detail"], res.text
+
+    after = _shared_entry("fake-model")
+    for field in _MUTABLE_FIELDS:
+        assert after[field] == before[field], f"共享条目「fake-model」的 {field} 被一次 POST 改掉了"
+    assert after["shared"] is True, "共享条目被改姓"
+    # 两栏纪律：错误响应不许把请求里的密钥带出来，界面回显也算出口
+    assert "sk-attacker-key-4321" not in res.text
+    assert "sk-real-looking-key-123456" not in res.text  # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+
+
+def test_post_with_a_brand_new_client_id_is_also_rejected():
+    """id 由服务端生成这件事不许是"可选"的：传了新 id 也不落库。
+
+    放过新 id 等于把"客户端可以指定身份"这条接口留着——今天没人撞车，
+    明天就有人靠它抢占一个后来才出现的共享 id。
+    """
+    res = client.post("/v1/providers", json=_payload(id="admin-chosen-id"))
+    assert res.status_code == 400, res.text
+    assert "admin-chosen-id" not in [p["id"] for p in client.get("/v1/providers").json()["providers"]]
+
+
+def test_rejected_create_never_reaches_the_store(monkeypatch):
+    """守卫必须在 upsert **之前**拦住：400 之后存储层一次都不该被叫到。"""
+    import app.core.providers as providers
+
+    def _boom(*a, **k):
+        raise AssertionError("带客户端 id 的创建走到了 upsert：守卫没在落库之前拦住")
+
+    monkeypatch.setattr(providers.store, "upsert", _boom)
+    res = client.post("/v1/providers", json=_payload(id="fake-model"))
+    assert res.status_code == 400, res.text
+
+
+def test_post_still_generates_id_when_client_sends_none_or_blank():
+    """正控：没带 / 空串 / 纯空白都照常创建，且各自拿到服务端生成的新 id。
+
+    这一条是防止修法把正常创建打死——也钉住口径：空白串算"没带"，不算"带了"。
+    「算没带」必须落成**服务端生成的那个形状**（`p_<8 hex>`），不能只判"三个 id
+    互不相同"：修法没落地时那一条的 id 是字面量 `"   "`，它和 `p_xxxxxxxx` 天然
+    不同，光比不同等于什么都不判（#224 修复轮 1 的审查实测）。
+    """
+    made = []
+    for payload in (_payload(), _payload(id=""), _payload(id="   ")):
+        res = client.post("/v1/providers", json=payload)
+        assert res.status_code == 200, res.text
+        pid = res.json()["provider"]["id"]
+        assert pid.startswith("p_"), f"空白/空串 id 原样进了存储层，库里躺着字面量 {pid!r}"
+        made.append(pid)
+    assert len(set(made)) == 3, f"三次创建拿到同一个 id，说明空白 id 没被换成新 id：{made}"
+    assert all(made), made
+    for pid in made:
+        client.delete(f"/v1/providers/{pid}")
+
+
+def test_two_blank_id_creates_make_two_rows_and_the_second_rewrites_nothing():
+    """本轮判据本体：两次带纯空白 id 的创建必须拿到两个不同的服务端 id。
+
+    为什么"只判不改"是不够的（修复轮 1 的 Important-1）：守卫只看 `strip()` 判
+    不判"带了 id"，判成"没带"的那个 `"   "` 会原样落进 `upsert`，而存储层的
+    id 归一是 `str(record.get("id") or f"p_{uuid...}")` —— 空白串是**真值**，
+    于是那条的 id 就成了字面量 `"   "`。后果不是"难看"而是覆盖还在活着：
+      - 谁再 POST 一次同样的空白 id，`upsert` 认的就是这个字面量 → 走更新分支，
+        把上一条的 label/base_url/model/api_key 整条换掉（共享面是这样，个人面
+        跨用户也是这样：owner 沿用库里那位，被覆盖的人之后每次聊天都在走
+        攻击者的上游）；
+      - 顺带把命中共享默认行时的 ★ 洗掉（个人面强制 is_default=False，
+        那是 #229 的形状，本单只是让非管理员也能触发它）。
+    所以这把锁一次判三件事：形状（`p_` 开头）、互不相同、第二条不许动第一条。
+
+    射程自陈（有实测，不是客套的警告）：**这四把锁钉的是行为，不是实现位置**，
+    本锁也是其中之一。把空白 id 的归一下沉进 `providers._validate`（在那里
+    `.strip()`）一样能过本锁，而那会改变「盘上遗留空白 id 行」的 PUT 语义
+    （就地改一条 → 另起新行），属 #231 的射程。审查员的 M-c 变异实测：那种
+    搬家形状下四把锁全绿、全量 4247 条用例无人报红——所以哪天归一真的搬进
+    存储层，本锁不会替你喊话，得另立一把钉实现位置的锁。
+    """
+    first = client.post("/v1/providers", json=_payload(
+        id="   ", label="空白第一条", base_url="https://one.invalid/v1", model="one-chat"))
+    assert first.status_code == 200, first.text
+    pid1 = first.json()["provider"]["id"]
+    assert pid1.startswith("p_"), f"空白 id 没被归零，存进去的是字面量 {pid1!r}"
+    before = _shared_entry(pid1)
+
+    second = client.post("/v1/providers", json=_payload(
+        id="   ", label="空白第二条", base_url="https://two.invalid/v1", model="two-chat"))
+    assert second.status_code == 200, second.text
+    pid2 = second.json()["provider"]["id"]
+    assert pid2.startswith("p_"), f"第二次空白创建的 id 也不是服务端生成的：{pid2!r}"
+    assert pid1 != pid2, f"两次空白 id 撞到同一条上：{pid1} / {pid2}"
+
+    after = _shared_entry(pid1)
+    for field in ("label", "base_url", "model"):
+        assert after[field] == before[field], \
+            f"第二次带空白 id 的 POST 改掉了第一条的 {field}：{before[field]} -> {after[field]}"
+    assert _shared_entry(pid2)["label"] == "空白第二条", "第二条没被单独建出来"
+
+    client.delete(f"/v1/providers/{pid1}")
+    client.delete(f"/v1/providers/{pid2}")
+
+
+def test_both_create_routes_share_one_id_guard():
+    """两条 POST 走同一把守卫，不各抄一份（本仓纪律：抄两份迟早漂移）。"""
+    import inspect
+
+    import app.main as main
+
+    src = inspect.getsource(main)
+    assert src.count("def _reject_client_provider_id") == 1, "守卫出现了第二份实现"
+    for fn in (main.add_provider, main.add_my_provider):
+        assert "_reject_client_provider_id(" in inspect.getsource(fn), \
+            f"{fn.__name__} 没过这道门：创建面又能收客户端 id 了"
+
+
 def test_set_default_and_delete():
     saved = client.post("/v1/providers", json=_payload()).json()["provider"]
     assert client.post(f"/v1/providers/{saved['id']}/default").status_code == 200

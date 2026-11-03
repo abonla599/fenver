@@ -1438,6 +1438,11 @@ def list_models(principal: Principal = CurrentPrincipal):
 # 前端（/app 的设置页）配合收起这些入口，但那只是不让普通用户点到一个必然 403 的
 # 按钮：手搓请求仍旧由这里的依赖拒绝，界面从来不是边界。
 class ProviderRequest(BaseModel):
+    # 这一格只对「改」有意义（PUT 里它也会被路径参数覆盖），对「创建」没有意义：
+    # 两条 POST 见到非空值一律 400，纯空白（空串、空格、制表、不换行空格）
+    # 在落库前被归零为 None、由服务端生成新 id——判据与理由见
+    # _reject_client_provider_id。
+    # 字段保留是历史形状（老客户端发过空串），不是因为 id 可以传。
     id: Optional[str] = None
     label: str
     base_url: str
@@ -1480,6 +1485,46 @@ def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
         raise HTTPException(status_code=404, detail="模型服务不存在")
     return existing
 
+
+PROVIDER_CREATE_ID_DETAIL = "创建模型服务不接受自带 id，请留空或由服务端生成"
+
+
+def _reject_client_provider_id(req: ProviderRequest) -> None:
+    """两条创建路由共用的闸门：客户端自带的非空 id 一律 400，纯空白就地归零。
+
+    为什么门必须长在路由上而不是指望存储层：`upsert` 认的是 id——请求里那个 id
+    在库里已存在，走的就是**更新分支**，而更新分支只从库里沿用 `owner` 这一格，
+    `base_url`/`model`/`api_key`/`label` 整条按请求替换（那是 PUT 的语义，也是
+    PUT 必须先过 `_owner_gate` 的原因）。POST 过去没有对应的门，于是"创建"等价于
+    "按 id 覆盖任何一条"：
+      - 带已有共享 id（`/v1/models` 人人可枚举）→ 全站那一条的上游与密钥换成
+        攻击者的，此后所有人的 `/v1/chat` 都走那台上游；
+      - 带别人的私有 id（`p_<8 hex>`，32 位熵，可穷举）→ 冒名改掉主人那条，
+        主人之后每次聊天都在花攻击者的钱、走攻击者的模型。
+    判据写在这两条路由的最前面（在 upsert 之前），两条共用这一份实现：抄两份
+    迟早漂移，而漂移的那一份正好是攻击者要走的那一条。
+
+    两步判据（缺一不可，修复轮 1 的 Important-1 就漏在第二步）：
+      1. `req.id` 非 None 且 `str(req.id).strip()` 非空 = "带了 id" → 响亮 400；
+      2. 带了但是**纯空白**（`""` / `"   "` / `"\t\n "` / `"\\xa0"`——`str.strip()`
+         把这四种都判成空）= "没带"，此时必须把 `req.id` 归零为 None，而不是
+         "什么都不做"。存储层的 id 是 `str(record.get("id") or f"p_{uuid...}")`，
+         空白串是**真值**：原样放行就等于让 `"   "` 成为那一条的字面 id，随后
+         任何一次同样的空白 POST 都会命中它、走更新分支整条换掉（共享条如此，
+         别人名下的私有条也如此，owner 仍沿用库里那位）。归零之后才真的做到
+         "空白算没带、由服务端生成新 id"——现网两个客户端的新建态就是这么发的，
+         把正常创建打死不是本单要修的东西。
+    不在 `providers._validate` 里 strip：PUT 两路把**路径参数**塞进
+    `record["id"]`（见 update_provider / update_my_provider），存储层一旦归一，
+    "路径里带空白的 PUT"就从"改那一条"变成"造一条新的"——那是 #231 的射程。
+    不做"静默忽略"：悄悄丢掉客户端字段，下一个接手的人会以为 id 可传。
+    不回显 `req.id`：这句 detail 会进响应体，而攻击者控制的字符串不该被原样送回去。
+    """
+    if req.id is not None:
+        if str(req.id).strip():
+            raise HTTPException(status_code=400, detail=PROVIDER_CREATE_ID_DETAIL)
+        req.id = None  # 空白 = 没带：不许原样进 upsert，否则它会成为那一条的字面 id
+
 @app.get("/v1/providers")
 def list_providers(_: Principal = RequireAdmin):
     # 绝不返回明文密钥，只给掩码与"是否已配置"。清单只含共享条目：
@@ -1488,6 +1533,7 @@ def list_providers(_: Principal = RequireAdmin):
 
 @app.post("/v1/providers")
 def add_provider(req: ProviderRequest, actor: Principal = RequireAdminReauth):
+    _reject_client_provider_id(req)
     try:
         saved = provider_store.upsert(req.model_dump())
     except ProviderError as e:
@@ -1614,6 +1660,7 @@ def my_providers(principal: Principal = CurrentPrincipal):
 
 @app.post("/v1/me/providers")
 def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipal):
+    _reject_client_provider_id(req)
     record = req.model_dump()
     record.update(owner=principal.user_id, paid_by="user", is_default=False)
     try:
