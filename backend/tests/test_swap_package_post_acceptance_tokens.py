@@ -72,23 +72,33 @@ r"""换包脚本**验收之后那段尾巴**的两处裸出口：step 8 的确�
 红绿分工（为什么本文件必须存在，而不是往旧锁里加一条 risky）：
 `test_pre_fix_reconstruction_is_green_on_the_existing_locks_and_red_on_ours` 用 `git cat-file`
 取**改前那一份** blob、**按 CRLF 重建**再判。锚点是**字面 SHA**，不是 `HEAD`：
-`_PRE_FIX_REF = b0cde6be`（#50 那一版，本票 token 出现 0 次）与 `_PREV_REF = 00f7fded`
-（#45 那一版）。初版写的是 `HEAD` / `HEAD~1`，于是这条锁只在"#47 还没 commit"的那段时间为绿，
+`_PRE_FIX_REF`（#47 那两处站点进去之前那一版，本票 token 出现 0 次）与 `_PREV_REF`（再往前一格，
+#45 那一版）。初版写的是 `HEAD` / `HEAD~1`，于是这条锁只在"#47 还没 commit"的那段时间为绿，
 提交那一秒 `HEAD` 自己变成了修复，下面每条"必须红"当场反向——它在自己的 commit 上变红
 （实测本文件 1 failed / 31 passed，全量 1 failed / 2320 passed）。"改前"交给 `HEAD` 表达，
 等于把判据绑在作者按下回车的那一刻；能诚实回答"改前"的只有字面 SHA，配套的自守断言
 （锚点那份里不许出现本票 token，见 `_head_blob`）防的就是有人把锚点重新指回 `HEAD`。
-代价也说清楚：字面 SHA 挡不住 rebase/squash，历史被重写后锚点解析不出来，那时它是**响亮
-失败**而不是 skip，按 `git log --oneline -- deploy/swap-package.ps1` 重挑 SHA 即可。
-本机 `core.autocrlf=true`，`git cat-file blob <ref>:deploy/...` 给的是 **LF** blob：`b0cde6be`
+代价也说清楚，而且 #232 真付过：字面 SHA 挡不住 rebase/squash。锚点一旦被 rewrite 孤立，
+"这格对象在不在本地"就成了**这棵树的环境属性**——仓库外全历史克隆 rc=128（克隆从不送不可达对象，
+`fetch-depth: 0` 也救不了），而共享对象库的本机/worktree 照样 rc=0（本机靠几棵游离工作树的 detached
+HEAD 把对象吊着）。于是这条锁**绿在本机、红在 CI**，红话还指着 swap-package.ps1 的代码。现在取锚处
+两道闸都在，都不许改成 skip：①`cat-file -e`（解析不出来就响亮失败）；②`_assert_anchor_in_history`
+（锚点必须是 HEAD 的祖先；rc 三档 0 放行 / 1 响亮红 / 128 及其它一律 fail-closed 红，把 128 读成 1
+就是 fail-open）。现锚是 #232 换上的**可达双生**：git 的 blob id 与换锚前逐字节相同，所以下面这些
+字节数、行数、两枚 sha256 以及全部判据吃到的东西一个字节都没换，换掉的只是"这格提交在不在被 ref
+收敛的历史里"。旧锚 → 现锚的对应表与逐字节同一性取证**只写在** `test_ci_history_depth.py` 的
+`_derive_pinned_anchors` 注释段，本文件不复述旧 SHA（复述就是第二份真相）。
+本机 `core.autocrlf=true`，`git cat-file blob <ref>:deploy/...` 给的是 **LF** blob：`_PRE_FIX_REF`
 那份实测 63590 字节 / CRLF 0 / LF 1055 / 非 ASCII 0 /
 sha256 `a6772ba1cc9a4048abeb1001077fd0c62f1beba7fca0234a35a9bea823cf65a0`；换成 CRLF 之后
 64645 字节 / CRLF 1055 / LF 1055 / 非 ASCII 0 / sha256
 `59b68cb4a594322b0c3f3f6b9c458fde1a91b6c449c3698fd65272c5ad07e835`。逐字节相同的是
 **"CRLF 重建"与"落盘副本"**这两者（本条当场重算比对），不是工作树那份——工作树已经是修复后的。
-**票面写的 60226 是 `00f7fded` 那份 LF blob 的大小**（60226 字节 / LF 1011），既不是
-`b0cde6be` 的 63590；初稿把它记成 `HEAD~1`，那是"当时 HEAD 恰好是 `b0cde6be`"的巧合，
-`HEAD` 一动这个 ref 就指错对象。本条把三个数都当场取出来放进断言消息并钉住两个字节数，
+**票面写的 60226 是 `_PREV_REF` 那份 LF blob 的大小**（60226 字节 / LF 1011），既不是
+`_PRE_FIX_REF` 的 63590；初稿把它记成 `HEAD~1`，那是"当时 HEAD 恰好就是 `_PRE_FIX_REF` 那一版"的巧合，
+`HEAD` 一动这个 ref 就指错对象。顺带一句免得下一个人误读：换到可达链之后 `_PRE_FIX_REF^` 恰好就是
+`_PREV_REF`，但**没有任何判据吃 `<锚>^`**——两道闸、取 blob、自守都只吃 `<锚>:deploy/swap-package.ps1`，
+所以那对父子关系是巧合而不是依赖。本条把三个数都当场取出来放进断言消息并钉住两个字节数，
 免得下一个人又按 60226 去找。
 **另注意 `_no_bare_exit_ok` 绿不等于它扫过尾巴**：那把尺的射程是 disable 到
 `$script:backupDone` 那一段，本票两处都在它之后——这台机器用 `Get-Content -Tail 40` 现场念一遍
@@ -207,7 +217,7 @@ _RETRY = re.compile(r"\bwhile\b|\bfor\b|foreach\s*\(|Start-Sleep|AddSeconds|New-
 _TRUNCATE = re.compile(r"Remove-Item|Set-Content|Clear-Content|Out-File|Add-Content|WriteAllBytes")
 _VERDICT_FIELD = re.compile(r"(verdict|aborted|swallowed|handled|branch)=")
 
-# 改动前（锚点 `b0cde6be` 那份，见 `_PRE_FIX_REF`）SITE 2 的两行原文：牙印四与"改前那份"都用它，逐字照抄 blob
+# 改动前（锚点 `_PRE_FIX_REF` 那份，逐字节取证见本文件头）SITE 2 的两行原文：牙印四与"改前那份"都用它，逐字照抄 blob
 PRE_TICKET_ENABLED_BLOCK = """$finalState = (Get-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName).State
 Write-Output ('ENABLED state=' + $finalState)"""
 
@@ -858,7 +868,7 @@ def _abort_budget_site(text: str, which: str):
 
 
 def _to_pre_ticket_enabled(text: str):
-    """SITE 2 退回改动前那两行裸读（锚点 `b0cde6be` 那份的形状）。"""
+    """SITE 2 退回改动前那两行裸读（锚点 `_PRE_FIX_REF` 那份的形状）。"""
     en = _enabled_ctx(text)
     if en is None:
         return None
@@ -1670,13 +1680,72 @@ def test_mutation_encoding_gates_bit_on_written_copies(tmp_path):
 # 的。写成 `HEAD` 时它只在"#47 还没进仓库"的那段时间为真，commit 那一秒 `HEAD` 就是修复本身，
 # 下面每条"必须红"当场反向，这条锁在自己的 commit 上变红（实测 1 failed / rc=1，全量 rc=1）。
 # 一个会随世界状态重定义自己的断言不是锁，是作者跑测试那一刻的快照——诚实的锚点只能是 SHA。
-#   _PRE_FIX_REF = b0cde6be  #50 那一版：本票 token 0 次，LF blob 63590 字节（旧代码里的 "HEAD"）
-#   _PREV_REF    = 00f7fded  #45 那一版：LF blob 60226 字节 = 票面那个数。旧代码写 `HEAD~1`，
-#                            只是当时 HEAD=b0cde6be 的巧合；HEAD 一动它就指到 63590 那一版。
-# 代价：字面 SHA 挡不住 rebase/squash——历史重写后这两个 ref 解析不出来，_head_blob 会响亮
-# 失败（绝不 skip），届时按 `git log --oneline -- deploy/swap-package.ps1` 重挑 SHA。
-_PRE_FIX_REF = "b0cde6be"
-_PREV_REF = "00f7fded"
+#   _PRE_FIX_REF  #47 的两处站点进去之前那一版：本票 token 0 次，LF blob 63590 字节
+#                 （旧代码在这里写的是 "HEAD"）
+#   _PREV_REF     再往前一格（#45 那一版）：LF blob 60226 字节 = 票面那个数。旧代码写 `HEAD~1`，
+#                 只是当时 HEAD 恰好是上一枚锚的巧合；HEAD 一动它就指到 63590 那一版。
+# 代价：字面 SHA 挡不住 rebase/squash。#232 治的就是这一格——锚点被孤立后 `cat-file` 只在干净克隆里
+# 解析不出来，在本机/worktree 仍 rc=0，于是这条锁"绿在本机、红在 CI"。现在取锚处两道闸都在，都响亮
+# 失败、绝不 skip：`cat-file -e` 与 `_assert_anchor_in_history`（锚 ⊑ HEAD，rc 三档分开认领）。届时重挑
+# SHA 的口径不变：`git log --oneline -- deploy/swap-package.ps1` 里**修复之前**的那一格。
+# 旧锚 → 现锚的对应表与逐字节同一性取证只写在 `test_ci_history_depth.py` 的
+# `_derive_pinned_anchors` 注释段（单源规矩），本文件不复述。
+_PRE_FIX_REF = "8d6e892f"
+_PREV_REF = "fd8f528b"
+
+_ANCHOR_PROBE_TIMEOUT_SECONDS = 30
+
+
+def _assert_anchor_in_history(ref: str, where: str) -> None:
+    r"""锚点必须被**我拿到的这份历史**收敛：`git merge-base --is-ancestor <ref> HEAD`，三档认领。
+
+    为什么取锚处要再多这一道（工单 #232 的病根，不是假想）：`git cat-file -e` 只问"这格对象在不在
+    本地"，而对象在不在本地是**这棵树的环境属性**，不是历史事实。#232 那三枚旧锚实测就是这一形：
+    在本机（对象被几棵游离工作树的 detached HEAD 吊着）rc=0，在仓库外 `git clone file://…` 的全历史
+    克隆里 rc=128 ——于是"改前那一份"的红绿分工**绿在本机、红在 CI**，而
+    `.github/workflows/tests.yml` 的 checkout 步今天就是 `fetch-depth: 0`：浅克隆根本不是原因，
+    克隆从不送不可达对象。祖先关系与对象在不在本地无关，所以这条判据把同一格病灶收成
+    **所有树都红**：下一次 rewrite 在提交前就被本机抓住，而不是在发版链第一格。
+
+    为什么这不是"把锚重新钉在 HEAD 上"（那是本仓明令禁止的形式主义反弹）：锚点常量一个都不动，判的
+    是"锚 ⊑ 我拿到的历史"这一**单调**关系——HEAD 往前挪永远不会让它变假，唯一能让它变假的物理事件
+    就是历史被重写/锚点被孤立，而那正是需要当场响的那一格。取锚处的自守（下面那条"锚点那份不许含本票
+    token"）继续拦"把锚挪到修复之后/HEAD"。
+
+    退出码三档必须分开认领（口径抄本仓已确立的两处：`tools/pre_tag_gate.py::_ref_reaches_quarantined`
+    与 `test_ci_history_depth.py::test_this_checkout_is_not_a_shallow_clone`）：
+      0                ⇒ 锚点在历史里，放行；
+      1                ⇒ 解析得出来但**不是** HEAD 的祖先 ⇒ 响亮红（被 rebase/squash/rewrite 孤立）；
+      128 / 其它 / 读不到 ⇒ 一律 fail-closed 红。把 128 读成 1、或读成"没验出问题＝没问题"，就是
+                        #74 那一族的 fail-open。
+    红话只指一件事：按 `git log --oneline -- deploy/swap-package.ps1` 在**可达历史**里重挑一枚修复之前
+    的字面 SHA。不许改成 `HEAD` 或分支 tip，也不许删掉"改前那一份"的对照来凑绿——摘防线不是修复。
+    """
+    repo = str(REPO_ROOT)
+    try:
+        proc = subprocess.run(["git", "merge-base", "--is-ancestor", ref, "HEAD"],
+                              cwd=repo, capture_output=True,
+                              timeout=_ANCHOR_PROBE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        pytest.fail(where + "：锚点可达性探测问不出话（" + type(exc).__name__ + ": " + str(exc)
+                    + "，cwd=" + repo + "）。问不出结论就只能算判据不成立——判红，不 skip：skip 等于"
+                    "让这道防线在这台机器上静默消失（#56/#63 那一族病）。")
+    rc = proc.returncode
+    stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+    if rc == 0:
+        return
+    reseat = ("按 `git log --oneline -- deploy/swap-package.ps1` 在可达历史里重挑一枚**修复之前**的字面 "
+              "SHA（既不是 HEAD 也不是分支 tip）；判据一个字都不许改，删掉红绿分工的对照来凑绿是事故不是"
+              "修复。")
+    if rc == 1:
+        pytest.fail(where + "：锚点 " + ref + " 在这棵树上解析得出来，却**不是 HEAD 的祖先**（rc=1）——"
+                    "它被 rebase/squash/rewrite 孤立了，没有任何 ref 收敛它。这正是工单 #232 的形状："
+                    "`cat-file -e` 在本机绿、在干净克隆里 rc=128，因为本机靠别的游离工作树把对象吊着。"
+                    "判红不 skip。" + reseat)
+    pytest.fail(where + "：锚点可达性探测给了没认领过的退出码 rc=" + str(rc) + "（stderr=" + stderr
+                + "，cwd=" + repo + "）。这条判据只认领 0（在历史里）与 1（不在历史里），其余一律"
+                "fail-closed 判红：128 说的是这一格里锚点解析不出来（克隆没这段历史、cwd 不是 git "
+                "仓库、对象已被 gc 清掉），把它读成 1 或读成'没验出问题'就是 fail-open。" + reseat)
 
 
 def _head_blob(ref: str):
@@ -1687,7 +1756,11 @@ def _head_blob(ref: str):
     于是 `pytest.skip`——红绿分工的整条证据静默消失，报告里只多出一个没人看的 "1 skipped"。
     这条锁的 subject 就是仓库历史本身，指不到历史只能算失败，不许算跳过。
 
-    第二件事是自守：锚点一旦被挪到修复**之后**的提交（包括把它改回 `HEAD`），那份 blob 里就
+    第二件事是可达性（#232 新加，`_assert_anchor_in_history`）：`cat-file -e` 只回答"这格对象在不在
+    本地"，那是**这棵树的环境属性**——锚点被 rewrite 孤立后，干净克隆 rc=128 而共享对象库的本机/worktree
+    照样 rc=0，于是这条锁绿在本机、红在 CI。所以取锚处再判一次"锚 ⊑ HEAD"，把同一格病灶收成所有树都红。
+
+    第三件事是自守：锚点一旦被挪到修复**之后**的提交（包括把它改回 `HEAD`），那份 blob 里就
     带着本票的 token，下面每条"必须红"又会整体反向——所以在取锚点的那一刻就断言它不含本票 token。
     """
     repo = str(REPO_ROOT)
@@ -1699,6 +1772,7 @@ def _head_blob(ref: str):
         "仓库历史，跳过等于把红绿分工的证据扔掉，所以这里只有失败。三查：①是不是在 checkout 里"
         "跑的；②锚点有没有被 rebase/squash/gc 换掉（`git log --oneline -- deploy/swap-package.ps1`"
         " 重挑 SHA）；③设了 SWAP_PS1_UNDER_TEST 的话那条通道与本锁无关，unset 它再跑。")
+    _assert_anchor_in_history(ref, "取锚点 " + ref + "（_head_blob）")
     blob = subprocess.run(["git", "cat-file", "blob", ref + ":deploy/swap-package.ps1"],
                           cwd=repo, capture_output=True, check=True).stdout
     for token in _FAIL_TOKENS + (_READFAIL_ENABLED, _HELPER_READ_PREFIX):

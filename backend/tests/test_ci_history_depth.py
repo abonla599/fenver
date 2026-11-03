@@ -26,9 +26,9 @@ fetch-depth ⇒ 这把哨**静默判绿**。而三处措辞（`.github/workflows
 `.github/workflows/tests.yml` 的 `actions/checkout` 从前**没有** `with:`，也就吃的是
 checkout 的默认浅克隆。而本仓有两把锁的判据是**仓库历史本身**，锚点钉成字面 SHA：
 
-- `backend/tests/test_swap_package_data_snapshot.py` 的 `262b1224`（取锚 `_pin_blob` 用
+- `backend/tests/test_swap_package_data_snapshot.py` 的 `_PINNED_PRE_CHANGE`（取锚 `_pin_blob` 用
   `git cat-file -e <sha>:deploy/swap-package.ps1`）；
-- `backend/tests/test_swap_package_post_acceptance_tokens.py` 的 `b0cde6be` / `00f7fded`
+- `backend/tests/test_swap_package_post_acceptance_tokens.py` 的 `_PRE_FIX_REF` / `_PREV_REF`
   （取锚 `_head_blob`，同形状）。
 
 浅克隆下这三枚对象根本不在本地（2026-10-09 在 `--depth 1` 副本里实测：
@@ -38,6 +38,34 @@ checkout 的默认浅克隆。而本仓有两把锁的判据是**仓库历史本
 历史给够。否则红出现在 checkout 之后，话术是"锚点在这份工作树里解析不出
 deploy/swap-package.ps1"，下一个人先去查 `swap-package.ps1` 的代码，而错的是那行
 `fetch-depth`。本单（工单 #55 的立项依据）第一次被实跑出来，不是推理出来的。
+（上面那句"这三枚"指的是 #90a 当时的锚；**#232 已经把三枚锚全换成可达双生**，对应表见下一节，
+本文件的 `PINNED_HISTORY_ANCHORS` 也不再手抄而是从两把锁的源码里派生。）
+
+## #232 那一格：`fetch-depth: 0` 早就配了，那两把锁还是红——锚点被 rewrite 孤立了
+
+#90a 修好之后 `tests.yml` 的 checkout 步一直是 `fetch-depth: 0`（今天也是）。后来那三枚锚还是红，
+而这次**不是克隆不够深**：`git clone` 送的是"被 ref 收敛的那些历史"，**不可达对象它从不送**，
+深浅都一样。病灶是 rebase/rewrite 把当年那三枚提交从 ref 拓扑上摘掉了。所以下面这两句要一起说清，
+免得这段散文长成第二份真相：浅克隆那一格由本文件判（`fetch-depth` 必须是整数 0）；
+"锚点在不在历史里"那一格由取锚处的 `_assert_anchor_in_history` 判。
+
+旧锚 → 现锚的对应表（**这张表是这份对应关系的唯一一份**：两把锁的注释只指向这里，不复述 SHA）：
+
+| 消费它的锁 | 旧锚（已不可达） | 现锚（可达双生） | blob id（新旧同一枚） | LF blob 字节 |
+|---|---|---|---|---|
+| `test_swap_package_data_snapshot.py::_PINNED_PRE_CHANGE` | `262b1224` | `541ee785` | `54ef17b33aa5e18f5db49a681535a6496d79222d` | 75929 |
+| `test_swap_package_post_acceptance_tokens.py::_PRE_FIX_REF` | `b0cde6be` | `8d6e892f` | `0dd2d02c410798cbd95cd5a40120b1c3a50b20de` | 63590 |
+| `test_swap_package_post_acceptance_tokens.py::_PREV_REF` | `00f7fded` | `fd8f528b` | `28c524845096af1ffdb4151968334f9e6c22da1c` | 60226 |
+
+同一枚 git blob id = 内容寻址相同 = **逐字节相同**（两枚 sha256 也各自复量过：LF 口径与按 CRLF
+重建口径）。所以换锚换掉的只有"这格提交在不在被 ref 收敛的历史里"这一件事，两把锁吃到的字节、
+行数、双口径断言、锚点自守**一个都没动**——红绿分工（"改前那一份对每条判据必红"）的证据链原样保留。
+
+本机当时还绿，**不是**因为孤儿对象躺在 pack 里等 gc：`.git/logs/` 对三枚旧锚 0 命中，真正收敛它们的
+是几棵**游离工作树的 detached HEAD**（谁按 `AGENTS.md §2` 做一次 `git worktree remove`/`prune`，再过
+默认 `gc.pruneExpire`，本机也当场转红）。⇒ 这就是 #232 必须成对交付的理由：只换锚 = 把病推到下一次
+rewrite；只加锁 = 响亮地红着但发版链仍卡死。加的那道闸判的是"锚 ⊑ 我拿到的历史"这一**单调**关系
+（HEAD 前进永不变假），不是把锚重新钉在 HEAD 上。
 
 ## #92a 泛化的那一步：尺子从"一个文件"挪到"整个 workflow 目录"
 
@@ -121,11 +149,16 @@ HEAD、main、develop 各自带着正常生长的历史，那句话是从"快照
   红，所以那批绿是"看不见"而不是"没跑"。② 浅克隆副本（`git clone --depth 1 --no-local`，实测
   `rev-parse --is-shallow-repository` = true、`rev-list --count HEAD` = 1）里该命令的表现，
   证明它读的确实是历史：
+  **这批条目里的 `262b1224` 是 SHA 形状的合成 token**（#232 之前的旧锚，今天不被任何 ref 收敛），
+  只用来把命令喂给正则判据，**不执行 git、也不是任何锁的现锚**；换成别的 SHA 形状串实测结论一样
+  （浅克隆对任何历史 SHA 都缺）。不许把它换成活的分支 tip——那个数每合一笔就漂（同第 5 条括号里
+  对 `deadbeef…` 那句），现锚名单以 `PINNED_HISTORY_ANCHORS`（从两把锁派生）为准。
   1. `git describe --tags --abbrev=0` —— ①仍绿；②rc=128 `fatal: No names found, cannot
      describe anything.`（同一条命令在全历史的生产树里实测 rc=0、答得出最近那个 tag——被切掉的
      正是 tag 指向的那段历史；这里刻意不写 tag 名，它每发一版就漂一次）
   2. `git show 262b1224:deploy/swap-package.ps1` —— ①仍绿；②rc=128 `fatal: invalid object
-     name '262b1224'.`（正是那两把钉锚点的锁的取锚形状，审查员实测的那枚 BLOCK）
+     name '262b1224'.`（合成 token；这一条漏的**形状**正是那两把锁取锚用的 `<sha>:<路径>`，
+     审查员当年实测的那枚 BLOCK 就是这个形状）
   3. `git rev-parse 262b1224^{commit}` —— ①仍绿；②rc=128 `fatal: ambiguous argument
      '262b1224^{commit}': unknown revision or path not in the working tree.`
   4. `git archive --format=tar 262b1224` —— ①仍绿；②rc=128 `fatal: not a valid object name:
@@ -200,6 +233,8 @@ fetch-depth ⇒ 红；同一处只写成 YAML 注释 ⇒ 绿；删 tests.yml 的
   自带反例"的结构钉）。红路子里没有 skip，也没有 `pytest.xfail`。
 """
 
+import ast
+import importlib
 import itertools
 import os
 import re
@@ -218,9 +253,62 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR_UNDER_TEST")
                      or (REPO_ROOT / ".github" / "workflows"))
 
-# 浅克隆下解析不出来的就是这三枚字面 SHA（两把既有锁的锚点）。这里只作为红话里的
-# 线索写给人看，**不**参与判据——判据是 checkout 那一步的 fetch-depth 值。
-PINNED_HISTORY_ANCHORS = ("262b1224", "b0cde6be", "00f7fded")
+# 那两把锁的锚点名单。这里**不作为判据**（判据是 checkout 那一步的 fetch-depth 值），只出现在红话里
+# 给下一个人指路——所以它更不许手抄：#232 的现场就是"常量换了一版、红话还在报旧 SHA"，接手的人按
+# 红话去查一枚不存在的锚。名单只住在两把锁自己的常量里，这一份用 `ast` 从它们的**源码**取
+# （先例：`test_pathmask.py::_drive_rule_literals` 只 ast.parse 兄弟模块的字面量，派生源在别的模块，
+# 不构成自比）。取不到就整份变空并记下面对错了什么，由
+# `test_the_pinned_anchor_roster_is_derived_and_agrees_with_the_two_locks` 响亮判红，
+# 绝不静默用一份手抄兜底。
+# 旧锚 → 现锚的对应表（唯一一份）写在模块 docstring 的「#232 那一格」那节，别处不复述。
+_ANCHOR_ROSTER_SOURCES = (
+    ("backend/tests/test_swap_package_data_snapshot.py", ("_PINNED_PRE_CHANGE",)),
+    ("backend/tests/test_swap_package_post_acceptance_tokens.py", ("_PRE_FIX_REF", "_PREV_REF")),
+)
+_PINNED_ANCHOR_COUNT = 3  # 条数钉：两把锁一共三枚锚，多一枚少一枚都在这里红
+
+
+def _literal_string_assignments(path: Path) -> dict:
+    """模块级 `NAME = "字符串字面量"` 的 {名字: 值}。
+
+    只认字面量：写成 `NAME = os.environ.get(...)` 那种"锚点由环境决定"的形状在这把尺里就是**取不到**
+    （锚点必须是钉死的历史坐标，可变的写法本来就违反两把锁的票面）。`ast.parse` 过不去直接抛，
+    由调用侧转成红，不静默返回半份名单。
+    """
+    found = {}
+    for node in ast.parse(path.read_text(encoding="utf-8"), filename=str(path)).body:
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                found[target.id] = node.value.value
+    return found
+
+
+def _derive_pinned_anchors():
+    """从两把锁的源码里取锚点名单；任何一格取不到就抛（不许退回手抄）。"""
+    out = []
+    for rel, names in _ANCHOR_ROSTER_SOURCES:
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            raise AssertionError(rel + " 读不到（" + str(path) + "）：名单没有派生源")
+        table = _literal_string_assignments(path)
+        for name in names:
+            if name not in table:
+                raise AssertionError(rel + " 里没有模块级字面量 " + name +
+                                     "（读到的是 " + str(sorted(table)) + " 那一族的键）")
+            out.append(table[name])
+    return tuple(out)
+
+
+try:
+    PINNED_HISTORY_ANCHORS = _derive_pinned_anchors()
+    _PINNED_ROSTER_FAILURE = None
+except Exception as exc:  # 转成判据不成立，由下面那枚钉响亮报红；不在这里 raise（会把收集期炸成 import error）
+    PINNED_HISTORY_ANCHORS = ()
+    _PINNED_ROSTER_FAILURE = type(exc).__name__ + ": " + str(exc)
 
 _PROBE_TIMEOUT_SECONDS = 60
 
@@ -607,7 +695,9 @@ _SYNTH_STILL_MISSED = (
      "浅克隆副本实测 rc=128：`fatal: No names found, cannot describe anything.`（同一条命令在"
      "全历史的生产树里实测 rc=0，答得出来——被切掉的正是 tag 指向的那段历史）"),
     ("git-show-sha", "git show 262b1224:deploy/swap-package.ps1",
-     "浅克隆副本实测 rc=128：`fatal: invalid object name '262b1224'.`——正是那两把钉锚点的锁的取锚形状"),
+     "浅克隆副本实测 rc=128：`fatal: invalid object name '262b1224'.`（262b1224 是 SHA 形状的合成"
+     " token：#232 之前的旧锚，今天不被任何 ref 收敛，也不参与本文件任何判据）——这一条漏的**形状**"
+     "正是那两把锁取锚用的 `<sha>:<路径>`"),
     ("git-rev-parse-sha", "git rev-parse 262b1224^{commit}",
      "浅克隆副本实测 rc=128：`unknown revision or path not in the working tree`"),
     ("git-archive-old-sha", "git archive --format=tar 262b1224",
@@ -842,11 +932,12 @@ def test_this_checkout_is_not_a_shallow_clone():
     if stdout == "true":
         pytest.fail("浅克隆哨（b）：这份工作树是**浅克隆**（cwd=" + str(REPO_ROOT)
                     + "，git rev-list --count HEAD 只有一段历史）。这台机器没有全历史，"
-                    "所以 test_swap_package_data_snapshot.py 的锚点 262b1224 与 "
-                    "test_swap_package_post_acceptance_tokens.py 的 b0cde6be/00f7fded "
-                    "在这里解析不出来（实测 git cat-file -e 给 rc=128 invalid object name）——"
+                    "那两把锁的锚点（派生名单：" + " / ".join(PINNED_HISTORY_ANCHORS)
+                    + "）在这里解析不出来（实测 git cat-file -e 给 rc=128 invalid object name）——"
                     "那两把锁在这里的红与代码无关，它们的绿灯同样不可采信。要么把 CI 的 "
-                    "fetch-depth: 0 配齐，要么在有全历史的检出里跑，别把克隆形状当环境变量绕过去。")
+                    "fetch-depth: 0 配齐，要么在有全历史的检出里跑，别把克隆形状当环境变量绕过去。"
+                    "浅克隆只是**其中一种**拿不到锚点的形状：#232 那一格是全历史克隆也送不进来的"
+                    "**不可达锚点**，那一格由取锚处的 `_assert_anchor_in_history` 判，不在本哨射程内。")
     assert stdout == "false", (
         "浅克隆哨（b）：rc=0 但 stdout 解析不出 true/false（读到 " + repr(stdout)
         + "，stderr=" + stderr + "）。答非所问就当作判据没成立——判红，不返回'看着不像 true "
@@ -1085,3 +1176,89 @@ def test_the_surface_carries_no_job_level_with_entry_today():
         "真树出现了作业级 `with:`：" + str(found) + "。调用点传进去的参数会不会被那个 reusable "
         "workflow 执行，取决于它自己的正文，本锁读不到——要么把面明确扩到那一格并补判据，要么"
         "改这份 workflow；不许只把本函数改成恒真让声明继续假装成立。")
+
+
+# ------------------------------------------------------------------ #232 交付项 C：锚点名单只有一份
+def _anchor_roster_runtime_side():
+    """第二侧：把两把锁**当模块导入**后读到的常量值（与 `ast` 从源码文本取的那一侧走不同通道）。
+
+    取不到就抛给调用侧转成判红——这里没有 skip 的余地：一个读不到名单的名单锁比没有名单锁更糟，
+    它会给下一个人"两侧比过了"的假证据。
+    """
+    out = []
+    for rel, names in _ANCHOR_ROSTER_SOURCES:
+        module_name = "tests." + Path(rel).name[:-3]
+        module = importlib.import_module(module_name)
+        for name in names:
+            if not hasattr(module, name):
+                raise AssertionError(module_name + " 里没有属性 " + name + "（常量被挪进函数/改名/改成"
+                                     "动态求值了：名单的两条通道从此不再同源）")
+            out.append(getattr(module, name))
+    return tuple(out)
+
+
+def test_the_pinned_anchor_roster_is_derived_and_agrees_with_the_two_locks():
+    """三枚锚点：**两侧集合相等 + 条数钉 + 读不到即红**（#232 交付项 C，单源规矩）。
+
+    本文件红话里那串 SHA 只是指路的线索，历史上它是一份手抄清单——#232 现场就是"两把锁的常量换了版、
+    这里的散文与名单还报旧 SHA"，接手的人按红话去查一枚不存在的锚，那份第二真相比没有名单更贵。
+    现在名单只住在两把锁自己的字面量常量里，这一份由 `_derive_pinned_anchors()` 用 `ast` 从它们源码取
+    （派生源在别的模块，不构成自比；先例 `test_pathmask.py::_drive_rule_literals`）。
+
+    四格各治一种漂法：
+    (1) 派生本身成立（文件在、名字在、值是模块级字符串字面量）——否则 `_PINNED_ROSTER_FAILURE` 非空；
+    (2) **两侧相等**：`ast` 读文本这一侧 vs `importlib` 求值模块那一侧。有人把常量挪进函数、改名、
+        或改成由环境算出来，两条通道会分家，这里红；
+    (3) 条数钉：两把锁一共三枚锚，一枚不多一枚不少，且不重复；
+    (4) 形状钉：每枚都得是十六进制的短 SHA——写成 `HEAD`/`develop`/分支 tip 都不是锚点，是又一次
+        "随世界状态重定义自己"（那正是两把锁 docstring 里记着的初版事故）。
+    红话不建议"在这里补一份手抄清单"，也不建议放宽任何一格：要改的是**源头那两个常量**。
+    """
+    assert _PINNED_ROSTER_FAILURE is None, (
+        "锚点名单派生失败：" + str(_PINNED_ROSTER_FAILURE) + "。本文件的红话现在没有可信的名单可读——"
+        "去看 `_ANCHOR_ROSTER_SOURCES` 点名的那两个文件：常量还在不在模块级、还是不是字符串字面量、"
+        "文件有没有改名。修法在源头，不在这里手抄一份，也不在这里 skip。")
+    assert len(PINNED_HISTORY_ANCHORS) == _PINNED_ANCHOR_COUNT, (
+        "派生出的锚点是 " + str(len(PINNED_HISTORY_ANCHORS)) + " 枚，条数钉要的是恰好 "
+        + str(_PINNED_ANCHOR_COUNT) + " 枚（读到 " + str(PINNED_HISTORY_ANCHORS) + "）。多一枚 = 有人新添"
+        "了一把钉历史的锁而名单没同步；少一枚 = 某一枚锚从字面量变成了别的东西。两种都得人来判。")
+    assert len(set(PINNED_HISTORY_ANCHORS)) == _PINNED_ANCHOR_COUNT, (
+        "锚点名单里有重复：" + str(PINNED_HISTORY_ANCHORS) + "。两把锁的三枚锚必须互不相同，"
+        "重复说明有一格常量抄错了对象——那把锁的红会指着错的提交。")
+    try:
+        runtime = _anchor_roster_runtime_side()
+    except Exception as exc:
+        pytest.fail("锚点名单的第二侧（把两把锁当模块导入后读属性）取不到：" + type(exc).__name__
+                    + ": " + str(exc) + "。两侧不同源就没有任何一侧可信——判红，不 skip。")
+    assert set(runtime) == set(PINNED_HISTORY_ANCHORS), (
+        "两侧名单分家：`ast` 从源码文本取的是 " + str(PINNED_HISTORY_ANCHORS) + "，`importlib` 求值"
+        "模块读到的是 " + str(runtime) + "。要么常量在模块里被重新赋值/由环境决定，要么派生认的形状"
+        "被动过。以两把锁的常量为准修源头。")
+    assert len(runtime) == _PINNED_ANCHOR_COUNT, (
+        "第二侧读出 " + str(len(runtime)) + " 枚，与条数钉 " + str(_PINNED_ANCHOR_COUNT)
+        + " 不符：" + str(runtime))
+    wrong_shape = [a for a in PINNED_HISTORY_ANCHORS if not re.fullmatch(r"[0-9a-f]{7,40}", a)]
+    assert not wrong_shape, (
+        "锚点名单里出现了不是十六进制 SHA 的东西：" + str(wrong_shape) + "。`HEAD`、分支名、tip 一律"
+        "不算锚点——那条路两把锁的 docstring 已经付过学费（写成 HEAD 的锁在提交那一秒自毁并整体反向）。")
+
+
+def test_the_prose_names_every_anchor_in_the_derived_roster():
+    """散文同步钉（#232 交付项 C 的另一半）：模块 docstring 的旧锚→现锚对应表必须点名**每一枚**现锚。
+
+    为什么需要这一枚：名单改成派生之后，代码那侧不会漂了，但**散文会**——本文件 docstring 里那张
+    对应表（还有 `.github/workflows/tests.yml` 的注释）是人写的。有人重挑锚点、常量跟着换、
+    表却没换，读表的人会去查一枚已经不用的提交，那正是 #232 里"下一个人先去查 swap-package.ps1
+    的代码"那一格的复现。这一枚把它变红。
+    """
+    assert PINNED_HISTORY_ANCHORS, "名单是空的（派生失败），先修上面那枚钉"
+    doc = __doc__ or ""
+    missing = [a for a in PINNED_HISTORY_ANCHORS if a not in doc]
+    assert not missing, (
+        "派生名单里有 " + str(missing) + " 没在本文件模块 docstring 的「#232 那一格」对应表里出现："
+        "锚点换了版而散文没跟上，散文就成了第二份真相。把那张表的**现锚**一列改成与名单一致"
+        "（旧锚一列是历史自述，保留不换）。")
+    for rel, _names in _ANCHOR_ROSTER_SOURCES:
+        assert Path(rel).name in doc, (
+            "本文件 docstring 的对应表里没有 " + rel + " 那一行：名单来源改名/挪走了，"
+            "表与 `_ANCHOR_ROSTER_SOURCES` 分家。")

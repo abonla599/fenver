@@ -6,11 +6,15 @@ jobs:
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
-          # 取全历史。两把钉**字面 SHA** 的锁（backend/tests/test_swap_package_data_snapshot.py
-          # 的 262b1224、test_swap_package_post_acceptance_tokens.py 的 b0cde6be/00f7fded）判的
-          # 就是仓库历史本身，靠 `git cat-file` 把锚点取出来。checkout 默认给浅克隆，浅克隆下
-          # 这三枚解析不出来（实测 rc=128 invalid object name），于是它们在 checkout 之后红成
-          # "锚点在这份工作树里解析不出…"——看着像代码有问题，实际是 CI 没把历史给够。
+          # 取全历史。但要把它管的格子说准，别再写反事实（工单 #232 就是被这段旧注释带偏过）：
+          # 这一步治的是**浅克隆**——`fetch-depth` 不是 0 时锚点之前那段历史根本没进 runner。
+          # 它治不了 #232 那次红：那三枚锚是被 rebase/rewrite **孤立**了（没有任何 ref 收敛它们），
+          # 而 `git clone` 从不送不可达对象，深浅都一样——所以当时"CI 没把历史给够"这句归因是错的，
+          # 同一格病在共享对象库的本机/worktree 里还完全隐形（`git cat-file -e` 照样 rc=0）。
+          # 治那一格的是取锚处的两道闸：`cat-file -e` 之外再加 `_assert_anchor_in_history`
+          # （`git merge-base --is-ancestor <锚> HEAD`，rc 0/1/其它三档，锚脱离可达历史就当场红）。
+          # 两把锁的现锚名单只住在它们自己的常量里（`_PINNED_PRE_CHANGE` / `_PRE_FIX_REF` / `_PREV_REF`），
+          # 旧锚→现锚的对应表与逐字节取证见 backend/tests/test_ci_history_depth.py 的「#232 那一格」。
           # 本仓不是"只有一个提交"的快照仓：这里有正常生长的历史，浅克隆切掉的是锚点之前的
           # 整段，那两把锁就红在 checkout 之后。这里不写提交数（HEAD/main/develop 各多少笔）：
           # 那个数每提一笔就漂一次。钉这个口径的是哨不是注释：backend/tests/test_ci_history_depth.py
