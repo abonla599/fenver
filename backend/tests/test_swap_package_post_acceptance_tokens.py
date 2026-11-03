@@ -87,7 +87,7 @@ HEAD 把对象吊着）。于是这条锁**绿在本机、红在 CI**，红话�
 就是 fail-open）。现锚是 #232 换上的**可达双生**：git 的 blob id 与换锚前逐字节相同，所以下面这些
 字节数、行数、两枚 sha256 以及全部判据吃到的东西一个字节都没换，换掉的只是"这格提交在不在被 ref
 收敛的历史里"。旧锚 → 现锚的对应表与逐字节同一性取证**只写在** `test_ci_history_depth.py` 的
-`_pinned_anchors_from_locks` 注释段，本文件不复述旧 SHA（复述就是第二份真相）。
+`_derive_pinned_anchors` 注释段，本文件不复述旧 SHA（复述就是第二份真相）。
 本机 `core.autocrlf=true`，`git cat-file blob <ref>:deploy/...` 给的是 **LF** blob：`_PRE_FIX_REF`
 那份实测 63590 字节 / CRLF 0 / LF 1055 / 非 ASCII 0 /
 sha256 `a6772ba1cc9a4048abeb1001077fd0c62f1beba7fca0234a35a9bea823cf65a0`；换成 CRLF 之后
@@ -1689,7 +1689,7 @@ def test_mutation_encoding_gates_bit_on_written_copies(tmp_path):
 # 失败、绝不 skip：`cat-file -e` 与 `_assert_anchor_in_history`（锚 ⊑ HEAD，rc 三档分开认领）。届时重挑
 # SHA 的口径不变：`git log --oneline -- deploy/swap-package.ps1` 里**修复之前**的那一格。
 # 旧锚 → 现锚的对应表与逐字节同一性取证只写在 `test_ci_history_depth.py` 的
-# `_pinned_anchors_from_locks` 注释段（单源规矩），本文件不复述。
+# `_derive_pinned_anchors` 注释段（单源规矩），本文件不复述。
 _PRE_FIX_REF = "8d6e892f"
 _PREV_REF = "fd8f528b"
 

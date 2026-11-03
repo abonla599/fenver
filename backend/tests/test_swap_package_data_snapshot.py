@@ -88,7 +88,7 @@ PS1 = SWAP_PS1.read_text(encoding="utf-8")
 # rc=128，而在共享对象库的本机/worktree 里照样 rc=0，于是这条锁**绿在本机、红在 CI**，正是 #232。
 # 现锚是 #232 挑的**可达双生**：blob 逐字节不变（git 内容寻址同一枚 blob），所以本文件每条判据、
 # 字节数与两枚 sha256 钉吃的字节一个都没换，只换了"这格提交在不在 ref 收敛的范围里"。
-# 旧锚 → 现锚的对应表与取证**只写在** `test_ci_history_depth.py` 的 `_pinned_anchors_from_locks` 注释段，
+# 旧锚 → 现锚的对应表与取证**只写在** `test_ci_history_depth.py` 的 `_derive_pinned_anchors` 注释段，
 # 本文件不复述旧 SHA（复述就是第二份真相）。
 _PINNED_PRE_CHANGE = "541ee785"
 
