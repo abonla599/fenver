@@ -29,7 +29,8 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
     （带 state=unreadable waiting_user=unproven error=<真实原文>）、rc 非 0、探针末尾的
     `PROBE_TAIL` 到不了、`DATA-SAVED` 一行都没有；
 (5) **ROLLBACK-HOWTO 7)** 存在、说清"抹掉"与"把 tasks.json 拷回去"的方向，而 1-6 步逐行与
-    改前那份**一字不差**（对照锚点是字面 SHA `262b1224`，不是 `HEAD`——见 `_PINNED_PRE_CHANGE`）。
+    改前那份**一字不差**（对照锚点是字面 SHA 且必须**在可达历史里**，不是 `HEAD`——见
+    `_PINNED_PRE_CHANGE` 与 `_assert_anchor_in_history`）。
 (6) **#62 轮转**：`data\swap-snapshots` 无上限会无限堆积（又整个在 data\ 的禁清区里）。
     默认保留最新 10 份（0 关闭）；只删严格 `yyyyMMdd-HHmmss` 的直接子目录；**绝不删当前
     快照**；删除失败 fail-closed（停手、保留剩余）；调用点在验收/守护恢复/预算之后、
@@ -68,7 +69,11 @@ from tests.test_swap_package_disable_verify import (
     _idx,
     _target_ps1,
 )
-from tests.test_swap_package_post_acceptance_tokens import _run_powershell, _write_crlf
+from tests.test_swap_package_post_acceptance_tokens import (
+    _assert_anchor_in_history,
+    _run_powershell,
+    _write_crlf,
+)
 from tests.test_swap_package_watchdog_enabled_machine_truth import (
     _find_powershell,
 )
@@ -78,7 +83,14 @@ PS1 = SWAP_PS1.read_text(encoding="utf-8")
 
 # 票面硬约束：锚点必须是**字面 SHA**。写成 HEAD 的那把锁在提交那一秒自毁并整体反向
 # （见 test_swap_package_post_acceptance_tokens.py 的红绿分工段）。
-_PINNED_PRE_CHANGE = "262b1224"
+# 取锚处还有第二道闸（#232）：`_assert_anchor_in_history` 判"锚 ⊑ 我拿到的历史"。字面 SHA 挡得住
+# "HEAD 自己变成修复"，挡不住"这枚 SHA 被 rebase/rewrite 孤立"——孤立之后 `git cat-file` 在干净克隆里
+# rc=128，而在共享对象库的本机/worktree 里照样 rc=0，于是这条锁**绿在本机、红在 CI**，正是 #232。
+# 现锚是 #232 挑的**可达双生**：blob 逐字节不变（git 内容寻址同一枚 blob），所以本文件每条判据、
+# 字节数与两枚 sha256 钉吃的字节一个都没换，只换了"这格提交在不在 ref 收敛的范围里"。
+# 旧锚 → 现锚的对应表与取证**只写在** `test_ci_history_depth.py` 的 `_pinned_anchors_from_locks` 注释段，
+# 本文件不复述旧 SHA（复述就是第二份真相）。
+_PINNED_PRE_CHANGE = "541ee785"
 
 _SAVED = "DATA-SAVED mode="
 _FAIL = "DATA-SAVE-FAIL mode="
@@ -565,7 +577,7 @@ def test_the_verdict_is_json_derived_and_never_answers_zero_for_cannot_read():
 
 
 def test_rollback_howto_step_7_names_the_erasure_and_1_to_6_are_word_for_word_unchanged():
-    """(5)：ROLLBACK-HOWTO 1)-6) 逐行与锚点 `262b1224` 那份**一字不差**，7) 是新增的，
+    """(5)：ROLLBACK-HOWTO 1)-6) 逐行与锚点 `_PINNED_PRE_CHANGE` 那份**一字不差**，7) 是新增的，
     并且写明"旧包解析不了 waiting_user 会在第一次落盘时抹掉记录"与"停服务->把 tasks.json
     拷回去->再启动"的方向。"""
     pre = _pre_change_text()
@@ -931,7 +943,13 @@ def _machine_honest_state_line(line: str, state: str) -> bool:
 def _pin_blob(ref: str):
     """`git cat-file blob <ref>:deploy/swap-package.ps1` -> (LF blob, CRLF 重建)。
     仓库根取 REPO_ROOT，**不**跟 SWAP_PS1_UNDER_TEST 走；取不到就响亮失败，绝不 skip
-    （skip 会让红绿分工的证据静默消失，报告里只多出一个没人看的 1 skipped）。"""
+    （skip 会让红绿分工的证据静默消失，报告里只多出一个没人看的 1 skipped）。
+
+    两道闸，各治一种失效（#232 只教会了第二条）：①`cat-file -e` 问"这格对象在不在本地"，它管的是
+    锚点写错/被删；②`_assert_anchor_in_history` 问"锚点是不是 HEAD 的祖先"，它管的是锚点被
+    rebase/squash/rewrite **孤立**——那种情况下①在共享对象库的本机/worktree 里照样 rc=0，
+    只有②会当场红（干净克隆里①也红，于是同一格病"绿在本机、红在 CI"）。③后面那条自守管的是
+    锚点被挪到修复**之后**（含挪回 HEAD）。三条都不许改成 skip。"""
     probe = subprocess.run(["git", "cat-file", "-e", ref + ":deploy/swap-package.ps1"],
                            cwd=str(REPO_ROOT), capture_output=True)
     assert probe.returncode == 0, (
@@ -940,6 +958,7 @@ def _pin_blob(ref: str):
         "仓库历史本身，跳过等于把证据扔掉。三查：①是不是在 checkout 里跑的；②锚点有没有被 "
         "rebase/squash/gc 换掉（`git log --oneline -- deploy/swap-package.ps1` 重挑 SHA）；"
         "③设了 SWAP_PS1_UNDER_TEST 与本锁无关，unset 再跑。")
+    _assert_anchor_in_history(ref, "取锚点 " + ref + "（_pin_blob）")
     blob = subprocess.run(["git", "cat-file", "blob", ref + ":deploy/swap-package.ps1"],
                           cwd=str(REPO_ROOT), capture_output=True, check=True).stdout
     for token in (_SAVED, _FAIL, _DRY_SAVE, "ROLLBACK-HOWTO 7)", "Get-TaskFileVerdict",
@@ -959,17 +978,32 @@ def _pre_change_text():
         _PRE_CACHE.update(lf=len(lf), crlf=len(crlf), lf_crlf=lf.count(b"\r\n"),
                           lf_lf=lf.count(b"\n"), crlf_crlf=crlf.count(b"\r\n"),
                           nonascii=sum(1 for b in crlf if b >= 0x80),
+                          lf_sha=hashlib.sha256(lf).hexdigest(),
                           sha=hashlib.sha256(crlf).hexdigest(), text=crlf.decode("utf-8"))
     return _PRE_CACHE["text"]
 
 
 def test_pre_change_copy_at_the_pinned_sha_is_red_on_every_lock_here(tmp_path):
-    """红绿分工（票面 TASK 3(i)）：CRLF 重建的 `262b1224` 那份（= 本票那 214 行之前）
+    """红绿分工（票面 TASK 3(i)）：**按 CRLF 重建**的 `_PINNED_PRE_CHANGE` 那份（= 本票那 214 行之前）
     对本文件每条判据都红，既有那把尺（disable 窗口）照旧绿——顺带把 LF/CRLF 的字节数、
-    CRLF 数、非 ASCII 数、sha256 当场取出来钉住，免得下一个人又拿 LF blob 喂文件自带门。
-    锚点是字面 SHA 而不是 HEAD：HEAD 在提交那一秒就变成修复本身。"""
+    CRLF 数、非 ASCII 数、两枚 sha256 当场取出来钉住，免得下一个人又拿 LF blob 喂文件自带门。
+    锚点是字面 SHA 而不是 HEAD：HEAD 在提交那一秒就变成修复本身。锚点还必须在可达历史里
+    （`_assert_anchor_in_history`），否则这条锁的证据只在共享对象库的那几棵树上存在。"""
     pre = _pre_change_text()
     facts = "\n".join(f"{k}={v}" for k, v in _PRE_CACHE.items() if k != "text")
+    # 内容钉（#232 的 T-a）：这三格把"锚点挪到了另一格提交"和"锚点换了 ref 但内容没变"分开。
+    # 口径逐条写明——75929 与 lf_sha 是 `git cat-file` 给的 **LF blob**，sha 是**按 CRLF 重建**那一份。
+    # 没有这三格，把锚点换成"可达、同路径、内容不同"的另一格提交时本文件一处都不会红
+    # （post_acceptance 那边有 63590/60226 两枚字节钉，本文件过去没有）。
+    assert _PRE_CACHE["lf"] == 75929, (
+        "锚点 " + _PINNED_PRE_CHANGE + " 那份 **LF blob** 的字节数不是取证值 75929：锚点被挪到了"
+        "另一格内容（可达但不同），本文件的红绿分工就不再证明“本票那 214 行之前”那一版真的缺守卫。"
+        "按 `git log --oneline -- deploy/swap-package.ps1` 重挑 #42 之前、blob 逐字节相同的那一格；"
+        "判据与这三个数都不许跟着改。\n" + facts)
+    assert _PRE_CACHE["lf_sha"] == ("8bfda64d09d2dd9d9cb8eebabecad29eded817a4565d1b6805fdebd2cffa5c8a"), (
+        "锚点那份 **LF blob**（`git cat-file blob` 直接给的字节，未做行尾重建）的 sha256 与取证不符：\n" + facts)
+    assert _PRE_CACHE["sha"] == ("8a0812f4480bff37421b81c751e9ef4872fabce463ce3ccc3d664a8a6377c16c"), (
+        "锚点那份 **CRLF 重建**（LF->CRLF 之后、也是落盘副本那一口径）的 sha256 与取证不符：\n" + facts)
     assert _PRE_CACHE["lf_crlf"] == 0, "锚点那份 blob 竟然带 CRLF（autocrlf 前提变了）：\n" + facts
     assert _PRE_CACHE["lf_lf"] == _PRE_CACHE["crlf_crlf"], "LF 行数与 CRLF 重建对不上：\n" + facts
     assert _PRE_CACHE["nonascii"] == 0 and _PRE_CACHE["crlf"] > 0, facts
