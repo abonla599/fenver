@@ -22,6 +22,7 @@
 import re
 from pathlib import Path
 
+from tests._corpus_exemption import deliberately_ignored
 from tests.test_apk_release_discipline import _code
 
 REPO = Path(__file__).resolve().parents[2]
@@ -911,18 +912,39 @@ def _tracked_android_kt():
 
 
 def _native_kt_corpus():
-    """全树 `android-native/**/*.kt` 的剥注释语料（写死三份就是 M6 那个洞）。
+    r"""全树 `android-native/**/*.kt` 的剥注释语料（写死三份就是 M6 那个洞）。
 
     两侧必须**同一个集合**：rglob 少一份（改名/挪走/walk 进空目录）、多一份（没入库的游离
     .kt）都红——"扫不到"和"守住了"不许长得一样（`test_native_android_discipline.py:105`
-    那句自述）。构建中间产物按 `/build/` 段排除，同一枚锁里钉住 git 侧一份 build 产物都没有。
+    那句自述）。
+
+    磁盘侧比集合前先扣掉"被 `.gitignore` 点名**有意不入库**"的那一份（工单 #267），判据与
+    网页那把共用同一份：`backend/tests/_corpus_exemption.py::deliberately_ignored`，形状锁见
+    `test_v0391_corpus_exemption_shape_lock.py`。
+
+    **这里以前是一枚手抄的 `/build/` 段排除**（`"/build/" not in 路径`），#265 的审查员往
+    `android-native/.gradle/` 放一份 `Scratch.kt`（`.gitignore:215` 点名不入库、但它不在
+    `/build/` 段里）就 2 failed——段排除当第二份真相就是这么红的。换掉之后**段排除不再参与
+    磁盘侧集合的构造**，构建产物改由 git 回答。换之前逐枚核过 `.kt` 落在 `/build/` 段里确实
+    被 `.gitignore` 覆盖（问的是具体文件、不带尾斜杠）：
+    `android-native/app/build/generated/Fake.kt` 与 `android-native/app/build/tmp/kotlin-classes/debug/Stray.kt`
+    都 rc=0 回 `.gitignore:33:build/`，`android-native/.gradle/Scratch.kt` rc=0 回 `:215`；
+    对照负例 `android-native/app/src/main/java/xyz/fenever/assistant/nativeapp/Stray267.kt`
+    rc=1（未被点名）⇒ 仍红，豁免变宽没把原意一起豁免掉。
+    `_tracked_android_kt()` 里那条 `assert not [p for p in tracked if "/build/" in p]`
+    **保留**：它钉的是"版本库里不许躺着 build 中间产物的 .kt"，是 git 侧的一面镜子，不是豁免
+    来源——两件事别混（形状锁的射程也因此只盯磁盘侧构造与那份 helper，见形状锁 docstring 的
+    "射程与残余"一节）。
     """
-    on_disk = {p.relative_to(REPO).as_posix() for p in sorted(NATIVE_ROOT.rglob("*.kt"))
-               if "/build/" not in p.relative_to(REPO).as_posix()}
+    on_disk_all = {p.relative_to(REPO).as_posix() for p in sorted(NATIVE_ROOT.rglob("*.kt"))}
     tracked = _tracked_android_kt()
+    ignored_on_disk = deliberately_ignored(on_disk_all, tracked, REPO)
+    on_disk = on_disk_all - ignored_on_disk
     assert on_disk == tracked, (
-        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份 / git 记 {len(tracked)} 份，"
-        f"只在磁盘={sorted(on_disk - tracked)} 只在 git={sorted(tracked - on_disk)}")
+        f"禁句语料的射程与仓库事实不同：磁盘扫到 {len(on_disk)} 份（另有 "
+        f"{len(ignored_on_disk)} 份被 .gitignore 点名有意不入库、已扣掉，不是漏扫："
+        f"{sorted(ignored_on_disk)[:6]}）/ git 记 {len(tracked)} 份，"
+        f"只在磁盘（且未被忽略）={sorted(on_disk - tracked)} 只在 git={sorted(tracked - on_disk)}")
     inside = {p.split("nativeapp/", 1)[-1] for p in on_disk}
     assert {"Api.kt", "ui/ChatUi.kt", "Prefs.kt"} <= inside, \
         "13B 点名的三份已不在语料里：禁句扫描的射程比那天还短了"
@@ -1131,8 +1153,11 @@ def test_native_kotlin_copy_is_free_of_banned_thinking_phrases():
     ③ §2 原文抄窄一味 → 第一条红；④ 把 `ui/UpdateUi.kt` 改名/挪走 → 基数钉红；
     ⑤ 新增一份没入库的 .kt → 基数钉红。
     射程：语料走 `_code`（剥注释），判的是**给用户看的字符串**里有没有这些句子；注释里出现
-    同词不判（与网页 `_js()`/`_html()` 同口径）。`/build/` 段下的中间产物不参与比对，
-    同一枚锁里钉住 git 侧没有 build 产物，所以这条排除面吃不进真源码。
+    同词不判（与网页 `_js()`/`_html()` 同口径）。磁盘侧不参与比对的那一份，是**被 `.gitignore`
+    点名有意不入库**的那些（构建产物 `build/` 与 `android-native/.gradle/` 两族都算），判据
+    现问 git（`_corpus_exemption.deliberately_ignored`；#267 之前这里是一份手抄的 `/build/`
+    段排除，换掉的经过与逐枚 `git check-ignore` 实测见 `_native_kt_corpus` 的 docstring）；
+    同一枚锁里另外钉住 git 侧没有 build 产物，所以这条排除面吃不进真源码。
     """
     assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
         f"裁决 §2 那一行只抠出 {len(_AMENDMENT_S2_BANNED)} 味，点名应是 " \
