@@ -18,11 +18,15 @@ T4 验收段：
    stderr 正文、完整命令行；start 只带 ``args_count``；
 9. ``shutdown()`` 幂等、无线程残留、status 无 running server；
 10. ``reload()``：enabled→disabled 停进程，disabled→enabled 起进程；旧代卡在
-    ``client.close`` 时不得复活再 spawn；
+    ``client.close`` 时不得复活再 spawn——这一格（N3）用**事件**把 worker 钉在收尸里，
+    观察点是"线程了结"而不是"睡了几秒"（#266：写死的 0.4/0.8 让它独跑 3 发 1 败），
+    形状锁见本文件末尾第 11 节；
 11. supervisor 再判 ``MAX_SERVERS=3``；坏条目 status 保留原始 ``enabled``。
 
 所有用例 ``finally`` 调 ``shutdown()``；Windows 上用 T3 的 ``is_pid_alive`` 断言无孤儿。
 """
+import ast
+import contextlib
 import inspect
 import json
 import os
@@ -30,6 +34,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -677,45 +682,203 @@ def test_reload_stops_and_starts_by_enabled_flag(tmp_path):
         supervisor.shutdown()
 
 
+PARK_BOUND = 30.0
+SPAWN_BOUND = 20.0
+SETTLE_BOUND = 20.0
+
+
+def _zombie_thread(supervisor, sid):
+    """这一代还挂着的 worker 线程；旧代卡在收尸里时引用被**保留**（N3 的观察点来源）。"""
+    with supervisor._lock:
+        runtime = supervisor._runtimes.get(sid)
+        return None if runtime is None else runtime.thread
+
+
+def _zombie_thread_exited(supervisor, sid):
+    thread = _zombie_thread(supervisor, sid)
+    return thread is None or not thread.is_alive()
+
+
+@contextlib.contextmanager
+def _zombie_park(monkeypatch, *, join_timeout=0.1):
+    """把 ``MCPStdioClient.close`` 换成"停在收尸里、由事件放行"的桩。
+
+    为什么必须是事件（#266 的全部理由）：旧写法靠 ``sleep(0.4)`` 停车、靠 ``sleep(0.8)``
+    观察，判据实际压在"0.8 > 0.4"这道算术上。主线程在 ``closing`` 置位与 ``reload()``
+    之间被调度走超过 0.4 秒，旧代就已经按 max_life 的**回收规则**合法地起了第三代
+    ⇒ 计数 3 ⇒ 独跑 3 发 1 败（2026-11-04 在本机 ``dc08ad56`` 上复跑 10 发 1 败）。
+    停车窗改由 ``released`` 决定之后，"reload 一定落在旧代还卡着的那一刻"是结构保证。
+
+    ``PARK_BOUND`` 与 ``join_timeout`` 都只是**上限**（挡"别把 CI 挂死"），不承载判据；
+    把 ``released.set()`` 挪出 ``finally``、或把上限摘掉/换成非正数，第 11 节那把形状锁会红。
+    """
+    monkeypatch.setattr("app.core.mcp_stdio.STOP_JOIN_TIMEOUT", join_timeout)
+    armed = threading.Event()
+    closing = threading.Event()
+    released = threading.Event()
+    parked = []
+
+    def parked_close(self):
+        if not armed.is_set():
+            return                      # 装闸之前的 close（第 1 代退场）照常放行
+        parked.append(self)
+        closing.set()
+        released.wait(PARK_BOUND)
+
+    monkeypatch.setattr(MCPStdioClient, "close", parked_close)
+    try:
+        yield SimpleNamespace(armed=armed, closing=closing, released=released, parked=parked)
+    finally:
+        # 放行必须在 finally：任何一枚断言在半路红，都不许把 worker 永久留在停车态。
+        released.set()
+
+
+class _ZombieTrace:
+    """把每一步的 ``(名字, 相对秒, 当时的 spawn 计数)`` 记下来——只在红的时候有用。
+
+    为什么值得留：这一族有两种完全不同的坏法——"被钉住之前就已经多跑了一代"（max_life
+    的回收规则自己起的，与闸口无关）和"闸口没拦住、放行后又起一代"（真回归）。没有这条
+    时间线，两种红在断言文本里长得一模一样，下一个人只能重新猜。
+    """
+
+    def __init__(self, counter):
+        self._counter = counter
+        self._t0 = time.monotonic()
+        self.marks = []
+
+    def mark(self, name):
+        self.marks.append((name, round(time.monotonic() - self._t0, 3), self._counter()))
+        return self
+
+    def __str__(self):
+        return " → ".join("%s@%ss(count=%s)" % item for item in self.marks)
+
+
 def test_zombie_generation_does_not_respawn_after_reload(tmp_path, monkeypatch):
     """N3：旧代卡在 client.close 超过 join 超时时，reload 不得再起一代、旧代也不许复活。
 
     形状：``crash_once`` 起两代（第 2 代 ready），再用很短的 max_life 让第 2 代在
-    worker 线程里进入 teardown；monkeypatch 的 close 把 worker 卡在 join 超时之外，
+    worker 线程里进入 teardown；close 桩把 worker **钉**在收尸里（事件放行，不睡秒数），
     此时 reload 改条目 → 新实现保留活线程（stopping）拒绝 spawn；旧实现会
     先起第 3 代、旧代醒来后又 spawn 一次。
+
+    三个观察点各钉一种坏法：
+    * reload 当场——条目必须停在 ``stopping``：钉"闸口没拦住、reload 自己起了新一代"
+      （把 ``_ensure_running`` 那道 ``thread.is_alive()`` 闸门摘掉，这里必红，旧实现会把
+      状态翻成 ``starting`` 再 spawn）；
+    * 放行之前——计数与停车那一刻**相等**；
+    * 放行、并等**旧代线程真的了结**之后——计数仍与停车那一刻相等：钉"旧代醒来复活又
+      spawn"。旧实现里那一代根本不会收束，所以这条等待到点报红，而不是悄悄放过。
+
+    为什么判据写成**增量**、不再写"计数必须停在 2"（2026-11-04 实测改的）：max_life 的
+    回收规则本来就会自己起新一代；主线程在"观察到第 2 次 spawn"与"装闸"之间被调度走
+    整整一个 ready+max_life 时，被钉住的那一代就已经是第 3 代了——绝对值断言把"停车前
+    跑了几代"这件与闸口无关的事一起吃了进去（同一形状 45 发里 7 发这样红）。增量把
+    判据收回到它真正想说的这句话上，时间线由 ``_ZombieTrace`` 带着，两种红分得开。
     """
-    monkeypatch.setattr("app.core.mcp_stdio.STOP_JOIN_TIMEOUT", 0.1)
-    armed = threading.Event()
-    closing = threading.Event()
-
-    def slow_close(self):
-        if armed.is_set():
-            closing.set()
-            time.sleep(0.4)
-
-    monkeypatch.setattr(MCPStdioClient, "close", slow_close)
-
     config = _Config(True, [_entry("s_zombie", "crash_once")])
-    supervisor = _make(config, tmp_path, max_life=0.25, stable_seconds=60.0)
-    try:
-        supervisor.start()
-        assert _wait_until(
-            lambda: _read_count(tmp_path, "s_zombie") >= 2, 5.0
-        ), supervisor.status()
-        armed.set()
-        assert closing.wait(5.0), "worker 没有进入 client.close"
-        config.servers = [_entry("s_zombie", "crash_once", extra_args=["changed"])]
-        supervisor.reload()
-        # 旧代走完 close 与收尾后，spawn 计数必须仍停在 2。
-        time.sleep(0.8)
-        assert _read_count(tmp_path, "s_zombie") == 2, supervisor.status()
-        assert _row(supervisor, "s_zombie")["state"] in (
-            STATE_STOPPING,
-            STATE_DISABLED,
+
+    def count():
+        return _read_count(tmp_path, "s_zombie")
+
+    trace = _ZombieTrace(count)
+    with _zombie_park(monkeypatch, join_timeout=0.1) as park:
+        supervisor = _make(config, tmp_path, max_life=0.25, stable_seconds=60.0)
+        try:
+            supervisor.start()
+            trace.mark("start")
+            assert _wait_until(lambda: count() >= 2, SPAWN_BOUND), (
+                "两代都没起来：%s status=%r" % (trace, supervisor.status()))
+            park.armed.set()
+            assert park.closing.wait(SETTLE_BOUND), (
+                "worker 没有进入 client.close：%s" % trace)
+            trace.mark("parked")
+            count_at_park = count()
+
+            config.servers = [_entry("s_zombie", "crash_once", extra_args=["changed"])]
+            supervisor.reload()
+            trace.mark("reloaded")
+
+            assert _row(supervisor, "s_zombie")["state"] == STATE_STOPPING, (
+                "reload 没有把条目停在 stopping：%s status=%r" % (trace, supervisor.status()))
+            assert count() == count_at_park, (
+                "闸口拒绝之后、放行之前又起了新一代（停车时 %d，现在 %d）：%s" % (
+                    count_at_park, count(), trace))
+
+            park.released.set()
+            trace.mark("released")
+            assert _wait_until(
+                lambda: _zombie_thread_exited(supervisor, "s_zombie"), SETTLE_BOUND
+            ), "旧代在 stop_event 已置位后仍没有了结（多半是它复活又 spawn 了一代）：%s status=%r" % (
+                trace, supervisor.status())
+            trace.mark("thread_done")
+            assert count() == count_at_park, (
+                "旧代了结之后又起了新一代（停车时 %d，现在 %d）：%s" % (
+                    count_at_park, count(), trace))
+        finally:
+            supervisor.shutdown()
+
+
+@pytest.mark.parametrize("scale", (0.1, 1.0, 10.0))
+def test_zombie_gate_survives_timing_constants(tmp_path, monkeypatch, scale):
+    """#266 要的自证：把这一格能注入的秒级常数同时改小/改大一个数量级，结论必须一模一样。
+
+    旧写法做不到这件事——0.4 与 0.8 一旦互相靠近，这格就随机红。改成事件驱动后，
+    "停车窗跨不跨过 reload"不由秒数决定，所以 ``max_life``、join 超时、monitor_interval
+    同比例缩到 0.1× 或放到 10× 都不许改变判据：
+
+    * 0.1×：第 2 代一 ready 就到期回收（收尸与 reload 挤在同一瞬间），闸口照样拦；
+    * 10×：reload 里那一次 ``join(1.0)`` 会**真等满**——旧代仍被事件钉着，没人替它放行，
+      所以 join 到点、状态停在 stopping、计数不再涨，与 0.1× 同结论。
+
+    这一格的放行时机取**相反**的那一支：reload 一返回就立刻放行（旧写法最吃亏的形状，
+    也是"旧代醒来复活"最有机会露头的时刻）；"钉着不放行"那一支由上一格覆盖。
+    """
+    config = _Config(True, [_entry("s_zombie", "crash_once")])
+
+    def count():
+        return _read_count(tmp_path, "s_zombie")
+
+    trace = _ZombieTrace(count)
+    with _zombie_park(monkeypatch, join_timeout=0.1 * scale) as park:
+        supervisor = _make(
+            config,
+            tmp_path,
+            max_life=0.25 * scale,
+            monitor_interval=0.01 * scale,
+            stable_seconds=60.0,
         )
-    finally:
-        supervisor.shutdown()
+        try:
+            supervisor.start()
+            trace.mark("start")
+            assert _wait_until(lambda: count() >= 2, SPAWN_BOUND), (
+                "scale=%s 连两代都没起来：%s" % (scale, trace))
+            park.armed.set()
+            assert park.closing.wait(SETTLE_BOUND), (
+                "scale=%s worker 没有进入 client.close：%s" % (scale, trace))
+            trace.mark("parked")
+            count_at_park = count()
+
+            config.servers = [_entry("s_zombie", "crash_once", extra_args=["changed"])]
+            supervisor.reload()
+            trace.mark("reloaded")
+
+            assert _row(supervisor, "s_zombie")["state"] == STATE_STOPPING, (
+                "scale=%s 闸口没拦住：reload 把条目带离了 stopping：%s status=%r" % (
+                    scale, trace, supervisor.status()))
+
+            # 立刻放行——这一支最容易让"旧代醒来再 spawn"露头。
+            park.released.set()
+            trace.mark("released")
+            assert _wait_until(
+                lambda: _zombie_thread_exited(supervisor, "s_zombie"), SETTLE_BOUND
+            ), "scale=%s 时旧代没有了结：判据开始吃时序了：%s" % (scale, trace)
+            trace.mark("thread_done")
+            assert count() == count_at_park, (
+                "scale=%s 起了新一代（停车时 %d，现在 %d）：秒级常数又开始承载判据了：%s" % (
+                    scale, count_at_park, count(), trace))
+        finally:
+            supervisor.shutdown()
 
 
 def test_reload_demoted_fourth_server_stops_its_old_runtime(tmp_path):
@@ -868,3 +1031,410 @@ def test_get_supervisor_is_lazy_and_singleton():
     assert status["servers"] == []
     with pytest.raises(ValueError):
         get_supervisor(mcp_root="ignored")
+
+
+# --------------------------------------------------- 11. zombie 用例的形状锁（#266 的自证）
+
+"""为什么还要一把**形状**锁：上面两格把 N3 改成事件驱动，本身不阻止下一个人再写回
+``time.sleep(0.8)``——行为测试在"这次恰好睡够了"的那一晚照样全绿。#266 要的自证是
+"把常数改大改小都必须红或必须绿"，那一格（``test_zombie_gate_survives_timing_constants``）
+只能证明**今天**不靠常数；"判据不许再压在秒数上"这条纪律只能钉在源码形状上。
+
+四条规则（``ZOMBIE_SHAPE_RULES``，每条都在 ``_ZOMBIE_CORPUS`` 里有代表，见
+``test_every_zombie_shape_rule_has_a_corpus_representative``）：
+
+1. ``no_bare_sleep``——zombie 这一族里任何 ``sleep(...)`` 都算违规（``time.sleep`` 与裸
+   ``sleep`` 两种写法都咬）。停车窗与观察窗都必须由事件给出。
+2. ``bounded_waits``——``X.wait(...)``（含裸 ``wait(...)`` 别名写法）与 ``_wait_until`` /
+   ``_wait_state`` 必须带一个**正数上限**（字面量，或模块级 ``NAME = 数字`` 常量）。上限只
+   挡"别把 CI 挂死"，不承载判据；摘掉、写成 ``True``、写成 0、换成一个查不到正数的名字，
+   都红。
+3. ``release_in_finally``——凡是**在嵌套函数里**被 ``wait`` 的那只事件（= 停车的那只），
+   它的 ``.set()`` 必须出现在某个 ``try`` 的 ``finally`` 分支里。挪进 ``try`` 正文、
+   或者去 ``set()`` 另一只事件，都红。
+4. ``no_tautological_assert``——``assert True`` / ``assert True or …`` / ``assert … or True``
+   这类恒真断言不许出现在这一族里（#265/#267 的审查员就是拿这一枚把锁缴械的）。
+
+射程边界（**如实写**，别当成已穷尽）：
+* 名单按"模块里函数名含 zombie"派生（``_zombie_subject_sources``），新加一格 zombie 用例
+  不必改这把锁就会被扫；把这三格改名或删掉会红在 ``EXPECTED_ZOMBIE_SUBJECTS`` 那枚钉上。
+* 只做**同函数内**的形状判断，不做跨函数/跨文件的赋值跟随：把 sleep 藏进一个
+  名字不含 zombie 的公共 helper 里再调用、或把上限算出来（``wait(MAX / 2)`` 这种
+  非常量表达式），今天都不在射程内。``_SYNTH_ZOMBIE_UNBOUND_JOIN`` 钉的就是"今天必须
+  放过去"的那一格（``worker.join()`` 不带超时）——哪天规则 widened 到咬得住它，
+  那条语料会红，逼着回来改这段话。
+* 这把锁的**守卫自身**：探测器被改成恒返回 ``[]`` 的话，语料那几格立刻红（每条坏形状
+  都断言"必须报出对应规则"），所以它不是自我指涉的恒绿探针。
+"""
+
+ZOMBIE_SHAPE_RULES = (
+    "no_bare_sleep",
+    "bounded_waits",
+    "release_in_finally",
+    "no_tautological_assert",
+)
+
+# 这三格必须一直在名单里：改名/删掉=射程自己缩水，必须红。
+EXPECTED_ZOMBIE_SUBJECTS = (
+    "_zombie_park",
+    "test_zombie_generation_does_not_respawn_after_reload",
+    "test_zombie_gate_survives_timing_constants",
+)
+
+# ``_wait_*`` 那几个轮询助手里"上限"所在的下标（0 基）。
+_POLL_BOUND_INDEX = {"_wait_until": 1, "_wait_state": 3}
+
+
+def _zombie_numeric_bounds():
+    """模块级 ``NAME = 正数`` 的取值表：上限允许写成常量名，但必须查得到是个正数。"""
+    tree = ast.parse(inspect.getsource(sys.modules[__name__]))
+    table = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        value = node.value.value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                table[target.id] = float(value)
+    return table
+
+
+def _zombie_subject_sources():
+    """按名字派生这一族的射程：模块里所有函数名含 "zombie" 的对象。"""
+    module = sys.modules[__name__]
+    found = []
+    for name in sorted(dir(module)):
+        obj = getattr(module, name)
+        if "zombie" not in name.lower() or not inspect.isfunction(obj):
+            continue
+        if getattr(obj, "__module__", None) != module.__name__:
+            continue
+        found.append((name, inspect.getsource(obj)))
+    return found
+
+
+def _zombie_bound_value(node, table):
+    """实参是不是"一个查得到值的正数上限"；不是就返回 ``None``。"""
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+    if isinstance(node, ast.Name):
+        return table.get(node.id)
+    return None
+
+
+def _zombie_wait_target(call):
+    """``X.wait(...)``（或裸 ``wait(...)`` 别名）里的等待对象原文；不是等待就返回 ``None``。
+
+    裸 ``wait`` 也咬：#125 那一课——把 ``park.closing.wait`` 换个别名递进来，判据不能跟着瞎。
+    """
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "wait":
+        return ast.unparse(call.func.value) if call.func.value is not None else "wait"
+    if isinstance(call.func, ast.Name) and call.func.id == "wait":
+        return "wait"
+    return None
+
+
+def _zombie_root_function(tree):
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node
+    return None
+
+
+def _zombie_shape_problems(where, source, table=None):
+    """返回这一格源码的形状违规明细（空表 = 合格）。规则 id 一律前置，红话点名行号。"""
+    table = _zombie_numeric_bounds() if table is None else table
+    problems = []
+
+    def flag(rule, node, text):
+        problems.append("%s@%s:%s %s" % (rule, where, getattr(node, "lineno", 0), text))
+
+    tree = ast.parse(source)
+    root = _zombie_root_function(tree)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    # 1. no_bare_sleep
+    for call in calls:
+        func = call.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name == "sleep":
+            flag("no_bare_sleep", call,
+                 "裸 sleep(...) 把判据压在秒级常数上——停车窗与观察窗都要改成事件")
+
+    # 2. bounded_waits
+    for call in calls:
+        target = _zombie_wait_target(call)
+        if target is not None:
+            bound = call.args[0] if call.args else None
+            if bound is None:
+                for keyword in call.keywords or []:
+                    if keyword.arg in ("timeout", None):
+                        bound = keyword.value
+            if bound is None or _zombie_bound_value(bound, table) is None:
+                flag("bounded_waits", call,
+                     "%s.wait(...) 没有正数上限（字面量或模块级数字常量）" % target)
+            elif _zombie_bound_value(bound, table) <= 0:
+                flag("bounded_waits", call,
+                     "%s.wait(...) 的上限不是正数：等于不挡任何东西" % target)
+            continue
+        if isinstance(call.func, ast.Name) and call.func.id in _POLL_BOUND_INDEX:
+            index = _POLL_BOUND_INDEX[call.func.id]
+            bound = call.args[index] if len(call.args) > index else None
+            if bound is None:
+                for keyword in call.keywords or []:
+                    if keyword.arg == "timeout":
+                        bound = keyword.value
+            if bound is None or _zombie_bound_value(bound, table) is None:
+                flag("bounded_waits", call,
+                     "%s(...) 缺第 %d 位的那个上限实参" % (call.func.id, index + 1))
+
+    # 3. release_in_finally
+    parked = set()
+    if root is not None:
+        for node in ast.walk(root):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node is root:
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    target = _zombie_wait_target(inner)
+                    if target is not None:
+                        parked.add(target)
+    released = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.finalbody:
+            for inner in ast.walk(stmt):
+                if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "set" and inner.func.value is not None):
+                    released.add(ast.unparse(inner.func.value))
+    for target in sorted(parked - released):
+        flag("release_in_finally", root,
+             "被卡在嵌套函数里等的那只 %s 没有在 try/finally 里 set()："
+             "断言半路红就会把 worker 永久留在停车态" % target)
+
+    # 4. no_tautological_assert
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        test = node.test
+        if isinstance(test, ast.Constant) and test.value in (True, 1):
+            flag("no_tautological_assert", node, "恒真 assert：这条判据永远不会红")
+        elif isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+            for value in test.values:
+                if isinstance(value, ast.Constant) and value.value in (True, 1):
+                    flag("no_tautological_assert", node,
+                         "assert … or True：把该报红的那一枚吃掉了")
+    return problems
+
+
+_SYNTH_ZOMBIE_CLEAN_PARK = '''
+def _zombie_park_ok(monkeypatch):
+    closing = threading.Event()
+    released = threading.Event()
+
+    def parked_close(self):
+        closing.set()
+        released.wait(PARK_BOUND)
+
+    try:
+        yield None
+    finally:
+        released.set()
+'''
+
+_SYNTH_ZOMBIE_CLEAN_CASE = '''
+def test_zombie_case_ok(park, supervisor, read_count):
+    assert park.closing.wait(SETTLE_BOUND), "没进 close"
+    assert _wait_until(lambda: read_count() >= 2, SPAWN_BOUND)
+    park.released.set()
+    assert read_count() == 2
+'''
+
+# **边界钉**：``worker.join()`` 不带超时今天必须绿（本条只咬等待类调用，不咬 join）。
+# 哪天规则 widened 到咬得住它，这一格会红，逼着回来把本节 docstring 的射程段改对。
+_SYNTH_ZOMBIE_UNBOUND_JOIN = '''
+def test_zombie_unbound_join(worker):
+    worker.start()
+    worker.join()
+    assert worker.is_alive() is False
+'''
+
+_SYNTH_ZOMBIE_ALIAS_WAIT = '''
+def test_zombie_alias_wait(wait):
+    wait()
+'''
+
+_SYNTH_ZOMBIE_BARE_SLEEP = '''
+def test_zombie_bare_sleep(park, read_count):
+    park.released.set()
+    time.sleep(0.8)
+    assert read_count() == 2
+'''
+
+_SYNTH_ZOMBIE_BARE_SLEEP_ALIAS = '''
+def test_zombie_bare_sleep_alias(sleep):
+    sleep(0.4)
+    assert True
+'''
+
+_SYNTH_ZOMBIE_UNBOUND_WAIT = '''
+def test_zombie_unbound_wait(park):
+    park.closing.wait()
+'''
+
+_SYNTH_ZOMBIE_BOOL_BOUND_WAIT = '''
+def test_zombie_bool_bound_wait(park):
+    park.closing.wait(True)
+'''
+
+_SYNTH_ZOMBIE_ZERO_BOUND_WAIT = '''
+def test_zombie_zero_bound_wait(park):
+    park.released.wait(0)
+'''
+
+_SYNTH_ZOMBIE_UNBOUND_POLL = '''
+def test_zombie_unbound_poll(predicate):
+    assert _wait_until(lambda: predicate())
+'''
+
+_SYNTH_ZOMBIE_UNKNOWN_NAME_BOUND = '''
+def test_zombie_unknown_name_bound(park, not_a_number):
+    park.closing.wait(not_a_number)
+'''
+
+_SYNTH_ZOMBIE_RELEASE_IN_TRY_BODY = '''
+def _zombie_park_release_in_body(monkeypatch):
+    released = threading.Event()
+
+    def parked_close(self):
+        released.wait(PARK_BOUND)
+
+    try:
+        released.set()
+        yield None
+    finally:
+        assert released.is_set()
+'''
+
+_SYNTH_ZOMBIE_RELEASE_WRONG_EVENT = '''
+def _zombie_park_release_wrong_event(monkeypatch):
+    released = threading.Event()
+    other = threading.Event()
+
+    def parked_close(self):
+        released.wait(PARK_BOUND)
+
+    try:
+        yield None
+    finally:
+        other.set()
+'''
+
+_SYNTH_ZOMBIE_TAUTOLOGICAL_ASSERT = '''
+def test_zombie_tautological(park, read_count):
+    assert True or park.closing.wait(SETTLE_BOUND)
+    assert read_count() == 2
+'''
+
+_SYNTH_ZOMBIE_TAUTOLOGICAL_OR_TAIL = '''
+def test_zombie_tautological_tail(park):
+    assert park.closing.wait(SETTLE_BOUND) or True
+'''
+
+# 每条坏形状各自应当报出的规则；``()`` 那两枚是**正对照**（防过度报警）。
+_ZOMBIE_CORPUS = (
+    ("clean_park", _SYNTH_ZOMBIE_CLEAN_PARK, ()),
+    ("clean_case", _SYNTH_ZOMBIE_CLEAN_CASE, ()),
+    ("bare_sleep", _SYNTH_ZOMBIE_BARE_SLEEP, ("no_bare_sleep",)),
+    ("bare_sleep_alias", _SYNTH_ZOMBIE_BARE_SLEEP_ALIAS,
+     ("no_bare_sleep", "no_tautological_assert")),
+    ("unbound_wait", _SYNTH_ZOMBIE_UNBOUND_WAIT, ("bounded_waits",)),
+    ("alias_wait", _SYNTH_ZOMBIE_ALIAS_WAIT, ("bounded_waits",)),
+    ("bool_bound_wait", _SYNTH_ZOMBIE_BOOL_BOUND_WAIT, ("bounded_waits",)),
+    ("zero_bound_wait", _SYNTH_ZOMBIE_ZERO_BOUND_WAIT, ("bounded_waits",)),
+    ("unbound_poll", _SYNTH_ZOMBIE_UNBOUND_POLL, ("bounded_waits",)),
+    ("unknown_name_bound", _SYNTH_ZOMBIE_UNKNOWN_NAME_BOUND, ("bounded_waits",)),
+    ("release_in_try_body", _SYNTH_ZOMBIE_RELEASE_IN_TRY_BODY, ("release_in_finally",)),
+    ("release_wrong_event", _SYNTH_ZOMBIE_RELEASE_WRONG_EVENT, ("release_in_finally",)),
+    ("tautological_assert", _SYNTH_ZOMBIE_TAUTOLOGICAL_ASSERT, ("no_tautological_assert",)),
+    ("tautological_or_tail", _SYNTH_ZOMBIE_TAUTOLOGICAL_OR_TAIL, ("no_tautological_assert",)),
+    # **边界钉**：``worker.join()`` 不带超时今天必须绿（不在射程里，见本节 docstring）。
+    # 哪天规则 widened 到咬得住它，这一格会红，逼着回来把那段声明改对。
+    ("unbound_join_is_out_of_scope", _SYNTH_ZOMBIE_UNBOUND_JOIN, ()),
+)
+
+
+def _zombie_problem_rules(problems):
+    return {item.split("@", 1)[0] for item in problems}
+
+
+@pytest.mark.parametrize("case_id,source,expected", _ZOMBIE_CORPUS,
+                         ids=[item[0] for item in _ZOMBIE_CORPUS])
+def test_zombie_shape_lock_can_go_red(case_id, source, expected):
+    """反例语料：每条坏形状都必须被点名，每条好形状都必须放过去。
+
+    红的是哪一种"锁被缴械"：探测器被改成恒返回 ``[]``、规则 id 改名、只按行首文本匹配
+    而不再读 AST —— 这三种坏法下，上面那十几枚语料会成片报"没抓到该抓的规则"。
+    两枚 ``()``（正对照）挡的是反方向的坏法：把规则做得过宽，于是真用例永远红、
+    最后被人整条摘掉。
+    """
+    problems = _zombie_shape_problems("synthetic:%s" % case_id, source)
+    found = _zombie_problem_rules(problems)
+    assert found == set(expected), (
+        "%s 期望报出 %s，实得 %s；明细：%s" % (case_id, sorted(expected), sorted(found), problems))
+
+
+def test_every_zombie_shape_rule_has_a_corpus_representative():
+    """规则名单与语料必须双向成立：每条规则有代表，语料不许造出名单外的规则 id。
+
+    红的是哪一种：新增一条规则却忘了配反例（那它就永远没有牙），或语料里拼错规则 id
+    （那条断言其实谁也没在验）。同 #257 给所有锁定的口径：**清单派生，不许手抄**。
+    """
+    covered = set()
+    for _, _, expected in _ZOMBIE_CORPUS:
+        covered.update(expected)
+    assert covered <= set(ZOMBIE_SHAPE_RULES), (
+        "语料里出现了名单外的规则 id：%s" % sorted(covered - set(ZOMBIE_SHAPE_RULES)))
+    missing = [rule for rule in ZOMBIE_SHAPE_RULES if rule not in covered]
+    assert not missing, "这些规则没有反例代表：%s" % missing
+
+
+def test_zombie_shape_lock_subjects_are_derived_not_handwritten():
+    """正对照（防空转）：射程必须是**派生**出来的，且那三格承重对象一直在名单里。
+
+    红的是哪一种：zombie 用例被改名、被整格删掉、被搬去别的文件 —— 派生名单会少人，
+    而"锁在扫什么"这句话就变成假话。没有这一条，"形状全对"和"一格都没扫到"在全绿里
+    根本分不开（本仓为这个形状付过钱，见 ``test_machine_read_pointers.py`` 与 #268 的
+    "守卫自身"盲区）。
+    """
+    subjects = _zombie_subject_sources()
+    names = {name for name, _ in subjects}
+    missing = [name for name in EXPECTED_ZOMBIE_SUBJECTS if name not in names]
+    assert not missing, "这些承重对象不在 zombie 射程里了（改名/删掉/搬走）：%s" % missing
+    assert len(subjects) >= len(EXPECTED_ZOMBIE_SUBJECTS), (
+        "派生名单只剩 %d 格，少于登记的 %d 格" % (
+            len(subjects), len(EXPECTED_ZOMBIE_SUBJECTS)))
+    for name, source in subjects:
+        parsed = ast.parse(source)   # 读不到可解析的形状 = 锁在扫空气
+        assert any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and node.name == name for node in parsed.body), (
+            "%s 的源码里没有同名函数定义：派生名单在骗人" % name)
+
+
+def test_zombie_cases_carry_no_wall_clock_verdict():
+    """主判据：这一族用例今天一条都不许违反上面四条规则。
+
+    红的是哪一种回归：把 N3 改回 ``time.sleep(0.8)`` 那种"猜睡够了"的观察窗、把事件上限
+    摘掉、把放行挪出 ``finally``、或往断言里塞 ``or True``。每一条都在语料里有同名反例，
+    所以这一条不会因为探测器被改窄而悄悄变绿。
+    """
+    problems = []
+    for name, source in _zombie_subject_sources():
+        problems += _zombie_shape_problems(name, source)
+    assert not problems, "zombie 这一族的时序形状被改回常数驱动了：\n%s" % "\n".join(problems)
