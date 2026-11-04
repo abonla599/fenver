@@ -13,9 +13,12 @@ r"""#267 的 AST 形状锁：语料豁免判据那三件必备，摘掉任何一
 ## 三件必备（工单 #267 交付 B 的原文口径）
 
 1. 必须出现 `subprocess.run`，且它的参数里有字符串 `"check-ignore"`；
-2. 必须有针对 `returncode` 的判定，形状是 `… .returncode in (0, 1)`；
+2. 必须有针对 `returncode` 的判定，形状是 `… .returncode in (0, 1)`，而且这一形必须
+   **直接是一枚 assert 的 test**——审查缴械 c 写的是 `assert True or (… in (0, 1))`：
+   字样还在、判据已死，所以"子树里找得到"不算数；
 3. 豁免集合不许来自函数字面量：禁 `startswith`/`endswith` 这一族段排除、禁把
-   Set/Tuple/List 的字符串常量名单当作赋值/返回/`in` 比较的右边。
+   Set/Tuple/List 的字符串常量名单当作赋值/返回/`in` 比较的**左右两边**、禁判据函数引用
+   模块级字符串名单（"git 问答照旧留着、再并一份手抄名单"这一形就是这么抓的）。
 
 外加三条同样钉写法的加固：**判据不许被 try/except 摘掉**（三格——helper、两把锁的调用点、
 以及调用点里把判据包成 wrapper 的那只手——都不许有返回值的 except 分支）；**扣减项必须是
@@ -28,9 +31,11 @@ r"""#267 的 AST 形状锁：语料豁免判据那三件必备，摘掉任何一
 `git ls-files backend/tests` 现取：git 问不到、返回空、或名单里任一棵不入库一律红——
 "扫不到"与"守住了"不许长得一样（B1 同一条规矩）。
 
-"判据函数"按**结构**认领而不是按名字：全射程里 body 内含字符串 `"check-ignore"` 的那个
-函数。把它改名不会绕过这把锁，因为两把锁的 import、调用与减法三项都按 AST 里看得到的
-别名与实参匹配；只把调用点改写、不改 helper，一样红。
+"判据函数"按**结构**认领而不是按名字：全射程里 body 内有一枚**字面量正好等于**
+`"check-ignore"` 的那个函数（把这三个字抄进 docstring 或长句子里不算，`"git check-ignore"`
+这种整串也不算）——所以把它改名、把问答拆进第二个函数（那里出现同一枚字面量→"有且只有一份"
+当场红）都绕不过去。两把锁的 import、调用与减法三项都按 AST 里看得到的别名与实参匹配，
+只把调用点改写、不改 helper，一样红。
 
 ## 射程与残余（写清边界，不是"已穷尽"）
 
@@ -130,13 +135,35 @@ def _asks_git(func) -> list:
             and GIT_FLAG in _call_str_args(n)]
 
 
+def _is_rc_compare(node) -> bool:
+    """`….returncode in (0, 1)` 这一形**本身**（不是包在 or/and 里的那一份）。"""
+    return (isinstance(node, ast.Compare) and len(node.ops) == 1
+            and isinstance(node.ops[0], ast.In)
+            and isinstance(node.left, ast.Attribute) and node.left.attr == "returncode"
+            and isinstance(node.comparators[0], ast.Tuple)
+            and [x.value for x in node.comparators[0].elts] == [0, 1])
+
+
 def _rc_whitelist(func) -> list:
-    """`….returncode in (0, 1)` 这一形（摘掉它 = 缴械 c，CI 与干净克隆两种树都看不出）。"""
+    """要求存在一枚 **test 直接就是** `returncode in (0, 1)` 的 assert。
+
+    为什么必须"直接是"而不是"子树里有"：#265 审查的缴械 c 写的就是
+    `assert True or (out.returncode in (0, 1))`——形状还在、判据已经死了。只认顶层 test
+    才咬得住这一形，摘掉整句同样红。
+    """
     return [n for n in ast.walk(func)
-            if isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], ast.In)
-            and isinstance(n.left, ast.Attribute) and n.left.attr == "returncode"
-            and isinstance(n.comparators[0], ast.Tuple)
-            and [x.value for x in n.comparators[0].elts] == [0, 1]]
+            if isinstance(n, ast.Assert) and _is_rc_compare(n.test)]
+
+
+def _tautological_asserts(func) -> list:
+    """`assert True or …` / `assert False and …` 这一形：断言自己宣布自己不判。"""
+    hits = []
+    for n in ast.walk(func):
+        if isinstance(n, ast.Assert) and isinstance(n.test, ast.BoolOp):
+            if any(isinstance(x, ast.Constant) and isinstance(x.value, bool)
+                   for x in n.test.values):
+                hits.append(n.lineno)
+    return hits
 
 
 def _container_has_str(node) -> bool:
@@ -260,6 +287,8 @@ def _alias_bindings(func, alias: str) -> list:
 def _exemption_violations(rel: str, func, predicate: str, import_map: dict) -> list:
     """对一棵"参与豁免的文件"里的函数，返回 [(说明, lineno), ...]。"""
     hits = list(_literal_exemption_shapes(func))
+    for line in _tautological_asserts(func):
+        hits.append(("断言被写成恒真（`assert True or …` / `assert False and …`）", line))
     alias = _exemption_alias(func)
     if alias and alias not in import_map.get(predicate, set()):
         hits.append((f"调用的豁免函数 `{alias}` 不是从 `{_MODULE_OF_HELPER}` import 进来的那份",
@@ -334,10 +363,15 @@ def test_the_predicate_asks_git_and_whitelists_rc():
         f"『只问 git』这句注释当场成假话")
 
     assert _rc_whitelist(func), (
-        f"{rel}:{func.lineno} `{func.name}` 没有 `….returncode in (0, 1)` 这一形："
+        f"{rel}:{func.name} 没有一枚 test 直接就是 `….returncode in (0, 1)` 的 assert"
+        f"（{rel}:{func.lineno}）："
         f"摘掉它，rc=128/超时/git 不在 PATH 都会退化『没有豁免』还继续比集合，"
         f"而红话反过来宣称『已扣掉，不是漏扫』——#265 审查缴械 c 实测在 CI 与干净克隆里"
         f"都是 74 passed，所以这条判据必须钉形状而不是钉运行结果")
+    tauto = _tautological_asserts(func)
+    assert not tauto, (
+        f"{rel}:{func.name} 第 {tauto} 行把断言写成 `assert True or …` 这一形："
+        f"形状还在、判据已经死了，这正是 #265 审查缴械 c 的写法")
 
 
 def test_the_predicate_takes_no_literal_shortcut():
@@ -521,6 +555,21 @@ _DISARM_SAMPLES = (
      '                         capture_output=True, timeout=60)\n'
      '    assert out.returncode in (0, 1), "只认 0/1"\n'
      '    return {p for p in paths if "/" + p + "/" in p}\n'),
+    ("tautological-rc", "predicate",
+     'import subprocess\n\n\ndef deliberately_ignored(paths, tracked, repo):\n'
+     '    out = subprocess.run(["git", "check-ignore", "--stdin", "-z"], input=b"a",\n'
+     '                         capture_output=True, timeout=60)\n'
+     '    assert True or (out.returncode in (0, 1)), "只认 0/1"\n'
+     '    return {p.decode() for p in out.stdout.split(b"\\0") if p}\n'),
+    ("roster-union-keeps-git", "predicate",
+     'import subprocess\n\n\n'
+     '_SIX_FAMILIES = ("docs/v0.24-", "docs/代码体检报告-", "docs/待修复清单-")\n\n\n'
+     'def deliberately_ignored(paths, tracked, repo):\n'
+     '    out = subprocess.run(["git", "check-ignore", "--stdin", "-z"], input=b"a",\n'
+     '                         capture_output=True, timeout=60)\n'
+     '    assert out.returncode in (0, 1), "只认 0/1"\n'
+     '    ignored = {p.decode() for p in out.stdout.split(b"\\0") if p}\n'
+     '    return ignored | {p for p in paths if p in _SIX_FAMILIES}\n'),
     ("site-build-segment-filter", "site",
      'from tests._corpus_exemption import deliberately_ignored\n\n\n'
      'def _corpus(root, tracked):\n'
@@ -574,7 +623,9 @@ def _predicate_findings(src: str) -> list:
     if not _asks_git(func):
         problems.append("没有 subprocess.run(..., \"check-ignore\")")
     if not _rc_whitelist(func):
-        problems.append("没有 returncode in (0, 1)")
+        problems.append("没有 test 直接就是 returncode in (0, 1) 的断言（被 or/and 包住也算没有）")
+    if _tautological_asserts(func):
+        problems.append(f"恒真断言 {_tautological_asserts(func)}")
     if any(isinstance(n, ast.ExceptHandler)
            and any(isinstance(r, ast.Return) for r in ast.walk(n))
            for n in ast.walk(func)):
