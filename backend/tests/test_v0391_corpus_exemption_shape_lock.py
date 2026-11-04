@@ -30,24 +30,36 @@ r"""#267 的 AST 形状锁：语料豁免判据那三件必备，摘掉任何一
 这份判据的返回值**（不许从名字、属性或模块级名单绕回来）；**判据里不许给问法补斜杠**
 （`p + "/"` 那一形在 CRLF 检出上会被裸 CR 空模式恒判"已忽略"，见 helper 的 docstring）。
 
-## #268 补的三格（这把锁自己的盲区，逐条写明挡谁、挡不住谁）
+## #268 补的格（笔 1 的三格 + 修复轮 1 补的四格，逐条写明挡谁、挡不住谁）
 
 - **自扫**：这一把原来不扫自己——`_SCOPE` 不含本文件，而
   `test_the_shape_lock_is_registered_where_the_guarded_locks_live` 只钉"在册 + 磁盘可读"、
   不钉内部形状，所以改它自己正文里的一句断言（塞一枚 `assert True or …`）没人红。
   `test_the_shape_lock_does_not_disarm_its_own_body` 补的就是这一格：照 #266
-  `no_tautological_assert` 的形状做，**不另造一套判据**，只对本文件全部顶层函数跑恒真断言并集。
+  `no_tautological_assert` 的形状做，**不另造一套判据**，对本文件的顶层函数与顶层类里的方法
+  跑恒真断言并集（射程一份定义住在 `_scanned_functions`，正对照共用它；后一半是 #268 修复轮
+  S2 补的——审查员 M6a 实测只扫顶层函数时，往 #266 那棵文件的 `class _ZombieTrace` 的方法里
+  塞裸 `assert True`，两把锁合跑全绿）。
   为什么不把 `SHAPE_LOCK` 塞进 `_SCOPE`（主控人裁决）：`_walks_disk` 把 `ast.walk` 当磁盘遍历，
   自扫会把本文件每个 AST helper 都拖进 `except`-return 那一格——今天绿，但将来任何人在这里写
   `except: return x` 都会被**错理由**判红。
 - **成员钉**：`test_the_scope_membership_is_the_declared_roster` 钉 `_SCOPE`/`_CALL_SITES`
   的成员与条数（从 `_SCOPE` 摘掉 helper 那棵 ⇒ 这里先红，不用等"认领不到判据函数"那条间接红话），
-  并把"SHAPE_LOCK 不进 `_SCOPE`"这条裁决钉在机器上而不是钉在注释里。
+  并把"SHAPE_LOCK 不进 `_SCOPE`"这条裁决钉在机器上而不是钉在注释里。正对照那张
+  `_TAUTO_SCAN_TARGETS` 的**成员与条数**同样钉在这里（#268 修复轮 S1：审查员 M4a 实测"只把
+  `SHAPE_LOCK` 摘出那张表"当时 rc=0——那张表原来只有"列进来的必须入库"这一道单向闸）。
 - **条数与清单钉**：`test_the_disarm_roster_is_pinned_and_distinct` 钉 `_DISARM_SAMPLES`
   的条数下限、id 互不相同、kind 必须落在白名单里。它换掉的是原来那枚**恒真**的
   `len(caught) == len(_DISARM_SAMPLES)`（`caught` 在每轮循环里必然 +1，那个等式永真、不含信息）。
   诚实登记：和 #266 那侧一样，**条数钉只挡"删"，挡不住"三处同向一起缩"**——这一把的
   "名单 + 探测器实现 + 语料代表"如果同向一起删，红话仍然只来自条数，所以条数就是唯一的那道闸。
+
+- **修复轮 1（独立审查判"不可并回"之后补的）**：B1 把 #266 那侧的**语料下限钉抬到零余量**
+  （裁决①；原来 17 枚实物配 15 的下限，删一枚语料代表照样隐身）；B2 走 (a) 那条路，把 #266 的
+  恒真判据补成与这一份**同一并集**，并为新认的三形各配一枚反例语料——本文件原来那句"所以今天
+  两份口径一致"是假话，现在它由 11 形逐枚实测支持；S1 给正对照那张表补成员钉，并在**被守卫
+  那一侧**（网页那把锁的在册钉）补一枚"自扫那枚函数必须存在"的 AST 钉；S2 把自扫与正对照的
+  射程扩到顶层类里的方法。
 
 ## 射程（从 `git ls-files` 现取，问不到即 fail-closed）
 
@@ -75,11 +87,14 @@ r"""#267 的 AST 形状锁：语料豁免判据那三件必备，摘掉任何一
   key）、或写成运行时拼接（`"".join([...])`、f-string）——这些都不是"字符串模式容器"。
   要让它们变红得先扩大这一把的语法覆盖面，本票没做；下一票若要收，请连同这三条形状一起
   写进红话，别只挑一条。
-- **恒真断言判据两份分家**（#268 主控人裁决：不抽共用 helper，两把锁各留一份）。代价如实登记：
-  另一份住在 `backend/tests/test_v0375_mcp_stdio_supervisor.py` 的 `no_tautological_assert`
-  （#266 那把）。本票已经把**并集**写全到这一侧（`_tautological_asserts` 现认裸 `assert True` /
-  `assert 1` 与 `BoolOp` 里的 `or True` / `and False`），所以今天两份口径一致；但它们是两份
-  独立实现、可以被单方面改窄——**"两份会再分叉"是本票登记的已知残余**，不在本票射程里。
+- **恒真断言判据两份各留一份实现**（#268 主控人裁决：不抽共用 helper）。**修复轮 B2 选的是
+  (a) 那条路：把 #266 那一侧补成与这一侧同一份并集**——`test_v0375_mcp_stdio_supervisor.py` 的
+  `no_tautological_assert` 原先只认裸 `assert True`/`assert 1` 与 `BoolOp` 里的 `or True`/`or 1`，
+  漏的是裸 `assert False`、裸 `assert 0`、`assert … and False`（审查员 §三 那张 11 形表点名的
+  三形，本把这侧一直认）。补齐以后两份在**那 11 形上逐枚实测过**，不是"注释说一致"。
+  诚实登记剩下的那一半：**等价性今天没有常驻锁看着**。两份是独立实现，谁都可以单方面改窄而
+  重新分叉，而那正是 #266/#267/#268 三批存在的理由那一族——"两份会再分叉"仍是本票登记的
+  已知残余，不在本票射程里（要不要把它做成一枚行为差分钉，已在报告里列为待裁决）。
   合并成一份要付出的代价（那把锁的射程按"函数名含 zombie"派生，抽 helper 会把这枚判据拖进
   它的派生射程）由主控人拍过，裁决是"各留一份"。
 
@@ -200,22 +215,48 @@ def _rc_whitelist(func) -> list:
 
 
 def _is_bool_constant(node) -> bool:
-    """这枚常量是不是"布尔味"的字面量：`True` / `False` / `1` / `0`。
+    """这枚常量是不是"布尔味"的字面量：**任何** `bool`/`int` 都算。
 
-    `1` 与 `0` 是 #266 那份 `no_tautological_assert` 也认的形状（`assert 1`、`assert x or 1`
-    与 `assert True` 同构）。#268 把两份并集写全，所以这里只**放宽**不收窄。
+    `True` / `False` / `1` / `0` 是常见写法，但 `assert 5` 与 `assert True` 在语法上是同一件事，
+    只列那四个字面量就是给"换个数字绕过"留门（实测：裸 `assert 5` 命中）。#268 修复轮 B2 把
+    `test_v0375_mcp_stdio_supervisor.py` 那一侧补成同一口径，两份都只**放宽**不收窄。
     """
     return isinstance(node, ast.Constant) and isinstance(node.value, (bool, int)) \
         and not isinstance(node.value, (str, bytes))
+
+
+def _scanned_functions(tree):
+    """自扫与正对照共用的射程：全部**顶层函数** + **顶层类里的方法**（#268 修复轮 S2）。
+
+    为什么不止顶层函数：审查员 M6a 实测往 `test_v0375_mcp_stdio_supervisor.py` 的
+    `class _ZombieTrace` 的 `mark()` 里塞一枚裸 `assert True`，两把锁合跑 `57 passed` 全绿——
+    只看 `tree.body` 的那些顶层函数就是这一格（#266 那把的派生射程按 `inspect.isfunction`
+    取模块属性，类方法同样不在它的射程里）。返回 `(名字, 节点)`，类方法带类名限定，
+    红话要指得出是哪一格。
+    边界（如实写）：只下探**一层**类体，方法里再套的函数靠 `ast.walk` 在判据那一层吃到；
+    嵌套在函数里的类（`def f(): class C: …`）不在这一枚的收集里——那种形状今天不存在，
+    出现了会让正对照少扫一格，请连这段一起改。
+    """
+    found = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            for inner in node.body:
+                if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found.append(("%s.%s" % (node.name, inner.name), inner))
+    return found
 
 
 def _tautological_asserts(func) -> list:
     """恒真/恒假断言的**并集**：断言自己宣布自己不判。
 
     认这几形（#268 把原来两份分家的口径写全在这里）：
-    * 裸 `assert True` / `assert False` / `assert 1` / `assert 0` —— **旧版这一把漏的就是
-      裸 `assert True`**，而 #266 那份从一开始就认；两份分家是本票登记的已知残余（见模块
-      docstring 的"恒真断言判据两份分家"）。
+    * 裸 `assert True` / `assert False` / `assert 1` / `assert 0` / 任何 `bool`/`int` 字面量
+      （`assert 5` 同构）—— **旧版这一把漏的就是裸 `assert True`**，而 #266 那份从一开始就认；
+      补上以后反过来漏的三形（裸 `assert False`/`assert 0`/`assert … and False`）在 #266 那一侧，
+      #268 修复轮 B2(a) 已经把那一侧也补到同一份并集（见模块 docstring 的"恒真断言判据两份
+      各留一份实现"那一格）。
     * `assert True or …` / `assert … or True` —— #265 审查缴械 c 的写法：字样还在、判据已死。
     * `assert False and …` / `assert … and False` —— 恒假，同属"自己宣布自己不判"。
 
@@ -572,6 +613,11 @@ def test_the_shape_lock_is_registered_where_the_guarded_locks_live():
 
     # 在册钉**只**钉在册，不钉内部形状——这正是 #267 那把锁不扫自己的那格。这里顺手把它
     # 钉成一句话：这一枚里不许出现"改内部形状也红在这里"的假声明（红话不许替别人作保）。
+    # **射程收窄（#268 修复轮，审查员 ④/R1 实测）**：下面这枚元钉读的是**它自己**的 source，
+    # 所以它只挡"这段文案被改回假话"，**挡不住"自扫那枚测试被整枚删掉"**（审查员 M2c 实测
+    # 删掉自扫 ⇒ 本文件 rc=0，谁也不红）。"自扫必须存在"那一半今天住在被守卫那一侧：
+    # `backend/tests/test_v0391_web_cockpit_ui.py` 的
+    # `test_the_exemption_shape_lock_is_present_and_tracked` 用 AST 数这一把的函数名。
     guard_src = inspect.getsource(test_the_shape_lock_is_registered_where_the_guarded_locks_live)
     assert "test_the_shape_lock_does_not_disarm_its_own_body" in guard_src, (
         "在册钉的 docstring 不再写明『内部形状那一半由自扫接住』：下一位读这一枚的人会把它"
@@ -590,25 +636,28 @@ def test_the_shape_lock_does_not_disarm_its_own_body():
     为什么是自扫而不是把 `SHAPE_LOCK` 塞进 `_SCOPE`（主控人裁决，实测理由成立）：
     `_walks_disk` 把 `ast.walk` 当磁盘遍历，自扫会把本文件每个 AST helper 都拖进
     `except`-return 那一格——今天绿，但将来任何人在这里写 `except: return x` 都会被
-    **错理由**判红。所以这一枚只对本文件的全部**顶层**函数跑"恒真断言并集"这一条规则，
-    别的规则一条都不跑。射程 `Path(__file__)`：读的就是正在被执行的那一份，改名/搬走
+    **错理由**判红。所以这一枚只对本文件的顶层函数与顶层类里的方法跑"恒真断言并集"这一条
+    规则（射程由 `_scanned_functions` 一份定义，与正对照共用），别的规则一条都不跑。
+    类方法那一半是 #268 修复轮 S2 补的：审查员 M6a 实测只扫顶层函数时，往
+    `test_v0375_mcp_stdio_supervisor.py` 那个 `class _ZombieTrace` 的方法里塞裸
+    `assert True` 两把锁都不红。射程 `Path(__file__)`：读的就是正在被执行的那一份，改名/搬走
     都会先红在册面的名字上，而这里绝不从 `_SCOPE` 取路径（否则改一个常量就顺带把自扫
     的射程也改了）。
     """
     source = Path(__file__).resolve().read_text(encoding="utf-8")
     tree = ast.parse(source)
-    top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    assert top, "本文件顶层一个函数都没有：这一枚自扫等于在扫空气（恒绿的摆设）"
+    scanned = _scanned_functions(tree)
+    assert scanned, "本文件一个顶层函数也没有：这一枚自扫等于在扫空气（恒绿的摆设）"
     offenders = []
-    for func in top:
+    for name, func in scanned:
         for line in _tautological_asserts(func):
-            offenders.append(f"{func.name}:{line}")
+            offenders.append(f"{name}:{line}")
     assert not offenders, (
         f"这一把形状锁自己的正文里有恒真/恒假断言：{offenders}。守卫自己被缴械而全量无一红，"
         f"就是 #267 审查点名的那一格——判据的字样还在、判据已经不判了")
 
 
-# ---------------- 成员钉：`_SCOPE` / `_CALL_SITES` 不许悄悄变窄（#268 牙五） ----------------
+# ---------------- 成员钉：`_SCOPE` / `_CALL_SITES` / 正对照那张表不许悄悄变窄（#268 牙五 + 修复轮 S1） ----------------
 
 def test_the_scope_membership_is_the_declared_roster():
     """射程名单钉成员与条数，并把"SHAPE_LOCK 不进 `_SCOPE`"这条裁决钉在机器上。
@@ -617,6 +666,11 @@ def test_the_scope_membership_is_the_declared_roster():
     少写一棵 —— 这一枚**先红**，不等"认领不到判据函数"那条间接红话。今天若没有这一枚，
     摘掉 helper 那棵只会让 `_predicate_function` 数出 0 份、红话说的是"两份判据各自腐烂"，
     那是**错理由**（真发生的动作是射程缩了一棵）。
+
+    正对照那张 `_TAUTO_SCAN_TARGETS` 同样在这里钉（#268 修复轮 S1）：审查员 M4a 实测
+    "只把 `SHAPE_LOCK` 摘出那张表"当时 rc=0 —— 那张表只有"列进来的必须入库"这一道单向闸，
+    挡多列不挡少列，而少列一棵就等于少对照一棵、`test_the_widened_tautology_predicate_is_quiet_on_real_sources`
+    照旧为剩下的四棵报绿。
 
     为什么不许图省事把 `SHAPE_LOCK` 塞进 `_SCOPE`：见 `test_the_shape_lock_does_not_disarm_its_own_body`
     的 docstring（`_walks_disk` 把 `ast.walk` 当磁盘遍历）。这条裁决由下面那一枚反向钉住，
@@ -638,7 +692,20 @@ def test_the_scope_membership_is_the_declared_roster():
         f"（_walks_disk 把 ast.walk 当磁盘遍历，自扫会误伤本文件每个 AST helper）。"
         f"要推翻这条裁决请先在 test_the_shape_lock_does_not_disarm_its_own_body 的 docstring "
         f"里把新理由写清，再改这一枚。")
-    for rel in _SCOPE:
+    # 正对照那张表同样钉成员与条数（#268 修复轮 S1 的另一半）。审查员 M4a 实测"只把
+    # SHAPE_LOCK 摘出 _TAUTO_SCAN_TARGETS"今天 rc=0：那张表少列一棵就等于少对照一棵，
+    # 而"真源码 0 命中"照样绿——单向的"列进来的必须入库"挡多列、不挡少列。
+    assert len(_TAUTO_SCAN_TARGETS) == 5, (
+        f"_TAUTO_SCAN_TARGETS 现在是 {len(_TAUTO_SCAN_TARGETS)} 棵。注释不写数（数只活在钉里），"
+        f"这条红话就是那份真相：正对照少一棵，`test_the_widened_tautology_predicate_is_quiet"
+        f"_on_real_sources` 那句『真源码 0 命中』就只剩一半证据。")
+    assert set(_TAUTO_SCAN_TARGETS) == {HELPER, SHAPE_LOCK, ZOMBIE_LOCK, WEB_LOCK, NATIVE_LOCK}, (
+        f"正对照名单的成员变了：{sorted(_TAUTO_SCAN_TARGETS)}——这张表必须同时盖住『被守卫的』"
+        f"（helper + 两把语料锁）与『守卫自己的』（本文件与 #266 那棵树），少哪一侧都不算对照")
+    assert len(set(_TAUTO_SCAN_TARGETS)) == len(_TAUTO_SCAN_TARGETS), (
+        f"正对照名单里有重复的树：{list(_TAUTO_SCAN_TARGETS)}——重复的一棵会顶掉名额，"
+        f"让『少列一棵』这种改法看起来没改")
+    for rel in tuple(_SCOPE) + tuple(_TAUTO_SCAN_TARGETS):
         assert rel.endswith(".py") and rel.startswith("backend/tests/") and "\\" not in rel, (
             f"射程名单里的 {rel} 不是『仓库相对 + posix 分隔符 + .py』的形状：{rel}"
             f"——`git ls-files` 报的就是这个口径，写成别的形状永远问不到")
@@ -890,11 +957,15 @@ def test_the_shape_lock_itself_has_teeth():
 # 这一枚恒真判据今天扫得到的全部真源码。名单是**派生射程之外**的一张显式表（同 #257 的
 # 口径：表与它的用法住在同一个文件里，改窄的人会同时改掉用它的断言），列进来的必须是
 # "被守卫的 + 守卫自己的"两侧：helper、本文件（#267 那把）、#266 那把形状锁所在的那棵树、
-# 两把语料锁。少列一棵 ⇒ 下面那枚在册断言红。
+# 两把语料锁。成员与条数由 `test_the_scope_membership_is_the_declared_roster` 钉住——
+# #268 审查员 M4a 实测"只把 SHAPE_LOCK 摘出这张表"今天 rc=0（那张表没有成员钉，而
+# `test_the_widened_tautology_predicate_is_quiet_on_real_sources` 只会为剩下的四棵报绿），
+# 修复轮把这一格并进了同一枚成员钉。
+ZOMBIE_LOCK = "backend/tests/test_v0375_mcp_stdio_supervisor.py"
 _TAUTO_SCAN_TARGETS = (
     HELPER,
     SHAPE_LOCK,
-    "backend/tests/test_v0375_mcp_stdio_supervisor.py",
+    ZOMBIE_LOCK,
     WEB_LOCK,
     NATIVE_LOCK,
 )
@@ -914,8 +985,8 @@ def test_the_widened_tautology_predicate_is_quiet_on_real_sources():
     """#268 牙七（正对照，不许漏）：并集写全之后的恒真判据，在真源码上必须**一条都不报**。
 
     规划员静态扫过说全绿——**这一格不接受转述**，所以把它做成常驻测试而不是一次性脚本：
-    五棵真源码（helper、本文件、#266 那把形状锁那棵树、两把语料锁）的全部顶层函数，
-    一条都不许命中。
+    五棵真源码（helper、本文件、#266 那把形状锁那棵树、两把语料锁）的全部顶层函数与顶层类
+    里的方法，一条都不许命中（射程与自扫共用 `_scanned_functions` 一份定义，#268 修复轮 S2）。
 
     红的是哪一种坏法：把判据做得**过宽**（比如连 `assert x == 1` 那种比较也算进去、或者
     把"任何带常量的断言"当成恒真），于是真源码成片红，而一片红的守卫活不过下一位接手的
@@ -933,11 +1004,11 @@ def test_the_widened_tautology_predicate_is_quiet_on_real_sources():
         path = REPO / rel
         assert path.is_file(), f"{rel} 在册却读不到：正对照的射程与磁盘不同"
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        top = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        assert top, f"{rel} 顶层一个函数都没有：这一枚正对照在扫空气"
-        for func in top:
+        scanned = _scanned_functions(tree)
+        assert scanned, f"{rel} 一个顶层函数也没有：这一枚正对照在扫空气"
+        for name, func in scanned:
             for line in _tautological_asserts(func):
-                offenders.append(f"{rel}:{func.name}:{line}")
+                offenders.append(f"{rel}:{name}:{line}")
     assert not offenders, (
         f"加宽后的恒真判据在真源码上命中 {len(offenders)} 处：{offenders[:8]}。要么判据宽过头"
         f"（过度报警的守卫会被整条摘掉），要么真源码里真的混进了恒真断言（那就是本票要挡的"
