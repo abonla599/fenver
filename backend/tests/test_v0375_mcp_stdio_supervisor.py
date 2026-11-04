@@ -1040,8 +1040,10 @@ def test_get_supervisor_is_lazy_and_singleton():
 "把常数改大改小都必须红或必须绿"，那一格（``test_zombie_gate_survives_timing_constants``）
 只能证明**今天**不靠常数；"判据不许再压在秒数上"这条纪律只能钉在源码形状上。
 
-四条规则（``ZOMBIE_SHAPE_RULES``，每条都在 ``_ZOMBIE_CORPUS`` 里有代表，见
-``test_every_zombie_shape_rule_has_a_corpus_representative``）：
+规则名单（``ZOMBIE_SHAPE_RULES``，每条都在 ``_ZOMBIE_CORPUS`` 里有代表，见
+``test_every_zombie_shape_rule_has_a_corpus_representative``；**条数不写在这里**——它住在
+``test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector`` 的条数钉里，
+注释里再写一份数就是第二份真相，它会比钉先腐烂）：
 
 1. ``no_bare_sleep``——zombie 这一族里任何 ``sleep(...)`` 都算违规（``time.sleep`` 与裸
    ``sleep`` 两种写法都咬）。停车窗与观察窗都必须由事件给出。
@@ -1052,19 +1054,47 @@ def test_get_supervisor_is_lazy_and_singleton():
 3. ``release_in_finally``——凡是**在嵌套函数里**被 ``wait`` 的那只事件（= 停车的那只），
    它的 ``.set()`` 必须出现在某个 ``try`` 的 ``finally`` 分支里。挪进 ``try`` 正文、
    或者去 ``set()`` 另一只事件，都红。
-4. ``no_tautological_assert``——``assert True`` / ``assert True or …`` / ``assert … or True``
-   这类恒真断言不许出现在这一族里（#265/#267 的审查员就是拿这一枚把锁缴械的）。
+4. ``no_tautological_assert``——**恒真与恒假**断言都不许出现在这一族里：裸 ``assert True`` /
+   ``assert False`` / 任何 ``bool`` 或 ``int`` 字面量（``assert 1``、``assert 0``、``assert 5``
+   同构），以及 ``BoolOp`` 的支里出现布尔味字面量（``or True`` / ``or 1`` / ``and False`` /
+   ``and 0``）。#265/#267 的审查员就是拿这一枚把锁缴械的。口径与本仓
+   ``backend/tests/test_v0391_corpus_exemption_shape_lock.py`` 的 ``_tautological_asserts``
+   **同一份并集**（#268 修复轮 B2(a) 对齐；此前这一枚漏裸 ``assert False`` / ``assert 0`` /
+   ``assert … and False`` 三形，两份并不像注释说的那样一致）。
 
 射程边界（**如实写**，别当成已穷尽）：
 * 名单按"模块里函数名含 zombie"派生（``_zombie_subject_sources``），新加一格 zombie 用例
-  不必改这把锁就会被扫；把这三格改名或删掉会红在 ``EXPECTED_ZOMBIE_SUBJECTS`` 那枚钉上。
+  不必改这把锁就会被扫；把 ``EXPECTED_ZOMBIE_SUBJECTS`` 里点名的那几格改名或删掉，
+  会红在 ``test_zombie_shape_lock_subjects_are_derived_not_handwritten`` 那枚钉上。
 * 只做**同函数内**的形状判断，不做跨函数/跨文件的赋值跟随：把 sleep 藏进一个
   名字不含 zombie 的公共 helper 里再调用、或把上限算出来（``wait(MAX / 2)`` 这种
   非常量表达式），今天都不在射程内。``_SYNTH_ZOMBIE_UNBOUND_JOIN`` 钉的就是"今天必须
   放过去"的那一格（``worker.join()`` 不带超时）——哪天规则 widened 到咬得住它，
   那条语料会红，逼着回来改这段话。
 * 这把锁的**守卫自身**：探测器被改成恒返回 ``[]`` 的话，语料那几格立刻红（每条坏形状
-  都断言"必须报出对应规则"），所以它不是自我指涉的恒绿探针。
+  都断言"必须报出对应规则"），所以它不是自我指涉的恒绿探针。往守卫正文里塞恒真断言
+  同样会红——这一族的守卫函数名字都含 zombie，派生射程把它们**包括在内**，所以
+  ``no_tautological_assert`` 天然扫得到它们自己（#266 审查员 M-C 实测：往
+  ``test_zombie_cases_carry_no_wall_clock_verdict`` 里塞 ``assert True or …`` 当场红）。
+  两条诚实的边界：① 派生射程按 ``inspect.isfunction`` 只收**模块级函数**，**顶层类里的方法
+  不在本把射程内**（#268 审查员 M6a 实测：往 ``class _ZombieTrace`` 的 ``mark()`` 塞裸
+  ``assert True``，本把不红）——那一格由 #267 那把的正对照看着，#268 修复轮 S2 已把它的射程
+  扩到顶层类里的方法；② "名单四条都留着、探测函数一进来就 ``return []``"这一手红在**语料**
+  那几格，不红在条数钉也不红在 id↔探测器绑定（绑定按 AST 取 ``flag()`` 的字面实参、
+  不看可达性，不可达的 ``flag(...)`` 照样算"报得出去"——#268 审查员 M1g 实测）。
+* **同向一起缩这一格只靠条数钉**（#268 牙二，本票存在理由）：把某条规则的名单行、
+  探测器里那枚 ``flag(...)`` 与它的语料代表**三处同向一起删**，双向覆盖钉与
+  id↔探测器绑定看见的都是自洽的名单、谁也不红——#266 审查员 M-B 实测这么干以后
+  ``41 passed`` 全绿，唯一信号是条数。今天咬得住它的只有
+  ``test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector`` 里的条数钉。
+  诚实登记分工：id↔探测器绑定挡"删探测器留名单"（#268 牙一），语料下限挡"删语料"（#268 修复轮
+  B1 把它抬到零余量：只删一枚也必须红），两者都**不是**这一格的替代。本枚
+  ``no_tautological_assert`` 与
+  ``backend/tests/test_v0391_corpus_exemption_shape_lock.py``（#267 那把语料豁免形状锁）
+  里的恒真判据是**两份独立实现**——主控人裁决不抽共用 helper。#268 修复轮 B2(a) 把这一侧补成
+  与那一侧同一份并集（补的正是这一侧原先漏掉的裸 ``assert False`` / ``assert 0`` /
+  ``assert … and False`` 三形，并为每一形配了一枚反例语料），**"今天一致"只由那一批的 11 形
+  实测支持，没有常驻锁看着两份**；它们可以被单方面改窄而重新分叉，那仍是本票登记的已知残余。
 """
 
 ZOMBIE_SHAPE_RULES = (
@@ -1081,7 +1111,11 @@ EXPECTED_ZOMBIE_SUBJECTS = (
     "test_zombie_gate_survives_timing_constants",
 )
 
-# ``_wait_*`` 那几个轮询助手里"上限"所在的下标（0 基）。
+# ``_wait_*`` 那几个轮询助手里"上限"所在的下标（0 基）。**每个键都必须在 ``_ZOMBIE_CORPUS``
+# 里有成对代表**（缺上限的一支必须报、带正数上限的一支必须不报）——这条由
+# ``test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector`` 的子分支覆盖断言
+# 看着：#266 审查实测 ``"_wait_state": 3`` 这一支今天既没被任何 zombie 用例调用、语料里也
+# 没有它的代表，规则级覆盖有钉、子分支级没有，所以它是一段没牙的死支（#268 牙六补的成对语料）。
 _POLL_BOUND_INDEX = {"_wait_until": 1, "_wait_state": 3}
 
 
@@ -1125,6 +1159,18 @@ def _zombie_bound_value(node, table):
     if isinstance(node, ast.Name):
         return table.get(node.id)
     return None
+
+
+def _zombie_bool_constant(node) -> bool:
+    """这枚常量是不是"布尔味"字面量：**任何** ``bool``/``int`` 都算。
+
+    `True`/`False`/`1`/`0` 是最常见的写法，但 `assert 5` 与 `assert True` 在语法上是同一件事，
+    只列四个字面量就是给"改个数字绕过"留门。口径与
+    `backend/tests/test_v0391_corpus_exemption_shape_lock.py` 的 `_is_bool_constant` 同一份
+    （#268 修复轮 B2(a)：两份并集对齐，不是这份单方面收窄）。函数名含 zombie ⇒ 本把的派生
+    射程也扫得到它自己。
+    """
+    return isinstance(node, ast.Constant) and isinstance(node.value, (bool, int))
 
 
 def _zombie_wait_target(call):
@@ -1218,18 +1264,22 @@ def _zombie_shape_problems(where, source, table=None):
              "被卡在嵌套函数里等的那只 %s 没有在 try/finally 里 set()："
              "断言半路红就会把 worker 永久留在停车态" % target)
 
-    # 4. no_tautological_assert
+    # 4. no_tautological_assert（恒真**与恒假**；与 #267 那把的 `_tautological_asserts` 同一份
+    #    并集——#268 修复轮 B2(a) 补的正是这里原先漏掉的裸 `assert False` / `assert 0` /
+    #    `assert … and False` 三形）
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assert):
             continue
         test = node.test
-        if isinstance(test, ast.Constant) and test.value in (True, 1):
-            flag("no_tautological_assert", node, "恒真 assert：这条判据永远不会红")
-        elif isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
-            for value in test.values:
-                if isinstance(value, ast.Constant) and value.value in (True, 1):
-                    flag("no_tautological_assert", node,
-                         "assert … or True：把该报红的那一枚吃掉了")
+        if _zombie_bool_constant(test):
+            flag("no_tautological_assert", node,
+                 "恒真/恒假 assert（test 直接是字面量 %r）：这条判据自己宣布自己不判"
+                 % (test.value,))
+        elif isinstance(test, ast.BoolOp) and any(_zombie_bool_constant(v) for v in test.values):
+            op = "or" if isinstance(test.op, ast.Or) else "and"
+            flag("no_tautological_assert", node,
+                 "assert … %s … 的支里出现布尔味字面量：`or` 把该报红的那一枚吃掉、"
+                 "`and` 让整条恒假——两种都是把判据换成摆设" % op)
     return problems
 
 
@@ -1303,6 +1353,21 @@ def test_zombie_unbound_poll(predicate):
     assert _wait_until(lambda: predicate())
 '''
 
+# `_POLL_BOUND_INDEX` 的另一支 `_wait_state`（真签名 `def _wait_state(supervisor, sid, state,
+# timeout=5.0)`，上限是第 4 位**关键字**参数）的**成对**语料：#266 审查实测这一支今天既没被
+# 任何 zombie 用例调用、语料里也没有代表，是一段没牙的死支。两支都按真实调用形状写，
+# 且必须走 `_SYNTH_ZOMBIE_*` 字符串惯例——写成真正的模块级函数会被派生射程收进去（函数名
+# 含 zombie），同时被 pytest 收集成需要假夹具的用例，当场 error。
+_SYNTH_ZOMBIE_UNBOUND_STATE_POLL = '''
+def test_zombie_unbound_state_poll(supervisor):
+    _wait_state(supervisor, "srv", STATE_READY)
+'''
+
+_SYNTH_ZOMBIE_BOUND_STATE_POLL = '''
+def test_zombie_bound_state_poll(supervisor, ready_count):
+    assert _wait_state(supervisor, "srv", STATE_READY, timeout=SPAWN_BOUND) is not None
+'''
+
 _SYNTH_ZOMBIE_UNKNOWN_NAME_BOUND = '''
 def test_zombie_unknown_name_bound(park, not_a_number):
     park.closing.wait(not_a_number)
@@ -1347,7 +1412,27 @@ def test_zombie_tautological_tail(park):
     assert park.closing.wait(SETTLE_BOUND) or True
 '''
 
-# 每条坏形状各自应当报出的规则；``()`` 那两枚是**正对照**（防过度报警）。
+# #268 修复轮 B2(a) 补的三形：这一侧原先只认 `assert True`/`assert 1` 与 `or True`，
+# 裸 `assert False`、裸 `assert 0`、`assert … and False` 三形是 #267 那把认、本把不认的那一格
+# （审查员 §三 那张 11 形表）。每一形各一枚反例——只加判据不加反例，等于"字样加了、牙没加"。
+_SYNTH_ZOMBIE_FALSE_ASSERT = '''
+def test_zombie_false_assert(park):
+    assert False
+'''
+
+_SYNTH_ZOMBIE_ZERO_ASSERT = '''
+def test_zombie_zero_assert(park):
+    assert 0
+'''
+
+_SYNTH_ZOMBIE_AND_FALSE_TAIL = '''
+def test_zombie_and_false_tail(park, read_count):
+    assert park.closing.wait(SETTLE_BOUND) and False
+    assert read_count() == 2
+'''
+
+# 每条坏形状各自应当报出的规则；期望为 ``()`` 的那几枚是**正对照**（防过度报警），
+# 条数不在注释里写、由本节末尾的条数钉管（#268："数只活在钉里"）。
 _ZOMBIE_CORPUS = (
     ("clean_park", _SYNTH_ZOMBIE_CLEAN_PARK, ()),
     ("clean_case", _SYNTH_ZOMBIE_CLEAN_CASE, ()),
@@ -1359,11 +1444,19 @@ _ZOMBIE_CORPUS = (
     ("bool_bound_wait", _SYNTH_ZOMBIE_BOOL_BOUND_WAIT, ("bounded_waits",)),
     ("zero_bound_wait", _SYNTH_ZOMBIE_ZERO_BOUND_WAIT, ("bounded_waits",)),
     ("unbound_poll", _SYNTH_ZOMBIE_UNBOUND_POLL, ("bounded_waits",)),
+    # `_POLL_BOUND_INDEX` 的另一支：成对语料，缺上限那支必须报、带正数 `timeout=` 那支必须
+    # 不报（#268 牙六——两支都要跑，只跑一半等于没证明这一支有牙）。
+    ("unbound_state_poll", _SYNTH_ZOMBIE_UNBOUND_STATE_POLL, ("bounded_waits",)),
+    ("bound_state_poll", _SYNTH_ZOMBIE_BOUND_STATE_POLL, ()),
     ("unknown_name_bound", _SYNTH_ZOMBIE_UNKNOWN_NAME_BOUND, ("bounded_waits",)),
     ("release_in_try_body", _SYNTH_ZOMBIE_RELEASE_IN_TRY_BODY, ("release_in_finally",)),
     ("release_wrong_event", _SYNTH_ZOMBIE_RELEASE_WRONG_EVENT, ("release_in_finally",)),
     ("tautological_assert", _SYNTH_ZOMBIE_TAUTOLOGICAL_ASSERT, ("no_tautological_assert",)),
     ("tautological_or_tail", _SYNTH_ZOMBIE_TAUTOLOGICAL_OR_TAIL, ("no_tautological_assert",)),
+    # #268 修复轮 B2(a)：本把补认的三形各一枚反例（原来只有 `or True` 一族有代表）。
+    ("false_assert", _SYNTH_ZOMBIE_FALSE_ASSERT, ("no_tautological_assert",)),
+    ("zero_assert", _SYNTH_ZOMBIE_ZERO_ASSERT, ("no_tautological_assert",)),
+    ("and_false_tail", _SYNTH_ZOMBIE_AND_FALSE_TAIL, ("no_tautological_assert",)),
     # **边界钉**：``worker.join()`` 不带超时今天必须绿（不在射程里，见本节 docstring）。
     # 哪天规则 widened 到咬得住它，这一格会红，逼着回来把那段声明改对。
     ("unbound_join_is_out_of_scope", _SYNTH_ZOMBIE_UNBOUND_JOIN, ()),
@@ -1380,9 +1473,10 @@ def test_zombie_shape_lock_can_go_red(case_id, source, expected):
     """反例语料：每条坏形状都必须被点名，每条好形状都必须放过去。
 
     红的是哪一种"锁被缴械"：探测器被改成恒返回 ``[]``、规则 id 改名、只按行首文本匹配
-    而不再读 AST —— 这三种坏法下，上面那十几枚语料会成片报"没抓到该抓的规则"。
-    两枚 ``()``（正对照）挡的是反方向的坏法：把规则做得过宽，于是真用例永远红、
-    最后被人整条摘掉。
+    而不再读 AST —— 这三种坏法下，上面那批语料会成片报"没抓到该抓的规则"。
+    期望值为 ``()`` 的那几枚是**正对照**（防过度报警）：把规则做得过宽，于是真用例永远红、
+    最后被人整条摘掉。语料条数与名单条数都不写在这里，由
+    ``test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector`` 的条数钉管。
     """
     problems = _zombie_shape_problems("synthetic:%s" % case_id, source)
     found = _zombie_problem_rules(problems)
@@ -1428,7 +1522,7 @@ def test_zombie_shape_lock_subjects_are_derived_not_handwritten():
 
 
 def test_zombie_cases_carry_no_wall_clock_verdict():
-    """主判据：这一族用例今天一条都不许违反上面四条规则。
+    """主判据：这一族用例今天一条都不许违反 ``ZOMBIE_SHAPE_RULES`` 里的任何一条规则。
 
     红的是哪一种回归：把 N3 改回 ``time.sleep(0.8)`` 那种"猜睡够了"的观察窗、把事件上限
     摘掉、把放行挪出 ``finally``、或往断言里塞 ``or True``。每一条都在语料里有同名反例，
@@ -1438,3 +1532,102 @@ def test_zombie_cases_carry_no_wall_clock_verdict():
     for name, source in _zombie_subject_sources():
         problems += _zombie_shape_problems(name, source)
     assert not problems, "zombie 这一族的时序形状被改回常数驱动了：\n%s" % "\n".join(problems)
+
+
+def _zombie_flagged_rule_ids():
+    """探测器里真正被 ``flag()`` 报出去的那些规则 id（按 AST 取实参，不按子串）。
+
+    为什么不能写成"id 在 ``inspect.getsource(...)`` 里出现就行"（#268 实测过的那一格）：
+    探测器正文里带着 ``# 1. no_bare_sleep`` 这种**分节注释**，只摘 ``flag(...)`` 那一行而
+    留着注释时，裸子串测试照样绿——那句话就成了假话。按 AST 取实参才只认"真的报出去了"。
+    """
+    tree = ast.parse(inspect.getsource(_zombie_shape_problems))
+    ids = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "flag" or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            ids.add(first.value)
+    return ids
+
+
+def test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector():
+    """条数钉 + 语料下限钉 + 规则 id↔探测器绑定 + ``_POLL_BOUND_INDEX`` 子分支成对覆盖
+    （#268 牙一/牙二/牙六；语料下限那一枚是修复轮 B1）。
+
+    逐格说清各自挡谁、挡不住谁（诚实登记射程，别读成"已穷尽"）：
+
+    * **条数钉**是本票的存在理由。把某条规则的名单行、探测器里那枚 ``flag(...)`` 与它的
+      语料代表**三处同向一起删**，双向覆盖钉与 id↔探测器绑定看见的都是自洽名单、谁也不红
+      ——#266 审查员 M-B 实测这么干以后 ``41 passed`` 全绿，唯一信号是条数而**当时**条数没有
+      任何钉（本仓同一族先例见 ``test_pathmask.py`` 的 ``_GIT_LS_FILES``/``_DRIVE_RULE_SITES``
+      那段与 #128）。今天只有这一枚咬得住那一格。它是**下限**（基数钉先例见
+      ``test_v0391_thinking_mapping.py`` 的 ``len(sources) >= 200``），挡"删"，
+      不挡"往名单里加一条没配反例的规则"——后者由
+      ``test_every_zombie_shape_rule_has_a_corpus_representative`` 的双向成立那一半挡。
+    * **语料下限钉**（#268 修复轮 B1，主控人裁决①）：条数钉管名单，这一枚管反例语料自己，
+      而且**余量是零**——下限就是今天的在册枚数，所以"规则与探测器都留着、只删一枚语料代表"
+      这种删法（审查员 M1c 实测在旧下限 ``15`` 下 ``45 passed`` 隐身）必须红在这里。
+      红话里的数字**从同一枚变量取**，不在文案里另抄一份（审查员 R7 实测过抄写的代价：
+      判据已经抬到 17 而文案还写着 15，那枚钉自己就带着一句假话）。
+      诚实登记：它同样是**下限**，加一枚语料不必改这一枚；"每条规则都有代表"在一份同样变窄的
+      名单上照样成立，所以这一枚是条数钉那一格的另一半，不是替代。
+    * **id↔探测器绑定**：每条在册 id 必须真出现在探测器的 ``flag()`` 实参里，反向同样钉
+      （探测器不许报出名单外的 id）。它挡"摘掉 flag 留名单"（牙一），**挡不住三处同向一起删**。
+    * **子分支成对覆盖**：``_POLL_BOUND_INDEX`` 的每个键都必须在语料里被调用过。#266 审查实测
+      ``"_wait_state": 3`` 这一支今天是死支：既没被任何 zombie 用例调用、语料里也没有它的代表，
+      规则级覆盖有钉而子分支级没有。牙六补的成对语料（缺上限必须报、带正数 ``timeout=`` 必须
+      不报）由 ``test_zombie_shape_lock_can_go_red`` 逐条跑，两支各红各绿都当场可复验。
+    """
+    assert len(ZOMBIE_SHAPE_RULES) == 4, (
+        "ZOMBIE_SHAPE_RULES 现在是 %d 条。注释与本节 docstring 都不写数（数只活在钉里），"
+        "所以这条红话就是唯一的那份真相：删一条规则要么连同探测器里的 flag 与语料代表一起删"
+        "（#266 审查员 M-B 实测那种删法今天全绿），要么只删名单（那会红在 "
+        "test_the_zombie_shape_lock_roster_is_pinned_and_bound_to_the_detector 的绑定与 "
+        "test_every_zombie_shape_rule_has_a_corpus_representative 上）。真要加/减一条规则，"
+        "改这条钉的 4 必须同批改好探测器与语料，并在上面那段射程声明里把新形状写清。"
+        % len(ZOMBIE_SHAPE_RULES))
+    assert len(set(ZOMBIE_SHAPE_RULES)) == len(ZOMBIE_SHAPE_RULES), (
+        "规则 id 必须互不相同：重复的一条会让双向覆盖钉数出假的一致")
+    # 语料下限钉（#268 修复轮 B1 / 主控人裁决①）：**零余量**——这枚数就是今天的在册枚数，
+    # 所以"只删一枚语料代表、规则与探测器都留着"那种删法（审查员 M1c）必须红在这里。
+    # 红话里的数字从这枚变量取，不在文案里另抄一份（R7：判据抬到 17、文案还写 15 就是假话）。
+    # 它是下限：新增语料不必改这里；真要**删**一枚，改这个数必须同批把上面那段分工声明与
+    # `_ZOMBIE_CORPUS` 那节的注释一起改对。
+    corpus_floor = 20
+    assert len(_ZOMBIE_CORPUS) >= corpus_floor, (
+        "反例语料只剩 %d 枚，低于登记的下限 %d。这一枚是**零余量**的：规则名单与探测器都原样"
+        "留着、只删一枚语料代表（审查员 M1c 那种删法——修到零余量以前它在旧下限上实测 `45 passed`"
+        " 全绿）也必须红在这里。语料被删窄以后『每条规则都有代表』在一份同样变窄的名单上照样"
+        "成立，所以这一枚是上面条数钉那一格的另一半。真要删一枚语料，改这枚下限必须同批把"
+        "docstring 的分工声明与 `_ZOMBIE_CORPUS` 那节的注释一起改对。"
+        % (len(_ZOMBIE_CORPUS), corpus_floor))
+    corpus_ids = [case_id for case_id, _src, _exp in _ZOMBIE_CORPUS]
+    assert len(set(corpus_ids)) == len(corpus_ids), (
+        "语料 id 必须互不相同：parametrize 会用同一个 id 生成两格，红话里分不清是哪一枚")
+
+    flagged = _zombie_flagged_rule_ids()
+    unflagged = [rule for rule in ZOMBIE_SHAPE_RULES if rule not in flagged]
+    assert not unflagged, (
+        "这些在册规则在探测器里没有任何 flag() 实参把它们报出去：%s——名单留着、判据已经被"
+        "摘掉，这一格从此只靠注释守着（#268 牙一实测的红话形状）" % unflagged)
+    ghost = sorted(flagged - set(ZOMBIE_SHAPE_RULES))
+    assert not ghost, (
+        "探测器报出了名单外的规则 id：%s——语料里那条断言其实谁也没在验，"
+        "而 `test_every_zombie_shape_rule_has_a_corpus_representative` 会把它当成名单漏了"
+        "一条来要求补" % ghost)
+
+    polled = set()
+    for _case_id, source, _expected in _ZOMBIE_CORPUS:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in _POLL_BOUND_INDEX:
+                polled.add(node.func.id)
+    dead_branches = sorted(set(_POLL_BOUND_INDEX) - polled)
+    assert not dead_branches, (
+        "_POLL_BOUND_INDEX 里这些下标支在语料里一份代表都没有：%s——规则级覆盖钉看不见"
+        "子分支，这一支等于没牙（#268 牙六补的就是 `_wait_state` 这一支）" % dead_branches)
+

@@ -5,6 +5,7 @@
 # 动态内容一律 textContent（模型名/消息预览都可能带服务端文本，innerHTML 等于开门）。
 # "轻量整理必须真的影响发送"（outbound 与 clientContextK 同一 offset）与
 # "done.usage 落账到发送时那个会话"是本任务的两条真功能，各配一条 node 真跑/形状锁。
+import ast
 import json
 import re
 import shutil
@@ -1533,6 +1534,11 @@ def test_one_pref_source_no_cached_level_count_and_no_banned_copy():
 # 都躲不掉的最后一格，本仓的处置办法一直是把它登记出来而不是假装没有（见
 # `test_v0374_single_source_of_egress_predicates.py` 的"仍漏"一节）。
 _SHAPE_LOCK = "backend/tests/test_v0391_corpus_exemption_shape_lock.py"
+# 形状锁"内部形状"那一半的名字（#268 修复轮 S1）。为什么这一格落在**被守卫这一侧**：
+# 形状锁文件里那枚元钉读的是它**自己**的 `inspect.getsource`，所以它只挡"文案被改回假话"，
+# 挡不住"自扫那枚测试被整枚删掉"——独立审查员 M2c 实测删掉自扫以后那份文件 `10 passed` rc=0，
+# 而这里的在册钉只问 `git ls-files` 与 `is_file()`，看不见文件里少了一枚函数。
+_SHAPE_LOCK_SELF_SCAN = "test_the_shape_lock_does_not_disarm_its_own_body"
 
 
 def test_the_exemption_shape_lock_is_present_and_tracked():
@@ -1547,3 +1553,15 @@ def test_the_exemption_shape_lock_is_present_and_tracked():
         f"（问 git、rc 只认 0/1、豁免不来自字面量）今天等于没人守")
     assert (REPO / _SHAPE_LOCK).is_file(), (
         f"{_SHAPE_LOCK} 在册却读不到：守卫与磁盘不同，红话里的坐标是假的")
+
+    # "在册"不等于"会扫自己"：AST 数一遍这一把的函数名，自扫那枚必须在册。
+    # 反例（#268 修复轮 S1 实跑）：把 `_SHAPE_LOCK` 里那枚函数删掉或改名 ⇒ 这里红。
+    guard_tree = ast.parse((REPO / _SHAPE_LOCK).read_text(encoding="utf-8"))
+    guard_funcs = {node.name for node in ast.walk(guard_tree)
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert _SHAPE_LOCK_SELF_SCAN in guard_funcs, (
+        f"{_SHAPE_LOCK} 里已经没有 `{_SHAPE_LOCK_SELF_SCAN}` 这枚函数（现共 "
+        f"{len(guard_funcs)} 枚）：这一把形状锁又回到『不扫自己』那一格——它的射程不含本文件，"
+        f"而 _SCOPE 也不收它（主控人裁决），所以往它自己正文里塞一句恒真 assert 今天没人红。"
+        f"这一枚钉只钉『自扫还在不在』，不替它的内容作保：改成恒绿摆设由它自己的正对照与"
+        f"测试面负责")
