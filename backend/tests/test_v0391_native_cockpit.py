@@ -1153,8 +1153,11 @@ def test_native_kotlin_copy_is_free_of_banned_thinking_phrases():
     ③ §2 原文抄窄一味 → 第一条红；④ 把 `ui/UpdateUi.kt` 改名/挪走 → 基数钉红；
     ⑤ 新增一份没入库的 .kt → 基数钉红。
     射程：语料走 `_code`（剥注释），判的是**给用户看的字符串**里有没有这些句子；注释里出现
-    同词不判（与网页 `_js()`/`_html()` 同口径）。`/build/` 段下的中间产物不参与比对，
-    同一枚锁里钉住 git 侧没有 build 产物，所以这条排除面吃不进真源码。
+    同词不判（与网页 `_js()`/`_html()` 同口径）。磁盘侧不参与比对的那一份，是**被 `.gitignore`
+    点名有意不入库**的那些（构建产物 `build/` 与 `android-native/.gradle/` 两族都算），判据
+    现问 git（`_corpus_exemption.deliberately_ignored`；#267 之前这里是一份手抄的 `/build/`
+    段排除，换掉的经过与逐枚 `git check-ignore` 实测见 `_native_kt_corpus` 的 docstring）；
+    同一枚锁里另外钉住 git 侧没有 build 产物，所以这条排除面吃不进真源码。
     """
     assert len(_AMENDMENT_S2_BANNED) == _AMENDMENT_S2_BANNED_COUNT, \
         f"裁决 §2 那一行只抠出 {len(_AMENDMENT_S2_BANNED)} 味，点名应是 " \
