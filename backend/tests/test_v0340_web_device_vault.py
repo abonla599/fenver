@@ -582,6 +582,9 @@ def test_legacy_secret_entries_are_purged_and_nothing_else_is():
         doomed[p + "u1"] = "SEC-1"
         doomed[p + "u2"] = "SEC-2"
     doomed["sdkey.foo"] = "sk-LEAKED-LEGACY-KEY"          # S1 具名的那一枚
+    # 这一枚不是编的：老 app.js 写的就是 SD_LOCAL_PREFIX + source（8657b4fa^ 那笔的
+    # :2560/:2775），源名只有 bocha / tavily 两个 ⇒ 真人浏览器里躺着的是这个形状。
+    doomed["sdkey.bocha"] = "sk-real-shape-legacy-key"
     survivors = {
         "identities": "[]",                               # 人名册
         "currentId": "u1",                                # 当前身份指针
