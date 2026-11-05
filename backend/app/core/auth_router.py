@@ -182,33 +182,68 @@ MAX_REAUTH_FAILURES_PER_WINDOW = 10
 _REAUTH_FAILS = _Ledger("reauth_fails")
 _REAUTH_BY_SECRET = _Ledger("reauth_by_secret")
 
-# 管理员二次验证的口令失败账（H-1 复核 2026-10-31）：持管理员会话的人可以无限次
-# 试口令，真实 admin 账号走 bcrypt，弱口令会被在线爆破。键是 user+IP：换 IP 的人
-# 对同一账号仍受同一格预算；同一 IP 上的其他管理员不互相挡。窗口/上限沿用
-# FAILURE_WINDOW_SECONDS / MAX_FAILURES_PER_WINDOW（10 次/10 分钟）。
+# 管理员二次验证的口令失败账（H-1 复核 2026-10-31 / S4 修正 2026-11-05）：持管理员
+# 会话的人可以无限次试口令，真实 admin 账号走 bcrypt，弱口令会被在线爆破。这里有**两道
+# 各按一维计的闸**，并存且各自成立——上一版注释只写了"user+IP 那一格对换 IP 的人也管得住"，
+# 那件事当时**没有实现**（换 IP 就换一格，同一账号跨来源不累计），本单把它补成真实现：
+# ① (user, IP) 那道（`_ADMIN_REAUTH_FAILS`，键 `user|IP`）：挡"同一账号在同一个来源上
+#    连打"；同一来源上的其他管理员不互相挡；**换来源的人在这一道下会开一格新预算**——
+#    所以它单独立不住"换 IP 仍吃满"那句话。
+# ② user_id 那道（`_ADMIN_REAUTH_FAILS_BY_USER`，键 `user_id` 本身）：挡"同一账号跨所有
+#    来源的总预算"——这才是"换 IP 的人对同一账号仍受同一格预算"这句话真正落地的地方。
+#    两道的窗口与上限都取自同一对钉（下面这两个常量），**不在此处另抄一份数字**：
+#    上限 = `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW`，窗口 = `FAILURE_WINDOW_SECONDS`
+#    （即"每 FAILURE_WINDOW_SECONDS 秒最多 _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW 次"，
+#    数值口径唯一以常量为准，注释只引用常量名不写死次数/秒数，免得第二处会腐烂）。
+# user_id 取不到（None/空）时**两道一起退化到单一 `'anon'` 格**（与既有 `_chat_key` 的
+# `or 'anon'` 同源）：这是 **fail-closed** 的选择——无身份的尝试共享一格、照样能被吃满拦下，
+# 而不是"取不到就这一道不判"（跳过 = 给能剥掉身份的来路留的口子，那是 fail-open）。代价如实
+# 认：真取不到身份时多个匿名来源会共用这一格 anon 预算、更早 429；但 `/admin-reauth` 先过
+# 角色闸（非管理员 403）、正常会话都带 user_id，取不到身份只在异常路径出现，退化宁可偏紧。
 _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW = 10
 _ADMIN_REAUTH_FAILS = _Ledger("admin_reauth_fails")
+_ADMIN_REAUTH_FAILS_BY_USER = _Ledger("admin_reauth_fails_by_user")
 
 
 def _admin_reauth_key(user_id: str, ip: str) -> str:
+    # 退化点单一：user_id / ip 任一取不到都用同一个哨兵串，与 user-only 那道口径一致。
     return f"{user_id or 'anon'}|{ip or 'unknown'}"
 
 
+def _admin_reauth_user_key(user_id: str) -> str:
+    # 只按 user_id 计的那道：None/空退化到 'anon'（fail-closed，见上段注释）。
+    return user_id or "anon"
+
+
 def _admin_reauth_throttled(user_id: str, ip: str) -> bool:
+    """两道闸任一吃满即拒：①同一 (user,IP) 连打；②同一 user 跨所有 IP 的总预算。"""
     moment = _now()
     _prune(moment)
     return (len(_recent(_ADMIN_REAUTH_FAILS,
                         _admin_reauth_key(user_id, ip),
                         FAILURE_WINDOW_SECONDS, moment))
+            >= _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW
+            or len(_recent(_ADMIN_REAUTH_FAILS_BY_USER,
+                           _admin_reauth_user_key(user_id),
+                           FAILURE_WINDOW_SECONDS, moment))
             >= _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW)
 
 
 def _note_admin_reauth_failure(user_id: str, ip: str) -> None:
-    _note(_ADMIN_REAUTH_FAILS, _admin_reauth_key(user_id, ip))
+    # 一次失败同时进两道账；moment 只取一次，保证"同一件事在两本账里不差一个刻度"。
+    moment = _now()
+    _note(_ADMIN_REAUTH_FAILS, _admin_reauth_key(user_id, ip), moment)
+    _note(_ADMIN_REAUTH_FAILS_BY_USER, _admin_reauth_user_key(user_id), moment)
 
 
 def reset_admin_reauth_throttle_for_tests() -> None:
     _ADMIN_REAUTH_FAILS.clear()
+    _ADMIN_REAUTH_FAILS_BY_USER.clear()
+
+
+def reset_admin_reauth_by_user_for_tests() -> None:
+    """只清 user-only 那道，保留 (user,IP) 那道：把旧那条用例钉死在①号闸上（见反例 iv）。"""
+    _ADMIN_REAUTH_FAILS_BY_USER.clear()
 
 
 def _reauth_secret_key(digest: str) -> str:
@@ -246,7 +281,8 @@ _LEDGERS = ((_FAILS, FAILURE_WINDOW_SECONDS),
             (_ORCHESTRATE_ATTEMPTS, ORCHESTRATE_ATTEMPT_WINDOW_SECONDS),
             (_REAUTH_FAILS, FAILURE_WINDOW_SECONDS),
             (_REAUTH_BY_SECRET, FAILURE_WINDOW_SECONDS),
-            (_ADMIN_REAUTH_FAILS, FAILURE_WINDOW_SECONDS))
+            (_ADMIN_REAUTH_FAILS, FAILURE_WINDOW_SECONDS),
+            (_ADMIN_REAUTH_FAILS_BY_USER, FAILURE_WINDOW_SECONDS))
 
 
 def _store():

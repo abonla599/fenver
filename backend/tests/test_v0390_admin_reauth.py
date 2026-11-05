@@ -64,13 +64,20 @@ def test_reauth_gate_covers_admin_writes_outside_admin_prefix(client, enforced, 
 
 
 def test_admin_reauth_is_rate_limited(client, enforced, monkeypatch):
-    """拿着管理员会话也不能无限试口令：10 次/10 分钟，超限 429 并带 Retry-After。"""
+    """拿着管理员会话也不能在同一来源上无限试口令：①(user,IP) 那道的判据。
+
+    这条**只钉 (user,IP) 那一道**：连打 10 次后先把"只按 user_id 那道"的账清掉，
+    于是下面这一发 429 只能由 (user,IP) 那格撑住——把它摘掉，这条立刻红（反例 iv），
+    证明这一单没有把旧牙磨掉。跨来源总预算由 `..._budget_follows_the_user_across_ips` 单独钉。
+    """
     monkeypatch.setenv("ADMIN_REAUTH_REQUIRED", "1")
     _reset()
     for _ in range(10):
         bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"},
                           headers=BOOT)
         assert bad.status_code == 401
+    # 只清 user-only 那道，保留 (user,IP) 那道：这一发的 429 必须来自旧那一道。
+    auth_router.reset_admin_reauth_by_user_for_tests()
     blocked = client.post("/v1/auth/admin-reauth", json={"password": "boot-token"},
                           headers=BOOT)
     assert blocked.status_code == 429
@@ -79,6 +86,46 @@ def test_admin_reauth_is_rate_limited(client, enforced, monkeypatch):
     allowed = client.post("/v1/auth/admin-reauth", json={"password": "boot-token"},
                           headers=BOOT)
     assert allowed.status_code == 200
+
+
+def test_admin_reauth_budget_follows_the_user_across_ips(client, enforced, monkeypatch):
+    """S4：注释承诺"换 IP 的人对同一账号仍受同一格预算"——这一枚把它变成真的。
+
+    同一管理员（BOOTSTRAP）跨多个 `cf-connecting-ip` 来源继续失败：(user,IP) 那道
+    每格都够不着上限（每个来源只失败两次），只有**只按 user_id** 那道能把总预算吃满。
+    摘掉那道 ⇒ 最后一发在全新 IP 上变 200，这条当场红（反例 i / iii）。
+    """
+    monkeypatch.setenv("ADMIN_REAUTH_REQUIRED", "1")
+    _reset()
+    ips = [f"203.0.113.{i}" for i in range(1, 6)]  # 五个不同来源，各失败两次
+    for i in range(10):
+        h = {**BOOT, "CF-Connecting-IP": ips[i % len(ips)]}
+        bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"}, headers=h)
+        assert bad.status_code == 401
+    # 一个"全新"的来源：(user,IP) 那道在这格是空的，只有 user 维度那道拦得住。
+    fresh = {**BOOT, "CF-Connecting-IP": "198.51.100.7"}
+    blocked = client.post("/v1/auth/admin-reauth", json={"password": "boot-token"},
+                          headers=fresh)
+    assert blocked.status_code == 429
+    assert blocked.headers.get("retry-after")
+
+
+def test_admin_reauth_anon_identity_is_fail_closed():
+    """S4：user_id 取不到（None/空）时这一道**不放松**——退化到单一 'anon' 格继续计。
+
+    取不到身份绝不等于"这一道不判"：跳过 = 给能剥掉身份的来路留的口子（fail-open）。
+    退化成共享的 'anon' 格才是 fail-closed。下面先跨两个不同来源各失败五次（合计 10），
+    第三个来源必须仍被同一格 anon 预算拦下；而真实 user_id 那格是空的，互不污染。
+    """
+    _reset()
+    for ip in ("203.0.113.1", "203.0.113.2"):
+        for _ in range(5):
+            assert not auth_router._admin_reauth_throttled(None, ip)
+            auth_router._note_admin_reauth_failure(None, ip)
+    # 无身份尝试跨来源仍共用一格 anon 预算 → 吃满后第三个来源也被拒。
+    assert auth_router._admin_reauth_throttled(None, "198.51.100.9")
+    # 且 anon 那一格不污染任何具名管理员：真 user_id 的预算仍是满的。
+    assert not auth_router._admin_reauth_throttled("u_real_admin", "198.51.100.9")
 
 
 def test_admin_only_unsafe_routes_outside_admin_prefix_require_reauth():

@@ -497,8 +497,16 @@ def test_the_router_touches_ledgers_only_through_the_backend():
     """
     src = (REPO_ROOT / "backend" / "app" / "core" / "auth_router.py").read_text(encoding="utf-8")
     body = re.sub(r"#.*", "", src)
-    for name in ("_FAILS", "_REGISTERS", "_RESETS", "_RESET_FAILS",
-                 "_RESET_FAILS_BY_ACCOUNT", "_CHATS", "_REAUTH_FAILS", "_REAUTH_BY_SECRET"):
+    # 这道结构闸覆盖的账本清单。**计数钉用 ==（不是 >=）**：>= 只会自己长回落，
+    # 从这份清单里悄悄摘掉任何一枚（少守一本账）都会让 len 掉到 9 当场红（反例 v）。
+    # 管理员 reauth 那两本（含 S4 新增的 user-only 那道）此前不在清单里 ⇒ 这道闸对它们
+    # 完全不设防，S4 不能往一道看不见它的闸后面塞账本。
+    guarded = ("_FAILS", "_REGISTERS", "_RESETS", "_RESET_FAILS",
+               "_RESET_FAILS_BY_ACCOUNT", "_CHATS", "_REAUTH_FAILS", "_REAUTH_BY_SECRET",
+               "_ADMIN_REAUTH_FAILS", "_ADMIN_REAUTH_FAILS_BY_USER")
+    assert len(guarded) == 10, \
+        f"结构闸清单应逐本覆盖路由层的失败账，实测 {len(guarded)} 本——被摘掉了一枚"
+    for name in guarded:
         assert not re.search(rf"{name}\[[^\]]*\]\s*\.\s*append\(", body), \
             f"{name} 又被直接 append：那一笔记载不进共享账本"
     assert "_LEDGER_BACKEND.note(" in body and "_LEDGER_BACKEND.recent(" in body, \
