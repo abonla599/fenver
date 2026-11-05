@@ -66,13 +66,17 @@ def test_reauth_gate_covers_admin_writes_outside_admin_prefix(client, enforced, 
 def test_admin_reauth_is_rate_limited(client, enforced, monkeypatch):
     """拿着管理员会话也不能在同一来源上无限试口令：①(user,IP) 那道的判据。
 
-    这条**只钉 (user,IP) 那一道**：连打 10 次后先把"只按 user_id 那道"的账清掉，
-    于是下面这一发 429 只能由 (user,IP) 那格撑住——把它摘掉，这条立刻红（反例 iv），
+    这条**只钉 (user,IP) 那一道**：把同一来源打到上限之后先把"只按 user_id 那道"的账
+    清掉，于是下面这一发 429 只能由 (user,IP) 那格撑住——把它摘掉，这条立刻红（反例 iv），
     证明这一单没有把旧牙磨掉。跨来源总预算由 `..._budget_follows_the_user_across_ips` 单独钉。
+
+    次数一律从 `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW` 现取，不在用例里抄第二份数字：
+    那一格是这套上限的唯一出处（本仓规矩"数只活在钉里"），抄成字面量就成了会腐烂的副本。
     """
     monkeypatch.setenv("ADMIN_REAUTH_REQUIRED", "1")
+    limit = auth_router._MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW
     _reset()
-    for _ in range(10):
+    for _ in range(limit):
         bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"},
                           headers=BOOT)
         assert bad.status_code == 401
@@ -91,14 +95,16 @@ def test_admin_reauth_is_rate_limited(client, enforced, monkeypatch):
 def test_admin_reauth_budget_follows_the_user_across_ips(client, enforced, monkeypatch):
     """S4：注释承诺"换 IP 的人对同一账号仍受同一格预算"——这一枚把它变成真的。
 
-    同一管理员（BOOTSTRAP）跨多个 `cf-connecting-ip` 来源继续失败：(user,IP) 那道
-    每格都够不着上限（每个来源只失败两次），只有**只按 user_id** 那道能把总预算吃满。
-    摘掉那道 ⇒ 最后一发在全新 IP 上变 200，这条当场红（反例 i / iii）。
+    同一管理员（BOOTSTRAP）跨多个 `cf-connecting-ip` 来源继续失败：失败数被摊到五个来源上，
+    ①(user,IP) 那道每一格都够不着上限，只有**只按 user_id** 那道能把总预算吃满。
+    摘掉那道 ⇒ 最后一发在全新 IP 上变 200，这条当场红（反例 i / iii 实测如此）。
+    次数同样从钉里现取，不在用例里抄第二份数字。
     """
     monkeypatch.setenv("ADMIN_REAUTH_REQUIRED", "1")
+    limit = auth_router._MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW
     _reset()
-    ips = [f"203.0.113.{i}" for i in range(1, 6)]  # 五个不同来源，各失败两次
-    for i in range(10):
+    ips = [f"203.0.113.{i}" for i in range(1, 6)]  # 五个不同来源
+    for i in range(limit):
         h = {**BOOT, "CF-Connecting-IP": ips[i % len(ips)]}
         bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"}, headers=h)
         assert bad.status_code == 401
@@ -114,12 +120,17 @@ def test_admin_reauth_anon_identity_is_fail_closed():
     """S4：user_id 取不到（None/空）时这一道**不放松**——退化到单一 'anon' 格继续计。
 
     取不到身份绝不等于"这一道不判"：跳过 = 给能剥掉身份的来路留的口子（fail-open）。
-    退化成共享的 'anon' 格才是 fail-closed。下面先跨两个不同来源各失败五次（合计 10），
-    第三个来源必须仍被同一格 anon 预算拦下；而真实 user_id 那格是空的，互不污染。
+    退化成共享的 'anon' 格才是 fail-closed。下面把上限这么多次失败**摊到两个来源**
+    （每一格都够不着①号闸），第三个来源必须仍被同一格 anon 预算拦下；
+    而真实 user_id 那格是空的，互不污染。次数同样取自常量，不抄第二份数字。
     """
+    limit = auth_router._MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW
+    assert limit >= 2, "摊到两个来源要求各格都够不着上限，上限小于 2 时这一枚无从成立"
     _reset()
-    for ip in ("203.0.113.1", "203.0.113.2"):
-        for _ in range(5):
+    first, rest = limit - limit // 2, limit // 2  # 两格各自 < 上限，合计 = 上限
+    for ip, hits in (("203.0.113.1", first), ("203.0.113.2", rest)):
+        assert hits < limit, "摊派写坏了：这一格自己就吃满了①号闸，anon 那格就没在单独承重"
+        for _ in range(hits):
             assert not auth_router._admin_reauth_throttled(None, ip)
             auth_router._note_admin_reauth_failure(None, ip)
     # 无身份尝试跨来源仍共用一格 anon 预算 → 吃满后第三个来源也被拒。
