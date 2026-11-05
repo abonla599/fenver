@@ -542,7 +542,10 @@ def test_a_server_only_tag_skips_the_release_lane_instead_of_going_red(tmp_path)
     cases = {
         "v0.38.3": "true",   # 说明里声明了 server-only
         "v0.36.4": "false",  # 真有包的老版本（说明里没有 scope 行）
-        "v0.39.0": "false",  # 说明还没写：放行，交给"说明缺失"那一步红
+        # "说明缺失"那一格要问在一个**真的没有说明**的 ref 上：v0.39.0 的说明已经写进
+        # 仓库（docs/releases/v0.39.0.md，scope: server-only），拿它当"还没写"的样本
+        # 会在发版物料落地的那一刻自己变红。这里换成不会撞见真实发版的号码，判据不变。
+        "v0.99.0": "false",  # 说明还没写：放行，交给"说明缺失"那一步红
         "develop": "false",  # workflow_dispatch 走分支时行为不变
     }
     for ref, want in cases.items():
