@@ -79,7 +79,6 @@ def test_admin_reauth_is_rate_limited(client, enforced, monkeypatch):
     这条**只钉 (user,IP) 那一道**：把同一来源打到上限之后先把"只按 user_id 那道"的账
     清掉，于是下面这一发 429 只能由 (user,IP) 那格撑住——把它摘掉，这条立刻红（反例 iv），
     证明这一单没有把旧牙磨掉。跨来源总预算由 `..._budget_follows_the_user_across_ips` 单独钉。
-    ②号那道换成更松的独立常量后这一枚只会钉得更死：摘掉①时②远没吃满，429 无从出现。
 
     次数一律从 `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW` 现取，不在用例里抄第二份数字：
     那一格是这套上限的唯一出处（本仓规矩"数只活在钉里"），抄成字面量就成了会腐烂的副本。
@@ -128,7 +127,7 @@ def test_admin_reauth_budget_follows_the_user_across_ips(client, enforced, monke
 
 
 def test_admin_reauth_user_gate_uses_its_own_constant(client, enforced, monkeypatch):
-    """S4 修复轮：②号那道换成独立常量后，形状必须是"到①的上限不拦、到②的上限才拦"。
+    """②号那道吃自己的独立上限常量，形状必须是"到①的上限不拦、到②的上限才拦"。
 
     同一管理员每次换一个来源失败（①号那道每格只有一笔，永远够不着自己那格的上限）：
     - 总账刚到①号上限时，全新来源**必须还放得过去**——把②指回
@@ -163,8 +162,8 @@ def test_admin_reauth_anon_identity_is_fail_closed():
 
     取不到身份绝不等于"这一道不判"：跳过 = 给能剥掉身份的来路留的口子（fail-open）。
     退化成共享的 'anon' 格才是 fail-closed。这里每来源只打一笔，①号那道每格都够不着
-    自己那格的上限（①退化后是 `anon|<IP>`，**不**塌成单一格——auth_router 那段注释按
-    这个事实改过，别再看成"两道一起塌"），于是吃满的只可能是②号那道。两截都钉：
+    自己那格的上限（①退化后是 `anon|<IP>`，**不**塌成单一格，两道退化到的形状不同），
+    于是吃满的只可能是②号那道。两截都钉：
     总账到①号上限时还不拦（把②指回①的常量就红，反例 i），到②号上限才拦（阈值改成
     极大就红，反例 ii）。次数从常量现取，不抄第二份数字。
     """
@@ -181,7 +180,7 @@ def test_admin_reauth_anon_identity_is_fail_closed():
         auth_router._note_admin_reauth_failure(None, _src_ip(n))
     # 无身份尝试跨来源共用②那一格 anon 预算 → 吃满后新来源也被拒。
     assert auth_router._admin_reauth_throttled(None, _src_ip(user_limit))
-    # 且 anon 那一格不污染任何具名管理员：真 user_id 的预算仍是满的。
+    # 且 anon 那一格不污染任何具名管理员：真 user_id 那一格的预算仍完整、未被消耗。
     assert not auth_router._admin_reauth_throttled("u_real_admin", _src_ip(user_limit))
 
 
