@@ -244,6 +244,101 @@ def test_the_alarm_permission_claim_matches_the_manifest():
         f"「{denial.group(0) if denial else '（没有否认）'}」：两处得说同一件事")
 
 
+# ---------- 2c. 隐私断言 ↔ 反馈路由同源（安全单 S2）----------
+# 官网 FAQ 那句「谁能看到我的数据？」和反馈管理面真实的返回形状是同一件事的两面。
+# 今天反馈正文确实出那道门（`_user_feedback_public` 带着它，列表与导出都走这份形状），
+# 文案就不许写「只有你」；反过来，哪天它从那道门摘掉而文案不动，那句"读得到"就成了
+# 新的谎。两个方向各自当场红——这半枚顺序就是"锁不是为已有结果写的"的证据。
+# 字段名单**从响应现取**，测试里不留第三份抄本（本仓反复付钱的那一族）。
+
+ADMIN_READS_FEEDBACK_CLAIM = "管理员处理反馈时读得到"
+SOLE_VIEWER_CLAIM = "只有你"
+# 只用于自检"派生被换成手抄"：这几枚键名一旦以字面量出现在下面两枚锁的源码里，
+# 就说明名单被抄了第三份。`text` 与 `id` 不在其列——那是这把锁真正要判的两枚键名。
+_ROSTER_NAMES = ("user_id", "email", "image_count", "created_at", "read_at")
+
+
+def _privacy_faq_answer() -> str:
+    """FAQ 里「谁能看到我的数据？」那一条的答句正文。
+
+    只取那一条，不取整页：注册步骤里还有一句「只有你知道答案的问题」（找回题面，
+    与数据可见性无关），整页扫「只有你」会把那句真话判成谎。
+    """
+    page = _page()
+    at = page.find("谁能看到我的数据")
+    assert at != -1, "FAQ 里「谁能看到我的数据？」这一条不见了：断言悄悄消失也是谎"
+    answer = re.search(r"<p>(.*?)</p>", page[at:], re.S)
+    assert answer, "「谁能看到我的数据？」那一条没有答句：这条锁没东西可判了"
+    return answer.group(1)
+
+
+def _feedback_route_fields(monkeypatch, tmp_path) -> set:
+    """反馈管理面**此刻真实的**返回字段：先落一条探针，再读列表里的第一条。
+
+    存储指进本用例的临时目录（与 `test_user_feedback.uf_file` 同一做法），探针那条
+    不落任何人案头；名单从响应现取，不在测试里抄第二份。
+    """
+    from app import user_feedback_storage
+    monkeypatch.setattr(user_feedback_storage, "USER_FEEDBACK_FILE",
+                        str(tmp_path / "user_feedback.json"))
+    posted = client.post("/v1/user-feedback", json={"text": "同源锁探针"})
+    assert posted.status_code == 200, \
+        f"探针反馈没被收下，同源锁无从派生：{posted.status_code} {posted.text}"
+    listed = client.get("/v1/admin/user-feedback")
+    assert listed.status_code == 200, f"反馈列表没答 200：{listed.status_code} {listed.text}"
+    items = listed.json().get("items") or []
+    assert len(items) == 1, f"列表里拿到的不是那一条探针（{len(items)} 条）：同源锁在空转"
+    return set(items[0])
+
+
+def test_the_privacy_faq_and_the_feedback_route_stay_the_same_story(monkeypatch, tmp_path):
+    """文案 ↔ 路由同源：正文还出那道门，FAQ 就不许宣称「只有你」。
+
+    判的是可见性这件事，不是某个具体措辞：
+      · 反馈响应仍带正文 → 文案必须如实写明管理员处理反馈时读得到，且不许出现「只有你」；
+      · 正文从那道门摘掉而文案不动 → 「读得到」变成新的谎，同样红。
+    会话、记忆、附件那三样今天是严格按属主的（`_require_session_owner`、记忆的身份只
+    来自凭据、附件读取带 owner 闸），所以"别的注册用户碰不到"这句留着；今天成立、
+    明天不成立的写法是"管理员读了也留痕"那一句——反馈的列表与导出并没有记那一笔。
+    """
+    fields = _feedback_route_fields(monkeypatch, tmp_path)
+    assert "id" in fields, f"列表返回的不是反馈记录那一形状：{sorted(fields)}"
+    answer = _privacy_faq_answer()
+    if "text" in fields:
+        assert SOLE_VIEWER_CLAIM not in answer, (
+            f"反馈正文还从管理面这道门出去（响应字段 {sorted(fields)}），"
+            f"FAQ 却还写着「{SOLE_VIEWER_CLAIM}」：{answer}")
+        assert ADMIN_READS_FEEDBACK_CLAIM in answer, (
+            f"反馈响应今天仍带正文，文案却不再如实说管理员读得到——把谎删掉不等于说了实话：{answer}")
+    else:
+        assert ADMIN_READS_FEEDBACK_CLAIM not in answer, (
+            f"反馈响应里已经没有正文这个字段（{sorted(fields)}），"
+            f"文案还宣称「{ADMIN_READS_FEEDBACK_CLAIM}」：这句今天不成立：{answer}")
+
+
+def test_the_feedback_field_list_is_derived_from_the_route_not_copied_by_hand():
+    """第四枚牙：把现取的名单手抄成常量，这把锁必须红。
+
+    `inspect.getsource` 拿到的是文件里此刻那份源码，所以两种改法都跑不掉：
+      · 同源锁不再调用现取那一步（改读别处给的名单）→ 红；
+      · 派生那一步不再打真实响应（改成字面量）→ 红；
+      · 任意一处冒出 ≥2 枚只有抄本才需要的键名字面量 → 红。
+    """
+    import inspect
+    helper = inspect.getsource(_feedback_route_fields)
+    lock = inspect.getsource(
+        test_the_privacy_faq_and_the_feedback_route_stay_the_same_story)
+    assert "_feedback_route_fields(" in lock, \
+        "同源锁不再现取字段：它守的是别人抄给它的那份名单"
+    assert "/v1/admin/user-feedback" in helper, \
+        "派生不再打反馈管理面的真实响应：这把锁没有来源了"
+    for name, part in (("派生函数", helper), ("同源锁", lock)):
+        copied = sorted(n for n in _ROSTER_NAMES if '"%s"' % n in part)
+        assert len(copied) < 2, (
+            f"{name} 的源码里冒出 {len(copied)} 枚手抄的反馈字段名 {copied}："
+            "名单只许从响应现取，测试里不许有第三份")
+
+
 def test_the_android_button_downloads_through_our_own_endpoint():
     """点「安卓版」要直接落盘，而不是把人丢到 GitHub 页面上自己找那颗按钮。
 
