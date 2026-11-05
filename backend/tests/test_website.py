@@ -39,7 +39,7 @@ STATIC_CSP = (
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; "
-    "connect-src 'self' https://api.bochaai.com/v1/web-search https://api.tavily.com/search; "
+    "connect-src 'self'; "
     "frame-src 'none'; "
     "frame-ancestors 'none'; "
     "object-src 'none'; "

@@ -136,13 +136,16 @@ def test_the_policy_is_complete_and_script_src_stays_strict():
     assert "'unsafe-eval'" not in script_src
     assert HASH_RE.search(script_src), "script-src 没有哈希：内联脚本会被浏览器拒绝"
 
-    # 这两条不是"越紧越好"：blob: 是附件预览的取处（app.js/api.js 的 objectURL），
-    # 两个搜索源是「直连搜索」从浏览器真发出去的请求。收紧它们要有替代实现。
+    # blob: 不是"越紧越好"：它是附件预览的取处（app.js/api.js 的 objectURL）。
+    # connect-src 整档只该有同源——搜索源站走服务端代理 /v1/search/source，浏览器不
+    # 再直连它们（旧的 searchDirect 已删，见 test_web_search_direct_contract.py）。
+    # 这里用整串相等而不是 in：用 in 的话把这一档换成放开 https: 也一样绿。
     img_sources = directives["img-src"].split()
     assert "data:" in img_sources and "blob:" in img_sources
     connect = directives["connect-src"]
-    assert "https://api.bochaai.com/v1/web-search" in connect
-    assert "https://api.tavily.com/search" in connect
+    assert connect == "'self'", (
+        "全站的 connect-src 里出现了外站（每一条都是一次真实出站白名单）："
+        f"{connect!r}")
 
 
 def test_the_hash_follows_the_watermark_instead_of_being_frozen(monkeypatch):
@@ -201,17 +204,17 @@ def test_every_html_page_gets_hashes_for_its_own_inline_scripts():
 def test_only_the_probe_page_may_connect_beyond_self_and_the_search_sources():
     """探测页单独一档 connect-src；其余页面保持严格。
 
-    探测页的 fetch 目标是用户填的 base URL（默认 api.deepseek.com），这一页的
-    1–6 项直连探测全靠它。connect-src 若只剩 'self' + 两个搜索源，那些探测会在
-    浏览器里全部被拒——页面上只会看到"跑了但全红"，而 changelog 还在教用户跑它。
-    所以这一页放开 https（不含 http/ws）；其余页面照旧，一个都不许跟着放开。
+    探测页的 fetch 目标是用户填的 base URL（默认 api.deepseek.com），1–6 项直连探测
+    全靠它，第 7 项还单独直连博查 / Tavily 看 CORS。connect-src 若只有全站那一档的
+    'self'，那些探测会在浏览器里全部被拒——页面上只会看到"跑了但全红"，而 changelog
+    还在教用户跑它。所以这一页单独放开 https（不含 http/ws）；其余页面照旧，一个都
+    不许跟着放开。
     """
     probe = _directives(client.get("/site/probe.html"))["connect-src"].split()
     assert set(probe) == {"'self'", "https:"}, \
         f"探测页的 connect-src 不是「'self' + https:」：{probe}"
 
-    strict = {"'self'", "https://api.bochaai.com/v1/web-search",
-              "https://api.tavily.com/search"}
+    strict = {"'self'"}
     for path in ("/app/", "/", "/changelog", "/admin/"):
         got = set(_directives(client.get(path))["connect-src"].split())
         assert got == strict, (
