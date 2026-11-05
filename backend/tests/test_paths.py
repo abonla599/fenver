@@ -382,6 +382,35 @@ def test_gitignore_ignores_the_logs_directory():
         "空模式（一枚裸 CR 的空行）也会命中，而那正是这条锁要挡的假阳性")
 
 
+def test_gitignore_ignores_a_root_call_ledger_by_a_rule_that_actually_exists():
+    """.gitignore 的 `/call-ledger-*.jsonl` 必须真把根级账本挡在版本库外。
+
+    形状照上面那条 `/logs/` 的锁：问**具体文件**（不带尾斜杠），再核 `-v` 报出的规则
+    就是新加的那一行——两处都不许省。
+    * 只看 rc 会被空模式假绿：本仓 `.gitignore` 的 CRLF 检出里那枚裸 CR 空模式对任何
+      `路径/` 都回"被排除"（枚数与行号的唯一来源是 backend/tests/_corpus_exemption.py）。
+      把新规则摘掉再问同一枚探针：带尾斜杠的 `call-ledger-g9.jsonl/` 回 rc=0、报的正是
+      那枚空模式，而不带斜杠回 rc=1。所以"问目录 + 只看 rc"那种写法摘掉规则照样绿，
+      不合格；这里问的是根级那一个具体文件名。
+    * 只核"报告行里含规则串"也不够：报告右半边本来就带着被问的路径，会被路径那一半
+      蒙过去，所以按 tab 切开后只比左半边的规则。
+    git 答不上来一律判红，判不了不许当作通过。探针名 `call-ledger-g9.jsonl` 不在任何一份
+    授权名单里，不会和真账本撞名，也不需要那个文件真的存在。
+    """
+    probe = "call-ledger-g9.jsonl"
+    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-v", "--", probe],
+                         capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    assert res.returncode == 0 and report, (
+        f"git 没说 {probe} 被忽略（rc={res.returncode}）：仓库根那个形状的账本又回到 "
+        "`git add -A` 的射程里，思考探针 stdout 重定向出来的密钥摘要会被提交进公开仓库")
+    rule_part, _, path_part = report.partition(chr(9))
+    assert path_part == probe, f"报告行认不出被问的是哪条路径：{report!r}"
+    assert rule_part.endswith(":/call-ledger-*.jsonl"), (
+        f"{probe} 命中的不是 /call-ledger-*.jsonl 那条规则，而是 {rule_part!r}——"
+        "空模式（一枚裸 CR 的空行）也会命中，而那正是这条锁要挡的假阳性")
+
+
 def _calls_named(node, names):
     """AST 里按被调名收 Call：Name 与 Attribute 两种写法都认（锁的是调用，不是文本）。"""
     return [n for n in ast.walk(node)

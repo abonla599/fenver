@@ -218,3 +218,17 @@ android-native/.gradle/
 # 产物、不是源码。接在末尾、不插空行：本文件是 CRLF，中途插行会把别处说明里的
 # 行号挪走（见上一条）。
 /logs/
+# 思考探针账本的根级兜底：tools/probe_thinking_profile.py 的出口只给现役密钥的 sha256
+# 短摘要，账本的**落盘路径**另有代码闸与一批映射/脱敏判据（见
+# backend/tests/test_v0391_thinking_mapping.py），但代码闸管不着"谁把 stdout 重定向成
+# 仓库根下一个 call-ledger-*.jsonl"——那一次 `git add -A` 就把摘要带进了公开仓库，而
+# 摘要足以和现役密钥逐一对上。这一条只管这一格，是纵深防御不是事故处置：本轮实测仓库根
+# 没有这一类文件，也就没有既成泄露。
+# 锚在根（前导斜杠）而不是写裸文件名：不带斜杠的 call-ledger-*.jsonl 会连每一层子目录
+# 一起盖住，而 data/ 那棵树的产物上面已由 `data/` 整棵挡过，这里只兜根级那一份落点。
+# 追加在文件末尾、紧贴上一行、不插空行、也不插在中途，是有意的：本文件是 CRLF，一枚新的
+# 空行就是一枚新的裸 CR 空模式（带尾斜杠的问法对它恒真），而中途插行会把别处说明引用的
+# 行号挪走。空模式的枚数与行号唯一来源是 backend/tests/_corpus_exemption.py，别再抄第二处。
+# 哨兵锁在 backend/tests/test_paths.py 的
+# test_gitignore_ignores_a_root_call_ledger_by_a_rule_that_actually_exists：摘掉本行它红。
+/call-ledger-*.jsonl
