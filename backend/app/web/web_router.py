@@ -184,13 +184,15 @@ def inline_script_hashes(html: str):
     return list(dict.fromkeys(found))
 
 
-# connect-src 的两档口径。全站页面里，浏览器要连的只有同源 /v1 与两个直连搜索源。
+# connect-src 的两档口径。全站页面里，浏览器要连的只有同源 /v1：`app.js` / `api.js`
+# 里一个绝对 URL 都没有（grep `http://` `https://` 为零），旧的「直连搜索」`searchDirect()`
+# 也已删除（`test_web_search_direct_contract.py` 钉它不许回来）⇒ 两个搜索源不需要
+# 出现在全站这一档里，多列一条就是多开一条浏览器能往外发的路。
 # 唯一的例外是连通性探测页（`/site/probe.html`）：它的目标地址由用户在页面里填
-# （默认 https://api.deepseek.com），页面靠 fetch 直连供应商完成 1–6 项探测，所以
-# 那一页必须放开任意 https。放开 https 是本页的既定用途，不是全站口径；http/ws
-# 不放开。
-CONNECT_SRC_STRICT = ("'self' https://api.bochaai.com/v1/web-search "
-                      "https://api.tavily.com/search")
+# （默认 https://api.deepseek.com），页面靠 fetch 直连供应商完成 1–6 项探测，第 7 项
+# 还单独直连博查 / Tavily 看 CORS，所以那一页必须放开任意 https。放开 https 是本页的
+# 既定用途，不是全站口径；http/ws 不放开。
+CONNECT_SRC_STRICT = "'self'"
 CONNECT_SRC_PROBE = "'self' https:"
 PROBE_PAGE_PATH = "/site/probe.html"
 
@@ -199,7 +201,7 @@ def content_security_policy(script_hashes=(), page_path: str = "/") -> str:
     """CSP 的拼装点只此一处；`script_hashes` 是当前文档内联脚本的 sha256。
 
     `page_path` 只影响 `connect-src`：探测页（`PROBE_PAGE_PATH`）用放开 https 的那一档，
-    其余所有页面保持"同源 + 两个直连搜索源"。按路径分档只分这一条指令，别的指令
+    其余所有页面只有同源 `'self'`。按路径分档只分这一条指令，别的指令
     两档一字不差——别把 `page_path` 扩成"按页面各自配策略"的口子。
 
     为什么是"运行时算哈希"而不是 nonce：HTML 允许缓存 30 秒（`PAGE_CACHE`）。nonce
@@ -287,9 +289,11 @@ def site_headers(response, cache: str = "no-cache", script_hashes=(),
     - `img-src 'self' data: blob:`：附件预览与聊天图片走 objectURL（app.js / api.js 的
       `URL.createObjectURL`），没有 `blob:` 预览就整片空白；`data:` 留给粘贴的 data URI。
       模型回复里的外链图片会被挡掉——有意为之（挡追踪像素），要放开得先有人明确同意。
-    - `connect-src 'self' + 两个搜索源`：app.js 的「直连搜索」真的从浏览器 POST 到
-      api.bochaai.com / api.tavily.com（`searchDirect`）；不列出这两个源，那一档会在
-      控制台里静默变哑。除探测页外，页面里的其余请求一律 /v1 同源。
+    - `connect-src 'self'`：页面里的请求一律 /v1 同源——`app.js` / `api.js` 里一个绝对
+      URL 都没有，搜索走服务端代理 `POST /v1/search/source`（key 因此不进浏览器，见
+      `test_web_search_direct_contract.py`）。这一档原先还列着博查 / Tavily 两个源站，
+      那是给已删除的浏览器直连函数 `searchDirect()` 留的位子：函数没了、白名单还开着，
+      等于防线比需要的宽（安全单 S3 摘掉）。今天真从浏览器直连那两个源的只有探测页。
     - 探测页（`/site/probe.html`）是唯一例外，单独一档 `connect-src 'self' https:`：
       它的 endpoint 由用户在页面里填（默认 https://api.deepseek.com），页面靠 fetch
       直连供应商完成 1–6 项探测。这是连通性探测页的既定用途，不是全站口径；只放开
