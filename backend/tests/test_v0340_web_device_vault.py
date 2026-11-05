@@ -582,6 +582,9 @@ def test_legacy_secret_entries_are_purged_and_nothing_else_is():
         doomed[p + "u1"] = "SEC-1"
         doomed[p + "u2"] = "SEC-2"
     doomed["sdkey.foo"] = "sk-LEAKED-LEGACY-KEY"          # S1 具名的那一枚
+    # 这一枚不是编的：老 app.js 写的就是 SD_LOCAL_PREFIX + source（8657b4fa^ 那笔的
+    # :2560/:2775），源名只有 bocha / tavily 两个 ⇒ 真人浏览器里躺着的是这个形状。
+    doomed["sdkey.bocha"] = "sk-real-shape-legacy-key"
     survivors = {
         "identities": "[]",                               # 人名册
         "currentId": "u1",                                # 当前身份指针
@@ -693,12 +696,19 @@ def test_the_old_vault_entry_points_are_gone():
                  "function rememberDevice", "function recallDevice",
                  "function forgetDevice", "function currentIdentityId"):
         assert gone not in api, f"api.js 里还留着 {gone}：localStorage 那一格没有真正退役"
-    assert api.count('"fenver.deviceSecret."') == 1, \
-        "存量前缀出现了不止一处：清理之外的读/写路径又长出来了"
+    # 计数钉双向都要说话：== 1 这条在 0 次与 2 次两种漂法下都红，而红话原本只报
+    # "不止一处"——C2 反例（把 "sdkey." 从 api.js 名单里摘掉）实测红在 0 次那一侧，
+    # 红话却指着"另一处"，把人往完全相反的方向找。所以两串各写清"要么掉了要么被抄"。
+    n_dev = api.count('"fenver.deviceSecret."')
+    assert n_dev == 1, \
+        (f"存量前缀 \"fenver.deviceSecret.\" 在 api.js 里有 {n_dev} 处（只许 1 处）："
+         "0 处 = v0.34 那族明文从名单里掉了，>1 处 = 清理之外的读/写路径又长出来了")
     # S1 新增的那一族是**另一串**字面量，不与上面那串复用凑数：sdkey.* 同样只许在
     # 名单里出现一次，别处再写一枚就等于又开了一条读/写这一格的口子。
-    assert api.count('"sdkey."') == 1, \
-        "sdkey. 这串前缀出现了不止一处：清理之外的读/写路径又长出来了"
+    n_sd = api.count('"sdkey."')
+    assert n_sd == 1, \
+        (f"S1 新增的存量前缀 \"sdkey.\" 在 api.js 里有 {n_sd} 处（只许 1 处）："
+         "0 处 = 旧「本机直连搜索源」那族明文根本没人清，>1 处 = 清理之外又长了读/写")
     assert re.search(_LEGACY_LIST_DECL, api), \
         "前缀名单的形状漂了：清理与这两把计数钉都从它派生"
 
