@@ -160,8 +160,14 @@ const API = (() => {
    *
    * 升级清理：老版本留在本机的 fenver.deviceSecret.* 是 JS 可读的明文凭据，
    * 页面加载时扫一遍全删。这是 api.js 唯一还会碰这一格的地方，除此之外不读不写。
+   *
+   * S1 追加第二族：v0.32 L-1 之前的「本机直连搜索源」把源站 key 明文写在 sdkey.*
+   * 那一族键里（static/index.html 搜索源那段的注释就是这一族的出处）。设置页早已
+   * 不写它，但**没有任何代码清理过这一族**——老浏览器里那格明文会一直躺着，一条 XSS
+   * 或一台与人共用的电脑都读得走。所以它并进同一份名单、同一个函数、同一次扫描，
+   * 不另起第二个清理函数：两族共用下面那条"清理失败不许打断页面"的纪律。
    */
-  const LEGACY_DEVICE_SECRET_PREFIX = "fenver.deviceSecret.";
+  const LEGACY_DEVICE_SECRET_PREFIXES = ["fenver.deviceSecret.", "sdkey."];
 
   function purgeLegacyDeviceSecrets() {
     // 隐私模式 / 配额 / 禁用存储会让访问 localStorage 抛异常：清理失败不许把
@@ -173,7 +179,9 @@ const API = (() => {
     try {
       for (let i = 0; i < store.length; i += 1) {
         const key = store.key(i);
-        if (key && key.indexOf(LEGACY_DEVICE_SECRET_PREFIX) === 0) doomed.push(key);
+        if (key && LEGACY_DEVICE_SECRET_PREFIXES.some((p) => key.indexOf(p) === 0)) {
+          doomed.push(key);
+        }
       }
       for (const key of doomed) store.removeItem(key);
     } catch (_) { return 0; }
