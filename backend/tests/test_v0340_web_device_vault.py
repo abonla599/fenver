@@ -584,7 +584,15 @@ def test_legacy_secret_entries_are_purged_and_nothing_else_is():
     doomed["sdkey.foo"] = "sk-LEAKED-LEGACY-KEY"          # S1 具名的那一枚
     # 这一枚不是编的：老 app.js 写的就是 SD_LOCAL_PREFIX + source（8657b4fa^ 那笔的
     # :2560/:2775），源名只有 bocha / tavily 两个 ⇒ 真人浏览器里躺着的是这个形状。
-    doomed["sdkey.bocha"] = "sk-real-shape-legacy-key"
+    # **真实的是键名 `sdkey.bocha`，不是它的值**：清理按前缀点名，值它一个字都不读，
+    # 下面这条用例比的是 removed 计数与幸存键名集合（见本用例末尾两行断言）。值在这里
+    # 只承担一件事——让读代码的人看出"这一族躺的是明文 key"，所以它是占位串，并且**故意
+    # 写成不构成全仓密钥扫描锁认得的那条形状**：test_secret_scan.py 的 openai-style 判据
+    # 是 `\bsk-` 之后再跟 20 个以上 [A-Za-z0-9_-]，而它扫的是 `git ls-files` 上的每一行，
+    # 本文件正是被扫的文件。上面那枚 17 位（去掉 `sk-` 后）不被抓、这一枚写满 21 位就被抓，
+    # #285 红的就是它。想"改得像真的"而往回加长度之前先读这段：那是重新踩同一道闸，
+    # 而闸的修法只有一个方向——夹具这一侧让步，扫描锁本身不许动（不加豁免、不改判据）。
+    doomed["sdkey.bocha"] = "sk-legacy-bocha-key"         # 键名照旧；值仍是占位串，不够那 20 位
     survivors = {
         "identities": "[]",                               # 人名册
         "currentId": "u1",                                # 当前身份指针
