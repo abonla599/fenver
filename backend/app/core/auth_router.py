@@ -191,32 +191,55 @@ _REAUTH_BY_SECRET = _Ledger("reauth_by_secret")
 #    所以它单独立不住"换 IP 仍吃满"那句话。
 # ② user_id 那道（`_ADMIN_REAUTH_FAILS_BY_USER`，键 `user_id` 本身）：挡"同一账号跨所有
 #    来源的总预算"——这才是"换 IP 的人对同一账号仍受同一格预算"这句话真正落地的地方。
-#    两道的窗口与上限都取自同一对钉（下面这两个常量），**不在此处另抄一份数字**：
-#    上限 = `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW`，窗口 = `FAILURE_WINDOW_SECONDS`
-#    （即"每 FAILURE_WINDOW_SECONDS 秒最多 _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW 次"，
-#    数值口径唯一以常量为准，注释只引用常量名不写死次数/秒数，免得第二处会腐烂）。
-# user_id 取不到（None/空）时**两道一起退化到单一 `'anon'` 格**（与既有 `_chat_key` 的
-# `or 'anon'` 同源）：这是 **fail-closed** 的选择——无身份的尝试共享一格、照样能被吃满拦下，
-# 而不是"取不到就这一道不判"（跳过 = 给能剥掉身份的来路留的口子，那是 fail-open）。代价如实
-# 认：真取不到身份时多个匿名来源会共用这一格 anon 预算、更早 429；但 `/admin-reauth` 先过
-# 角色闸（非管理员 403）、正常会话都带 user_id，取不到身份只在异常路径出现，退化宁可偏紧。
+#    两道的窗口同源（都是 `FAILURE_WINDOW_SECONDS`），**上限各用各的钉，此处不抄数字**：
+#    ① 上限 = `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW`；
+#    ② 上限 = `_MAX_ADMIN_REAUTH_USER_FAILURES_PER_WINDOW`
+#    （即"每 FAILURE_WINDOW_SECONDS 秒最多各自那道常量那么多次"，数值口径唯一以常量为准，
+#    注释只引用常量名，免得第二处会腐烂）。
+#    ② 比 ① **松**是 2026-11-05 的裁决，不是笔误：② 数的是跨来源总账，而且成功换票**不
+#    清账**，两道的上限若同值，一个已持管理员会话的人只靠"每个来源各打几发"就能长期把
+#    同组织里的另一个管理员锁在二次验证之外（角色闸先于计数，来路必须先有管理员会话，
+#    但管理员互相锁确实能发生）。也不许把 ① 的值一起改大来"解决"这件事——那等于同时
+#    放宽单来源的口令爆破预算，所以 ① 的值保持原样。
+# user_id 取不到（None/空）时两道**退化到的形状不一样**，各写各的，不合并成一句：
+#    ② 键塌成**单一 `'anon'` 格**（`user_id or "anon"`，见 `_admin_reauth_user_key`）——
+#      所有无身份尝试跨来源共用这一格预算，这是它先被吃满的那一格；
+#    ① 键只把身份那一半换成哨兵，仍是 **`anon|<IP>`**（见 `_admin_reauth_key`）——
+#      **不同来源各开一格**，这一道并不塌成单一格，所以"两道一起退化到单一 anon 格"
+#      那种说法是假的（旧版注释就这么写过，本行把它改掉）。
+#    这仍然是 **fail-closed** 的选择——无身份的尝试照样被计、照样会被吃满拦下，而不是
+#    "取不到就这一道不判"（跳过 = 给能剥掉身份的来路留的口子，那是 fail-open）。代价
+#    如实认：真取不到身份时，多个匿名来源会共用 ② 那一格 anon 预算、更早 429；但
+#    `/admin-reauth` 先过角色闸（非管理员 403）、正常会话都带 user_id，取不到身份只在
+#    异常路径出现，退化宁可偏紧。
+#    顺带把另一句假话改掉：这**不是**"与既有 `_chat_key` 的 `or 'anon'` 同源"。读一眼
+#    `_chat_key` 就知道它的键是 `f"{ip}|{user_id or 'anon'}"`——IP 永远是独立一维，身份
+#    取不到只换掉 user 那一半、同样不塌成单一格。两道共用的只是 `'anon'` 这枚哨兵**串**，
+#    键形状与退化后果都不同，口径不能互相引用。
 _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW = 10
+_MAX_ADMIN_REAUTH_USER_FAILURES_PER_WINDOW = 30  # ② 专用上限；比 ① 松的理由见上段
 _ADMIN_REAUTH_FAILS = _Ledger("admin_reauth_fails")
 _ADMIN_REAUTH_FAILS_BY_USER = _Ledger("admin_reauth_fails_by_user")
 
 
 def _admin_reauth_key(user_id: str, ip: str) -> str:
-    # 退化点单一：user_id / ip 任一取不到都用同一个哨兵串，与 user-only 那道口径一致。
+    # ① 号那道：身份取不到只把 user 那一半换成 'anon'（ip 取不到换成 'unknown'），
+    # 键仍带 IP 维度 ⇒ 退化后是 `anon|<IP>`，不同来源各开一格，**不塌成单一 anon 格**。
     return f"{user_id or 'anon'}|{ip or 'unknown'}"
 
 
 def _admin_reauth_user_key(user_id: str) -> str:
-    # 只按 user_id 计的那道：None/空退化到 'anon'（fail-closed，见上段注释）。
+    # ② 号那道：键就是 user_id 本身，None/空时塌成**单一** 'anon' 格（fail-closed，
+    # 与 ① 号那道只共用哨兵串，形状不同，见上段）。
     return user_id or "anon"
 
 
 def _admin_reauth_throttled(user_id: str, ip: str) -> bool:
-    """两道闸任一吃满即拒：①同一 (user,IP) 连打；②同一 user 跨所有 IP 的总预算。"""
+    """两道闸任一吃满即拒：①同一 (user,IP) 连打；②同一 user 跨所有 IP 的总预算。
+
+    两道各自的上限常量（① `_MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW`、②
+    `_MAX_ADMIN_REAUTH_USER_FAILURES_PER_WINDOW`）与上面的键形状一一对应，别互换。
+    """
     moment = _now()
     _prune(moment)
     return (len(_recent(_ADMIN_REAUTH_FAILS,
@@ -226,7 +249,7 @@ def _admin_reauth_throttled(user_id: str, ip: str) -> bool:
             or len(_recent(_ADMIN_REAUTH_FAILS_BY_USER,
                            _admin_reauth_user_key(user_id),
                            FAILURE_WINDOW_SECONDS, moment))
-            >= _MAX_ADMIN_REAUTH_FAILURES_PER_WINDOW)
+            >= _MAX_ADMIN_REAUTH_USER_FAILURES_PER_WINDOW)
 
 
 def _note_admin_reauth_failure(user_id: str, ip: str) -> None:
