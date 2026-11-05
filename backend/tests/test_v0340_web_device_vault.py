@@ -18,13 +18,18 @@ logout/改密/找回清），JS 从此读不到这把 400 天寿命的钥匙。�
    误当成会话过期，是行为问题，不是文本问题。
 3. `reauthOnce` 的请求形状：Cookie-only（不把 device_secret 放进 body）、
    `credentials:"same-origin"`、带 X-CSRF、不带 Authorization、不读 localStorage。
-4. 升级清理：页面加载时把老版本留下的 `fenver.deviceSecret.*` 全部删掉，坏存储
-   不许把页面打停；除此之外 api.js 不再读/写这一格。
+4. 升级清理：页面加载时把老版本留在 localStorage 的两族明文凭据（v0.34 的
+   `fenver.deviceSecret.*`、v0.32 L-1 之前的 `sdkey.*`）全删，名单之外的键一个
+   都不许多删；坏存储（读不到 / 扫到一半抛）不许把页面打停；**顶层那行调用本身
+   也在射程内**——清理函数写了却没人调，等于没清（S1 的调用点级钉）。除此之外
+   api.js 不再读/写这一格。
 5. 与原生 `SessionRenew.reauthOnce` / `Api.kt` 的判据顺序与豁免名单继续对齐：
    两边错开就是"手机上能自愈、网页上不能"这类没法解释的差别。
 
 语料一律走 test_web_pwa 那把剥注释的尺子。
 """
+import ast
+import inspect
 import json
 import re
 import shutil
@@ -480,10 +485,28 @@ def test_both_ladders_share_one_renewal_gate_and_one_cooldown_ruler():
 # ---------- 升级清理：老版本留在 localStorage 的那一格 ----------
 
 
+_LEGACY_LIST_DECL = r"const LEGACY_DEVICE_SECRET_PREFIXES = \[([^\]]*)\];"
+
+
+def _legacy_prefixes() -> list:
+    """从 api.js 现抠那份前缀名单：测试不手抄第二份真相。
+
+    手抄的那份只会跟着源码漂。名单若在源码里少了 `sdkey.`，抄来的用例仍然全绿，
+    这条安全单就此变成"测试证明了已修好"的空头承诺——派生之后，名单里掉任何一族
+    都当场红（反例：把 api.js 那串 "sdkey." 摘掉）。
+    """
+    api = _js("api.js")
+    m = re.search(_LEGACY_LIST_DECL, api)
+    assert m, "api.js 里找不到存量清理的前缀名单：升级后那批明文凭据会永远留在设备上"
+    prefixes = re.findall(r'"([^"]+)"', m.group(1))
+    assert prefixes, "存量清理的前缀名单是空的：写了个空名单等于没有清理"
+    return prefixes
+
+
 def _legacy_source() -> str:
     api = _js("api.js")
-    m = re.search(r"const LEGACY_DEVICE_SECRET_PREFIX = [^;]+;", api)
-    assert m, "api.js 里找不到存量清理的前缀：升级后那批明文凭据会永远留在设备上"
+    m = re.search(_LEGACY_LIST_DECL, api)
+    assert m, "api.js 里找不到存量清理的前缀名单：升级后那批明文凭据会永远留在设备上"
     return m.group(0) + "\n" + _fn_text(api, "purgeLegacyDeviceSecrets")
 
 
@@ -517,6 +540,15 @@ if (SC.broken) {
   Object.defineProperty(sandbox.window, "localStorage", {
     get() { throw new Error("storage denied"); },
   });
+} else if (SC.throwmid) {
+  // 存储"看着在"、扫到一半才抛：配额爆了 / 禁用存储下 key() 与 removeItem() 都会抛。
+  // 这一支专门喂给函数正文里那条 catch——上一版只有 broken 那一支，它撞的是进门
+  // 第一次 try，正文里那条 catch 被摘掉也照样绿。
+  sandbox.window = { localStorage: {
+    length: 3,
+    key() { throw new Error("quota exceeded"); },
+    removeItem() { throw new Error("quota exceeded"); },
+  } };
 } else {
   sandbox.window = { localStorage: fakeStorage };
 }
@@ -529,24 +561,128 @@ process.stdout.write(JSON.stringify({ removed, keys: Array.from(store.keys()) })
 """
 
 
-def test_legacy_device_secret_entries_are_purged_and_nothing_else_is():
-    """升级清理只删 `fenver.deviceSecret.*`：名册、指针、断网静音一个都不许动。"""
-    out = _run_purge({"store": {
-        "fenver.deviceSecret.u1": "SEC-1",
-        "fenver.deviceSecret.u2": "SEC-2",
-        "identities": "[]",
-        "currentId": "u1",
-        "netminder_mute": "2026-10-20",
-    }})
-    assert out["removed"] == 2
-    assert sorted(out["keys"]) == ["currentId", "identities", "netminder_mute"]
+def test_legacy_secret_entries_are_purged_and_nothing_else_is():
+    """两族明文凭据都清得掉，名单之外的键一个都不许多删。
+
+    名单从源码派生（见 _legacy_prefixes），逐族造两枚，另加 S1 点名的那一枚
+    `sdkey.foo`。"不多清"这一半靠近似陷阱键说话：把开头那条 `indexOf(p) === 0` 放宽
+    成 includes、或把前缀写宽，下面那份 survivors 立刻对不上。
+    """
+    prefixes = _legacy_prefixes()
+    assert "fenver.deviceSecret." in prefixes, \
+        "v0.34 的 fenver.deviceSecret.* 从名单里掉了：老浏览器那格续命凭据明文又没人管"
+    assert "sdkey." in prefixes, \
+        "S1：历史遗留的 sdkey.*（旧「本机直连搜索源」的明文 key）不在清理名单里"
+    # 短到能扫穿整个存储的前缀不是"清得更彻底"，是连人名册与指针一起删。
+    assert all(p.endswith(".") and len(p) > 3 for p in prefixes), \
+        f"前缀名单里出现了会扫穿整个存储的宽前缀：{prefixes}"
+
+    doomed = {}
+    for p in prefixes:
+        doomed[p + "u1"] = "SEC-1"
+        doomed[p + "u2"] = "SEC-2"
+    doomed["sdkey.foo"] = "sk-LEAKED-LEGACY-KEY"          # S1 具名的那一枚
+    # 这一枚不是编的：老 app.js 写的就是 SD_LOCAL_PREFIX + source（8657b4fa^ 那笔的
+    # :2560/:2775），源名只有 bocha / tavily 两个 ⇒ 真人浏览器里躺着的是这个形状。
+    doomed["sdkey.bocha"] = "sk-real-shape-legacy-key"
+    survivors = {
+        "identities": "[]",                               # 人名册
+        "currentId": "u1",                                # 当前身份指针
+        "netminder_mute": "2026-10-20",                   # 断网静音日期
+        "sdSource": "bocha",                              # 搜索源选择：名字挨着 sdkey 也不动
+        "sdkey": "no-trailing-dot",                       # 少了那枚点：不是这一族
+        "presdkey.foo": "infix-not-prefix",               # 这一串在中间：不是这一族
+        "SDKEY.Foo": "case-sensitive",                    # 老键名是小写，不误伤同名大写
+        "fenver.deviceSecretX.u3": "near-miss",           # 前缀差一个字符
+        "fenver.deviceSecret": "no-dot-tail",             # 没有结尾那点
+        "dashscope.apiKey": "third-party-other-key",      # 其它第三方键：不在名单就不许动
+    }
+    out = _run_purge({"store": {**doomed, **survivors}})
+    assert out["removed"] == len(doomed), \
+        f"该删的没删净或多删了：期望 {len(doomed)} 枚，实删 {out['removed']} 枚"
+    assert sorted(out["keys"]) == sorted(survivors), "清理动了名单之外的键"
 
 
 def test_a_broken_storage_does_not_break_boot():
-    """隐私模式 / 禁用存储：清理失败返回 0，页面照常启动。"""
+    """隐私模式 / 禁用存储：连 localStorage 这个格子都读不到，清理返回 0，页面照常启动。"""
     out = _run_purge({"broken": True})
-    assert out["removed"] == 0
     assert "harness_error" not in out
+    assert out["removed"] == 0
+
+
+def test_a_storage_that_throws_mid_scan_does_not_break_boot():
+    """存储"看着在"、扫到一半才抛（配额爆了 / 禁用存储下 key() 就抛）：仍然不许打断页面。
+
+    broken 那一支只撞得着进门的第一次 try，这一支专门跑正文里那圈 catch：把它摘掉，
+    异常就从 api.js 的模块 IIFE 里抛出去，整个 API 命名空间没建起来——症状是界面全空
+    且不报错，本仓最贵的那一类。要的就是它红。
+    """
+    out = _run_purge({"throwmid": True})
+    assert "harness_error" not in out, \
+        f"清理失败把异常抛给了页面：{out.get('harness_error')}"
+    assert out["removed"] == 0
+
+
+def test_the_purge_corpus_is_sliced_from_api_js_not_hand_copied():
+    """S1 的自扫（#267/#268 那条「不许并一份手抄名单」）：喂给 node 的那份只许是切片。
+
+    手抄的字面量当下与源码等价、全绿；等源码那一族漂了（比如有人又把 `sdkey.` 从名单
+    里摘掉），测试仍按抄的那份跑，这条安全单就退化成"测试自己证明自己修好了"。所以
+    这里钉的是**形状**而不是结果：两枚组料的 helper 正文里（docstring 除外）不许出现
+    任何存量前缀字面量，并且必须显式从 `_js("api.js")` 现读语料。
+    """
+    api = _js("api.js")
+    for name in ("_legacy_prefixes", "_legacy_source"):
+        fn = globals()[name]
+        try:
+            tree = ast.parse(inspect.getsource(fn))
+        except OSError as e:      # 打进 EXE 时没有 .py 源文件：明说没跑成，别判红
+            pytest.skip(f"读不到 {name} 的源码，自扫锁无从谈起：{e}")
+        # getsource 交回来的是**函数定义**，所以 tree.body[0] 是 FunctionDef，
+        # docstring 在它自己的 body[0] 上——第一版把它认错位置，本锁当场红在
+        # 自己那句 docstring 上（这一红正好证明它对字符串常量是真判的）。
+        fdef = tree.body[0]
+        head = fdef.body[0]
+        doc_const = head.value if (isinstance(head, ast.Expr)
+                                   and isinstance(head.value, ast.Constant)
+                                   and isinstance(head.value.value, str)) else None
+        literals = [n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                    and n is not doc_const]
+        copied = [s for s in literals if "fenver." in s or "sdkey" in s.lower()]
+        assert not copied, \
+            f"{name} 的正文里出现了手抄的存量前缀字面量 {copied}：名单的第二份真相"
+        src = inspect.getsource(fn)
+        assert '_js("api.js")' in src, \
+            f"{name} 不再从 api.js 现读语料：切片被换成了自备语料，源码漂了就没人知道"
+    fed = _legacy_source()
+    assert fed.split("\n", 1)[0] in api, "交给 node 执行的那行名单不再是 api.js 的逐字切片"
+    assert _fn_text(api, "purgeLegacyDeviceSecrets") in api
+
+
+def test_the_purge_is_called_at_module_top_level_not_only_defined():
+    """S1 的调用点级钉：`purgeLegacyDeviceSecrets();` 得真的出现在模块顶层。
+
+    这条是被实测逼出来的：把 api.js 顶层那一行调用摘掉，本文件 34 条全绿、rc=0
+    （2026-11-05 变异取证）——旧的形状锁只把函数正文抠出来丢进 VM **手动**调用，
+    "函数写了没人调"那一洞它读不出来。判据按缩进认顶层（与前缀名单声明同一格），
+    不写死空格数：整文件重排缩进不该把它跑红；调用被删、被塞进任何函数正文、
+    或多出一遍，都算红。
+    """
+    api = _js("api.js")
+    decl = re.search(r"^([ \t]*)const LEGACY_DEVICE_SECRET_PREFIXES", api, re.M)
+    assert decl, "api.js 里找不到前缀名单的声明行：认不出模块顶层那一格缩进"
+    body = _fn_text(api, "purgeLegacyDeviceSecrets")
+    at = api.index(body)
+    calls = [m for m in re.finditer(r"purgeLegacyDeviceSecrets\s*\(\s*\)\s*;", api)
+             if not at <= m.start() < at + len(body)]
+    assert len(calls) == 1, \
+        (f"模块顶层对存量清理的调用应当恰好一次，实得 {len(calls)} 次："
+         "0 次就是「清理函数写了没人调」，多于一次是同一格被扫多遍")
+    head = api[api.rindex("\n", 0, calls[0].start()) + 1:calls[0].start()]
+    assert head == decl.group(1), \
+        (f"清理调用不在模块顶层：它的缩进 {head!r} 与前缀名单声明的 {decl.group(1)!r} 不同——"
+         "塞进某个函数正文里，等于页面加载时没人敲它")
 
 
 # ---------- 形状：Web 端不再有第二处凭据存储面 ----------
@@ -560,8 +696,21 @@ def test_the_old_vault_entry_points_are_gone():
                  "function rememberDevice", "function recallDevice",
                  "function forgetDevice", "function currentIdentityId"):
         assert gone not in api, f"api.js 里还留着 {gone}：localStorage 那一格没有真正退役"
-    assert api.count('"fenver.deviceSecret."') == 1, \
-        "存量前缀出现了不止一处：清理之外的读/写路径又长出来了"
+    # 计数钉双向都要说话：== 1 这条在 0 次与 2 次两种漂法下都红，而红话原本只报
+    # "不止一处"——C2 反例（把 "sdkey." 从 api.js 名单里摘掉）实测红在 0 次那一侧，
+    # 红话却指着"另一处"，把人往完全相反的方向找。所以两串各写清"要么掉了要么被抄"。
+    n_dev = api.count('"fenver.deviceSecret."')
+    assert n_dev == 1, \
+        (f"存量前缀 \"fenver.deviceSecret.\" 在 api.js 里有 {n_dev} 处（只许 1 处）："
+         "0 处 = v0.34 那族明文从名单里掉了，>1 处 = 清理之外的读/写路径又长出来了")
+    # S1 新增的那一族是**另一串**字面量，不与上面那串复用凑数：sdkey.* 同样只许在
+    # 名单里出现一次，别处再写一枚就等于又开了一条读/写这一格的口子。
+    n_sd = api.count('"sdkey."')
+    assert n_sd == 1, \
+        (f"S1 新增的存量前缀 \"sdkey.\" 在 api.js 里有 {n_sd} 处（只许 1 处）："
+         "0 处 = 旧「本机直连搜索源」那族明文根本没人清，>1 处 = 清理之外又长了读/写")
+    assert re.search(_LEGACY_LIST_DECL, api), \
+        "前缀名单的形状漂了：清理与这两把计数钉都从它派生"
 
 
 def test_the_app_no_longer_writes_or_clears_a_local_secret():
