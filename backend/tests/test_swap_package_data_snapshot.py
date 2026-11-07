@@ -29,8 +29,9 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
     （带 state=unreadable waiting_user=unproven error=<真实原文>）、rc 非 0、探针末尾的
     `PROBE_TAIL` 到不了、`DATA-SAVED` 一行都没有；
 (5) **ROLLBACK-HOWTO 7)** 存在、说清"抹掉"与"把 tasks.json 拷回去"的方向，而 1-6 步逐行与
-    改前那份**一字不差**（对照锚点是字面 SHA 且必须**在可达历史里**，不是 `HEAD`——见
-    `_PINNED_PRE_CHANGE` 与 `_assert_anchor_in_history`）。
+    改前那份**一字不差**——唯一登记过的插格是 5a)（#295 代理清理步：5) 标题行与启动行
+    各自一字不改，中间内容由 `_HOWTO_5A` 钉住）（对照锚点是字面 SHA 且必须**在可达历史里**，
+    不是 `HEAD`——见 `_PINNED_PRE_CHANGE` 与 `_assert_anchor_in_history`）。
 (6) **#62 轮转**：`data\swap-snapshots` 无上限会无限堆积（又整个在 data\ 的禁清区里）。
     默认保留最新 10 份（0 关闭）；只删严格 `yyyyMMdd-HHmmss` 的直接子目录；**绝不删当前
     快照**；删除失败 fail-closed（停手、保留剩余）；调用点在验收/守护恢复/预算之后、
@@ -334,14 +335,20 @@ _HOWTO_SEVEN = ("DATA-SAVED dir=", "waiting_user", "erases", "data\\tasks.json",
                 "DATA-SAVE-FAIL")
 
 
+_HOWTO_5A = ("FIRST clear env proxy vars", "Remove-Item env:HTTP_PROXY",
+             "env:HTTPS_PROXY", "env:ALL_PROXY", "env:NO_PROXY")
+
+
 def _howto_ok(text: str, pre_text: str) -> bool:
-    """(5)：1-6 步（含结尾那行 ref:）逐行与改前那份**完全相同**，第 7 步是新增的，
-    且写明"旧包解析不了 waiting_user -> 第一次落盘就抹掉记录"与"停服务 -> 把 tasks.json
-    拷回去 -> 再启动"的恢复方向。"""
+    """(5)：1-6 步（含结尾那行 ref:）逐行与改前那份**完全相同**——唯一登记过的插格是 5a)：
+    第 5 步标题行一字不改（且仍是 5) 块唯一一行），启动那行一字不改地落在 5a) 块末尾，
+    中间插入的清理步内容由 `_HOWTO_5A` 逐 token 钉住（#295：被污染的 NO_PROXY 会随
+    Start-Process 遗传给子进程）。第 7 步是新增的，且写明"旧包解析不了 waiting_user ->
+    第一次落盘就抹掉记录"与"停服务 -> 把 tasks.json 拷回去 -> 再启动"的恢复方向。"""
     now = _howto_map(text)
     if now is None:
         return False
-    for key in ("1)", "2)", "3)", "4)", "5)", "6)", "7)", "ref:"):
+    for key in ("1)", "2)", "3)", "4)", "5)", "5a)", "6)", "7)", "ref:"):
         if key not in now:
             return False
     if len(now["7)"]) != 1:
@@ -350,6 +357,11 @@ def _howto_ok(text: str, pre_text: str) -> bool:
     for need in _HOWTO_SEVEN:
         if need not in line:
             return False
+    if len(now["5a)"]) != 3:
+        return False
+    for need in _HOWTO_5A:
+        if need not in "\n".join(now["5a)"]):
+            return False
     if any("ROLLBACK-HOWTO 8)" in ln for grp in now.values() for ln in grp):
         return False
     if pre_text is None:
@@ -357,10 +369,14 @@ def _howto_ok(text: str, pre_text: str) -> bool:
     pre = _howto_map(pre_text)
     if pre is None:
         return False
-    for key in ("1)", "2)", "3)", "4)", "5)", "6)", "ref:"):
+    for key in ("1)", "2)", "3)", "4)", "6)", "ref:"):
         if pre.get(key) != now.get(key):
             return False
-    if "7)" in pre:
+    if "5a)" in pre or "7)" in pre:
+        return False
+    if now.get("5)") != pre.get("5)")[:1]:
+        return False
+    if now["5a)"][-1] != pre["5)"][-1]:
         return False
     return not any("DATA-SAVED" in "\n".join(pre[k]) for k in pre)
 
@@ -577,14 +593,16 @@ def test_the_verdict_is_json_derived_and_never_answers_zero_for_cannot_read():
 
 
 def test_rollback_howto_step_7_names_the_erasure_and_1_to_6_are_word_for_word_unchanged():
-    """(5)：ROLLBACK-HOWTO 1)-6) 逐行与锚点 `_PINNED_PRE_CHANGE` 那份**一字不差**，7) 是新增的，
-    并且写明"旧包解析不了 waiting_user 会在第一次落盘时抹掉记录"与"停服务->把 tasks.json
-    拷回去->再启动"的方向。"""
+    """(5)：ROLLBACK-HOWTO 1)-6) 逐行与锚点 `_PINNED_PRE_CHANGE` 那份**一字不差**（登记插格 5a)：
+    5) 标题行仍是 5) 块唯一一行、启动行一字不改地落在 5a) 块末尾，5a) 内容由 `_HOWTO_5A` 钉住），
+    7) 是新增的，并且写明"旧包解析不了 waiting_user 会在第一次落盘时抹掉记录"与"停服务->把
+    tasks.json 拷回去->再启动"的方向。"""
     pre = _pre_change_text()
     assert _howto_ok(PS1, pre), (
-        "Show-Rollback 的 1-6 步与改前那份不再逐行相同（改配方就是改既有契约），"
-        "或 7) 少了：DATA-SAVED dir= / waiting_user / erases / copy tasks.json back over "
-        "data\\tasks.json / stop the backend / DATA-SAVE-FAIL 六个要素之一")
+        "Show-Rollback 的 1-6 步与改前那份不再逐行相同（改配方就是改既有契约；5a) 是唯一" +
+        "登记过的插格），或 5a) 少了 _HOWTO_5A 的清理要素之一，或 7) 少了：DATA-SAVED dir= / " +
+        "waiting_user / erases / copy tasks.json back over data\\tasks.json / stop the backend / " +
+        "DATA-SAVE-FAIL 六个要素之一")
 
 
 def test_generated_probes_run_the_scripts_own_region_and_cannot_touch_production():
@@ -1014,7 +1032,7 @@ def test_pre_change_copy_at_the_pinned_sha_is_red_on_every_lock_here(tmp_path):
     assert not _ordering_ok(pre), "改前那份没有保存点，顺序锁必须红\n" + facts
     assert not _copy_only_ok(pre), "改前那份没有只复制这一步，必须红\n" + facts
     assert not _verdict_honest_ok(pre), "改前那份没有 JSON 判决，必须红\n" + facts
-    assert not _howto_ok(pre, pre), "改前那份没有第 7 步，必须红\n" + facts
+    assert not _howto_ok(pre, pre), "改前那份没有 5a) 清理步与第 7 步，必须红\n" + facts
     assert _probe_source(pre) is None, "改前那份生不出探针（定位不到 step 0b）\n" + facts
     assert not _machine_originals_survive({"tasks": Path("nope"), "before": ("x",), "after": ("x",)}), \
         "机器裸判据对不存在的前置条件不许恒真"

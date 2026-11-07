@@ -508,6 +508,17 @@ function Invoke-Guard {
     }
 }
 
+# PROXY-SCRUB-HELPER-BEGIN
+function Remove-ProxyEnvForChild {
+    # Ticket #295 defense-in-depth: drop env proxy vars from THIS process before the
+    # backend child starts, so a poisoned NO_PROXY (bracketed [::1] construction-crash
+    # family, ticket #294) can never be inherited through Start-Process. Loud even
+    # when nothing matched: names=none still prints, so logs prove this step ran.
+    $names = @(Get-ChildItem env: | Where-Object { $_.Name -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' } | ForEach-Object { $_.Name })
+    foreach ($n in $names) { Remove-Item ("env:" + $n) }
+    Write-Output ('PROXY-ENV-SCRUBBED names=' + $(if ($names.Count -gt 0) { $names -join ',' } else { 'none' }))
+}
+# PROXY-SCRUB-HELPER-END
 # --------------------------------------------------------------------- 主流程
 # 单实例锁：计划任务理论上不会重叠，但机器睡眠唤醒 / 手动跑一次都可能撞上。
 # 两个看门狗同时"发现进程不在 → 各拉一次"会起出两个后端，第二个抢不到 8000 端口
@@ -537,6 +548,8 @@ try {
         Invoke-Guard -State $state -Key 'backend' -Title '后端 run_backend.exe' -CheckPort $Port `
             -Probe { Get-BackendProcess } `
             -Launch {
+                $scrubToken = Remove-ProxyEnvForChild
+                Write-Log 'INFO' ("$Title 拉起前代理环境清理（#295）：$scrubToken")
                 Start-Process -FilePath $BackendExe -WorkingDirectory $ProjectRoot `
                     -WindowStyle Hidden -PassThru
             }

@@ -176,9 +176,12 @@ def test_enable_watchdog_only_after_both_acceptance_checks():
 
 
 def test_old_package_renamed_never_deleted():
-    """回滚的唯一依赖是旧包还在盘上：全脚本不许出现任何 Remove-Item（也不许
-    rd/del/erase）；备份名带时间戳，重复换包不许互相覆盖。"""
-    assert "Remove-Item" not in CODE, "旧包只改名不删除——删了就没有回滚位了"
+    """回滚的唯一依赖是旧包还在盘上：Remove-Item 只许指向 `env:` 驱动器——
+    #295 的代理清理删的是环境变量（`Remove-Item ("env:" + $n)` 与其回滚配方打印行），
+    变量不是回滚位，动不到任何目录/文件；除此以外的任何 Remove-Item（也不许
+    rd/del/erase）都等于删回滚位。备份名带时间戳，重复换包不许互相覆盖。"""
+    rest = CODE.replace('Remove-Item ("env:"', "").replace("Remove-Item env:", "")
+    assert "Remove-Item" not in rest, "旧包只改名不删除——Remove-Item 只许删 env: 变量，删了就没有回滚位了"
     assert not re.search(r"\b(rd|del|erase)\b", CODE, re.I), "同上，换个别名也不行"
     assert re.search(r"run_backend_old-", PS1), "备份目录名必须带 run_backend_old- 前缀"
     assert re.search(r"yyyyMMdd-HHmmss", PS1), "备份名带时间戳：每次换包的备份互不覆盖"
