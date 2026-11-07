@@ -42,6 +42,7 @@ def _ask(url: str, key: str, payload: dict, extract):
     """
     try:
         with httpx.Client(verify=system_ssl_context(), timeout=TIMEOUT_SECONDS,
+                          trust_env=False,
                           follow_redirects=False) as client:
             with client.stream("POST", url, json=payload,
                                headers={"Authorization": f"Bearer {key}",

@@ -930,6 +930,7 @@ def download_plan():
 def _open_asset():
     """取包用的客户端。跳转自己管（见 fetch_asset），所以这里必须关掉自动跟。"""
     return httpx.Client(verify=system_ssl_context(), timeout=ASSET_TIMEOUT_SECONDS,
+                        trust_env=False,
                         follow_redirects=False, headers={"User-Agent": USER_AGENT})
 
 
