@@ -61,8 +61,8 @@ _LAUNCH_SITES = {
 }
 # 精确计数钉（>0）：清环境部件的枚数，掏空/复制都会在这里红。
 _ROSTER_SIZES = (
-    ("ps-helper-defs", 2),        # watchdog 与 swap 各定义一份 Remove-ProxyEnvForChild
-    ("ps-helper-calls", 3),       # watchdog 后端 1 + swap main 1 + swap restart 1
+    ("ps-helper-defs", 2),        # watchdog 与 swap 的 Remove-ProxyEnvForChild 函数定义
+    ("ps-helper-calls", 3),       # watchdog 与 swap 里 Remove-ProxyEnvForChild 的调用点
     ("bat-blocks", 1),
     ("rollback-print-lines", 1),
 )

@@ -31,6 +31,8 @@ Get-Process → test_no_rename_item_and_no_get_process）。
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SWAP_PS1 = REPO_ROOT / "deploy" / "swap-package.ps1"
 
@@ -175,16 +177,164 @@ def test_enable_watchdog_only_after_both_acceptance_checks():
         "State 判决不许回来：实例在跑时它恒为 Running，是一条必然误判的判据"
 
 
+# --- #298 B-1 正向白名单：Remove-Item 的整个 path 实参，每个数组元素都必须是 env: token ---
+#
+# 口径（裁决 R8）：枚举每一处 Remove-Item，取出它整个 path 实参（含逗号续接的全部元素），
+# 要求每一个元素只能是 env: 驱动器 token。两种被允许的具体形状：
+#   裸 token：env:NAME（NAME 只许 [A-Za-z_][A-Za-z0-9_]*，可带单/双引号）
+#   拼接式：("env:" + $n) / ('env:' + $n)（单引号也放行——修 N-4 的假红）
+# 任何元素不是 env: token（变量、目录、splat、反引号续行、拼出别的东西）⇒ 红。
+# -Path / -LiteralPath 显式 named 形式同样校验；rd/del/erase 别名照旧全禁。
+# fail-closed：解析不出 path 实参、形状不认识、零元素 ⇒ 红，绝不静默放行。
+# 不许一刀切禁逗号：swap-package.ps1:758 打印的回滚配方合法地用了全 env: 的逗号数组。
+#
+# 射程声明（按实测，不许超出）：
+# - 只认上述两种 env: 形状；拼接式里只允许简单 $var（不认 $n.Trim() / $names[0] 等成员/下标）。
+# - path 实参在第一个 named 参数（-Recurse/-ErrorAction 等）或命令终止符（换行 ; | } 引号 结尾）处结束；
+#   named 参数之后的额外位置 token 不再校验（PowerShell 会因位置参数冲突报错，不会静默删除）。
+# - 不认 -Path:env:FOO 冒号绑定形、不认 named 参数排在位置实参之前的形（如 -Force env:FOO）——一律 fail-closed 判红。
+# - 别名只禁 rd/del/erase（沿用旧判据）；ri 这个 Remove-Item 别名既不在别名禁里、\bRemove-Item\b 也不匹配它，
+#   故 `ri env:FOO, $dir` 今天认不出（仍漏，见交付报告）。
+_ENV_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_ENV_BARE_RE = re.compile(r"env:" + _ENV_NAME)
+_ENV_CONCAT_RE = re.compile(r"""["']env:["']\s*\+\s*\$\{?""" + _ENV_NAME + r"""\}?""")
+_PATH_NAMED_RE = re.compile(r"-(Path|LiteralPath)\b", re.I)
+_CMD_TERMINATORS = "\r\n;|}'\""
+
+
+def _parse_one_path_element(s: str, i: int):
+    """从 s[i] 解析一个 path 数组元素，返回 (is_env_only, next_index)。
+    只认裸 env:NAME（可带引号）与 ("env:" + $var) 拼接式；其余一律 False（fail-closed）。"""
+    n = len(s)
+    while i < n and s[i] in " \t":
+        i += 1
+    if i >= n:
+        return False, i
+    c = s[i]
+    if c == "(":
+        depth = 0
+        j = i
+        while j < n:
+            if s[j] == "(":
+                depth += 1
+            elif s[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= n or depth != 0:
+            return False, i  # 括号不闭合 ⇒ fail-closed
+        inner = s[i + 1:j].strip()
+        return bool(_ENV_CONCAT_RE.fullmatch(inner)), j + 1
+    if c in "\"'":
+        j = i + 1
+        while j < n and s[j] != c:
+            j += 1
+        if j >= n:
+            return False, i  # 引号不闭合 ⇒ fail-closed
+        inner = s[i + 1:j]
+        return bool(_ENV_BARE_RE.fullmatch(inner)), j + 1
+    # 裸 token：读到空白/逗号/命令终止符为止
+    j = i
+    while j < n and s[j] not in " \t," + _CMD_TERMINATORS:
+        j += 1
+    tok = s[i:j]
+    return bool(_ENV_BARE_RE.fullmatch(tok)), j
+
+
+def _remove_item_path_is_env_only(s: str, i: int):
+    """s[i] 是某处 Remove-Item 之后的位置。解析整个 path 实参（含逗号续接的全部元素），
+    要求每个元素都是 env: token。返回 (ok, next_index)。fail-closed。"""
+    n = len(s)
+    while i < n and s[i] in " \t":
+        i += 1
+    m = _PATH_NAMED_RE.match(s, i)
+    if m:  # 显式 -Path / -LiteralPath 同样要校验其后的实参
+        i = m.end()
+        while i < n and s[i] in " \t":
+            i += 1
+    count = 0
+    while True:
+        ok, i = _parse_one_path_element(s, i)
+        if not ok:
+            return False, i
+        count += 1
+        while i < n and s[i] in " \t":
+            i += 1
+        if i < n and s[i] == ",":  # 逗号即数组续接：校验下一个元素，绝不剥前缀放行
+            i += 1
+            continue
+        break
+    if count == 0:
+        return False, i  # 零元素（解析不出 path 实参）⇒ fail-closed
+    # path 实参之后只许接 named 参数或命令终止符；stray 位置 token ⇒ 形状不认识 ⇒ 红
+    if i < n and s[i] != "-" and s[i] not in _CMD_TERMINATORS:
+        return False, i
+    return True, i
+
+
+def _remove_item_violations(code: str) -> list:
+    """正向白名单判据（#298 B-1）：返回违规清单，空=合规。
+
+    枚举 code 里每一处 Remove-Item，校验其整个 path 实参的每个数组元素都是 env: token；
+    并照旧全禁 rd/del/erase 别名。fail-closed：任何不认识的形状都判红，绝不静默放行。
+    替换掉 #295 的两次前缀剥离——那只要把回滚目录挂在 env: 变量之后当第二个数组元素，
+    前缀被剥光就判绿，而命令实际会删掉回滚位（C3e/C3f）。
+    """
+    violations = []
+    for m in re.finditer(r"\bRemove-Item\b", code, re.I):
+        ok, _ = _remove_item_path_is_env_only(code, m.end())
+        if not ok:
+            violations.append(
+                f"Remove-Item 的 path 实参不是纯 env: token（位置 {m.start()}）"
+                "——旧包只改名不删除，删了就没有回滚位了")
+    for m in re.finditer(r"\b(rd|del|erase)\b", code, re.I):
+        violations.append(f"出现删除别名 {m.group(0)}（换个别名也不行）")
+    return violations
+
+
 def test_old_package_renamed_never_deleted():
     """回滚的唯一依赖是旧包还在盘上：Remove-Item 只许指向 `env:` 驱动器——
     #295 的代理清理删的是环境变量（`Remove-Item ("env:" + $n)` 与其回滚配方打印行），
     变量不是回滚位，动不到任何目录/文件；除此以外的任何 Remove-Item（也不许
     rd/del/erase）都等于删回滚位。备份名带时间戳，重复换包不许互相覆盖。"""
-    rest = CODE.replace('Remove-Item ("env:"', "").replace("Remove-Item env:", "")
-    assert "Remove-Item" not in rest, "旧包只改名不删除——Remove-Item 只许删 env: 变量，删了就没有回滚位了"
-    assert not re.search(r"\b(rd|del|erase)\b", CODE, re.I), "同上，换个别名也不行"
+    violations = _remove_item_violations(CODE)
+    assert not violations, \
+        "旧包只改名不删除——Remove-Item 只许删 env: 变量，删了就没有回滚位了：" + "; ".join(violations)
     assert re.search(r"run_backend_old-", PS1), "备份目录名必须带 run_backend_old- 前缀"
     assert re.search(r"yyyyMMdd-HHmmss", PS1), "备份名带时间戳：每次换包的备份互不覆盖"
+
+
+# 验牙反例（#298 B-1）：吃合成代码串、纯函数、不改脚本文件、零风险。
+# 期望值照派单第 3 节的样本表手抄；True=合规（纯 env:），False=不合规（会删回滚位/别名）。
+_REMOVE_ITEM_SAMPLES = [
+    ('Remove-Item ("env:" + $n)', True, 'paren-double-quote-concat'),
+    ("Remove-Item ('env:' + $n)", True, 'paren-single-quote-concat-N4'),
+    ('Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY -ErrorAction SilentlyContinue',
+     True, 'all-env-comma-array-swap758'),
+    ('Remove-Item env:HTTP_PROXY, $RollbackDir -Recurse -Force', False, 'C3e-comma-array-bypass'),
+    ('Remove-Item ("env:" + $n), $RollbackDir -Recurse -Force', False, 'C3f-paren-comma-bypass'),
+    ('Remove-Item -Recurse -Force $RollbackDir', False, 'C3a-plain-dir'),
+    ('Remove-Item -LiteralPath $Backup -Recurse -Force', False, 'C3b-literalpath-dir'),
+    ('rd /s /q "$Live"', False, 'C3c-alias-rd'),
+    ('Remove-Item $path', False, 'C3d-indirect-var'),
+    ('Remove-Item -Path env:HTTP_PROXY, $Backup', False, 'explicit-Path-comma-array'),
+]
+
+
+@pytest.mark.parametrize("code,expected_compliant,label", _REMOVE_ITEM_SAMPLES)
+def test_remove_item_env_only_whitelist_counterexamples(code, expected_compliant, label):
+    """判据级验牙：把合成代码串喂给 _remove_item_violations，断言判定与样本表一致。
+
+    这条测试的牙：在「只剥前缀」的旧判据上，C3e/C3f（env: 后逗号挂目录）会被误判合规，
+    于是期望「不合规」的断言变红——正是 B-1 的取证。换成正向白名单后全绿。
+    """
+    violations = _remove_item_violations(code)
+    compliant = not violations
+    assert compliant == expected_compliant, (
+        f"[{label}] 期望{'合规' if expected_compliant else '不合规'}，"
+        f"实得{'合规' if compliant else '不合规'}；样本={code!r}；violations={violations}"
+    )
 
 
 def test_preflight_checks_stage_purity_and_version_stamp():
