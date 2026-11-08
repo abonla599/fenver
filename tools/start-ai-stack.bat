@@ -20,6 +20,22 @@ rem in the public snapshot.
 cd /d "%~dp0.."
 set "ROOT=%CD%"
 
+rem PROXY-SCRUB-BEGIN
+rem Ticket #295 defense-in-depth: clear env proxy vars before the backend child is
+rem launched, so a poisoned NO_PROXY (bracketed [::1] construction-crash family,
+rem #294) never reaches run_backend. The token prints even when nothing matched
+rem (names=none), so the log proves this step ran. Per-line if-defined below: each
+rem line re-expands %_PSCRUB% at its own parse time, so accumulation works without
+rem delayed expansion. Names only - never echo the values.
+set "_PSCRUB="
+if defined HTTP_PROXY (set "_PSCRUB=%_PSCRUB%HTTP_PROXY," & set "HTTP_PROXY=")
+if defined HTTPS_PROXY (set "_PSCRUB=%_PSCRUB%HTTPS_PROXY," & set "HTTPS_PROXY=")
+if defined ALL_PROXY (set "_PSCRUB=%_PSCRUB%ALL_PROXY," & set "ALL_PROXY=")
+if defined NO_PROXY (set "_PSCRUB=%_PSCRUB%NO_PROXY," & set "NO_PROXY=")
+if not defined _PSCRUB (echo PROXY-ENV-SCRUBBED names=none) else (echo PROXY-ENV-SCRUBBED names=%_PSCRUB%)
+set "_PSCRUB="
+rem PROXY-SCRUB-END
+
 rem Skip the backend if something already listens on 8000: a second instance loses the
 rem race for the port, and in the window before it dies it writes the same session and
 rem memory files as the first one.

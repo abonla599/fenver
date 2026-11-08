@@ -29,7 +29,11 @@
 Get-Process → test_no_rename_item_and_no_get_process）。
 """
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SWAP_PS1 = REPO_ROOT / "deploy" / "swap-package.ps1"
@@ -175,13 +179,217 @@ def test_enable_watchdog_only_after_both_acceptance_checks():
         "State 判决不许回来：实例在跑时它恒为 Running，是一条必然误判的判据"
 
 
+# --- #298 B-1 正向白名单：Remove-Item 的整个 path 实参，每个数组元素都必须是 env: token ---
+#
+# 口径（裁决 R8）：枚举每一处 Remove-Item，取出它整个 path 实参（含逗号续接的全部元素），
+# 要求每一个元素只能是 env: 驱动器 token。两种被允许的具体形状：
+#   裸 token：env:NAME（NAME 只许 [A-Za-z_][A-Za-z0-9_]*，可带单/双引号）
+#   拼接式：("env:" + $n) / ('env:' + $n)（单引号也放行——修 N-4 的假红）
+# 任何元素不是 env: token（变量、目录、splat、反引号续行、拼出别的东西）⇒ 红。
+# -Path / -LiteralPath 显式 named 形式同样校验；Remove-Item 别名按 _REMOVE_ITEM_ALIASES 名册全禁。
+# fail-closed：解析不出 path 实参、形状不认识、零元素 ⇒ 红，绝不静默放行。
+# 不许一刀切禁逗号：swap-package.ps1:758 打印的回滚配方合法地用了全 env: 的逗号数组。
+#
+# 射程声明（按实测，不许超出）：
+# - 只认上述两种 env: 形状；拼接式里只允许简单 $var（不认 $n.Trim() / $names[0] 等成员/下标）。
+# - path 实参在第一个 named 参数（-Recurse/-ErrorAction 等）或命令终止符（换行 ; | } 引号 结尾）处结束；
+#   named 参数之后的额外位置 token 不再校验（PowerShell 会因位置参数冲突报错，不会静默删除）。
+# - 不认 -Path:env:FOO 冒号绑定形、不认 named 参数排在位置实参之前的形（如 -Force env:FOO）——一律 fail-closed 判红。
+# - 别名禁令从 _REMOVE_ITEM_ALIASES 名册派生（R10 补齐 ri/rm/rmdir，不再漏）；名册条数有 == 钉，
+#   与本机 Get-Alias -Definition Remove-Item 实测的双向对账见 test_remove_item_alias_roster_matches_machine_truth。
+_ENV_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_ENV_BARE_RE = re.compile(r"env:" + _ENV_NAME)
+_ENV_CONCAT_RE = re.compile(r"""["']env:["']\s*\+\s*\$\{?""" + _ENV_NAME + r"""\}?""")
+_PATH_NAMED_RE = re.compile(r"-(Path|LiteralPath)\b", re.I)
+_CMD_TERMINATORS = "\r\n;|}'\""
+
+
+def _parse_one_path_element(s: str, i: int):
+    """从 s[i] 解析一个 path 数组元素，返回 (is_env_only, next_index)。
+    只认裸 env:NAME（可带引号）与 ("env:" + $var) 拼接式；其余一律 False（fail-closed）。"""
+    n = len(s)
+    while i < n and s[i] in " \t":
+        i += 1
+    if i >= n:
+        return False, i
+    c = s[i]
+    if c == "(":
+        depth = 0
+        j = i
+        while j < n:
+            if s[j] == "(":
+                depth += 1
+            elif s[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if j >= n or depth != 0:
+            return False, i  # 括号不闭合 ⇒ fail-closed
+        inner = s[i + 1:j].strip()
+        return bool(_ENV_CONCAT_RE.fullmatch(inner)), j + 1
+    if c in "\"'":
+        j = i + 1
+        while j < n and s[j] != c:
+            j += 1
+        if j >= n:
+            return False, i  # 引号不闭合 ⇒ fail-closed
+        inner = s[i + 1:j]
+        return bool(_ENV_BARE_RE.fullmatch(inner)), j + 1
+    # 裸 token：读到空白/逗号/命令终止符为止
+    j = i
+    while j < n and s[j] not in " \t," + _CMD_TERMINATORS:
+        j += 1
+    tok = s[i:j]
+    return bool(_ENV_BARE_RE.fullmatch(tok)), j
+
+
+def _remove_item_path_is_env_only(s: str, i: int):
+    """s[i] 是某处 Remove-Item 之后的位置。解析整个 path 实参（含逗号续接的全部元素），
+    要求每个元素都是 env: token。返回 (ok, next_index)。fail-closed。"""
+    n = len(s)
+    while i < n and s[i] in " \t":
+        i += 1
+    m = _PATH_NAMED_RE.match(s, i)
+    if m:  # 显式 -Path / -LiteralPath 同样要校验其后的实参
+        i = m.end()
+        while i < n and s[i] in " \t":
+            i += 1
+    count = 0
+    while True:
+        ok, i = _parse_one_path_element(s, i)
+        if not ok:
+            return False, i
+        count += 1
+        while i < n and s[i] in " \t":
+            i += 1
+        if i < n and s[i] == ",":  # 逗号即数组续接：校验下一个元素，绝不剥前缀放行
+            i += 1
+            continue
+        break
+    if count == 0:
+        return False, i  # 零元素（解析不出 path 实参）⇒ fail-closed
+    # path 实参之后只许接 named 参数或命令终止符；stray 位置 token ⇒ 形状不认识 ⇒ 红
+    if i < n and s[i] != "-" and s[i] not in _CMD_TERMINATORS:
+        return False, i
+    return True, i
+
+
+# R10（2026-11-08）：Remove-Item 别名名册——手抄字面量，来源是本机
+# `Get-Alias -Definition Remove-Item | Select-Object -ExpandProperty Name` 的实测输出。
+# 静态判据（下面 _remove_item_violations 的别名禁令）从这份名册派生；条数钉在
+# test_remove_item_alias_roster_count_pinned，与机器实测的双向对账在
+# test_remove_item_alias_roster_matches_machine_truth（多一枚/少一枚都红，两个方向分开报）。
+_REMOVE_ITEM_ALIASES = ("del", "erase", "rd", "ri", "rm", "rmdir")
+_REMOVE_ITEM_ALIAS_RE = re.compile(r"\b(" + "|".join(_REMOVE_ITEM_ALIASES) + r")\b", re.I)
+
+
+def _remove_item_violations(code: str) -> list:
+    """正向白名单判据（#298 B-1）：返回违规清单，空=合规。
+
+    枚举 code 里每一处 Remove-Item，校验其整个 path 实参的每个数组元素都是 env: token；
+    并按 _REMOVE_ITEM_ALIASES 名册全禁 Remove-Item 别名。fail-closed：任何不认识的形状都判红，绝不静默放行。
+    替换掉 #295 的两次前缀剥离——那只要把回滚目录挂在 env: 变量之后当第二个数组元素，
+    前缀被剥光就判绿，而命令实际会删掉回滚位（C3e/C3f）。
+    """
+    violations = []
+    for m in re.finditer(r"\bRemove-Item\b", code, re.I):
+        ok, _ = _remove_item_path_is_env_only(code, m.end())
+        if not ok:
+            violations.append(
+                f"Remove-Item 的 path 实参不是纯 env: token（位置 {m.start()}）"
+                "——旧包只改名不删除，删了就没有回滚位了")
+    for m in _REMOVE_ITEM_ALIAS_RE.finditer(code):
+        violations.append(f"出现删除别名 {m.group(0)}（换个别名也不行）")
+    return violations
+
+
 def test_old_package_renamed_never_deleted():
-    """回滚的唯一依赖是旧包还在盘上：全脚本不许出现任何 Remove-Item（也不许
-    rd/del/erase）；备份名带时间戳，重复换包不许互相覆盖。"""
-    assert "Remove-Item" not in CODE, "旧包只改名不删除——删了就没有回滚位了"
-    assert not re.search(r"\b(rd|del|erase)\b", CODE, re.I), "同上，换个别名也不行"
+    """回滚的唯一依赖是旧包还在盘上：Remove-Item 只许指向 `env:` 驱动器——
+    #295 的代理清理删的是环境变量（`Remove-Item ("env:" + $n)` 与其回滚配方打印行），
+    变量不是回滚位，动不到任何目录/文件；除此以外的任何 Remove-Item（_REMOVE_ITEM_ALIASES
+    名册里的别名也一律不许）都等于删回滚位。备份名带时间戳，重复换包不许互相覆盖。"""
+    violations = _remove_item_violations(CODE)
+    assert not violations, \
+        "旧包只改名不删除——Remove-Item 只许删 env: 变量，删了就没有回滚位了：" + "; ".join(violations)
     assert re.search(r"run_backend_old-", PS1), "备份目录名必须带 run_backend_old- 前缀"
     assert re.search(r"yyyyMMdd-HHmmss", PS1), "备份名带时间戳：每次换包的备份互不覆盖"
+
+
+# 验牙反例（#298 B-1）：吃合成代码串、纯函数、不改脚本文件、零风险。
+# 期望值照派单第 3 节的样本表手抄；True=合规（纯 env:），False=不合规（会删回滚位/别名）。
+_REMOVE_ITEM_SAMPLES = [
+    ('Remove-Item ("env:" + $n)', True, 'paren-double-quote-concat'),
+    ("Remove-Item ('env:' + $n)", True, 'paren-single-quote-concat-N4'),
+    ('Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY -ErrorAction SilentlyContinue',
+     True, 'all-env-comma-array-swap758'),
+    ('Remove-Item env:HTTP_PROXY, $RollbackDir -Recurse -Force', False, 'C3e-comma-array-bypass'),
+    ('Remove-Item ("env:" + $n), $RollbackDir -Recurse -Force', False, 'C3f-paren-comma-bypass'),
+    ('Remove-Item -Recurse -Force $RollbackDir', False, 'C3a-plain-dir'),
+    ('Remove-Item -LiteralPath $Backup -Recurse -Force', False, 'C3b-literalpath-dir'),
+    ('rd /s /q "$Live"', False, 'C3c-alias-rd'),
+    ('Remove-Item $path', False, 'C3d-indirect-var'),
+    ('Remove-Item -Path env:HTTP_PROXY, $Backup', False, 'explicit-Path-comma-array'),
+    ('rm $RollbackDir -Recurse -Force', False, 'R10-alias-rm'),
+    ('rmdir /s /q "$Live"', False, 'R10-alias-rmdir'),
+    ('ri env:FOO, $dir', False, 'R10-alias-ri'),
+]
+
+
+@pytest.mark.parametrize("code,expected_compliant,label", _REMOVE_ITEM_SAMPLES)
+def test_remove_item_env_only_whitelist_counterexamples(code, expected_compliant, label):
+    """判据级验牙：把合成代码串喂给 _remove_item_violations，断言判定与样本表一致。
+
+    这条测试的牙：在「只剥前缀」的旧判据上，C3e/C3f（env: 后逗号挂目录）会被误判合规，
+    于是期望「不合规」的断言变红——正是 B-1 的取证。换成正向白名单后全绿。
+    """
+    violations = _remove_item_violations(code)
+    compliant = not violations
+    assert compliant == expected_compliant, (
+        f"[{label}] 期望{'合规' if expected_compliant else '不合规'}，"
+        f"实得{'合规' if compliant else '不合规'}；样本={code!r}；violations={violations}"
+    )
+
+
+def test_remove_item_alias_roster_count_pinned():
+    """名册是手抄字面量，条数由这条 == 钉看着：增删名册而不动钉 ⇒ 红。
+    静态判据从名册派生（_REMOVE_ITEM_ALIAS_RE），所以名册漏一枚 = 判据漏一枚；
+    名册与本机 Get-Alias 实测的双向对账在 test_remove_item_alias_roster_matches_machine_truth。"""
+    assert len(_REMOVE_ITEM_ALIASES) == 6, (
+        f"Remove-Item 别名名册条数漂了：{sorted(_REMOVE_ITEM_ALIASES)}——"
+        "改名册必须同时改这条钉，并重跑机器对账确认新名册与实测一致")
+    assert len(set(_REMOVE_ITEM_ALIASES)) == len(_REMOVE_ITEM_ALIASES), \
+        "名册出现重复条目（重复会让条数钉与集合对账口径分叉）"
+
+
+def test_remove_item_alias_roster_matches_machine_truth():
+    """机器真相对账（R10）：问本机 `Get-Alias -Definition Remove-Item`，实测别名集合
+    必须与手抄名册 _REMOVE_ITEM_ALIASES 双向相等。两个方向分开报：
+    - 机器有而名册没有 ⇒ 漏禁（那枚别名删回滚位认不出，正是 R10 补的洞）；
+    - 名册有而机器没有 ⇒ 名册与机器口径分叉（禁了不存在的别名，或机器版本变了）。
+    没有 powershell.exe 只跳这一格；静态那格（条数钉 + 合成样本验牙）照跑照判，
+    惯例同 test_launch_env_hygiene.py 与 test_swap_package_boot_poll_single_process_machine_truth.py。
+    探针只读（Get-Alias 不碰文件/进程/网络），零副作用。"""
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    if ps is None:
+        pytest.skip("powershell.exe 不可用：跳过的是「名册↔机器实测双向对账」这一格；"
+                    "静态那格（_REMOVE_ITEM_ALIASES 条数钉 + 合成样本验牙）不受影响、照判。"
+                    "没有机器对账时名册只剩手抄水平，放行复跑必须在 Windows 现网机上做。")
+    res = subprocess.run(
+        [ps, "-NoProfile", "-Command",
+         "Get-Alias -Definition Remove-Item | Select-Object -ExpandProperty Name"],
+        capture_output=True, text=True, timeout=90)
+    assert res.returncode == 0, \
+        f"Get-Alias 探针跑失败 rc={res.returncode}：{(res.stdout or '') + (res.stderr or '')}"
+    measured = {ln.strip().lower() for ln in (res.stdout or "").splitlines() if ln.strip()}
+    assert measured, "Get-Alias 答了空集合——探针没真跑，下面的对账是空转（阳性对照失败）"
+    roster = {a.lower() for a in _REMOVE_ITEM_ALIASES}
+    missing = measured - roster
+    extra = roster - measured
+    assert not missing, \
+        f"机器实测有而名册没有（漏禁：这些别名删回滚位认不出）：{sorted(missing)}"
+    assert not extra, \
+        f"名册有而机器实测没有（名册与机器口径分叉）：{sorted(extra)}"
 
 
 def test_preflight_checks_stage_purity_and_version_stamp():

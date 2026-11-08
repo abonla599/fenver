@@ -133,6 +133,7 @@ def search(query: str, max_results: int = DEFAULT_RESULTS) -> list:
         return []
     try:
         with httpx.Client(verify=system_ssl_context(), timeout=TIMEOUT_SECONDS,
+                          trust_env=False,
                           follow_redirects=False,
                           headers={"User-Agent": USER_AGENT,
                                    "Accept-Language": "zh-CN,zh;q=0.9"}) as client:

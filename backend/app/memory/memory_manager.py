@@ -126,7 +126,8 @@ class MemoryManager:
                         self.client = OpenAI(
                             api_key=api_key,
                             base_url=base_url,
-                            http_client=httpx.Client(verify=system_ssl_context()),
+                            http_client=httpx.Client(verify=system_ssl_context(),
+                                                     trust_env=False),
                             timeout=EMBED_TIMEOUT,
                             max_retries=0,
                         )

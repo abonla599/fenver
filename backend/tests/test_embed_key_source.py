@@ -280,3 +280,44 @@ def test_selfcheck_survives_a_broken_provider_store(monkeypatch):
     monkeypatch.setenv("EMBEDDINGS_BASE_URL", "https://embed.invalid/v1")
     monkeypatch.setenv("EMBEDDINGS_MODEL", CANARY_MODEL)
     assert selfcheck._embeddings_unconfigured() is False
+
+
+# ---------- 7. 毒环境：带方括号的 NO_PROXY 不许把云端嵌入打成伪嵌入 ----------
+
+# 毒必须是带方括号的 `[::1]`：httpx 解析环境代理时裸 IPv6 走合法的
+# `all://[::1]` 分支、不崩，带方括号才落进 `all://*[::1]` 在**构造期**抛
+# InvalidURL（机理见 httpx/_utils.py，本机实测）。反例若换成裸 ::1，
+# 生产构造路径根本不抛、降级断言恒绿空转——这一格是承重的，动反例前先想清楚。
+_POISON_NO_PROXY = "localhost,127.0.0.1,[::1]"
+
+
+def test_bracket_no_proxy_poison_does_not_degrade_cloud_embed(tmp_path, monkeypatch, capsys):
+    """一枚带方括号的 NO_PROXY 不许让嵌入客户端在构造期崩进降级分支。
+
+    活性阳性对照先行：裸 httpx.Client() 在该毒下必须**真的抛** InvalidURL——
+    证明确实是毒在起作用，而不是用例自己空转。然后走生产构造路径
+    （MemoryManager 的 http_client=httpx.Client(...) 是真构造，OpenAI 已被假替、
+    探发返回固定向量）：修复前这里构造抛错被 except 吞掉、降级成伪嵌入、
+    embed_model 变 dummy；修复后客户端 trust_env=False、不读环境代理、三项配齐
+    就该用云端。零出网：httpx 构造本身不发任何请求，base_url 用 .invalid 域。
+    """
+    import httpx
+
+    monkeypatch.setenv("NO_PROXY", _POISON_NO_PROXY)
+    with pytest.raises(httpx.InvalidURL) as poison_control:
+        httpx.Client()
+    assert "Invalid port" in str(poison_control.value), (
+        f"阳性对照拿到的不是构造期 InvalidURL，而是 {poison_control.value!r}："
+        "毒环境没有注入成功，下面的反例就成了空转")
+
+    monkeypatch.setenv("api_key", ENV_KEY)
+    bucket = {}
+    manager = _boot(monkeypatch, tmp_path, bucket)
+    assert manager._dummy_embed is False, (
+        "毒环境下 MemoryManager 降级成了伪嵌入：生产 httpx 客户端的构造异常会被 "
+        "except 分支吞掉，这正是记忆静默坏掉的事故形状。检查 memory_manager.py "
+        "的 http_client 是否还带着 trust_env=False")
+    assert manager.embed_model == CANARY_MODEL, (
+        f"embed_model 不是配置值而是 {manager.embed_model!r}（降级路径会把它洗成 dummy）")
+    out = capsys.readouterr().out
+    assert "伪嵌入" not in out, f"日志里出现了降级警告：{out}"

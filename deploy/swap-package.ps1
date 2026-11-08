@@ -728,6 +728,17 @@ function Invoke-SnapshotRetention {
     Write-Output ('SNAPSHOT-RETENTION state=ok keep=' + $Keep + ' removed=' + $removed + ' snapshots=' + ($sorted.Count - $removed))
 }
 
+# PROXY-SCRUB-HELPER-BEGIN
+function Remove-ProxyEnvForChild {
+    # Ticket #295 defense-in-depth: drop env proxy vars from THIS process before the
+    # backend child starts, so a poisoned NO_PROXY (bracketed [::1] construction-crash
+    # family, ticket #294) can never be inherited through Start-Process. Loud even
+    # when nothing matched: names=none still prints, so logs prove this step ran.
+    $names = @(Get-ChildItem env: | Where-Object { $_.Name -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' } | ForEach-Object { $_.Name })
+    foreach ($n in $names) { Remove-Item ("env:" + $n) }
+    Write-Output ('PROXY-ENV-SCRUBBED names=' + $(if ($names.Count -gt 0) { $names -join ',' } else { 'none' }))
+}
+# PROXY-SCRUB-HELPER-END
 function Show-Rollback {
     # printed, never auto-run: after the live dir has been moved aside, a wrong
     # automatic un-rename under a file lock converts one half-swap into two.
@@ -743,6 +754,8 @@ function Show-Rollback {
     Write-Output '    deeper inside the half-live package instead of failing):'
     Write-Output ("    [System.IO.Directory]::Move('$Backup', '$Live')")
     Write-Output 'ROLLBACK-HOWTO 5) start the old package and wait until /health answers with the OLD build:'
+    Write-Output 'ROLLBACK-HOWTO 5a) FIRST clear env proxy vars in THIS window (#295: a poisoned NO_PROXY degrades cloud embedding in whatever it starts):'
+    Write-Output '    Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY -ErrorAction SilentlyContinue'
     Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden")
     Write-Output 'ROLLBACK-HOWTO 6) only now re-enable the watchdog task (find it by its action, as this script did)'
     Write-Output ('ROLLBACK-HOWTO 7) runtime data copies this run saved (DATA-SAVED dir=) live at ' + $DataSnapshotDir + ' - if the package going live is older than v0.35 it cannot parse a waiting_user status and erases those records from data\tasks.json on its first flush, so stop the backend, copy tasks.json back over data\tasks.json, then start it again (DATA-SAVE-FAIL instead of DATA-SAVED means no copy exists)')
@@ -951,6 +964,8 @@ function Stop-AfterFailure {
         # Start-Process call in its body.
         if (@(Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
             # do not double-start: two backends would write the same data\ files
+            # ticket #295: scrub env proxies in THIS process before the child inherits them
+            Remove-ProxyEnvForChild
             Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
             $package = 'old-package-restarted'
         }
@@ -1376,6 +1391,8 @@ Write-Output 'SWAPPED'
 # fails a GOOD package and prints a rollback recipe for no reason. Poll
 # instead, and keep the window configurable for slower machines.
 try {
+    # ticket #295: never let a poisoned NO_PROXY slip into the new backend's environment
+    Remove-ProxyEnvForChild
     Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
 } catch {
     Stop-AfterFailure 'start' $_.Exception.Message
