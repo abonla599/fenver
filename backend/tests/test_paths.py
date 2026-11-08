@@ -411,6 +411,23 @@ def test_gitignore_ignores_a_root_call_ledger_by_a_rule_that_actually_exists():
         "空模式（一枚裸 CR 的空行）也会命中，而那正是这条锁要挡的假阳性")
 
 
+def test_gitignore_call_ledger_rule_anchors_the_root_only():
+    """反向用例：前导斜杠只锚仓库根，子目录里的同名文件不许被这条规则盖住。
+
+    谁把规则改宽成无斜杠的 `call-ledger-*.jsonl`（任意深度）这一条就红：那会连子目录里
+    有意留档的样本一起吞掉，而"根级兜底"要的从来不是这个形状。rc 只认 0/1，128 之类
+    一律判红——不许把"问不出"当成"没被忽略"。
+    """
+    probe = "sub/call-ledger-x.jsonl"
+    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-v", "--", probe],
+                         capture_output=True, timeout=60)
+    report = (res.stdout or b"").decode("utf-8", "replace").strip()
+    assert res.returncode in (0, 1), f"git 答不上来（rc={res.returncode}）：判不了不许当作通过"
+    assert res.returncode == 1 and not report, (
+        f"{probe} 本该不被忽略，git 却回了 rc={res.returncode}／{report!r}："
+        "规则被改宽成任意深度了，前导斜杠那一格丢了")
+
+
 def _calls_named(node, names):
     """AST 里按被调名收 Call：Name 与 Attribute 两种写法都认（锁的是调用，不是文本）。"""
     return [n for n in ast.walk(node)
