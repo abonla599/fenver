@@ -892,4 +892,19 @@ object Api {
                 put("items", arr)
             }.toString()))
     }
+
+    /* ---------- v0.40 移动端感知（只读） ---------- */
+
+    /* 上传一份设备侧已脱敏的快照。body 由 core.DeviceContextPayload.build() 产出——
+     * 这里刻意只收成品字符串：让 Api 自己拼 JSON，脱敏那一道就多了一个可以绕过的地方。
+     * 走 call() 而不是自己打 OkHttp，是为了白拿那一层 401 自愈（会话过期时重打一次）；
+     * 服务端 403/413 的 reason 在 ApiException.message 里，界面照原样显示即可。 */
+    suspend fun postDeviceContext(body: String): String =
+        call("/v1/device/context", "POST", body)
+
+    /* 用户随时停止共享：不带 deviceId 撤自己名下全部（§9.8 可达性 ≤2 步）。 */
+    suspend fun clearDeviceContext(deviceId: String? = null) {
+        call("/v1/device/context" + (if (deviceId.isNullOrEmpty()) ""
+            else "?device_id=" + enc(deviceId)), "DELETE")
+    }
 }
