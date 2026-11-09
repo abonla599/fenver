@@ -55,3 +55,24 @@ def test_window_background_matches_token():
     assert f"#{bg}" in _text(COLORS).upper(), \
         f"colors.xml 的 window_bg 不是 {bg}：键盘顶起窗口时会露出另一块底色"
     assert "@color/window_bg" in _text(THEMES)
+
+
+def test_xml_comments_never_contain_a_double_hyphen():
+    """aapt 的 mergeDebugResources 会拒绝注释里出现 ASCII 双连字符的 XML。
+
+    2026-11-09 真踩过：把官网色板写进 colors.xml 注释时顺手写了「官网 --bg 的
+    #2B3D34」，XML 规范不允许注释内容含 `--`，整条 Build Native Android APK
+    在 `mergeDebugResources` 挂掉，而本地只跑 backend/tests 看不见这一层。
+    中文破折号「——」是 U+2014，不是两个 ASCII 连字符，不在此列。
+    """
+    res = REPO / "android-native/app/src/main/res"
+    scanned = 0
+    for path in sorted(res.rglob("*.xml")):
+        text = _text(path)
+        for m in re.finditer(r"<!--([\s\S]*?)-->", text):
+            scanned += 1
+            line = text[:m.start()].count("\n") + 1
+            assert "--" not in m.group(1), (
+                f"{path.relative_to(REPO)} 第 {line} 行注释含 ASCII `--`："
+                " aapt 会拒绝整份资源文件")
+    assert scanned > 0, "一份 XML 注释都没扫到：切片失效，这条锁成了空绿的门"
