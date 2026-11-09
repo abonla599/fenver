@@ -697,9 +697,12 @@ def test_the_jvm_bench_and_the_shipped_core_are_one_and_the_same_copy():
     shipped = sorted(p.name for p in
                      (repo / "android-native" / "app" / "src" / "main" / "java" / "xyz"
                       / "fenever" / "assistant" / "core").glob("*.java"))
-    assert shipped == ["ApkDigest.java", "ApkDownloader.java", "ExportName.java",
-                       "ExportRedeem.java", "MiniJson.java", "ReleasePlan.java",
-                       "ScheduleBoard.java", "TaskCard.java"], \
+    # v0.40 A 轨的那一枚是 2026-11-09 显式加进来的：设备侧脱敏与 wire 形状，
+    # 台架 DeviceContextPayloadTest（16 例）由 CI 的 testDebugUnitTest 跑，
+    # 与服务端常量的对照另在 test_v040_android_wire_parity.py。
+    assert shipped == ["ApkDigest.java", "ApkDownloader.java", "DeviceContextPayload.java",
+                       "ExportName.java", "ExportRedeem.java", "MiniJson.java",
+                       "ReleasePlan.java", "ScheduleBoard.java", "TaskCard.java"], \
         f"上线模块的判断核与名单对不上（现在是 {shipped}）：先确认谁被加/删，再改这条"
 
     benched = sorted(p.name for p in bench.CORE_PKG_DIR.glob("*.java"))
