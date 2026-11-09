@@ -777,11 +777,42 @@ def test_live_error_excerpt_never_carries_the_loaded_key(tmp_path):
     assert secrets == [SHAPEY] and payload["credential_fp"] == probe.key_fingerprint(SHAPEY)
 
 
+# 探针的 stdout 里可能先落一行**诊断**（apk_cache / releases 的"仅日志"行）。
+# 那几行走 stdout 是生产契约（EXE 是隐藏窗口起的，stdout 就是 server.log），
+# 且由 test_apk_self_host_cache.py / test_request_timing_log.py 正面钉着，不能为了
+# 让测试好写就挪去 stderr。这里按同一口径把已知前缀滤掉，只留 payload。
+# 谁先触发那行取决于进程内的首次访问，所以它落在哪个用例头上是随机的——
+# 不滤就会得到一条"换个顺序就红"的假失败。
+_DIAG_PREFIXES = ("[apk-cache]", "[releases]")
+
+
+def _payload_only(printed: str) -> str:
+    return "\n".join(ln for ln in printed.splitlines()
+                     if not ln.startswith(_DIAG_PREFIXES))
+
+
+def test_payload_only_drops_diagnostics_and_keeps_the_json():
+    """过滤本身要单测：这条假失败过一次，且只在全量里出现。
+
+    2026-11-09 全量：`capsys` 读到的第一行是 `[apk-cache] 可定位细节（仅日志）…`，
+    `json.loads` 直接抛 `Expecting value: line 1 column 2`。单跑这条用例是绿的，
+    单跑整个模块也是绿的——那行诊断只在**进程内首次**访问安装包缓存时打印，
+    落谁头上取决于用例顺序。过滤器要有牙，就得单测它。
+    """
+    polluted = ('[apk-cache] 可定位细节（仅日志）：盘上缺包、版本 0.36.5\n'
+                '[releases] 预取线程异常：TimeoutError\n'
+                '{\n  "credential_fp": "abc"\n}\n')
+    assert json.loads(_payload_only(polluted)) == {"credential_fp": "abc"}
+    # 负控：payload 本体的一行都不许被吃掉（前缀只认开头那几个字面量）
+    kept = '{\n  "[apk-cache] 这是正文里的字符串"\n}\n'
+    assert "[apk-cache] 这是正文里的字符串" in _payload_only(kept)
+
+
 def test_rendered_payload_carries_only_the_fingerprint(tmp_path, capsys):
     probe.main(_argv(tmp_path, "--profile", "deepseek_thinking_type", "--level", "均衡",
                      "--dry-run", key=SHAPEY))
     printed = capsys.readouterr().out
-    parsed = json.loads(printed)
+    parsed = json.loads(_payload_only(printed))
     assert SHAPEY not in printed
     assert parsed["credential_fp"] == probe.key_fingerprint(SHAPEY) != SHAPEY
 
@@ -794,7 +825,7 @@ def test_exit_guard_refuses_to_print_a_payload_carrying_the_key(tmp_path, capsys
     rc = probe.main(_argv(tmp_path, "--profile", "none", "--dry-run"))
     printed = capsys.readouterr().out
     assert rc == probe.RC_LEAK_BLOCKED and SHAPELESS not in printed
-    assert json.loads(printed)["exit_guard"] == "blocked"
+    assert json.loads(_payload_only(printed))["exit_guard"] == "blocked"
 
 
 def test_exit_guard_does_not_fire_on_a_clean_payload(tmp_path, capsys, monkeypatch):
@@ -805,7 +836,7 @@ def test_exit_guard_does_not_fire_on_a_clean_payload(tmp_path, capsys, monkeypat
     rc = probe.main(_argv(tmp_path, "--profile", "none", "--dry-run"))
     printed = capsys.readouterr().out
     assert rc == probe.RC_UNVERIFIED
-    assert json.loads(printed)["error_excerpt"] == clean["error_excerpt"]
+    assert json.loads(_payload_only(printed))["error_excerpt"] == clean["error_excerpt"]
 
 
 def test_render_and_check_rejects_a_credential_shape_it_was_not_told_about():
