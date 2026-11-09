@@ -730,13 +730,32 @@ function Invoke-SnapshotRetention {
 
 # PROXY-SCRUB-HELPER-BEGIN
 function Remove-ProxyEnvForChild {
-    # Ticket #295 defense-in-depth: drop env proxy vars from THIS process before the
-    # backend child starts, so a poisoned NO_PROXY (bracketed [::1] construction-crash
-    # family, ticket #294) can never be inherited through Start-Process. Loud even
-    # when nothing matched: names=none still prints, so logs prove this step ran.
-    $names = @(Get-ChildItem env: | Where-Object { $_.Name -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' } | ForEach-Object { $_.Name })
-    foreach ($n in $names) { Remove-Item ("env:" + $n) }
-    Write-Output ('PROXY-ENV-SCRUBBED names=' + $(if ($names.Count -gt 0) { $names -join ',' } else { 'none' }))
+    # Ticket #295: drop env proxy vars from THIS process before the backend child
+    # starts, so a poisoned NO_PROXY can never be inherited through Start-Process.
+    # 2026-11-09: never enumerate the env: drive here. A host can inject BOTH
+    # http_proxy and HTTP_PROXY; building that dictionary throws "An item with the
+    # same key has already been added", and because this helper sat inside the
+    # start try, it aborted a swap AFTER the package had already been moved.
+    # Use a fixed roster (both cases) instead; the regex below is the roster's
+    # machine-readable shape, not an enumeration source.
+    # This is defence-in-depth only: a failed scrub must never abort a swap.
+    $roster = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+    $names = @($roster | Where-Object { $_ -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' })
+    $removed = @()
+    foreach ($n in $names) {
+        $had = $false
+        try { $had = ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) } catch { $had = $false }
+        if (-not $had) { continue }
+        try {
+            Remove-Item ("env:" + $n) -ErrorAction SilentlyContinue
+            [Environment]::SetEnvironmentVariable($n, $null, 'Process')
+            $removed = $removed + $n
+        } catch {
+            Write-Output ('PROXY-SCRUB-WARN name=' + $n)
+        }
+    }
+    Write-Output ('PROXY-ENV-SCRUBBED names=' + $(if ($removed.Count -gt 0) { $removed -join ',' } else { 'none' }))
 }
 # PROXY-SCRUB-HELPER-END
 function Show-Rollback {
@@ -965,7 +984,7 @@ function Stop-AfterFailure {
         if (@(Get-LiveProcess).Count -eq 0 -and (Test-Path -LiteralPath $LiveExe)) {
             # do not double-start: two backends would write the same data\ files
             # ticket #295: scrub env proxies in THIS process before the child inherits them
-            Remove-ProxyEnvForChild
+            try { Remove-ProxyEnvForChild } catch { Write-Output ('PROXY-SCRUB-SKIPPED error=' + $_.Exception.Message) }
             Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
             $package = 'old-package-restarted'
         }
@@ -1392,7 +1411,7 @@ Write-Output 'SWAPPED'
 # instead, and keep the window configurable for slower machines.
 try {
     # ticket #295: never let a poisoned NO_PROXY slip into the new backend's environment
-    Remove-ProxyEnvForChild
+    try { Remove-ProxyEnvForChild } catch { Write-Output ('PROXY-SCRUB-SKIPPED error=' + $_.Exception.Message) }
     Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
 } catch {
     Stop-AfterFailure 'start' $_.Exception.Message

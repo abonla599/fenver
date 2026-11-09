@@ -436,3 +436,46 @@ def test_machine_truth_bat_counterexample_no_scrub_leaves_vars(tmp_path):
     out = res.stdout or ""
     assert "PROBE_STATE=STILL_" in out, f"反例坏了：不跑清环境块变量就不在了？{out}"
     assert "FINDSTR_RC=0" in out, f"findstr 抓不到注入的变量，正面那格的 rc=1 就没有意义：{out}"
+
+
+# ---------------------------------------------------- 2026-11-09 换包事故形状锁
+_FIXED_ROSTER = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+def test_ps_helper_uses_fixed_roster_not_env_drive_enumeration():
+    """helper 不许再靠 `Get-ChildItem env:` 枚举来取删除名单。
+
+    2026-11-09 真实事故：工具宿主同时注入了 http_proxy / HTTP_PROXY 和
+    https_proxy / HTTPS_PROXY，枚举 env: drive 时 .NET 字典抛「已添加了具有相同键
+    的项」；helper 排在 Start-Process 前面且同在一个 try，于是换包在 start 阶段中止
+    ——包已经移进 live，服务没起来，公网 502。固定八枚名字（大小写两版）+ 逐枚
+    SetEnvironmentVariable 兜底，才不会碰重复键那本字典。
+    """
+    for path in (WATCHDOG_PS1, SWAP_PS1):
+        helper = _extract_ps_helper(path)
+        assert helper, f"{path.name} 没有可抽取的 helper"
+        assert "Get-ChildItem env:" not in helper, \
+            f"{path.name} 又用 env: drive 枚举取名单了：重复键那场事故会重演"
+        assert "SetEnvironmentVariable" in helper, \
+            f"{path.name} 没有按名字清的兜底动作"
+        assert "PROXY-SCRUB-WARN" in helper, \
+            f"{path.name} 单枚清理失败会往外抛：防御动作不许中断换包"
+        for name in _FIXED_ROSTER:
+            assert "'" + name + "'" in helper, f"{path.name} 的固定名单缺 {name}"
+
+
+def test_swap_scrub_calls_are_wrapped_so_they_cannot_abort_start():
+    """swap 里两处 helper 调用都得被自己的 try/catch 包住。
+
+    清理只是纵深防御；它失败时最多打一行 token，不许落到 step 6 的外层 catch
+    变成 Stop-AfterFailure 'start'（那是「包已换、服务没起」的最坏失败形状）。
+    """
+    text = _read(SWAP_PS1)
+    calls = [ln for ln in text.splitlines()
+             if re.search(r"\bRemove-ProxyEnvForChild\b", ln)
+             and not re.match(r"^\s*function\s", ln)]
+    assert len(calls) == 2, f"swap 里应是两处调用，实际 {len(calls)}：{calls}"
+    for ln in calls:
+        assert re.search(r"\btry\s*\{[^}]*Remove-ProxyEnvForChild[^}]*\}\s*catch", ln), \
+            f"调用没有单独兜底：{ln.strip()}"
