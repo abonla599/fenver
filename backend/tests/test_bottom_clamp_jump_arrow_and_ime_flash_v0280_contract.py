@@ -136,12 +136,12 @@ def test_manifest_theme_pins_the_window_background():
         f"资源底色 {xml_bg.group(1)} 与 Compose 深色画布 {kt_bg.group(1)} 不是同一个颜色"
 
 
-def test_ai_theme_resyncs_window_background_on_theme_switch():
-    """换肤（深色↔浅色/跟随系统）时窗口底色必须跟着改：资源只管冷启动首帧。"""
+def test_ai_theme_pins_the_window_background():
+    """窗口底色钉成官网墨绿：资源只管冷启动首帧，之后每一帧归 Compose 管。"""
     theme = _strip_kotlin_comments(_read(THEME_KT))
     m = re.search(r"fun AiTheme\([\s\S]*?\n\}", theme)
     assert m, "找不到 AiTheme 函数体"
     body = m.group(0)
     assert "setBackgroundDrawable(ColorDrawable(bg.toArgb()))" in body, \
-        "AiTheme 不再随外观重设窗口底色：浅色用户会等到一块深色闪屏（对称的旧 bug）"
-    assert "DisposableEffect(bg)" in body, "底色重设没有挂在对 bg 的 effect 上：换肤不生效"
+        "AiTheme 不再钉窗口底色：键盘 adjustResize 顶起时会露出系统白底"
+    assert "DisposableEffect(bg)" in body, "底色重设没有挂在对 bg 的 effect 上"

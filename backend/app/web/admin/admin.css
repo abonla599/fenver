@@ -13,7 +13,7 @@
   /* 可点目标的统一热区。44px 是这一页的硬下限：删号、换发、停用点错都要重来。 */
   --fv-tap: 44px;
   /* 共享令牌里没有 danger 的淡底；本页只此一处定义，标签与高危徽章共用。 */
-  --fv-danger-soft: rgba(248, 113, 113, .14);
+  --fv-danger-soft: color-mix(in srgb, var(--fv-danger) 14%, transparent);
 }
 
 body.admin {
@@ -31,23 +31,23 @@ body.admin {
 .btn .lbl { white-space: nowrap; }
 
 code {
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--fv-mono);
   font-size: 12px;
   background: var(--bg-soft);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--fv-radius-xs);
   padding: 0 5px;
 }
 
 .dim { color: var(--text-3); }
-.pane-note { color: var(--text-3); font-size: 12.5px; line-height: 1.6; margin: 0 0 12px; }
+.pane-note { color: var(--text-2); font-size: 12.5px; line-height: 1.6; margin: 0 0 12px; }
 .pane-note.warn { color: var(--danger); }
 .note-tight { margin: 10px 0 0; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .grow { flex: 1 1 220px; min-width: 0; }
 .stat { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .stat b { font-size: 26px; font-weight: 600; color: var(--accent); }
-.stat span { color: var(--text-3); font-size: 12.5px; }
+.stat span { color: var(--text-2); font-size: 12.5px; }
 .tag-row { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 
 /* 焦点态必须看得见：本页大量动作是破坏性的，键盘用户不能靠猜。 */
@@ -124,7 +124,7 @@ summary {
 #panel textarea {
   border: 1px solid var(--line);
   background: var(--bg-soft);
-  border-radius: 10px;
+  border-radius: var(--fv-radius-xs);
   padding: 9px 12px;
   color: var(--text);
   outline: none;
@@ -146,7 +146,7 @@ textarea.req {
   width: 100%;
   border: 1px solid var(--line);
   background: var(--bg-soft);
-  border-radius: 10px;
+  border-radius: var(--fv-radius-xs);
   padding: 10px 12px;
   resize: vertical;
   outline: none;
@@ -251,7 +251,7 @@ body.admin .sidebar-foot { flex: none; }
   margin-left: auto;
   min-width: 20px;
   padding: 0 6px;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: var(--fv-danger);
   color: var(--bg);
   font-size: 11px;
@@ -297,7 +297,7 @@ body.admin .sidebar-foot { flex: none; }
   color: var(--accent);
   overflow-wrap: anywhere;
 }
-.stat-cell span { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); }
+.stat-cell span { display: block; margin-top: 2px; font-size: 12px; color: var(--text-2); }
 .skeleton { color: var(--text-3); font-size: 13px; }
 
 .link-btn {
@@ -330,14 +330,14 @@ body.admin .sidebar-foot { flex: none; }
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   padding: 2px;
   background: var(--bg-soft);
 }
 .seg-btn {
   padding: 0 14px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: transparent;
   color: var(--text-2);
   font-size: 13px;
@@ -378,16 +378,16 @@ body.admin .sidebar-foot { flex: none; }
 .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-th { color: var(--text-3); font-weight: 500; font-size: 12px; white-space: nowrap; }
+th { color: var(--text-2); font-weight: 500; font-size: 12px; white-space: nowrap; }
 td.name { font-weight: 500; }
 /* 反馈卡片的编号是 span.code，不只是表格里的 td.code：两处统一等宽。 */
-td.code, span.code { font-family: ui-monospace, Consolas, monospace; letter-spacing: .5px; }
+td.code, span.code { font-family: var(--fv-mono); letter-spacing: .5px; }
 td.acts, th.acts { white-space: nowrap; }
 td.acts button { margin: 0 2px 2px 0; }
 .tag {
   font-size: 11.5px;
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: var(--accent-soft);
   color: var(--accent);
   white-space: nowrap;
@@ -457,7 +457,7 @@ td.acts button { margin: 0 2px 2px 0; }
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--fv-radius-xs);
   background: var(--fv-surface-3);
   cursor: zoom-in;
 }
@@ -483,13 +483,13 @@ td.acts button { margin: 0 2px 2px 0; }
   max-width: 100%;
   max-height: 78vh;
   object-fit: contain;
-  border-radius: 8px;
+  border-radius: var(--fv-radius-xs);
   background: var(--fv-surface-3);
 }
 
 .security-summary {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--fv-radius-sm);
   background: var(--fv-surface-3);
   padding: 14px 16px;
   margin: 14px 0;
@@ -508,7 +508,7 @@ td.acts button { margin: 0 2px 2px 0; }
   align-items: center;
   gap: 8px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--fv-radius-sm);
   padding: 10px 14px;
   margin: 0 0 12px;
   font-size: 13.5px;
@@ -529,7 +529,7 @@ td.acts button { margin: 0 2px 2px 0; }
 .sev-bar {
   display: flex;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   overflow: hidden;
   background: var(--fv-surface-3);
 }
@@ -602,7 +602,7 @@ td.acts button { margin: 0 2px 2px 0; }
 .source-fp {
   margin-left: 6px;
   color: var(--text-3);
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--fv-mono);
   font-size: 11.5px;
   letter-spacing: .5px;
 }
@@ -610,7 +610,7 @@ td.acts button { margin: 0 2px 2px 0; }
 .sev-tag {
   font-size: 11.5px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   white-space: nowrap;
 }
 .sev-tag.info { background: var(--fv-surface-3); color: var(--text-2); }
@@ -622,17 +622,17 @@ td.acts button { margin: 0 2px 2px 0; }
 .rank-list { display: flex; flex-direction: column; gap: 10px; }
 .rank-item { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .rank-head { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
-.rank-name { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+.rank-name { font-family: var(--fv-mono); overflow-wrap: anywhere; }
 .rank-num { color: var(--text-3); flex: none; }
 .rank-bar {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: var(--fv-surface-3);
   overflow: hidden;
 }
 .rank-fill {
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
@@ -673,7 +673,7 @@ td.acts button { margin: 0 2px 2px 0; }
   gap: 6px;
   padding: 0 14px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   background: transparent;
   color: var(--text-2);
   font-size: 13.5px;
@@ -733,7 +733,7 @@ td.acts button { margin: 0 2px 2px 0; }
   flex-wrap: wrap;
   border: 1px solid var(--line);
   background: var(--bg-soft);
-  border-radius: 14px;
+  border-radius: var(--fv-radius-sm);
   padding: 10px 12px;
 }
 .task:hover { border-color: var(--accent); }
@@ -743,7 +743,7 @@ td.acts button { margin: 0 2px 2px 0; }
   display: block;
   font-size: 12px;
   color: var(--text-3);
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--fv-mono);
 }
 .task .tm .tq { color: var(--text-2); font-family: inherit; white-space: normal; overflow-wrap: anywhere; }
 .task .tm .tq.warn { color: var(--danger); }
@@ -751,7 +751,7 @@ td.acts button { margin: 0 2px 2px 0; }
   font-size: 11.5px;
   flex: none;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--fv-radius-pill);
   padding: 1px 8px;
   color: var(--text-2);
 }
@@ -796,12 +796,12 @@ td.acts button { margin: 0 2px 2px 0; }
 .sheet h2 { font-size: 15px; margin: 0 0 6px; }
 .sheet p { color: var(--text-2); font-size: 13px; line-height: 1.65; margin: 0 0 10px; }
 .secret {
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--fv-mono);
   font-size: 13px;
   word-break: break-all;
   background: var(--code-bg);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--fv-radius-xs);
   padding: 10px 12px;
   margin: 10px 0;
 }
@@ -867,7 +867,7 @@ td.acts button { margin: 0 2px 2px 0; }
     justify-content: center;
     padding: 4px 2px;
     border: 0;
-    border-radius: 10px;
+    border-radius: var(--fv-radius-xs);
     font-size: 11px;
   }
   .nav-btn .ico svg { width: 20px; height: 20px; }

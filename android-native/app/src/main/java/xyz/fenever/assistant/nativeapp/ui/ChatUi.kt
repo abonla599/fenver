@@ -186,7 +186,6 @@ import xyz.fenever.assistant.nativeapp.Usage
 import xyz.fenever.assistant.core.TaskCard
 import xyz.fenever.assistant.nativeapp.theme.AiBrandMark
 import xyz.fenever.assistant.nativeapp.theme.FenverTokens
-import xyz.fenever.assistant.nativeapp.theme.isWebLight
 import xyz.fenever.assistant.nativeapp.theme.text3Color
 
 /* 聊天主屏 —— 逐块对位旧壳加载的网页（backend/app/web/static）：
@@ -2597,10 +2596,9 @@ private fun fmtSize(bytes: Long): String = when {
     else -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
 }
 
-/* .bg-hover 不在 MaterialTheme 色板上（网页它是独立一档），按主题直取。 */
+/* 单主题：bg-hover 取官网 --surface-3 那一档，不再按主题分叉。 */
 @Composable
-internal fun hoverBg(): Color =
-    if (isWebLight()) FenverTokens.LBgHover else FenverTokens.BgHover
+internal fun hoverBg(): Color = FenverTokens.BgHover
 
 /* ---------------- 输入卡（第 12 轮真机反馈：豆包三态输入区） ----------------
  * 收起态一行：[声纹] [发消息或按住说话…] [＋]；

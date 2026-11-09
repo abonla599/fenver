@@ -36,7 +36,7 @@ REPO = Path(__file__).resolve().parents[2]
 # 「三行各切一段、只报壳版本号」的判据一个字没动）。
 VERSION_ROW = 'SetRow(FenverIcon.Info, "版本"'
 UPDATE_ROW = 'SetRow(FenverIcon.Refresh, "检查更新"'
-NEXT_ROW = 'SetRow(FenverIcon.Moon, "外观"'
+NEXT_ROW = 'SetRow(FenverIcon.Mail, "意见反馈"'
 
 
 def _ui() -> str:

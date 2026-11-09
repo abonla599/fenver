@@ -7,7 +7,6 @@ import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,12 +16,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,59 +34,40 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/* v0.36.0 极简原生：中性表面 + 单强调色 + 发丝线，数值以 spec 4.1 为准。
- * 深/浅两套共用一组名字；旧调用点用到的过渡 token 保留为同族映射，Task 2/3 再收口。 */
+/* 单主题墨绿：色板唯一真源是官网 site/site.css 的 :root。
+ * 网页 /app/style.css 的 --fv-* 与下面 FenverTokens 逐字同源，三方对照由
+ * backend/tests/test_design_tokens_parity_v0360.py 从官网动态读值核对。
+ * 应用图标那三色不跟页面令牌走，见 tools/render-app-icon.ps1。 */
 object FenverTokens {
     // ---- dark ----
-    val Bg = Color(0xFF0A0B0E)
-    val BgSoft = Color(0xFF181A20)
-    val BgHover = Color(0xFF1F222A)
-    val Surface = Color(0xFF121317)
-    val Surface2 = Color(0xFF181A20)
-    val Surface3 = Color(0xFF1F222A)
-    val Line = Color(0xFF262A31)
-    val Text = Color(0xFFF2F3F5)
-    val Text2 = Color(0xFFA1A6B0)
-    val Text3 = Color(0xFF6F747E)
-    val Accent = Color(0xFF3DD598)
-    val AccentPressed = Color(0xFF35C98C)
-    val AccentSoft = Color(0x1F3DD598)      // rgba(61,213,152,.12)
-    val Ai = Color(0xFF7C83FF)
-    val Danger = Color(0xFFF87171)
-    val CodeBg = Color(0xFF08090C)
+    val Bg = Color(0xFF2B3D34)
+    val BgSoft = Color(0xFF3B5247)
+    val BgHover = Color(0xFF435C50)
+    val Surface = Color(0xFF344940)
+    val Surface2 = Color(0xFF3B5247)
+    val Surface3 = Color(0xFF435C50)
+    val Line = Color(0xFF4D6859)
+    val Text = Color(0xFFF0F5F2)
+    val Text2 = Color(0xFFB3C7BE)
+    val Text3 = Color(0xFF9AAFA6)
+    val Accent = Color(0xFF5CC79B)
+    val AccentPressed = Color(0xFF74D9B2)
+    val AccentSoft = Color(0xFF32493E)      // 官网 --brand-soft，实色表面
+    val Ai = Color(0xFFA3A7FF)
+    val AiSoft = Color(0xFF33365A)     // 官网 --ai-soft
+    val Danger = Color(0xFFFF8F8F)
+    val BrandInk = Color(0xFF06150F)   // 官网 --brand-ink，主色按钮上的深字
+    val CodeBg = Color(0xFF2B3D34)
 
-    // ---- light ----
-    val LBg = Color(0xFFF7F8FA)
-    val LBgSoft = Color(0xFFEEF0F4)
-    val LBgHover = Color(0xFFE4E7EC)
-    val LSurface = Color(0xFFFFFFFF)
-    val LSurface2 = Color(0xFFEEF0F4)
-    val LSurface3 = Color(0xFFE4E7EC)
-    val LLine = Color(0xFFE3E6EB)
-    val LText = Color(0xFF16181D)
-    val LText2 = Color(0xFF5F6672)
-    val LText3 = Color(0xFF8A919C)
-    val LAccent = Color(0xFF0A7D5E)
-    val LAccentPressed = Color(0xFF086A4F)
-    val LAccentSoft = Color(0xFFE6F6F0)
-    val LAi = Color(0xFF5566F0)
-    val LDanger = Color(0xFFDC2626)
-    val LCodeBg = Color(0xFFF3F4F6)
 
-    // 旧调用点的过渡别名：Accent2 即 AI 身份色，Auth*/Glass* 收编为表面色阶。
+    // 旧调用点的过渡别名：单主题后只剩一套，全部指向上面的官网色板。
     val Accent2 = Ai
-    val LAccent2 = LAi
-    val Accent2Soft = Color(0x297C83FF)
-    val LAccent2Soft = Color(0x1F5566F0)
-    val BtnPrimaryInk = Bg
+    val Accent2Soft = AiSoft
+    val BtnPrimaryInk = BrandInk
     val AuthBand = Bg
-    val LAuthBand = LBg
-    val AuthPanel = Surface
-    val LAuthPanel = LSurface
+    val AuthPanel = Surface2
     val Glass = Bg
-    val LGlass = LBg
     val GlassStrong = Surface
-    val LGlassStrong = LSurface
 }
 
 private val DarkScheme = darkColorScheme(
@@ -119,44 +95,19 @@ private val DarkScheme = darkColorScheme(
     outlineVariant = FenverTokens.Line,
 )
 
-private val LightScheme = lightColorScheme(
-    primary = FenverTokens.LAccent,
-    onPrimary = Color.White,
-    primaryContainer = FenverTokens.LAccentSoft,
-    onPrimaryContainer = FenverTokens.LAccent,
-    secondary = FenverTokens.LAi,
-    onSecondary = Color.White,
-    secondaryContainer = FenverTokens.LSurface2,
-    onSecondaryContainer = FenverTokens.LText,
-    tertiary = FenverTokens.LAi,
-    onTertiary = Color.White,
-    background = FenverTokens.LBg,
-    onBackground = FenverTokens.LText,
-    surface = FenverTokens.LSurface,
-    onSurface = FenverTokens.LText,
-    surfaceVariant = FenverTokens.LSurface2,
-    onSurfaceVariant = FenverTokens.LText2,
-    error = FenverTokens.LDanger,
-    onError = Color.White,
-    errorContainer = FenverTokens.LSurface2,
-    onErrorContainer = FenverTokens.LDanger,
-    outline = FenverTokens.LLine,
-    outlineVariant = FenverTokens.LLine,
-)
-
 private val FenverShapes = Shapes(
-    extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp),
-    large = RoundedCornerShape(16.dp),
+    extraSmall = RoundedCornerShape(10.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(24.dp),
     extraLarge = RoundedCornerShape(24.dp),
 )
 
 // spec 4.2：系统字体，字重/行高按档位收口，局部尺寸才允许在调用点写死。
 private val FenverTypography = Typography(
-    headlineSmall = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 28.sp, lineHeight = 36.sp),
-    titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 22.sp, lineHeight = 30.sp),
-    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 17.sp, lineHeight = 24.sp),
+    headlineSmall = TextStyle(fontWeight = FontWeight.Bold, fontSize = 28.sp, lineHeight = 36.sp),
+    titleLarge = TextStyle(fontWeight = FontWeight.Bold, fontSize = 22.sp, lineHeight = 30.sp),
+    titleMedium = TextStyle(fontWeight = FontWeight.Bold, fontSize = 17.sp, lineHeight = 24.sp),
     bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 24.sp),
     bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 20.sp),
     bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp),
@@ -165,29 +116,11 @@ private val FenverTypography = Typography(
     labelSmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp),
 )
 
-/* 外观三态（system/dark/light）：设置页「外观」行换成分段控件后，
- * "system" 在渲染时按 isSystemInDarkTheme() 落成真深浅，跟随系统切换。
- * 默认仍是深色 = 网页 :root。用 Compose state：切一下整棵树立刻换肤。 */
-object ThemeMode {
-    var value: String by mutableStateOf("dark")
-}
-
-@Composable
-fun isWebLight(): Boolean = MaterialTheme.colorScheme.background == FenverTokens.LBg
-
 @Composable
 fun AiTheme(content: @Composable () -> Unit) {
-    val dark = when (ThemeMode.value) {
-        "light" -> false
-        "dark" -> true
-        else -> !isSystemInDarkTheme()
-    }
-    // v0.28（用户真机反馈「点输入框时，键盘出现之前会出现白色闪屏」）：键盘以
-    // adjustResize 顶起窗口时，输入卡下方露出来的是**窗口底色**。res/values/
-    // themes.xml 把冷启动首帧钉成深色画布（App 默认外观），但外观是运行时可换的
-    // 三态——浅色/跟随系统落浅色时，底色必须跟着换回白，否则闪屏只是换了个颜色。
-    // 换肤的每一拍在这里重设底色：资源管首帧，这里管之后的一切帧。
-    val bg = if (dark) FenverTokens.Bg else FenverTokens.LBg
+    // 单主题：窗口底色固定取官网 --bg。资源 colors.xml 管冷启动首帧，
+    // 这里管之后的一切帧（键盘 adjustResize 露出窗口底时不能闪白）。
+    val bg = FenverTokens.Bg
     val view = LocalView.current
     DisposableEffect(bg) {
         var c: Context = view.context
@@ -196,7 +129,7 @@ fun AiTheme(content: @Composable () -> Unit) {
         onDispose { }
     }
     MaterialTheme(
-        colorScheme = if (dark) DarkScheme else LightScheme,
+        colorScheme = DarkScheme,
         shapes = FenverShapes,
         typography = FenverTypography,
         content = content,
@@ -204,7 +137,7 @@ fun AiTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun text3Color(): Color = if (isWebLight()) FenverTokens.LText3 else FenverTokens.Text3
+fun text3Color(): Color = FenverTokens.Text3
 
 /* 品牌记号：直接使用与桌面图标同源的 app_icon.png。 */
 @Composable

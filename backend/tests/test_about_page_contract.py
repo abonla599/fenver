@@ -62,7 +62,7 @@ def test_both_corpuses_are_real_ones():
     """正对照：两条切片都真拿到了内容，否则下面每一条都在空串上判、恒绿。"""
     web, native = _web_about(), _native_about()
     assert "版本" in web and "版本" in native, "连「版本」都切没了，多半是界面改动顶掉了切法"
-    assert "外观" in web and "外观" in native, "同上：「外观」也是这一组的老住户"
+    assert "意见反馈" in web and "意见反馈" in native, "同上：「意见反馈」也是这一组的老住户"
     assert len(web) > 400 and len(native) > 400, "切片短得不像话"
 
 

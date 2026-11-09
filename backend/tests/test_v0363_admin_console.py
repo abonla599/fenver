@@ -362,8 +362,10 @@ def test_security_source_shows_the_fingerprint_but_never_the_raw_ip():
     assert "event.source_fp" in js, "页面没有消费 source_fp"
     assert "slice(0, 8)" in js, "指纹没有截到 8 位"
     assert '"source-fp"' in js, "指纹没有独立的 dim/mono 样式挂点"
-    assert ".source-fp" in css and "ui-monospace" in _css_rule(".source-fp"), \
-        "指纹不是等宽小字"
+    # 等宽字体收进了 /app/style.css 的 --fv-mono 共享令牌，这里不再抄一份字体栈；
+    # 令牌本身是不是等宽，由 test_design_tokens_parity_v0360.py 在真源处钉着。
+    assert ".source-fp" in css and "var(--fv-mono)" in _css_rule(".source-fp"), \
+        "指纹不再取共享的等宽字体令牌"
     assert "innerHTML" not in js
 
 

@@ -217,12 +217,7 @@ const pref = {
   set temperature(v) { localStorage.setItem("temperature", String(v)); },
   get contextTokensK() { return Number(localStorage.getItem("contextTokensK") || 8); },
   set contextTokensK(v) { localStorage.setItem("contextTokensK", String(v)); },
-  get theme() {
-    const saved = localStorage.getItem("theme");
-    if (saved) return saved;
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  },
-  set theme(v) { localStorage.setItem("theme", v); },
+  /* 单主题：不再存 theme 偏好、不再读系统明暗。配色只有官网那一套墨绿。 */
   /* 方案 C 起 pref 不再有 token 这一项——运行时凭据是 httpOnly Cookie，
    * JS 既读不到也不该想读。userId 仍是清单字段，只是"这台机器记着谁"。 */
   get userId() { return (currentEntry() || {}).userId || ""; },
@@ -299,12 +294,8 @@ function setStatus(text, isErr) {
   el.classList.toggle("err", !!isErr);
 }
 
-function applyTheme() {
-  document.documentElement.dataset.theme = pref.theme;
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = pref.theme === "light" ? "#ffffff" : "#0a0b0e";
-  $("themeVal").textContent = pref.theme === "light" ? "浅色" : "深色";
-}
+/* 单主题：theme-color 固定写在 index.html 的 <head>，这里不再覆写，
+   也不再切 data-theme——CSS 里只有 :root 那一份色板。 */
 
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + " B";
@@ -5632,7 +5623,6 @@ function bind() {
   // 不传 tab：落在哪一页由 openSettings 按角色决定（管理员=模型服务，其他人=连接）。
   // 收起侧栏是必须的：手机上它是抽屉，不收就是一片遮罩挡在面板前面。
   $("whoRow").onclick = () => { openSettings(); closeSidebar(); };
-  $("themeBtn").onclick = () => { pref.theme = pref.theme === "dark" ? "light" : "dark"; applyTheme(); };
   $("sessionSearch").oninput = (e) => { state.filter = e.target.value; renderSessions(); };
 
   $("modelSel").onchange = (e) => {
@@ -6020,7 +6010,6 @@ async function boot() {
   // 必须排第一：升级（老键/清单里的明文洗成 Cookie）没做完就往下读，等于把
   // 一个还在线的人当陌生人，或者让旧明文多活一个页面生命周期。
   await upgradeIdentitiesToCookie();
-  applyTheme();
   bind();
   setupKeyboardAware();
   // 壳的事件入口只注册这一次。没有桥时这个数组永远没人推，注册本身无害。

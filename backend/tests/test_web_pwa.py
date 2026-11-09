@@ -974,7 +974,7 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
     1. 齿轮是内联 SVG。`⚙` 在部分字体里渲染成彩色 emoji、在部分里是方块。
     2. 整行是个 button 且真的开设置、收侧栏（手机上侧栏是抽屉，不收就是一片遮罩）。
     3. 头像取用户名首字母，未登录时不能留空格子。
-    4. 「◐ 主题」从这一行搬走了，它得还在设置弹层里，别搬丢了。
+    4. 深浅主题切换已移除：设置里不该再出现「外观」入口。
     """
     html = _html()
     js = _js()
@@ -987,15 +987,17 @@ def test_the_sidebar_foot_is_one_row_that_opens_settings():
         "点击没有同时打开设置并收起侧栏"
     assert '$("userAvatar").textContent = name ? name[0]' in js, "头像没取首字母"
     # 「关于」那一整组，不是"到第一个 </div> 为止"：老写法用非贪婪匹配，
-    # 组里第一行换成一个 <div>（版本）之后它就只截到那一行，把 themeBtn 落在外面，
-    # 报了一条与主题毫无关系的假红。按"到下一组或最后一张卡片为止"切才对。
+    # 组里第一行换成一个 <div>（版本）之后它就只截到那一行，把后面的行落在外面，
+    # 报了一条与断言毫无关系的假红。按"到下一组或最后一张卡片为止"切才对。
     MARK = '<p class="set-group">关于</p>'
     tail = html[html.index(MARK):]
     stops = [i for i in (tail.find('<p class="set-group">', len(MARK)),
                          tail.find("set-card set-last")) if i > 0]
     about = tail[:min(stops)] if stops else tail
-    assert 'id="themeBtn"' in about and "外观" in about, \
-        "主题入口从侧栏搬走之后没落到设置一级列表里，或它已经不改名成「外观」了"
+    # 单主题：官网是墨绿一套配色，应用不提供第二套，也不该留下切换入口。
+    assert 'id="themeBtn"' not in html and 'id="themeVal"' not in html, \
+        "「外观」切换又回来了：应用现在与官网一样只有一套墨绿配色"
+    assert 'id="rowFeedback"' in about, "关于组被截断了：连意见反馈那一行都不在"
     # 手机上"设置不好点"与"齿轮旁边那个点是什么鬼"两件事的判据：整行要有 44px 的
     # 可点高度，并且要**写出"设置"两个字**——一个没有文字的齿轮在手机上读起来像装饰。
     css = _css()
@@ -2139,13 +2141,14 @@ def _declared_rules(css: str, selector: str) -> list[str]:
             if re.search(r"(^|[\s,])" + re.escape(selector) + r"($|[\s,{])", sel)]
 
 
-def test_the_arc_sits_on_a_real_boundary_in_both_themes():
+def test_the_arc_sits_on_a_real_boundary_in_the_single_theme():
     """弧要看得见，前提是它两侧不是一档颜色——上一版就是因为这个白做了。
 
-    那时面板底色只在动画里存在、落位即淡成 transparent，于是深主题下 --surface(#16191d)
+    那时面板底色只在动画里存在、落位即淡成 transparent，于是 --surface(#16191d)
     压在 --bg(#0e1013) 上根本分不出来，clip-path 擦了一遍弧没人看见。现在弧是常驻结构，
-    两侧各取一个专用 token，所以判据有三条：品牌带与面板取的是【不同】的 token；
-    这两个 token 在深浅两套主题里都真的定义了；而且两处的实际色值不相等。
+    两侧各取一个专用 token。单主题化之后判据变了但没变松：只有一份 :root，
+    不许再按 data-theme 分套；两个 token 都得在，且**解析到官网色板之后**的实际
+    色值不能相等（只比 var() 字面会漏掉"两个变量恰好同值"那种静默塌弧）。
     少任何一条，弧都会静默消失——这类回归不会报错，只会"效果没了"。
     """
     css = _css()
@@ -2156,18 +2159,26 @@ def test_the_arc_sits_on_a_real_boundary_in_both_themes():
     assert any("--auth-panel" in r for r in panel), "表单面板没吃 --auth-panel"
 
     root = re.search(r":root\s*\{([^}]*)\}", css)
-    light = re.search(r'\[data-theme="light"\]\s*\{([^}]*)\}', css)
-    assert root and light, "找不到 :root 或浅色主题那一段"
+    assert root, "找不到 :root 那一段"
+    assert "data-theme" not in css and "prefers-color-scheme" not in css, \
+        "又按主题分套了：官网是单主题，应用只留 :root 这一套色板"
+    block = root.group(1)
 
-    def var(block: str, name: str) -> str | None:
+    def var(name: str) -> str | None:
         m = re.search(r"--" + name + r"\s*:\s*([^;]+);", block)
         return m.group(1).strip() if m else None
 
-    for block, label in ((root.group(1), "深主题"), (light.group(1), "浅主题")):
-        a, b = var(block, "auth-band"), var(block, "auth-panel")
-        assert a and b, f"{label}里 --auth-band / --auth-panel 没成对定义：弧会塌成一片"
-        assert a.lower() != b.lower(), (
-            f"{label}里带子与面板同为 {a}：没有色差的弧等于没有弧")
+    def resolve(value: str) -> str | None:
+        """var(--x) 解到它在同一份 :root 里的实际色值；不是 var() 就原样返回。"""
+        m = re.fullmatch(r"var\(\s*(--[a-z0-9-]+)\s*\)", value)
+        return var(m.group(1)[2:]) if m else value
+
+    a, b = var("auth-band"), var("auth-panel")
+    assert a and b, "单主题里 --auth-band / --auth-panel 没成对定义：弧会塌成一片"
+    assert a.lower() != b.lower(), f"带子与面板同为 {a}：没有色差的弧等于没有弧"
+    ra, rb = resolve(a), resolve(b)
+    assert ra and rb and ra.lower() != rb.lower(), (
+        f"带子与面板解到官网色板后同为 {ra}：两个变量指向同一档颜色，弧还是看不见")
 
 
 def test_the_sheet_panel_does_not_fade_back_out_at_rest():
@@ -2263,14 +2274,16 @@ def test_the_update_row_sits_right_under_the_version_row():
     dev = html.index('class="set-group">设备')
     about = html.index('class="set-group">关于')
     ver = html.index('id="versionVal"')
-    theme = html.index('id="themeBtn"')
+    # 单主题化之后「外观」那一行没了，紧随其后的意见反馈接管原来的上界锚点。
+    feedback = html.index('id="rowFeedback"')
     assert about > dev, "分组顺序被改了：正向对照不成立，下面那几条都是空的"
 
     for rid in ('id="rowUpdate"', 'id="rowUpdateLink"'):
         at = html.index(rid)
         assert at > about, f"{rid} 还在「设备」那一组里"
-        assert ver < at < theme, (
-            f"{rid} 要排在「版本」下面、「外观」上面（当前 ver={ver} at={at} theme={theme}）")
+        assert ver < at < feedback, (
+            f"{rid} 要排在「版本」下面、「意见反馈」上面"
+            f"（当前 ver={ver} at={at} feedback={feedback}）")
 
 
 def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():

@@ -16,7 +16,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import xyz.fenever.assistant.core.ReleasePlan
 import xyz.fenever.assistant.nativeapp.theme.AiTheme
-import xyz.fenever.assistant.nativeapp.theme.ThemeMode
 import xyz.fenever.assistant.nativeapp.ui.AuthScreen
 import xyz.fenever.assistant.nativeapp.ui.ChatScreen
 import xyz.fenever.assistant.nativeapp.ui.reenterRequested
@@ -31,8 +30,7 @@ class MainActivity : ComponentActivity() {
         // 扫私有下载目录要读磁盘、逐条比版本，不该和首帧抢主线程：交给后台线程，
         // 删包结果不影响启动路径上的任何状态。
         thread(name = "apk-sweep") { sweepStaleApks(applicationContext) }
-        // 冷启动第一帧就把已存的外观偏好灌进 Compose state，不闪一下深色
-        ThemeMode.value = Prefs.themeMode
+        // 单主题：色板只有官网墨绿一套，没有外观偏好要灌。
         setContent {
             AiTheme { AppRoot() }
         }

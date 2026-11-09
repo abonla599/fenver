@@ -103,7 +103,6 @@ import xyz.fenever.assistant.nativeapp.ReminderChannels
 import xyz.fenever.assistant.nativeapp.ReminderScheduler
 import xyz.fenever.assistant.nativeapp.ReminderStore
 import xyz.fenever.assistant.nativeapp.update.Updater
-import xyz.fenever.assistant.nativeapp.theme.ThemeMode
 import xyz.fenever.assistant.nativeapp.theme.text3Color
 import java.io.File
 
@@ -369,33 +368,6 @@ private fun SetSwitch(on: Boolean, onChange: (Boolean) -> Unit) {
         .padding(3.dp),
         contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart) {
         Box(Modifier.size(22.dp).background(Color.White, CircleShape))
-    }
-}
-
-/** 「外观」行的三态分段（系统/浅色/深色，借鉴 WorkBuddy 的主题行）。
- *  选中态读 ThemeMode.value 而不是 Prefs.themeMode：前者是 Compose state，
- *  切一下这一条才会立刻重画；深档选中底是 primaryContainer（暗薄荷），
- *  字吃 primary——与全站「选中 = 强调色」的旧规矩同一口径。 */
-@Composable
-private fun ThemeSegment() {
-    val haptic = rememberSetHaptic()
-    val scheme = MaterialTheme.colorScheme
-    val mode = ThemeMode.value
-    Row(Modifier.clip(RoundedCornerShape(10.dp))
-        .border(1.dp, scheme.outline, RoundedCornerShape(10.dp))
-        .padding(2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        listOf("system" to "系统", "light" to "浅色", "dark" to "深色").forEach { (v, l) ->
-            val on = mode == v
-            Box(Modifier.clip(RoundedCornerShape(8.dp))
-                .background(if (on) scheme.primaryContainer else Color.Transparent)
-                .clickable { if (!on) { haptic(); Prefs.themeMode = v } }
-                .padding(horizontal = 10.dp, vertical = 5.dp)) {
-                Text(l, fontSize = 12.5.sp,
-                    color = if (on) scheme.primary else text3Color(),
-                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
-            }
-        }
     }
 }
 
@@ -780,9 +752,8 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         if (Updater.checking) return@SetRow
         Updater.startCheck()
     }
-    // 「外观」从两态点切升级成三态分段（借鉴 WorkBuddy 的主题行）：多了「系统」。
-    // 行名仍叫「外观」不叫「主题」——双端「关于」组的同文案合同钉着这两个字。
-    SetRow(FenverIcon.Moon, "外观", trailing = null, valSlot = { ThemeSegment() })
+    // 单主题：官网是墨绿一套配色，原生也不再提供「外观」切换入口。
+    // 关于组的下一行是「意见反馈」，紧邻关系由 test_v0342 的位置锁接着。
     // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
     // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
     // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
