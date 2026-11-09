@@ -2,7 +2,7 @@
 
 审计承诺是用户可见的发版说明里的隐私句子：`target.detail` 落盘前必须把异常原文里的
 URL 整段剥掉——`httpx.InvalidURL` 这类消息会原样带上 query/fragment/userinfo。
-`test_release_notes.py` 只校验当前 `versionName` 对应的 v0.36.4，服务端版
+`test_release_notes.py` 只校验当前 `versionName` 对应的 v0.36.5，服务端版
 v0.37.4 的三段式与 scope 在这里单独钉住。
 """
 import json
