@@ -27,11 +27,21 @@ rem #294) never reaches run_backend. The token prints even when nothing matched
 rem (names=none), so the log proves this step ran. Per-line if-defined below: each
 rem line re-expands %_PSCRUB% at its own parse time, so accumulation works without
 rem delayed expansion. Names only - never echo the values.
+rem
+rem 2026-11-09: list BOTH cases of all four names. A host can hand this process a
+rem block holding http_proxy and HTTP_PROXY as two separate entries; `if defined`
+rem is case-insensitive (it sees either), but `set "NAME="` removes only ONE entry,
+rem so the lowercase twin survived into run_backend with a dead proxy. Same fixed
+rem roster as deploy/swap-package.ps1 and deploy/watchdog.ps1; never enumerate.
 set "_PSCRUB="
 if defined HTTP_PROXY (set "_PSCRUB=%_PSCRUB%HTTP_PROXY," & set "HTTP_PROXY=")
+if defined http_proxy (set "_PSCRUB=%_PSCRUB%http_proxy," & set "http_proxy=")
 if defined HTTPS_PROXY (set "_PSCRUB=%_PSCRUB%HTTPS_PROXY," & set "HTTPS_PROXY=")
+if defined https_proxy (set "_PSCRUB=%_PSCRUB%https_proxy," & set "https_proxy=")
 if defined ALL_PROXY (set "_PSCRUB=%_PSCRUB%ALL_PROXY," & set "ALL_PROXY=")
+if defined all_proxy (set "_PSCRUB=%_PSCRUB%all_proxy," & set "all_proxy=")
 if defined NO_PROXY (set "_PSCRUB=%_PSCRUB%NO_PROXY," & set "NO_PROXY=")
+if defined no_proxy (set "_PSCRUB=%_PSCRUB%no_proxy," & set "no_proxy=")
 if not defined _PSCRUB (echo PROXY-ENV-SCRUBBED names=none) else (echo PROXY-ENV-SCRUBBED names=%_PSCRUB%)
 set "_PSCRUB="
 rem PROXY-SCRUB-END

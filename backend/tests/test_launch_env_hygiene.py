@@ -41,7 +41,9 @@ WATCHDOG_PS1 = REPO_ROOT / "deploy" / "watchdog.ps1"
 SWAP_PS1 = REPO_ROOT / "deploy" / "swap-package.ps1"
 STACK_BAT = REPO_ROOT / "tools" / "start-ai-stack.bat"
 
-# 要清掉的四个环境代理变量名（Windows 环境变量大小写不敏感，判据按大小写不敏感认）。
+# 四个**逻辑**代理变量名。2026-11-09 起落点必须把每个名字的大小写两版都列进名单：
+# 宿主可以把 http_proxy 与 HTTP_PROXY 当成两条独立条目交给子进程，而 `if defined` /
+# `set "NAME="` 都只认一个大小写不敏感的"名字"，删掉一条、另一条照样往下传。
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _PS_FILTER = "(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$"
 
@@ -301,16 +303,60 @@ def test_swap_helper_and_edits_are_pure_ascii():
     assert all(ord(c) < 128 for c in helper), "watchdog 的 helper 段必须 ASCII（探针生成物全 ASCII）。"
 
 
-def test_bat_scrub_clears_four_and_echoes_token():
+def _bat_roster_problems(block: str) -> list:
+    """bat 清环境块的名单判据本体：八枚名字（四变量 × 两版）都要有对应的删除语句。
+
+    抽出来是为了能自证有牙——喂一段只有大写四枚的合成块，它必须报出四条问题。
+    """
+    problems = []
+    code = re.sub(r"(?mi)^\s*rem\b.*$", "", block)  # 注释里也会写到 `if defined`，只数真语句
+    for v in PROXY_VARS:
+        if not re.search(r'set\s+"' + v + r'="', block):
+            problems.append(f"没清 {v}")
+        if not re.search(r'set\s+"' + v.lower() + r'="', block):
+            problems.append(f"没清小写那版 {v.lower()}：同名两条会留下一条带进子进程")
+    if code.count("if defined ") != 2 * len(PROXY_VARS):
+        problems.append("if defined 的行数不是八行：名单被收窄了（只列一版就会少四条）")
+    return problems
+
+
+def test_bat_scrub_clears_both_cases_and_echoes_token():
+    """bat 块必须把八枚名字（四个变量 × 大小写两版）都列出来，不许只列大写。
+
+    2026-11-09 实测：同一个工具宿主把 http_proxy / HTTP_PROXY 与 https_proxy /
+    HTTPS_PROXY 当成**四条独立条目**交给子进程。`if defined` 大小写不敏感（看得到
+    任意一版），但 `set "NAME="` 只删掉其中一条，于是小写那条带着死代理进到
+    run_backend。list 两版是把"只删一条"堵死的唯一写法；cmd 侧造不出同名两条，
+    所以这条只能由名单本身钉住（机器探针那格只判"清的动作是真的"）。
+    """
     btext = _read(STACK_BAT)
     rng = _bat_block_range(btext)
     assert rng, "start-ai-stack.bat 缺 PROXY-SCRUB-BEGIN/END 标记块。"
     block = btext[rng[0]:rng[1]]
-    for v in PROXY_VARS:
-        assert re.search(r'set\s+"' + v + r'="', block), f"bat 块没清 {v}"
+    assert not _bat_roster_problems(block), \
+        "bat 清环境块名单不全：%s" % _bat_roster_problems(block)
     assert "PROXY-ENV-SCRUBBED names=none" in block, "bat 全空时没打 names=none（沉默=没执行过）。"
     assert re.search(r"PROXY-ENV-SCRUBBED names=%", block), "bat 命中时没打真实名字 token。"
     assert all(ord(c) < 128 for c in block), "bat 清环境块必须 ASCII——OEM 936 错解码事故见文件头。"
+
+
+def test_bat_roster_lock_can_go_red():
+    """变异自证：把名单砍回事故前那四行大写，同一条判据必须报红。
+
+    没有这一格，上面那条绿可能只是"正则永远匹配不上"的空转；有这一格，判据的射程
+    就钉在"两版都得列"上。正控是同一段文本补回小写四行后立刻转绿。
+    """
+    four = "".join(
+        'if defined ' + v + ' (set "_PSCRUB=%_PSCRUB%' + v + '," & set "' + v + '=")\r\n'
+        for v in PROXY_VARS)
+    problems = _bat_roster_problems(four)
+    assert len(problems) == len(PROXY_VARS) + 1, \
+        f"砍回四行大写时判据只报了 {problems}——它认不出名单被收窄"
+    assert any("if defined 的行数" in p for p in problems), problems
+    eight = "".join(
+        'if defined ' + n + ' (set "_PSCRUB=%_PSCRUB%' + n + '," & set "' + n + '=")\r\n'
+        for n in _FIXED_ROSTER)
+    assert not _bat_roster_problems(eight), f"补回八行后判据仍报红：{_bat_roster_problems(eight)}"
 
 
 # ------------------------------------------------------------ 机器真相（PS）
@@ -321,6 +367,19 @@ def _extract_ps_helper(path: Path):
     if not m:
         return None
     return m.group("body")
+
+
+def _assert_probe_is_duplicate_safe(probe: str) -> None:
+    """探针生成物自己也不许用 `Get-ChildItem env:` 数条目。
+
+    2026-11-09 实测：宿主同时给了 http_proxy 与 HTTP_PROXY 两条独立条目时，这个
+    cmdlet 本身就抛「已添加了具有相同键的项」，探针先死在一句与被测脚本无关的异常
+    上——那种红会被读成"脚本坏了"。取数一律逐名 GetEnvironmentVariable。
+    """
+    assert "Get-ChildItem env:" not in probe, \
+        "探针又用 env: drive 枚举了：同名两条会让它先炸，红的原因就不是被测代码"
+    assert "GetEnvironmentVariable($n, 'Process')" in probe, \
+        "探针没有逐名取值：大小写两版是否都清掉就判不出来"
 
 
 def _run_ps_file(script_text: str, tmp_path: Path):
@@ -336,7 +395,14 @@ def _run_ps_file(script_text: str, tmp_path: Path):
 
 @pytest.mark.parametrize("path", [WATCHDOG_PS1, SWAP_PS1], ids=["watchdog", "swap"])
 def test_machine_truth_ps_scrubber_clears_poison(path, tmp_path):
-    """把脚本自己的 helper 拼进生成的 .ps1 真跑：注入 4 枚毒 -> 清 -> 必须剩 0，且 token 响亮。"""
+    """把脚本自己的 helper 拼进生成的 .ps1 真跑：注入 4 枚毒 -> 清 -> 必须剩 0，且 token 响亮。
+
+    取数一律**逐名 `[Environment]::GetEnvironmentVariable`**，不许用 `Get-ChildItem env:`
+    数条目——宿主同时注入 `http_proxy` 与 `HTTP_PROXY` 时，枚举那本字典自己就抛
+    「已添加了具有相同键的项」（2026-11-09 换包事故的同一个异常），探针会替被测对象先
+    死在这儿，报出来的红与被测代码无关。按名字取值是大小写不敏感的：任一大小写变体还
+    活着都会数到它，所以 `AFTER=0` 同时证明了大小写两版都清干净了。
+    """
     if (shutil.which("powershell.exe") or shutil.which("powershell")) is None:
         pytest.skip("powershell.exe 不可用，机器那格跳过（文本锁照跑）")
     helper = _extract_ps_helper(path)
@@ -345,17 +411,21 @@ def test_machine_truth_ps_scrubber_clears_poison(path, tmp_path):
     assert "Remove-Item" in helper, f"{path.name} helper 里没有删变量的动作"
     probe = (
         "$ErrorActionPreference='Stop'\r\n"
+        "$CheckNames = @('" + "','".join(PROXY_VARS) + "')\r\n"
         "$env:HTTP_PROXY='http://127.0.0.1:1'\r\n"
         "$env:HTTPS_PROXY='http://127.0.0.1:1'\r\n"
         "$env:ALL_PROXY='socks5://127.0.0.1:1'\r\n"
         "$env:NO_PROXY='localhost,127.0.0.1,[::1]'\r\n"
-        "$before = @(Get-ChildItem env: | Where-Object { $_.Name -match '" + _PS_FILTER + "' })\r\n"
-        "Write-Output ('BEFORE=' + $before.Count)\r\n"
+        "$before = 0\r\n"
+        "foreach ($n in $CheckNames) { if ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) { $before++ } }\r\n"
+        "Write-Output ('BEFORE=' + $before)\r\n"
         + helper + "\r\n"
         "Remove-ProxyEnvForChild\r\n"
-        "$after = @(Get-ChildItem env: | Where-Object { $_.Name -match '" + _PS_FILTER + "' })\r\n"
-        "Write-Output ('AFTER=' + $after.Count)\r\n"
+        "$after = 0\r\n"
+        "foreach ($n in $CheckNames) { if ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) { $after++ } }\r\n"
+        "Write-Output ('AFTER=' + $after)\r\n"
     )
+    _assert_probe_is_duplicate_safe(probe)
     res = _run_ps_file(probe, tmp_path)
     out = (res.stdout or "") + (res.stderr or "")
     assert res.returncode == 0, f"探针跑失败 rc={res.returncode}：{out}"
@@ -371,13 +441,16 @@ def test_machine_truth_ps_counterexample_no_scrub_leaves_vars(tmp_path):
     if (shutil.which("powershell.exe") or shutil.which("powershell")) is None:
         pytest.skip("powershell.exe 不可用")
     probe = (
+        "$CheckNames = @('" + "','".join(PROXY_VARS) + "')\r\n"
         "$env:HTTP_PROXY='http://127.0.0.1:1'\r\n"
         "$env:HTTPS_PROXY='http://127.0.0.1:1'\r\n"
         "$env:ALL_PROXY='socks5://127.0.0.1:1'\r\n"
         "$env:NO_PROXY='localhost,127.0.0.1,[::1]'\r\n"
-        "$after = @(Get-ChildItem env: | Where-Object { $_.Name -match '" + _PS_FILTER + "' })\r\n"
-        "Write-Output ('AFTER=' + $after.Count)\r\n"
+        "$after = 0\r\n"
+        "foreach ($n in $CheckNames) { if ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) { $after++ } }\r\n"
+        "Write-Output ('AFTER=' + $after)\r\n"
     )
+    _assert_probe_is_duplicate_safe(probe)
     res = _run_ps_file(probe, tmp_path)
     after = int(re.search(r"AFTER=(\d+)", res.stdout).group(1))
     assert after == 4, f"反例坏了：不清环境竟也答 {after}（应 4），上面那条绿就没有牙"
@@ -402,8 +475,18 @@ _BAT_CHECK_TAIL = (
     "set | findstr /I /R \"^HTTP_PROXY= ^HTTPS_PROXY= ^ALL_PROXY= ^NO_PROXY=\"\r\n"
     "echo FINDSTR_RC=%ERRORLEVEL%\r\n"
 )
+# 注入前先把八枚名字（大小写两版）清空：宿主可能替这个进程备好了 http_proxy 与
+# HTTP_PROXY 两条同名不同大小的条目，那样 BEFORE 就不是探针注入的那四枚，探针本身
+# 变成一次靠宿主运气的测量。归一化之后，"四枚注入 -> 清零 -> CLEAN" 才是这台机器上
+# 可复现的结论。注：cmd 的 `set` 是大小写不敏感的，它**造不出**同名两条这种形状，
+# 所以"两版都得清"这条只能由文本锁钉名单来判，机器探针判的是清的动作为真。
+_BAT_NORMALIZE = "".join(
+    'set "' + n + '="\r\n'
+    for n in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+              "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"))
 _BAT_POISON = (
     "@echo off\r\n"
+    + _BAT_NORMALIZE +
     "set HTTP_PROXY=http://127.0.0.1:1\r\n"
     "set HTTPS_PROXY=http://127.0.0.1:1\r\n"
     "set ALL_PROXY=socks5://127.0.0.1:1\r\n"
@@ -463,6 +546,9 @@ def test_ps_helper_uses_fixed_roster_not_env_drive_enumeration():
             f"{path.name} 单枚清理失败会往外抛：防御动作不许中断换包"
         for name in _FIXED_ROSTER:
             assert "'" + name + "'" in helper, f"{path.name} 的固定名单缺 {name}"
+        assert _PS_FILTER in helper, (
+            f"{path.name} 的名单过滤器不是「四个前缀、大小写不敏感」这条：{_PS_FILTER}"
+            "——收窄成只认某几个名字，剩下那几枚会被静默漏清")
 
 
 def test_swap_scrub_calls_are_wrapped_so_they_cannot_abort_start():
