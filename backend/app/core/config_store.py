@@ -32,6 +32,10 @@ from app.core.paths import data_root
 # 的 v0.23.x 更新链在改名后不能断，那是 releases 的事，不是这里的第二真相）。
 DEFAULTS = {
     "registration_open": False,
+    # 移动端感知（只读）的能力开关，默认关。只有管理员显式打开、且设备侧真的
+    # 递上来一份带权限的快照，device_context 工具才对模型可见；关掉它等于
+    # 远程 kill switch。读配置失败按关处理（core/device_context.py:feature_enabled）。
+    "device_context_enabled": False,
     "update_repo": "abonla599/fenver",
     # v0.25 R3b：流式断线后"没有读者的宽限期"（秒）。单一真相就是这里——
     # 读取统一走 stream_no_reader_grace_seconds()，别处不许再写这个数。

@@ -682,6 +682,10 @@ DECLARED_HAND_WRITTEN = {
         "只进工具注册表，不是流上的帧",
     ("core/mcp_stdio_bridge.py", "object"):
         "桥接层给注册表补的 inputSchema 类型字面量，不是流上的帧",
+    ("tools/device_context_tool.py", "object"):
+        "v0.40 移动端感知只读工具的 inputSchema 类型字面量（无参数：properties 为空），"
+        "只进工具注册表，不上流；这条工具真正的出口是 ToolResponse，由 pipeline 现有的"
+        "工具结果通道送回，不是新帧类型",
     **{("core/guardrails.py", n): "RoundGuard 的内部事件记录（护栏的账），进程内读，不上流"
        for n in _GUARD_INTERNAL_EVENTS},
 }

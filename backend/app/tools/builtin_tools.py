@@ -725,3 +725,8 @@ def plan_add(user_id: str, text: str, at: str = "", day: str = "", resume: dict 
         result["note"] = (f"这句话里没认出具体时刻，已按今天"
                           f"（{result['day']}）记下；要定点就告诉我几点。")
     return result
+
+
+# 移动端感知（只读）的工具住在自己的模块里，这里只为触发注册副作用。
+# 别名以下划线开头，不会被 pipeline.py 的 `from ... import *` 带走。
+from app.tools import device_context_tool as _device_context_tool  # noqa: E402,F401

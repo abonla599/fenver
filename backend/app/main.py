@@ -188,6 +188,7 @@ from app.core.auth_router import throttle_orchestrate_attempt, throttle_paid_ups
 # v0.37.5 T6：MCP stdio 的配置/状态面。路由都挂在 /v1/admin/* 之下且带
 # RequireAdmin，路由契约与中间件两把锁都覆盖得到（不新增顶层前缀）。
 from app.core.mcp_stdio_admin import router as mcp_stdio_admin_router
+from app.core.device_context_router import router as device_context_router
 
 # PWA 前端（手机浏览器访问 /app 即可使用，与 API 同源）
 from app.web.web_router import mount_admin, mount_pwa
@@ -247,6 +248,10 @@ app.include_router(auth_router)
 # 注册 MCP stdio 管理端点（/v1/admin/mcp/stdio*）。放在身份路由之后、PWA 之前：
 # 契约按路由表扫，位置本身不带语义；顺序只是让同类管理面挨着。
 app.include_router(mcp_stdio_admin_router)
+
+# 移动端屏幕上下文（只读）：POST 上传快照 / DELETE 撤销共享，都挂身份依赖。
+# 纯新增端点，旧 APK 不认、不受影响。逻辑在 core/device_context.py。
+app.include_router(device_context_router)
 
 # 注册 PWA 前端。挂载在 /app 下，接口仍走 /v1/*，两者互不干扰。
 mount_pwa(app)

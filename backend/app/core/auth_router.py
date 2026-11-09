@@ -1308,10 +1308,11 @@ def remove_user(user_id: str, actor: Principal = RequireAdmin):
 # ---------- v0.24 T1.4：运行时配置 ----------
 
 class ConfigUpdateRequest(BaseModel):
-    """管理端只收这三个键，形状与 config_store.MUTABLE_KEYS 对齐。
+    """管理端只收下面显式列出的键，形状与 config_store.MUTABLE_KEYS 对齐。
 
     字段写成 Optional：PATCH 语义，"没带的那个键不动"。全接收一个 dict 当然更省
     一行代码，但那等于让 pydantic 之外的世界替我们决定什么能写——白名单就白名单。
+    目前四格：注册开关、更新仓库、http_fetch 主机白名单、设备上下文能力开关。
     """
     registration_open: Optional[bool] = None
     update_repo: Optional[str] = None
@@ -1319,6 +1320,10 @@ class ConfigUpdateRequest(BaseModel):
     # 既读不到（GET /v1/config 剔除）也写不了（POST 在依赖处就 403）。空列表是
     # 合法值（= 工具下线）；条目形状由 config_store 整表判，坏的进 rejected。
     fetch_allowed_hosts: Optional[List[str]] = None
+    # v0.40 移动端感知（只读）的能力开关。默认关；管理员在配置面打开后，还要
+    # 设备侧真的授予权限并上报一份快照，device_context 工具才对模型可见。
+    # 环境变量 FENVER_DEVICE_CONTEXT_ENABLED=0 是更高优先级的急停（见 core/device_context.py）。
+    device_context_enabled: Optional[bool] = None
 
 
 @router.get("/v1/config")
