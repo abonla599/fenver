@@ -352,7 +352,8 @@ def _app_source_files():
 def test_no_openai_client_is_built_without_an_explicit_http_client():
     """每一处 OpenAI(...) 都必须自带 http_client。
 
-    本机卡巴斯基在拆 TLS：它签发的证书在 certifi 那份根证书包里，所以默认构造的
+    本机卡巴斯基在拆 TLS：它签发的证书只有系统根库里那张自签根验得了，certifi 那份
+    根证书包里根本没有它（实测 certifi 里 Kaspersky 计数为 0），所以默认构造的
     客户端一律 CERTIFICATE_VERIFY_FAILED。漏一处的后果还不一样——聊天会红着脸报错，
     而 memory_manager 那处会静默降级成伪嵌入，语义检索再也读不到记忆，界面上毫无痕迹。
     """
@@ -377,6 +378,103 @@ def test_the_trust_anchor_still_verifies_certificates():
     assert isinstance(ctx, ssl.SSLContext)
     assert ctx.verify_mode == ssl.CERT_REQUIRED, "不许把校验关掉"
     assert ctx.check_hostname, "不许关掉主机名比对"
+
+
+def _trust_narrowing_problems(source: str) -> list:
+    """信任锚源码里「把信任集收窄成另一份名单」的形状（AST 判 keyword.arg，不是子串）。
+
+    纯函数、吃源码字符串：这样能喂合成坏源码自证有牙，不必真去改 tls.py。
+    fail-closed：解析不了、扫不到构造点、位置实参超过 purpose 那一枚、`**` 展开
+    （实参看不到）一律报问题。注释与字符串里写着 cafile 不算数。
+    """
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return [f"源码解析不了，判据无从下手：{exc}"]
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        else:
+            continue
+        if name == "create_default_context":
+            calls.append(node)
+    if not calls:
+        return ["扫不到 create_default_context 构造点：信任锚被换成别的形状了，判据先红给人看"]
+    problems = []
+    for call in calls:
+        for kw in call.keywords:
+            if kw.arg in ("cafile", "capath", "cadata"):
+                problems.append(
+                    f"第 {call.lineno} 行构造带了 {kw.arg}=：信任集被换成另一份名单")
+            elif kw.arg is None:
+                problems.append(
+                    f"第 {call.lineno} 行构造用了 ** 展开：实参看不到，fail-closed")
+        if len(call.args) > 1:
+            problems.append(
+                f"第 {call.lineno} 行构造有 {len(call.args)} 枚位置实参："
+                "create_default_context 的第 2/3/4 位就是 cafile/capath/cadata")
+    return problems
+
+
+def test_the_trust_anchor_is_not_narrowed_to_another_ca_bundle():
+    """信任锚不许被钉成 certifi（或任何别的名单）：cafile / capath / cadata 一枚都不许有。
+
+    为什么必须另加这一把：上面那把只判 isinstance / verify_mode / check_hostname，
+    而钉 certifi 之后这三格全都保持默认 ⇒ 它照样绿，今天没有任何测试拦得住那个误修。
+    实测钉 cafile=certifi 会把卡巴斯基那枚根从信任集里挤掉（它在 Windows 根库里、
+    不在 certifi 里）：模型调用/云端嵌入/搜索/取包全 CERTIFICATE_VERIFY_FAILED，
+    记忆面静默降级成伪嵌入。反例见 test_trust_narrowing_lock_can_go_red。
+    """
+    from app.core import tls
+
+    source = Path(tls.__file__).read_text(encoding="utf-8")
+    problems = _trust_narrowing_problems(source)
+    assert not problems, "信任锚被收窄了（那就是静默降级的入口）：" + "; ".join(problems)
+
+
+# 合成语料（不碰真 tls.py）：前六格必须红，最后一格必须绿——它证明判据走 AST 而不是
+# 子串，注释里提到 cafile 不算违规。
+_TRUST_NARROWING_MUTANTS = (
+    ("cafile-certifi",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context(cafile=certifi.where())\n", True),
+    ("capath",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context(capath='/nonexistent-probe/certs')\n", True),
+    ("cadata",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context(cadata=_PEM_TEXT)\n", True),
+    ("positional-cafile",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context(ssl.Purpose.SERVER_AUTH, certifi.where())\n", True),
+    ("kwargs-unpack",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context(**_ANCHOR_KWARGS)\n", True),
+    ("anchor-replaced",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n", True),
+    ("comment-only",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    # cafile=certifi.where() 是被否决的修法\n"
+     "    return ssl.create_default_context()\n", False),
+)
+
+
+@pytest.mark.parametrize("label,source,expect_red", _TRUST_NARROWING_MUTANTS,
+                         ids=[m[0] for m in _TRUST_NARROWING_MUTANTS])
+def test_trust_narrowing_lock_can_go_red(label, source, expect_red):
+    """变异自证：把信任集收窄的六种形状喂给同一条判据必须红；只写在注释里的那份必须绿。"""
+    problems = _trust_narrowing_problems(source)
+    assert bool(problems) == expect_red, \
+        f"[{label}] 期望{'红' if expect_red else '绿'}，实得 {problems}"
 
 
 def test_build_client_feeds_that_context_to_httpx(monkeypatch):
