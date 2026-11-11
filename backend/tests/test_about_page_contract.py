@@ -160,6 +160,18 @@ def test_no_third_party_link_was_added_to_the_about_group():
     assert hosts == {"https://github.com"}, f"关于组的外链主机不再是唯一一家：{hosts}"
 
 
+def test_the_admin_console_still_shows_the_server_build():
+    """U2 的反向一半：服务端号从 About 撤出，但管理台「构建」必须带标签留着。
+
+    单号口径的配对判据：About 屏的干净不许靠拆掉别人的判据换来。/health 的 build
+    字段本身由 test_v0342_single_version_row_contract.py 钉着（main.py / buildinfo），
+    这一条钉它在 web 侧带标签的消费者——服务端号的正当去处是这里，不是版本行。
+    """
+    admin = (STATIC.parent / "admin" / "admin.js").read_text(encoding="utf-8")
+    assert 'statCell(data.build || "—", "构建")' in admin, \
+        "管理台「构建」不再读 /health 的 build：服务端号没有带标签的去处了"
+
+
 def test_native_opens_the_repository_in_the_browser_not_in_app():
     """同一个卡片里两个相反的要求，所以两条都得钉：
 

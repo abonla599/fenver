@@ -815,6 +815,10 @@ a.trace-result-title:hover { text-decoration: underline; }
 .set-mini.set-del { color: var(--danger); border-color: var(--danger); }
 .set-mini.set-del:hover { background: var(--danger); color: var(--bg); }
 .set-mini[disabled] { opacity: .5; cursor: default; }
+/* 版本行的值可能是那句无号长说明，胶囊又必须留在行内：值这一格允许收缩换行，
+   胶囊（flex:none）不会被挤出屏幕。链接形态的胶囊不带上划线。 */
+#versionVal { flex: 0 1 auto; min-width: 0; }
+a.set-mini { text-decoration: none; }
 .set-me { display: flex; align-items: center; gap: 12px; padding: 14px; }
 .set-av { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid;
   place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 600; }

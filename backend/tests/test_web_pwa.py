@@ -938,9 +938,11 @@ def test_settings_icons_are_the_fv_sprite_not_bare_paths():
             f"设置行图标不是纯 use 引用：{m.group(0)[:80]}"
 
     # 整页 24 格 UI 图标全部走 sprite（侧栏那枚与登录层眼睛都在内）。
+    # 下限是语料防塌的 Sanity 值：独立「检查更新」两行并进版本行的文字胶囊后，
+    # 随行的两枚 fv-refresh 实例一起没了，20 → 18；symbol 定义与 use-only 判据不动。
     body = html[html.index("</defs></svg>"):]
     inst = re.findall(r'<svg viewBox="0 0 24 24"[^>]*>(.*?)</svg>', body, re.S)
-    assert len(inst) >= 20, f"24 格图标实例少了（现 {len(inst)} 枚）：设置行被搬走了？"
+    assert len(inst) >= 18, f"24 格图标实例少了（现 {len(inst)} 枚）：设置行被搬走了？"
     for inner in inst:
         assert inner.startswith('<use href="#fv-'), f"24 格实例没走 #fv- symbol：{inner[:60]}"
 
@@ -2206,68 +2208,69 @@ def test_the_neutral_state_hides_the_sheet_so_it_cannot_show_an_empty_slab():
 
 
 def test_the_update_row_exists_and_never_becomes_a_dead_button():
-    """设置 → 关于 那行「检查更新」必须在，且它的去向由【壳报没报 update】决定。
+    """设置 → 关于 的「检查更新」胶囊必须在版本行里，且它的去向由【壳报没报 update】决定。
 
-    三种坏法都不会报错：
-    ① 行被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
+    载体从独立一行并进了版本行（U1：一个号码 + 一颗小胶囊），要防的三种坏法一种没少：
+    ① 胶囊被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
     ② 无条件走原生那条（不看 caps.update）——旧壳的桥里没有 checkUpdate 这个方法，
        点一下什么也不发生，页面连一句错都不显示，而它看起来和新壳上一模一样；
-    ③ 那颗 <a> 的去向又写成站外的发布页——v0.34 摘掉的就是它（`abonla599` 停用后那条
-       地址恒 404，把人送去 404 比不放链接更糟）。本条判它必须是自家那个"替访问者把
+    ③ 旧壳那颗 <a> 的去向又写成站外的发布页——v0.34 摘掉的就是它（`abonla599` 停用后
+       那条地址恒 404，把人送去 404 比不放链接更糟）。本条判它必须是自家那个"替访问者把
        这一版包取回来"的同源端点；全仓范围的扫描锁在
        tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web。
+    纯浏览器那一档是第三颗元素：点下去弹「网页版无需安装」的瞬态对话框（判据在
+    test_the_browser_capsule_opens_an_honest_dialog_and_never_asks_the_network），
+    不再递一个它装不上的 APK，也不让它以为这个页面能自己更新。
     """
     html = _html()
-    assert 'id="rowUpdate"' in html, "设置 → 关于 里那行「检查更新」没了"
-    assert 'id="rowUpdateLink"' in html, "旧壳那条退路（去下载页）没了"
+    for ident in ("rowUpdate", "rowUpdateLink", "rowUpdateWeb"):
+        assert f'id="{ident}"' in html, f"「检查更新」胶囊 #{ident} 没了"
     # 退路的去向必须是同源相对路径的自家代取端点。判"端点"而不判"某个具体文件"：
     # 写死资产名的链接下一次发版就腐烂，这条理由从原来那把钉 releases/latest 的锁继承下来，
     # 换了方向没换理由。
     row_tag = _tag_of(html, "rowUpdateLink")
     assert f'href="{APK_EXIT}"' in row_tag, f"旧壳那颗退路不再指向自家代取端点 {APK_EXIT}：{row_tag}"
     assert "github.com" not in row_tag, f"那颗 <a> 又挂回 github.com 了：{row_tag}"
-    for ident in ("rowUpdate", "rowUpdateLink"):
-        assert f'class="set-row hidden" id="{ident}"' in html,             f"#{ident} 默认必须是藏起来的：没有壳（手机浏览器）时这一行没有能办的事"
+    for ident in ("rowUpdate", "rowUpdateLink", "rowUpdateWeb"):
+        assert f'class="set-mini hidden" id="{ident}"' in html, \
+            f"#{ident} 默认必须是藏起来的：露哪一颗由 renderAboutRows 按壳的形态决定"
 
     js = _js("app.js", "shell.js")
-    assert "rowUpdateLink" in js and "updateLinkVal" in js, "那一行只写了 markup，没有代码在管它"
+    assert "rowUpdateLink" in js and "rowUpdateWeb" in js, "胶囊只写了 markup，没有代码在管它"
     assert "checkUpdate" in js, "新壳那条路断了"
-    # 两个去向各是什么，也在 JS 里钉一次：只判"有个三元分流"而不管两个常量指向哪儿，
+    # 两个去向各是什么，也在 JS 里钉一次：只判"有个分流"而不管两个常量指向哪儿，
     # 把 APK_EXIT_PATH 改成 'https://example.invalid/x' 照样绿。
     assert f'const APK_EXIT_PATH = "{APK_EXIT}"' in js, f"APK_EXIT_PATH 不再是 {APK_EXIT}"
     assert f'const CHANGELOG_PATH = "{CHANGELOG_PAGE}"' in js, \
         f"CHANGELOG_PATH 不再是 {CHANGELOG_PAGE}"
 
-    body = js[js.index("function renderAboutRows()"):]
+    body = _js_fn(js, "renderAboutRows")
     # 判"有没有参与判断"，不判"这个标识符在不在"：只查 caps.update 出现过一次的锁，
     # 把 `!!caps.update` 换成 `true` 也照样绿——那等于没锁。
     assert "!!caps.update" in body, "分流不看壳报的能力，旧壳上就会摆一个死按钮"
     shown = [x for x in body.splitlines() if "const shown =" in x]
     assert shown, "读不到那一行选谁的决定"
-    # 2026-09-21 他把这一行点名要放在「版本」旁边，包括手机浏览器里。于是"藏掉"不再是
-    # 答案，但这条锁要防的两件事一件都没松：① 不许有死按钮——没有桥就不许露那颗
-    # button，只能露会真的跳走的 <a>；② 不许让人以为网页能自己更新——所以链接那一颗
-    # 的文字与去向都得写明"点下去到底拿到什么"。
-    assert "native ? btn : link" in shown[0], (
-        "分流不再是「有桥才给 button」，旧壳与浏览器上就会出现点了没反应的死按钮："
-        + shown[0].strip())
-    # 那颗 <a> 的去向与那句说明都由"这台机器上有没有壳"决定，不是恒给一个包：
-    # 老壳唯一还有字节的出口是代取端点，纯浏览器没有可安装的包、只有更新日志是实话。
-    # 判整句形状而不是判标识符在场——`SHELL.present || true` 那种写法两个标识符都在。
+    # 三档互斥：新壳才调桥（它会比对已装的版本）；旧壳给下载页（桥里没有 checkUpdate，
+    # 给它 button 就是死按钮）；浏览器给对话框按钮（没有包可装，界面随服务端更新）。
+    assert "native ? btn : (SHELL.present ? link : web)" in shown[0], (
+        "分流不再是「有桥才给 button、有壳才给下载页、浏览器给对话框」，旧壳与浏览器上"
+        "就会出现点了没反应的死按钮或一个装不上的包：" + shown[0].strip())
+    # 那颗 <a> 只露给旧壳（上面的分流保证），去向恒为代取端点；浏览器的日志出口
+    # 在对话框里（showUpdateInfo），不在这一颗上。
     handed = [x for x in body.splitlines() if "link.href =" in x]
-    assert handed, "那颗 <a> 的去向不再由代码决定：纯浏览器也会被指去做一次 APK 下载"
-    assert "? APK_EXIT_PATH : CHANGELOG_PATH" in handed[0], (
-        "去向的分流不再是「有壳才给包，没壳给日志」：" + handed[0].strip())
-    assert "去下载页" in body and "看更新日志" in body, (
-        "那颗的文字不再分两档（壳在=去下载页、浏览器=看更新日志）：只写「检查更新」会被"
-        "读成“这个页面能自己更新”，而浏览器那一档根本没有包可下")
+    assert handed, "那颗 <a> 的去向不再由代码决定"
+    assert "APK_EXIT_PATH" in handed[0], (
+        "旧壳的退路不再指向自家代取端点：" + handed[0].strip())
+    assert "CHANGELOG_PATH" in _js_fn(js, "showUpdateInfo"), \
+        "对话框的「看更新日志」不再走 CHANGELOG_PATH：那个常量成了没人消费的装饰"
 
 
 def test_the_update_row_sits_right_under_the_version_row():
-    """「检查更新」紧跟在「版本」那一行下面——这是 2026-09-21 他点名的位置。
+    """「检查更新」胶囊在版本行里、紧跟值槽——2026-09-21 他点名的位置，U1 并进版本行。
 
-    位置本身就是要求，所以钉位置不是吹毛求疵：这一行在设备组里能跑、在服务地址下面
-    也能跑，而"换安装包这件事和这是什么版本是同一个问题的两面"只有挨着才成立。
+    位置本身就是要求，所以钉位置不是吹毛求疵：这一颗在设备组里能跑、在服务地址下面
+    也能跑，而"换安装包这件事和这是什么版本是同一个问题的两面"只有挨着才成立，
+    「一个号码 + 一颗小按钮」也只有同在一张行里才成立。
     它同时还得留在 关于 组里——挪回设备组会让这条锁当场红，那是有意留的对照。
     """
     html = _html()
@@ -2278,11 +2281,11 @@ def test_the_update_row_sits_right_under_the_version_row():
     feedback = html.index('id="rowFeedback"')
     assert about > dev, "分组顺序被改了：正向对照不成立，下面那几条都是空的"
 
-    for rid in ('id="rowUpdate"', 'id="rowUpdateLink"'):
+    for rid in ('id="rowUpdate"', 'id="rowUpdateLink"', 'id="rowUpdateWeb"'):
         at = html.index(rid)
         assert at > about, f"{rid} 还在「设备」那一组里"
         assert ver < at < feedback, (
-            f"{rid} 要排在「版本」下面、「意见反馈」上面"
+            f"{rid} 要排在「版本」值槽后面、「意见反馈」上面"
             f"（当前 ver={ver} at={at} feedback={feedback}）")
 
 
@@ -2300,6 +2303,276 @@ def test_关于_reports_a_version_instead_of_a_number_we_wrote_by_hand():
     assert "versionVal" in js, "HTML 里有位置、JS 里没人填——那会是永久空白"
     assert "caps.version" in js, "填进去的值不是壳报的那个版本"
     assert not re.search(r"[\"'`]v?\d+\.\d+", js), "JS 里出现了手写版本号字面量"
+
+
+# ---------- 单号指令的 Web 半 ----------
+#
+# 2026-10 那条「常驻的版本值只能有一个号码」原本只锁了原生
+# （test_v0342_single_version_row_contract.py，读 SettingsUi.kt）。这一节把同一口径
+# 扩展到 app.js 的常驻版本行：能出现的号码只有壳报上来的已装版；浏览器没有已装版 ⇒
+# 那句无号说明，而不是猜一个号。通道号、服务端号只能出现在瞬态对话框 / 独立页面。
+# 语料走 _js()（剥注释）：把旧文案写在注释里不算违例。
+
+_WEB_VERSION_SENTENCE = "网页版 · 界面随服务端更新，无需安装"
+_WEB_VERSION_ASSIGN = 'box.textContent = shellVer || "' + _WEB_VERSION_SENTENCE + '";'
+_WEB_SHELL_VER_DEF = ('const shellVer = typeof caps.version === "string" && caps.version'
+                      ' ? "v" + caps.version : "";')
+# 与原生半的禁字清单（test_v0342）同源：都是"第二个号的来源/拼接动作"。
+# 「服务端」三个字本身不禁——那句无号说明里正当含有它；禁的是拿它当号码前缀。
+_WEB_VERSION_FORBIDDEN = ("serverBuild", "fetchServerBuild", "Api.health", '"/health"',
+                          "parts.push", "joinToString", "listOfNotNull", '"壳 ', '"服务端 ')
+
+
+def _web_version_row_problems(js: str) -> list:
+    """返回常驻版本行违反单号口径的清单；空列表 = 合规。
+
+    取清单而不是直接断言，是为了让反向锁能喂合成语料：只会判真文件的判据
+    没法证明它有牙。四层判据：
+    ① 值赋值必须逐字是「shellVer || 那句无号说明」——只有一个号码来源，浏览器档零号码；
+    ② shellVer 本身只许由 caps.version 拼出（与原生钉 BuildConfig.VERSION_NAME 同源）；
+    ③ 版本行切片里不许有第二个号的来源 / 拼接动作 / 手写号；
+    ④ renderAboutRows 整个函数不许再去 fetch——"拉来不用"也算违例（白跑一次网络）。
+    """
+    problems = []
+    body = _js_fn(js, "renderAboutRows")
+    if "fetch(" in body:
+        problems.append("renderAboutRows 还在 fetch：常驻版本行不需要任何网络")
+    for token in ("serverBuild", "fetchServerBuild"):
+        if token in body:
+            problems.append(f"第二个号的来源还在函数里：{token}")
+    if _WEB_SHELL_VER_DEF not in body:
+        problems.append("shellVer 不再只由 caps.version 拼出——版本号出现了第二个来源")
+    start = body.find('const box = $("versionVal")')
+    stop = body.find('const diag = $("bridgeDiag")', start + 1) if start >= 0 else -1
+    if start < 0 or stop < 0:
+        problems.append("版本行切片切不出来：锚点挪了，判据要跟着改（fail-closed）")
+        return problems
+    ver = body[start:stop]
+    if _WEB_VERSION_ASSIGN not in ver:
+        problems.append("版本行的值不再是「shellVer || 无号句」：" + ver.strip()[:120])
+    for forbidden in _WEB_VERSION_FORBIDDEN:
+        if forbidden in ver:
+            problems.append(f"版本行又掺进了第二个号（命中 {forbidden!r}）")
+    if re.search(r"[\"'`]v?\d+\.\d+", ver):
+        problems.append("版本行里出现了手写版本号字面量")
+    return problems
+
+
+def test_the_web_version_row_keeps_the_single_number_rule():
+    """常驻版本行：只有一个号（壳报的已装版），浏览器零号码。
+
+    正面的一半是逐字赋值 + shellVer 的唯一来源；反面的一半（判据真会咬）在下一条
+    can_go_red——没跑过反例的绿一律记「未测」。
+    """
+    assert _web_version_row_problems(_js()) == []
+
+
+def test_the_web_single_number_lock_can_go_red():
+    """反向锁：喂三种「版本行里出现第二个号」的合成语料，每一种都必须被报出来。
+
+    ① 把服务端构建戳拼回去（旧文案的原形）；② 浏览器档猜一个号；
+    ③ 回去 fetch 构建戳（拉来不用也算）。真语料必须先绿，否则下面的红没有对照。
+    """
+    js = _js()
+    assert _web_version_row_problems(js) == [], "真语料必须先绿，否则下面的红没有对照"
+    second = js.replace(_WEB_VERSION_ASSIGN,
+                        'box.textContent = shellVer + " · 服务端 " + serverBuild;')
+    assert second != js, "合成语料没命中赋值行：锚点漂了"
+    assert _web_version_row_problems(second), "版本行拼了第二个号（服务端构建戳），判据却没响"
+    guessed = js.replace(_WEB_VERSION_ASSIGN, 'box.textContent = shellVer || "v0.39.2";')
+    assert _web_version_row_problems(guessed), "浏览器档猜了一个号，判据却没响"
+    refetch = js.replace('const box = $("versionVal")',
+                         'fetch("/health");\n  const box = $("versionVal")')
+    assert _web_version_row_problems(refetch), "版本行回去 fetch 构建戳了，判据却没响"
+
+
+def test_the_second_number_has_no_source_left_in_the_web_app():
+    """整份 app.js 里第二个号的来源一并没了：留着"拉来不用"等于白跑一次网络还留着坑。
+
+    /health 的 build 字段本身不删：管理台「构建」还在读它（admin.js，判据在
+    test_about_page_contract.py），原生半的同款口径在 test_v0342（main.py / buildinfo / Api.kt）。
+    """
+    js = _js()
+    assert "serverBuild" not in js, "serverBuild 那份状态还在（值不许显示，来源也不该留着）"
+    assert "fetchServerBuild" not in js, "关于屏还在拉 /health 的 build"
+
+
+# ---------- 版本行三种形态 + 浏览器胶囊：node 真跑 ----------
+#
+# 与 reminderStatusCard 那节同一个理由：「给定这几种输入，屏幕上出现哪句话、露哪颗
+# 胶囊、点下去发生什么、发了几次请求」全是运行时事实，文本断言只能证明那句话在文件里，
+# 证明不了分流挑对了那一边（把三元两边对调，文本上一字未改）。
+
+_ABOUT_JS_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const SC = JSON.parse(process.argv[3]);
+
+class El {
+  constructor(id) {
+    this.id = id; this.textContent = ""; this.href = ""; this.onclick = null;
+    this._hidden = true;
+    const self = this;
+    this.classList = {
+      add(c) { if (c === "hidden") self._hidden = true; },
+      remove(c) { if (c === "hidden") self._hidden = false; },
+      toggle(c, force) { if (c === "hidden") self._hidden = force === undefined ? !self._hidden : !!force; },
+      contains(c) { return c === "hidden" ? self._hidden : false; },
+    };
+  }
+}
+const els = {};
+function $(id) { if (!els[id]) els[id] = new El(id); return els[id]; }
+
+const bridgeCalls = [], layerOpens = [], layerHides = {}, fetchCalls = [];
+const caps = SC.caps || {};
+const SHELL = {
+  present: !!SC.present,
+  capabilities() { return caps; },
+  checkUpdate() { bridgeCalls.push("checkUpdate"); return { ok: true }; },
+  diagnostic() { return { object: "undefined", reply: "-", text: "", page: "https://example.test" }; },
+};
+const Layers = {
+  open(name, hide) { layerOpens.push(name); layerHides[name] = hide; },
+  close(name) { layerOpens.push("close:" + name); },
+};
+// 只记账、绝不出网：这一节要钉的恰恰是「浏览器档一次请求都不发」。
+function fetch(url) { fetchCalls.push(String(url)); return Promise.reject(new Error("harness: no network")); }
+
+const sandbox = {
+  $, SHELL, Layers, fetch, bridgeCalls, layerOpens, layerHides, fetchCalls,
+  console, JSON, Math, String, Number, Array, Object, Date, Boolean, Promise, Error,
+};
+vm.createContext(sandbox);
+const driver = "\n;(function () {"
+  + " renderAboutRows();"
+  + " const out = {"
+  + "   version: $(\"versionVal\").textContent,"
+  + "   shown: [\"rowUpdate\", \"rowUpdateLink\", \"rowUpdateWeb\"].filter((id) => !$(id).classList.contains(\"hidden\")),"
+  + "   linkHref: $(\"rowUpdateLink\").href,"
+  + "   diagHidden: $(\"bridgeDiag\").classList.contains(\"hidden\"),"
+  + " };"
+  + " out.shown.forEach((id) => { const el = $(id); if (el.onclick) el.onclick(); });"
+  + " out.afterClick = {"
+  + "   dialogHidden: $(\"updateInfoModal\").classList.contains(\"hidden\"),"
+  + "   logHref: $(\"updateInfoLog\").href,"
+  + "   bridgeCalls: bridgeCalls.slice(), layerOpens: layerOpens.slice(),"
+  + " };"
+  + " if (layerHides.updateInfo) layerHides.updateInfo();"
+  + " out.afterClose = { dialogHidden: $(\"updateInfoModal\").classList.contains(\"hidden\") };"
+  + " out.fetchCalls = fetchCalls.slice();"
+  + " return out; })()";
+const out = vm.runInContext(src + driver, sandbox);
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_about_js(scenario: dict) -> dict:
+    """在 node 里真跑仓库那份 renderAboutRows / showUpdateInfo / hideUpdateInfo。
+
+    DOM、桥、层栈都是假的，fetch 是只记账的桩；被执行的**分流与文字选择**是仓库那一份，
+    逐字经 _js() 那把尺子取出。两个去向常量是 app.js 的顶层声明、不在函数体里，
+    从真文件派生出来前置（不手抄第二份；它们的值由死按钮那把锁逐字钉着）。
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("这台机器上没有 node，跑不了这段 JS")
+    js = _js()
+    consts = [ln for ln in js.splitlines()
+              if ln.startswith("const APK_EXIT_PATH =") or ln.startswith("const CHANGELOG_PATH =")]
+    assert len(consts) == 2, f"两个去向常量派生不出来：{consts}"
+    snippet = "\n".join(consts) + "\n" + "\n".join(
+        _fn_text(js, n) for n in ("renderAboutRows", "showUpdateInfo", "hideUpdateInfo"))
+    d = Path(tempfile.mkdtemp(prefix="about-js-"))
+    (d / "fns.js").write_text(snippet, encoding="utf-8")
+    (d / "harness.cjs").write_text(_ABOUT_JS_HARNESS, encoding="utf-8")
+    r = subprocess.run([node, str(d / "harness.cjs"), str(d / "fns.js"),
+                        json.dumps(scenario)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
+    return json.loads(r.stdout)
+
+
+def test_the_version_row_shows_one_number_in_a_shell_and_none_in_a_browser():
+    """U1/U2：常驻版本行只有两种形态——壳报的已装版，或那句无号说明。
+
+    旧文案把「壳 vX · 服务端 vY」拼成两个号，浏览器档显示服务端构建戳——那个号
+    不属于这台设备上装的任何东西，却摆在版本行里，读起来像"你装的是这一版"。
+    """
+    browser = _run_about_js({"present": False, "caps": {}})
+    assert browser["version"] == "网页版 · 界面随服务端更新，无需安装", browser
+    assert not re.search(r"\d+\.\d+", browser["version"]), "浏览器版本行出现了号码"
+    old = _run_about_js({"present": True, "caps": {"shell": 1, "version": "0.23.4"}})
+    assert old["version"] == "v0.23.4", old
+    new = _run_about_js({"present": True, "caps": {"shell": 1, "update": 1, "version": "0.36.4"}})
+    assert new["version"] == "v0.36.4", new
+    for out in (old, new):
+        assert "·" not in out["version"], f"壳的版本行拼进了第二个号：{out['version']}"
+
+
+def test_each_form_exposes_exactly_the_capsule_that_can_act():
+    """三档互斥：新壳拿调桥按钮、旧壳拿下载页链接、浏览器拿对话框按钮。
+
+    给旧壳一颗调桥的 button 是死按钮（它的桥里没有 checkUpdate）；
+    给浏览器一个下载链接是递一个它装不上的东西。
+    """
+    browser = _run_about_js({"present": False, "caps": {}})
+    assert browser["shown"] == ["rowUpdateWeb"], browser
+    old = _run_about_js({"present": True, "caps": {"shell": 1, "version": "0.23.4"}})
+    assert old["shown"] == ["rowUpdateLink"], old
+    assert old["linkHref"] == APK_EXIT, old
+    assert old["afterClick"]["bridgeCalls"] == [], "旧壳去调了它没有的桥方法"
+    new = _run_about_js({"present": True, "caps": {"shell": 1, "update": 1, "version": "0.36.4"}})
+    assert new["shown"] == ["rowUpdate"], new
+    assert new["afterClick"]["bridgeCalls"] == ["checkUpdate"], new
+    assert new["afterClick"]["dialogHidden"] is True, "新壳按胶囊却弹了浏览器那个对话框"
+
+
+def test_the_browser_capsule_opens_an_honest_dialog_and_never_asks_the_network():
+    """浏览器点「检查更新」：瞬态对话框说实话，零请求。
+
+    浏览器能不能装包是结构性已知的，去问一次再答「没有」是多余的一跳。
+    统一标签「检查更新」会被读成"这个页面能自己更新"，所以对话框必须把
+    「网页版无需安装，界面随服务端更新」说清（文案判据在下一条 markup 锁），
+    并给更新日志出口；它进层栈，返回键收得掉。
+    """
+    out = _run_about_js({"present": False, "caps": {}})
+    assert out["fetchCalls"] == [], f"浏览器版本行/胶囊出网了：{out['fetchCalls']}"
+    assert out["afterClick"]["dialogHidden"] is False, "点了胶囊没弹对话框"
+    assert out["afterClick"]["layerOpens"] == ["updateInfo"], "对话框没进层栈：返回键收不掉它"
+    assert out["afterClick"]["logHref"] == CHANGELOG_PAGE, out
+    assert out["afterClose"]["dialogHidden"] is True, "层栈的关闭回调没把对话框真的藏回去"
+
+
+def test_the_web_update_dialog_says_what_is_true_and_defaults_to_hidden():
+    """对话框的文案是统一标签的诚实另一半；markup 里一个号码都不带。
+
+    它不回答"有哪一版可装"（那是更新日志页的事），所以不该带版本号；
+    默认藏、role/aria-label 齐全、更新日志出口开新标签带 noopener、关闭走层栈。
+    """
+    html, js = _html(), _js()
+    assert ('class="modal hidden" id="updateInfoModal" role="dialog" aria-modal="true"'
+            ' aria-label="检查更新"') in html, "对话框不在 markup、默认没藏、或没带标签"
+    at = html.index('id="updateInfoModal"')
+    block = html[at:html.index("<script", at)]
+    assert "网页版无需安装，界面随服务端更新" in block, "对话框没说实话：网页版无需安装"
+    assert ">看更新日志</a>" in block, "更新日志那个出口没了"
+    log_tag = _tag_of(block, "updateInfoLog")
+    assert f'href="{CHANGELOG_PAGE}"' in log_tag, "更新日志出口不再指向更新日志页"
+    assert 'target="_blank"' in log_tag and "noopener" in log_tag, \
+        "更新日志出口没开新标签 / 没带 noopener"
+    assert not re.search(r"[\"'`]v?\d+\.\d+", block), "对话框里出现了手写版本号"
+    assert '$("updateInfoOk")' in js and 'id="updateInfoOk"' in block, \
+        "关闭按钮只有 markup 或只有接线的一半"
+    opener = _js_fn(js, "showUpdateInfo")
+    assert 'classList.contains("hidden")' in opener, "没有重入守卫：点两下会往层栈里压两份"
+    closer = _js_fn(js, "closeUpdateInfo")
+    assert 'Layers.close("updateInfo")' in closer, "关闭不走层栈：历史与屏幕会漂移"
 
 
 # ---------- 「发现版本更新」底部卡片 ----------
@@ -2333,7 +2606,8 @@ def _js_fn(js: str, name: str) -> str:
 
 
 def _sheet_block() -> str:
-    """index.html 里那张卡片**本体**（不含设置弹层里那两行「检查更新」）。
+    """index.html 里那张卡片**本体**（版本行那颗胶囊不在这一刀里；浏览器那个
+    「检查更新」对话框落在刀内，但它不含「立即更新」与 APK 去向，下面的计数不受影响）。
 
     切到第一个 <script 为止，不数配对的 </div>：这块里有嵌套 div 和 SVG，
     按标签配对的写法下一次多加一层就要重写，而它要的只是"卡片自己那一段"。
@@ -2522,9 +2796,9 @@ def test_the_daily_stamp_is_the_local_calendar_not_an_utc_one():
 def test_no_card_and_no_request_without_a_shell_version():
     """浏览器与不报版本号的老壳：既不弹卡片，也一次请求都不发。
 
-    浏览器里没有安装包可换，弹一张「发现版本更新」只会让人以为网页能自更新（设置那一行
-    为此专门写着"去下载页"）。老壳更直接：拿不到手上的版本号就没法回答"有没有更新"，
-    而猜一个号出来弹脸，是比沉默更坏的选择。
+    浏览器里没有安装包可换，弹一张「发现版本更新」只会让人以为网页能自更新（版本行
+    那颗胶囊为此在浏览器档弹「网页版无需安装」的对话框）。老壳更直接：拿不到手上的
+    版本号就没法回答"有没有更新"，而猜一个号出来弹脸，是比沉默更坏的选择。
     """
     js = _js()
     ask = _js_fn(js, "maybeAskUpdate")

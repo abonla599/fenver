@@ -422,42 +422,34 @@
           <div class="set-card">
             <!-- 版本只有一个来源：壳通过 capabilities() 报上来的 versionName，而它来自
                  出包那份 gradle（旧 WebView 壳的源码已于 2026-10-08 退役）。这里出现不了写死的
-                 "v0.16"——抄一份到前端，
-                 下次升版必然有一处是旧的，而且它显示得理直气壮。浏览器里没有安装包可说，
-                 那句由 app.js 给，不在这儿硬写。 -->
+                 "v0.16"——抄一份到前端，下次升版必然有一处是旧的，而且它显示得理直气壮。
+                 浏览器里没有安装包可说，那句无号说明由 app.js 给，不在这儿硬写。
+                 行内那三颗「检查更新」胶囊同一时刻只露一颗（app.js 的 renderAboutRows）：
+                 新壳调桥、旧壳去下载页、浏览器弹「网页版无需安装」的对话框。
+                 常驻的版本值只能有一个号码，就是这台设备上真装的那一版——单号口径的
+                 Web 锁在 tests/test_web_pwa.py，原生半在 test_v0342。 -->
             <div class="set-row set-plain">
               <span class="set-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#fv-info"/></svg></span>
-              <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span></div>
+              <span class="set-lbl">版本</span><span class="set-val" id="versionVal"></span>
+              <button class="set-mini hidden" id="rowUpdate" type="button">检查更新</button>
+              <a class="set-mini hidden" id="rowUpdateLink" target="_blank" rel="noopener" href="/site/android.apk">检查更新</a>
+              <button class="set-mini hidden" id="rowUpdateWeb" type="button">检查更新</button></div>
             <!-- 桥诊断：只有页面认不到壳时才露出来（填它的是 app.js 的 renderAboutRows）。
                  这不是给用户看的功能说明，是"桥静默失效"唯一的现场证据——present 一旦为
                  false，整个界面和手机浏览器长得一模一样，光凭眼睛分不清是对象没注入、
                  调用没匹配上 Java 方法、还是被壳那侧的 origin 闸门拒了。2026-09-22 那次
                  真机排查就是因为没有这一行，只能靠拆 APK 数字符串。 -->
             <p class="pane-note hidden" id="bridgeDiag"></p>
-            <!-- 检查更新：这一行点的是【安装包】，不是界面。界面永远从服务器现加载，
-                 只有那四件原生能力（提醒/分享/组件/检查更新）才需要重装。
-                 两个元素、同一时刻只露一个：新壳用 button（调桥去查），旧壳用 a
-                 （直接去下载页）。2026-09-21 从「设备」那一组挪到这里：换安装包这件事
-                 和"这是什么版本"是同一个问题的两面，放在提醒旁边没人找得到。
-                 v0.34 起这一颗的去向是**同源相对路径** `/site/android.apk`，不再写
-                 github.com 的发布页：`abonla599` 停用之后那条地址恒 404，而"送去一个
-                 404 比不放链接更糟"是官网已经判过的口径（扫描锁见
+            <!-- 版本行那颗胶囊点的是【安装包】，不是界面：界面永远从服务器现加载，
+                 只有原生能力才需要重装。旧壳那颗 <a> 的去向是**同源相对路径**
+                 `/site/android.apk`（服务端代取这一版 APK 的出口，与官网「安卓版」同一端点，
+                 core/releases.py::SELF_APK_PATH），不写 github.com 的发布页——账号停用之后
+                 那条恒 404，送去一个 404 比不放链接更糟（扫描锁见
                  tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web）。
-                 `/site/android.apk` 是服务端替访问者把这一版 APK 取回来的那条出口，与官网
-                 「安卓版」那颗同一个端点（core/releases.py::SELF_APK_PATH），拿不到字节时
-                 它自己 302 回官网，所以这里最坏也只是慢一次，不是一张 404。
-                 纯浏览器（没有壳）那一档由 app.js 的 renderAboutRows 把 href 换成
-                 `/changelog`：那台机器上没有可安装的包，给它一个 APK 不如给它"这一版改了什么"。
-                 地址为什么不写在 app.js 里而是留在 markup：同源纪律那条锁
-                 （test_frontend_uses_relative_api_paths_only）禁的是前端 JS 出现绝对 URL，
-                 这里顺着它把默认去向留在 HTML——JS 只在这颗真被露出来时按壳在不在改一次相对路径。 -->
-            <button class="set-row hidden" id="rowUpdate">
-              <span class="set-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#fv-refresh"/></svg></span>
-              <span class="set-lbl">检查更新</span><span class="set-val" id="updateVal"></span><span class="set-go">›</span></button>
-            <a class="set-row hidden" id="rowUpdateLink" target="_blank" rel="noopener"
-               href="/site/android.apk">
-              <span class="set-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#fv-refresh"/></svg></span>
-              <span class="set-lbl">检查更新</span><span class="set-val" id="updateLinkVal"></span><span class="set-go">↗</span></a>
+                 浏览器那一档不递 APK：它弹 updateInfoModal，把「无需安装、界面随服务端更新」
+                 说清，再给更新日志出口。地址默认值留在 markup、JS 只在露出来时按形态改一次：
+                 同源纪律那条锁（test_frontend_uses_relative_api_paths_only）禁的是前端 JS
+                 出现绝对 URL。 -->
             <!-- 深浅切换已移除：官网是墨绿单主题，应用不提供第二套配色。
                  theme-color 在 <head> 里钉成 #2b3d34，系统 UI 与页面同源。 -->
             <!-- 意见反馈：v0.27 起这一行是**应用内**的一页（openSetPage("feedback")），
@@ -883,11 +875,11 @@
   </div>
 
   <!-- 「发现版本更新」：底部卡片，只在确实有新版时弹（判据在 app.js 的 offerUpdate）。
-       和设置里那行「检查更新」是两件事——那一行是人去问，这张卡是"替他看一眼然后提一句"，
+       和版本行那颗「检查更新」胶囊是两件事——胶囊是人去问，这张卡是"替他看一眼然后提一句"，
        所以两者各自独立存在，删掉一张另一张照常。
        版本号从 /v1/release/latest 填进来，这里一个字都不写死：抄一份进 markup，下一次
        发版它就腐烂，而且腐烂得理直气壮（和 versionVal 那条是同一个理由）。
-       「立即更新」有两个元素（button 与 a），同一时刻只露一个，规则与设置那一行完全相同：
+       「立即更新」有两个元素（button 与 a），同一时刻只露一个，规则与版本行那颗胶囊完全相同：
        报得出版本号、又带 update 能力的壳才调桥，其余一律给下载页——否则手机上会留下一颗
        点了没反应的死按钮。这张卡只在**壳里**弹（判据是壳报的版本号），所以那颗 <a> 面向的
        就是"装过旧包、桥里没有 checkUpdate 方法"的那些手机：给它同源相对路径
@@ -914,6 +906,25 @@
       <button class="us-btn us-primary hidden" id="updateGoBtn" type="button">立即更新</button>
       <a class="us-btn us-primary hidden" id="updateGoLink" target="_blank" rel="noopener"
          href="/site/android.apk">立即更新</a>
+    </div>
+  </div>
+
+  <!-- 浏览器档的「检查更新」：没有安装包可查，对话框只说实话——界面随服务端更新、
+       无需安装；想看改了什么去更新日志。零请求：浏览器能不能装包是结构性已知的，
+       去问一次再答「没有」是多余的一跳。胶囊标签统一写「检查更新」，而那个标签会被
+       读成"这个页面能自己更新"，这个对话框就是那另一半诚实（判据在
+       tests/test_web_pwa.py::test_the_web_update_dialog_says_what_is_true_and_defaults_to_hidden）。
+       它不回答"有哪一版可装"，所以一个版本号都不带。进层栈（app.js 的 showUpdateInfo），
+       返回键 / Esc 收得掉；骨架复用 .modal/.pw-card 那一套。 -->
+  <div class="modal hidden" id="updateInfoModal" role="dialog" aria-modal="true" aria-label="检查更新">
+    <div class="modal-card pw-card">
+      <p class="pw-title">检查更新</p>
+      <p class="pw-note">网页版无需安装，界面随服务端更新。</p>
+      <div class="pw-actions">
+        <button type="button" class="btn" id="updateInfoOk">知道了</button>
+        <a class="btn btn-primary" id="updateInfoLog" target="_blank" rel="noopener"
+           href="/changelog">看更新日志</a>
+      </div>
     </div>
   </div>
 
