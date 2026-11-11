@@ -739,9 +739,18 @@ function Remove-ProxyEnvForChild {
     # Use a fixed roster (both cases) instead; the regex below is the roster's
     # machine-readable shape, not an enumeration source.
     # This is defence-in-depth only: a failed scrub must never abort a swap.
+    # SSL_CERT_FILE / SSL_CERT_DIR are the two env names OpenSSL itself reads for
+    # its verify locations: inheriting them lets the parent session add trust
+    # anchors the child would otherwise never accept. Same both-cases fixed roster.
+    # Range: child-start inheritance only. An .env read inside the process and a
+    # manual start are out of range - see backend/tests/test_launch_env_hygiene.py.
     $roster = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'ssl_cert_file', 'ssl_cert_dir')
     $names = @($roster | Where-Object { $_ -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' })
+    # SECOND filter, appended after the proxy one: the hygiene lock reads the first
+    # -match literal as the proxy roster's shape, so that one has to stay first.
+    $names += @($roster | Where-Object { $_ -match '(?i)^SSL_CERT_(FILE|DIR)$' })
     $removed = @()
     foreach ($n in $names) {
         $had = $false
@@ -773,8 +782,8 @@ function Show-Rollback {
     Write-Output '    deeper inside the half-live package instead of failing):'
     Write-Output ("    [System.IO.Directory]::Move('$Backup', '$Live')")
     Write-Output 'ROLLBACK-HOWTO 5) start the old package and wait until /health answers with the OLD build:'
-    Write-Output 'ROLLBACK-HOWTO 5a) FIRST clear env proxy vars in THIS window (#295: a poisoned NO_PROXY degrades cloud embedding in whatever it starts):'
-    Write-Output '    Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY -ErrorAction SilentlyContinue'
+    Write-Output 'ROLLBACK-HOWTO 5a) FIRST clear env proxy vars and SSL_CERT_FILE/SSL_CERT_DIR in THIS window (#295: a poisoned NO_PROXY degrades cloud embedding in whatever it starts, and the two SSL_CERT_* names let this session add trust anchors the child would inherit):'
+    Write-Output '    Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY, env:SSL_CERT_FILE, env:SSL_CERT_DIR -ErrorAction SilentlyContinue'
     Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden")
     Write-Output 'ROLLBACK-HOWTO 6) only now re-enable the watchdog task (find it by its action, as this script did)'
     Write-Output ('ROLLBACK-HOWTO 7) runtime data copies this run saved (DATA-SAVED dir=) live at ' + $DataSnapshotDir + ' - if the package going live is older than v0.35 it cannot parse a waiting_user status and erases those records from data\tasks.json on its first flush, so stop the backend, copy tasks.json back over data\tasks.json, then start it again (DATA-SAVE-FAIL instead of DATA-SAVED means no copy exists)')

@@ -28,7 +28,7 @@ rem (names=none), so the log proves this step ran. Per-line if-defined below: ea
 rem line re-expands %_PSCRUB% at its own parse time, so accumulation works without
 rem delayed expansion. Names only - never echo the values.
 rem
-rem 2026-11-09: list BOTH cases of all four names. A host can hand this process a
+rem 2026-11-09: list BOTH cases of all four proxy names. A host can hand this process a
 rem block holding http_proxy and HTTP_PROXY as two separate entries; `if defined`
 rem is case-insensitive (it sees either), but `set "NAME="` removes only ONE entry,
 rem so the lowercase twin survived into run_backend with a dead proxy. Same fixed
@@ -42,6 +42,15 @@ if defined ALL_PROXY (set "_PSCRUB=%_PSCRUB%ALL_PROXY," & set "ALL_PROXY=")
 if defined all_proxy (set "_PSCRUB=%_PSCRUB%all_proxy," & set "all_proxy=")
 if defined NO_PROXY (set "_PSCRUB=%_PSCRUB%NO_PROXY," & set "NO_PROXY=")
 if defined no_proxy (set "_PSCRUB=%_PSCRUB%no_proxy," & set "no_proxy=")
+rem SSL_CERT_FILE / SSL_CERT_DIR are the two env names OpenSSL itself reads for its
+rem verify locations, so a parent session can add trust anchors the backend child
+rem would inherit. Both cases, same fixed-roster rule as the proxy names above.
+rem Range: child-start inheritance only - an .env read inside the process and a
+rem manual start are out of range, see backend/tests/test_launch_env_hygiene.py.
+if defined SSL_CERT_FILE (set "_PSCRUB=%_PSCRUB%SSL_CERT_FILE," & set "SSL_CERT_FILE=")
+if defined ssl_cert_file (set "_PSCRUB=%_PSCRUB%ssl_cert_file," & set "ssl_cert_file=")
+if defined SSL_CERT_DIR (set "_PSCRUB=%_PSCRUB%SSL_CERT_DIR," & set "SSL_CERT_DIR=")
+if defined ssl_cert_dir (set "_PSCRUB=%_PSCRUB%ssl_cert_dir," & set "ssl_cert_dir=")
 if not defined _PSCRUB (echo PROXY-ENV-SCRUBBED names=none) else (echo PROXY-ENV-SCRUBBED names=%_PSCRUB%)
 set "_PSCRUB="
 rem PROXY-SCRUB-END

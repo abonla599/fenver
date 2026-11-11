@@ -336,7 +336,8 @@ _HOWTO_SEVEN = ("DATA-SAVED dir=", "waiting_user", "erases", "data\\tasks.json",
 
 
 _HOWTO_5A = ("FIRST clear env proxy vars", "Remove-Item env:HTTP_PROXY",
-             "env:HTTPS_PROXY", "env:ALL_PROXY", "env:NO_PROXY")
+             "env:HTTPS_PROXY", "env:ALL_PROXY", "env:NO_PROXY",
+             "env:SSL_CERT_FILE", "env:SSL_CERT_DIR")
 
 
 def _howto_ok(text: str, pre_text: str) -> bool:

@@ -5,7 +5,10 @@ swap-package / start-ai-stack，`Start-Process` 把当前进程的环境原样�
 #294 给生产四处 httpx 客户端关了 trust_env，那是**子进程侧**的防线，父会话里的毒仍然
 在。#295 在**启动这一层**再加一道：拉起后端之前先从当前进程环境里删掉
 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY`，并响亮打印 token（一枚都没命中也要
-打 `names=none`，让日志能证明这步执行过）。裁决 R2 走方案 (c)：清环境 + 响亮 token，
+打 `names=none`，让日志能证明这步执行过）。名单另含 `SSL_CERT_FILE / SSL_CERT_DIR`：
+这两个名字是 OpenSSL 自己读的验证位置环境变量（`ssl.get_default_verify_paths()` 的
+`openssl_cafile_env` / `openssl_capath_env`），继承它们等于让父会话替子进程追加信任锚。
+裁决 R2 走方案 (c)：清环境 + 响亮 token，
 **不留** `-KeepProxyEnv` 之类的旁路开关；回滚指引（Show-Rollback 打印的那条手动
 Start-Process）也必须把"先清代理"打给照抄指引的人——那是第 5 条落点，单独成类。
 
@@ -16,9 +19,10 @@ Start-Process）也必须把"先清代理"打给照抄指引的人——那是�
 - 机器真相探针（纪律抄 test_swap_package_boot_poll_single_process_machine_truth.py）：
   抽脚本**自己的**清环境表达式（`PROXY-SCRUB-HELPER` 标记之间 / bat 的
   `PROXY-SCRUB-BEGIN/END` 块），原样拼进生成的 .ps1 / .cmd（写在 tmp_path，仓库外），
-  注入四枚毒变量后真跑，断言变量确实清零、token 确实打出。阳性对照 = 注入本身必须
-  让"动手前"数到 4（不注入成功的绿是空转）；反例 = 同样的注入、不调清环境，变量必须
-  还在。探针零后端进程启动、零出网、只碰变量名不碰任何值。
+  注入六枚毒变量后真跑，断言变量确实清零、token 确实打出。阳性对照 = 注入本身必须
+  让"动手前"数到 6（不注入成功的绿是空转）；反例 = 同样的注入、不调清环境，变量必须
+  还在。探针零后端进程启动、零出网、只碰变量名不碰任何值；两枚 TLS 名注入的是不存在
+  的假路径，探针不加载 TLS，那些值不会被任何库读到。
 - 没有 powershell.exe / cmd.exe 就只跳过机器那几格，文本锁照跑（惯例同上）。
 
 射程声明（按实测，不许超出）：
@@ -28,6 +32,20 @@ Start-Process）也必须把"先清代理"打给照抄指引的人——那是�
 - 注释与整行 `#` 剥掉再扫（bat 的 rem 同）；块注释 `#>` 续行仍是被声明的盲区；
 - helper 调用被写进变量赋值（`$x = Remove-ProxyEnvForChild`）仍在调用判据里，
   被改写成字符串反射之类就出射程——那种形状先过 PS 语法这关再说。
+
+仍漏清单（名单只关闭"子进程启动时的环境继承"这一条路，下面三种它管不到）：
+- `.env`：`paths.load_project_env()` 用 `load_dotenv(override=False)` 把值灌进
+  `os.environ`，调用点在 `providers.py` / `memory_manager.py` 的 **import 期**——
+  那发生在进程内部，启动前删环境删不到它；
+- 操作者手工启动（自己 `python run_backend.py`、双击 exe）：没有父脚本，也就没有这一步；
+- 隧道（`cloudflared.exe`）不在射程，沿用上面那条声明，不扩大也不下结论。
+
+`SSL_CERT_DIR` 的判据口径（已实测，不许换回根数）：把它指向 `<subject_hash>.0` 形式的
+哈希目录，验链从 CERTIFICATE_VERIFY_FAILED 变成成功，而 `len(ctx.get_ca_certs())`
+**不变**——OpenSSL 的 hash-dir 查找是惰性的，只在链构建时按 hash 去取文件，证书不进
+store 的对象列表，所以"根数上涨"这个量具对 capath 天生是盲的。真握手探针要 openssl
+二进制 + 自签 CA + socketpair，在 CI 上必然 skip，因此不移植进本套件；这里承担回归的是
+文本层名单锁 + 扩到六名的机器环境探针。
 """
 import re
 import shutil
@@ -46,6 +64,19 @@ STACK_BAT = REPO_ROOT / "tools" / "start-ai-stack.bat"
 # `set "NAME="` 都只认一个大小写不敏感的"名字"，删掉一条、另一条照样往下传。
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 _PS_FILTER = "(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$"
+
+# 两枚 TLS 信任集变量。OpenSSL 自己读这两个名字（ssl.get_default_verify_paths() 的
+# openssl_cafile_env / openssl_capath_env）：SSL_CERT_FILE 往系统根库上**追加**锚，
+# SSL_CERT_DIR 要 <subject_hash>.0 哈希目录形式才生效。手抄字面量，不许从脚本或
+# PROXY_VARS 派生（test_names_copied_literals_not_derived 盯着这一条）。
+_TRUST_VARS = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+_TRUST_FILTER = "(?i)^SSL_CERT_(FILE|DIR)$"
+# 名单里两版大小写都要在（理由同代理那八枚：宿主可以把同名两条交给子进程）。
+_TRUST_ROSTER = ("SSL_CERT_FILE", "SSL_CERT_DIR", "ssl_cert_file", "ssl_cert_dir")
+# 探针注入值：不存在的那个驱动器上的假路径，全 ASCII（生成物要 .encode("ascii")）。
+# 探针只跑 powershell/cmd、不加载 TLS、不出网，所以这两个值不会被任何库读到。
+_TRUST_POISON = (("SSL_CERT_FILE", r"X:\probe-trust\ca.pem"),
+                 ("SSL_CERT_DIR", r"X:\probe-trust\certs"))
 
 _HELPER_BEGIN = "# PROXY-SCRUB-HELPER-BEGIN"
 _HELPER_END = "# PROXY-SCRUB-HELPER-END"
@@ -125,10 +156,15 @@ def _rollback_printed_launch_line(text: str):
 
 
 def _rollback_scrub_instruction_line(text: str):
-    """Show-Rollback 里打印给操作者的"先清代理"命令行（Remove-Item env:…，四个名字齐）。"""
+    """Show-Rollback 里打印给操作者的"先清环境"命令行（Remove-Item env:…，六枚名字齐）。
+
+    这一行是给人照抄的、脚本自己不执行：漏一枚名字，照抄的人就把那枚带进旧包，
+    所以判据要求代理四枚与 TLS 两枚同时在场（反例见
+    test_rollback_instruction_lock_can_go_red）。
+    """
     for i, ln in enumerate(text.splitlines()):
         if re.search(r"Remove-Item\s+env:", ln) \
-                and all(re.search(r"env:" + v, ln) for v in PROXY_VARS):
+                and all(re.search(r"env:" + v, ln) for v in PROXY_VARS + _TRUST_VARS):
             return i
     return None
 
@@ -234,6 +270,32 @@ def test_roster_sizes_pinned_exactly():
     assert all(v > 0 for v in expect.values()), "计数钉必须 >0，0 不构成防线。"
 
 
+def test_rollback_instruction_lock_can_go_red():
+    """回滚指引那行的变异自证（纯文本，CI 上也有牙）：只列四枚代理名 ⇒ 判据必须认不出它。
+
+    那一行是打印给操作者照抄的、脚本自己不执行：判据若只要求代理四枚，TLS 两枚被摘掉
+    时它照样绿，第四处落点就成了"改了没人守"。正控 = 六枚齐的那行 + 真脚本那一行。
+    """
+    def _line(names):
+        return ("Remove-Item " + ", ".join("env:" + v for v in names)
+                + " -ErrorAction SilentlyContinue\n")
+
+    assert _rollback_scrub_instruction_line(_line(PROXY_VARS)) is None, \
+        "只有四枚代理名时判据竟认了这一行——TLS 两枚被摘掉它不会红"
+    for missing in _TRUST_VARS:
+        names = tuple(v for v in PROXY_VARS + _TRUST_VARS if v != missing)
+        assert _rollback_scrub_instruction_line(_line(names)) is None, \
+            f"缺 {missing} 时判据竟认了这一行（逐枚都要有牙）"
+    assert _rollback_scrub_instruction_line(_line(PROXY_VARS + _TRUST_VARS)) == 0, \
+        "六枚齐时判据必须认出这一行（正控）"
+
+    stext = _read(SWAP_PS1)
+    instr = _rollback_scrub_instruction_line(stext)
+    rp = _rollback_printed_launch_line(stext)
+    assert instr is not None and rp is not None and instr < rp, \
+        f"真脚本的清理指引行缺失、或排在启动指引之后（照抄的人会先起进程）：instr={instr} start={rp}"
+
+
 def test_helper_defined_before_every_call():
     for path in (WATCHDOG_PS1, SWAP_PS1):
         text = _read(path)
@@ -258,9 +320,15 @@ def test_names_copied_literals_not_derived():
     src = _read(Path(__file__))
     assert re.search(r"_LAUNCH_SITES\s*=\s*\{", src), "名册得是字面 dict。"
     assert re.search(r"_ROSTER_SIZES\s*=\s*\(", src), "计数钉得是字面 tuple。"
+    assert re.search(r"_TRUST_VARS\s*=\s*\(", src), "TLS 两枚名字得是字面 tuple。"
+    assert re.search(r"_TRUST_ROSTER\s*=\s*\(", src), "TLS 大小写两版名单得是字面 tuple。"
     # 反缴械判据：两处名单的赋值 RHS 一旦变成标识符（`_derive...` 之类）就红。
     assert not re.search(r"_LAUNCH_SITES\s*=\s*_[A-Za-z]", src), "名册 RHS 变成了表达式。"
     assert not re.search(r"_ROSTER_SIZES\s*=\s*_[A-Za-z]", src), "计数钉 RHS 变成了表达式。"
+    assert not re.search(r"_TRUST_VARS\s*=\s*_[A-Za-z]", src), "TLS 名单 RHS 变成了表达式。"
+    assert not re.search(r"_TRUST_ROSTER\s*=\s*_[A-Za-z]", src), "TLS 两版名单 RHS 变成了表达式。"
+    assert not re.search(r"_TRUST_VARS\s*=\s*PROXY_VARS", src), \
+        "TLS 名单不许从代理名单派生：两族名字是两份独立的手抄事实。"
 
 
 # ---------------------------------------------------------------- token / 形状
@@ -291,6 +359,88 @@ def test_ps_helper_regex_targets_exactly_four_proxy_vars():
             assert not re.match(rx, innocent), f"{rx} 误伤了不该动的 {innocent}"
 
 
+def _ps_trust_problems(helper: str) -> list:
+    """helper 的 TLS 名单判据本体：四枚字面量（两名 × 大小写两版）+ 第二条过滤器，
+    且那条过滤器必须排在代理过滤器**后面**。
+
+    抽成纯函数是为了能喂合成 helper 自证有牙：CI 是 ubuntu，四格机器探针在那边 skip，
+    文本层这一格就是这条修复在 CI 上唯一的牙。
+    """
+    problems = []
+    for name in _TRUST_ROSTER:
+        if "'" + name + "'" not in helper:
+            problems.append(f"固定名单缺 {name}")
+    if _TRUST_FILTER not in helper:
+        problems.append(f"缺 TLS 过滤器字面量 {_TRUST_FILTER}")
+    proxy_at = helper.find(_PS_FILTER)
+    trust_at = helper.find(_TRUST_FILTER)
+    if proxy_at == -1:
+        problems.append("代理过滤器不在了：它必须留在前面（第一个 -match 字面量是它的形状）")
+    elif trust_at != -1 and trust_at < proxy_at:
+        problems.append("TLS 过滤器排在代理过滤器前面：第一个 -match 字面量会被读成 TLS 那条")
+    return problems
+
+
+def test_ps_helper_roster_and_second_filter_cover_the_trust_vars():
+    """两份 helper 都必须把两枚 TLS 名（大小写两版）列进固定名单，并追加第二条过滤器。
+
+    只改一份 = 下一场事故（逐字同形那把锁另有格）；只列大写 = 宿主给的小写那条照样
+    往下传。代理那条过滤器不许被替换掉，也不许被挤到后面去。
+    """
+    for path in (WATCHDOG_PS1, SWAP_PS1):
+        helper = _extract_ps_helper(path)
+        assert helper, f"{path.name} 没有可抽取的 helper"
+        problems = _ps_trust_problems(helper)
+        assert not problems, f"{path.name} 的 TLS 信任集名单不全：{problems}"
+
+
+def test_ps_trust_filter_targets_exactly_the_two_openssl_vars():
+    """第二条过滤器只认这两枚名字（大小写两版），不许误伤别的 CA 相关变量或 PATH。"""
+    for v in _TRUST_VARS:
+        for name in (v, v.lower()):
+            assert re.match(_TRUST_FILTER, name), f"{_TRUST_FILTER} 认不出该被清的 {name}"
+    for innocent in ("PATH", "TEMP", "HOME", "HTTP_PROXY", "SSL_CERT_FILEX", "XSSL_CERT_FILE",
+                     "SSL_CERT_DIRTY", "SSL_CERT_FILE_BAK", "REQUESTS_CA_BUNDLE",
+                     "CURL_CA_BUNDLE", "PYTHONPATH"):
+        assert not re.match(_TRUST_FILTER, innocent), f"{_TRUST_FILTER} 误伤了不该动的 {innocent}"
+
+
+def test_ps_trust_lock_can_go_red():
+    """变异自证（纯文本、不跑机器）：摘掉第二条过滤器 / 名单只留大写 / 把它挪到代理前面，
+    同一条判据必须分别报红。正控是真 helper 自己。
+
+    顺序那一格同时证明 R3 的陷阱是真的：挪到前面之后，helper 里**第一个** `-match '…'`
+    字面量就变成了 TLS 那条，代理过滤器那把锁会跟着红。
+    """
+    helper = _extract_ps_helper(SWAP_PS1)
+    assert helper is not None, "正控的前提：swap 有可抽取的 helper"
+    assert not _ps_trust_problems(helper), f"正控先绿：真 helper 自己就该过判据 {_ps_trust_problems(helper)}"
+
+    lines = helper.splitlines(keepends=True)
+    trust_lines = [ln for ln in lines if _TRUST_FILTER in ln]
+    assert len(trust_lines) == 1, f"变异前提：真 helper 里应恰好一条 TLS 过滤器，实得 {len(trust_lines)}"
+
+    dropped = "".join(ln for ln in lines if _TRUST_FILTER not in ln)
+    assert any("缺 TLS 过滤器" in p for p in _ps_trust_problems(dropped)), \
+        f"摘掉第二条过滤器判据竟不红：{_ps_trust_problems(dropped)}"
+
+    upper_only = helper.replace(", 'ssl_cert_file', 'ssl_cert_dir'", "")
+    assert upper_only != helper, "变异没生效：名单里找不到小写那两枚（形状变了，先修判据）"
+    problems = _ps_trust_problems(upper_only)
+    assert problems and all("ssl_cert_" in p for p in problems), \
+        f"名单只留大写两枚时判据应只报小写那两枚缺失，实得 {problems}"
+
+    rest = [ln for ln in lines if _TRUST_FILTER not in ln]
+    proxy_idx = next(i for i, ln in enumerate(rest) if _PS_FILTER in ln)
+    reversed_order = "".join(rest[:proxy_idx] + trust_lines + rest[proxy_idx:])
+    problems = _ps_trust_problems(reversed_order)
+    assert any("排在代理过滤器前面" in p for p in problems), \
+        f"把 TLS 过滤器挪到前面判据竟不红：{problems}"
+    first_rx = re.search(r"-match\s+'(?P<rx>[^']+)'", reversed_order)
+    assert first_rx and first_rx.group("rx") == _TRUST_FILTER, \
+        "顺序陷阱的前提变了：挪到前面后第一个 -match 字面量竟不是 TLS 那条"
+
+
 def test_swap_helper_and_edits_are_pure_ascii():
     """swap-package.ps1 整文件（含 helper 与回滚指引新行）一个 >=0x80 字节都不许有——
     沿用 contract 那把 ASCII 钉的形状门；watchdog 允许 BOM+中文，但 helper 段本身
@@ -304,24 +454,26 @@ def test_swap_helper_and_edits_are_pure_ascii():
 
 
 def _bat_roster_problems(block: str) -> list:
-    """bat 清环境块的名单判据本体：八枚名字（四变量 × 两版）都要有对应的删除语句。
+    """bat 清环境块的名单判据本体：十二枚名字（六变量 × 大小写两版）都要有对应的删除语句。
 
-    抽出来是为了能自证有牙——喂一段只有大写四枚的合成块，它必须报出四条问题。
+    抽出来是为了能自证有牙——喂一段只有大写四枚代理名的合成块，它必须报出
+    「代理小写四枚 + TLS 两版四枚 + 行数」共九条问题（见 test_bat_roster_lock_can_go_red）。
     """
     problems = []
     code = re.sub(r"(?mi)^\s*rem\b.*$", "", block)  # 注释里也会写到 `if defined`，只数真语句
-    for v in PROXY_VARS:
+    for v in PROXY_VARS + _TRUST_VARS:
         if not re.search(r'set\s+"' + v + r'="', block):
             problems.append(f"没清 {v}")
         if not re.search(r'set\s+"' + v.lower() + r'="', block):
             problems.append(f"没清小写那版 {v.lower()}：同名两条会留下一条带进子进程")
-    if code.count("if defined ") != 2 * len(PROXY_VARS):
-        problems.append("if defined 的行数不是八行：名单被收窄了（只列一版就会少四条）")
+    want = 2 * (len(PROXY_VARS) + len(_TRUST_VARS))
+    if code.count("if defined ") != want:
+        problems.append(f"if defined 的行数不是 {want} 行：名单被收窄了（只列一版就会少一半）")
     return problems
 
 
 def test_bat_scrub_clears_both_cases_and_echoes_token():
-    """bat 块必须把八枚名字（四个变量 × 大小写两版）都列出来，不许只列大写。
+    """bat 块必须把十二枚名字（六个变量 × 大小写两版）都列出来，不许只列大写。
 
     2026-11-09 实测：同一个工具宿主把 http_proxy / HTTP_PROXY 与 https_proxy /
     HTTPS_PROXY 当成**四条独立条目**交给子进程。`if defined` 大小写不敏感（看得到
@@ -344,19 +496,35 @@ def test_bat_roster_lock_can_go_red():
     """变异自证：把名单砍回事故前那四行大写，同一条判据必须报红。
 
     没有这一格，上面那条绿可能只是"正则永远匹配不上"的空转；有这一格，判据的射程
-    就钉在"两版都得列"上。正控是同一段文本补回小写四行后立刻转绿。
+    就钉在"两版都得列"上。正控是同一段文本补回十二行后立刻转绿。
+    中间那一格（代理八行齐、TLS 四条缺）证明判据分得清缺的是哪一族，而不是只数行数。
     """
     four = "".join(
         'if defined ' + v + ' (set "_PSCRUB=%_PSCRUB%' + v + '," & set "' + v + '=")\r\n'
         for v in PROXY_VARS)
     problems = _bat_roster_problems(four)
-    assert len(problems) == len(PROXY_VARS) + 1, \
+    assert len(problems) == len(PROXY_VARS) + 1 + 2 * len(_TRUST_VARS), \
         f"砍回四行大写时判据只报了 {problems}——它认不出名单被收窄"
     assert any("if defined 的行数" in p for p in problems), problems
+
     eight = "".join(
         'if defined ' + n + ' (set "_PSCRUB=%_PSCRUB%' + n + '," & set "' + n + '=")\r\n'
         for n in _FIXED_ROSTER)
-    assert not _bat_roster_problems(eight), f"补回八行后判据仍报红：{_bat_roster_problems(eight)}"
+    problems = _bat_roster_problems(eight)
+    name_problems = [p for p in problems if "if defined 的行数" not in p]
+    assert len(name_problems) == 2 * len(_TRUST_VARS), \
+        f"代理八行齐、TLS 四条缺时，名字问题应恰好是 TLS 那四条，实得 {name_problems}"
+    assert all(any(t in p for t in _TRUST_ROSTER) for p in name_problems), name_problems
+    assert not any(any(v in p for v in _FIXED_ROSTER) for p in name_problems), \
+        f"代理八行齐却报出了代理族的问题（两族分不清）：{name_problems}"
+    # 行数钉同时在场：8 != 12。它是另一条判据，不许拿它冒充"名字族分得清"。
+    assert any("if defined 的行数" in p for p in problems), problems
+
+    twelve = "".join(
+        'if defined ' + n + ' (set "_PSCRUB=%_PSCRUB%' + n + '," & set "' + n + '=")\r\n'
+        for n in _FIXED_ROSTER + _TRUST_ROSTER)
+    assert not _bat_roster_problems(twelve), \
+        f"补回十二行后判据仍报红：{_bat_roster_problems(twelve)}"
 
 
 # ------------------------------------------------------------ 机器真相（PS）
@@ -395,7 +563,7 @@ def _run_ps_file(script_text: str, tmp_path: Path):
 
 @pytest.mark.parametrize("path", [WATCHDOG_PS1, SWAP_PS1], ids=["watchdog", "swap"])
 def test_machine_truth_ps_scrubber_clears_poison(path, tmp_path):
-    """把脚本自己的 helper 拼进生成的 .ps1 真跑：注入 4 枚毒 -> 清 -> 必须剩 0，且 token 响亮。
+    """把脚本自己的 helper 拼进生成的 .ps1 真跑：注入 6 枚毒 -> 清 -> 必须剩 0，且 token 响亮。
 
     取数一律**逐名 `[Environment]::GetEnvironmentVariable`**，不许用 `Get-ChildItem env:`
     数条目——宿主同时注入 `http_proxy` 与 `HTTP_PROXY` 时，枚举那本字典自己就抛
@@ -411,11 +579,12 @@ def test_machine_truth_ps_scrubber_clears_poison(path, tmp_path):
     assert "Remove-Item" in helper, f"{path.name} helper 里没有删变量的动作"
     probe = (
         "$ErrorActionPreference='Stop'\r\n"
-        "$CheckNames = @('" + "','".join(PROXY_VARS) + "')\r\n"
+        "$CheckNames = @('" + "','".join(PROXY_VARS + _TRUST_VARS) + "')\r\n"
         "$env:HTTP_PROXY='http://127.0.0.1:1'\r\n"
         "$env:HTTPS_PROXY='http://127.0.0.1:1'\r\n"
         "$env:ALL_PROXY='socks5://127.0.0.1:1'\r\n"
         "$env:NO_PROXY='localhost,127.0.0.1,[::1]'\r\n"
+        + "".join("$env:" + n + "='" + v + "'\r\n" for n, v in _TRUST_POISON) +
         "$before = 0\r\n"
         "foreach ($n in $CheckNames) { if ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) { $before++ } }\r\n"
         "Write-Output ('BEFORE=' + $before)\r\n"
@@ -431,21 +600,22 @@ def test_machine_truth_ps_scrubber_clears_poison(path, tmp_path):
     assert res.returncode == 0, f"探针跑失败 rc={res.returncode}：{out}"
     before = int(re.search(r"BEFORE=(\d+)", out).group(1))
     after = int(re.search(r"AFTER=(\d+)", out).group(1))
-    assert before == 4, f"阳性对照失败：注入就没生效（BEFORE={before}≠4）——下面的绿是空转"
+    assert before == 6, f"阳性对照失败：注入就没生效（BEFORE={before}≠6）——下面的绿是空转"
     assert after == 0, f"脚本自己的清环境表达式没把毒清掉：AFTER={after}（应为 0）"
     assert "PROXY-ENV-SCRUBBED names=" in out, f"helper 没打印响亮 token：{out}"
 
 
 def test_machine_truth_ps_counterexample_no_scrub_leaves_vars(tmp_path):
-    """反例：同样注入四枚毒、**不**调清环境，机器必须答"还在"——证明上面那条绿是清环境挣来的。"""
+    """反例：同样注入六枚毒、**不**调清环境，机器必须答"还在"——证明上面那条绿是清环境挣来的。"""
     if (shutil.which("powershell.exe") or shutil.which("powershell")) is None:
         pytest.skip("powershell.exe 不可用")
     probe = (
-        "$CheckNames = @('" + "','".join(PROXY_VARS) + "')\r\n"
+        "$CheckNames = @('" + "','".join(PROXY_VARS + _TRUST_VARS) + "')\r\n"
         "$env:HTTP_PROXY='http://127.0.0.1:1'\r\n"
         "$env:HTTPS_PROXY='http://127.0.0.1:1'\r\n"
         "$env:ALL_PROXY='socks5://127.0.0.1:1'\r\n"
         "$env:NO_PROXY='localhost,127.0.0.1,[::1]'\r\n"
+        + "".join("$env:" + n + "='" + v + "'\r\n" for n, v in _TRUST_POISON) +
         "$after = 0\r\n"
         "foreach ($n in $CheckNames) { if ($null -ne [Environment]::GetEnvironmentVariable($n, 'Process')) { $after++ } }\r\n"
         "Write-Output ('AFTER=' + $after)\r\n"
@@ -453,7 +623,7 @@ def test_machine_truth_ps_counterexample_no_scrub_leaves_vars(tmp_path):
     _assert_probe_is_duplicate_safe(probe)
     res = _run_ps_file(probe, tmp_path)
     after = int(re.search(r"AFTER=(\d+)", res.stdout).group(1))
-    assert after == 4, f"反例坏了：不清环境竟也答 {after}（应 4），上面那条绿就没有牙"
+    assert after == 6, f"反例坏了：不清环境竟也答 {after}（应 6），上面那条绿就没有牙"
 
 
 # ------------------------------------------------------------ 机器真相（BAT）
@@ -471,19 +641,23 @@ _BAT_CHECK_TAIL = (
     "if defined HTTPS_PROXY set AFTER=STILL_HTTPS\r\n"
     "if defined ALL_PROXY set AFTER=STILL_ALL\r\n"
     "if defined NO_PROXY set AFTER=STILL_NO\r\n"
+    "if defined SSL_CERT_FILE set AFTER=STILL_SSLFILE\r\n"
+    "if defined SSL_CERT_DIR set AFTER=STILL_SSLDIR\r\n"
     "echo PROBE_STATE=%AFTER%\r\n"
-    "set | findstr /I /R \"^HTTP_PROXY= ^HTTPS_PROXY= ^ALL_PROXY= ^NO_PROXY=\"\r\n"
+    "set | findstr /I /R \"^HTTP_PROXY= ^HTTPS_PROXY= ^ALL_PROXY= ^NO_PROXY= "
+    "^SSL_CERT_FILE= ^SSL_CERT_DIR=\"\r\n"
     "echo FINDSTR_RC=%ERRORLEVEL%\r\n"
 )
-# 注入前先把八枚名字（大小写两版）清空：宿主可能替这个进程备好了 http_proxy 与
-# HTTP_PROXY 两条同名不同大小的条目，那样 BEFORE 就不是探针注入的那四枚，探针本身
-# 变成一次靠宿主运气的测量。归一化之后，"四枚注入 -> 清零 -> CLEAN" 才是这台机器上
+# 注入前先把十二枚名字（大小写两版）清空：宿主可能替这个进程备好了 http_proxy 与
+# HTTP_PROXY 两条同名不同大小的条目，那样 BEFORE 就不是探针注入的那六枚，探针本身
+# 变成一次靠宿主运气的测量。归一化之后，"六枚注入 -> 清零 -> CLEAN" 才是这台机器上
 # 可复现的结论。注：cmd 的 `set` 是大小写不敏感的，它**造不出**同名两条这种形状，
 # 所以"两版都得清"这条只能由文本锁钉名单来判，机器探针判的是清的动作为真。
 _BAT_NORMALIZE = "".join(
     'set "' + n + '="\r\n'
     for n in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
-              "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"))
+              "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+              "SSL_CERT_FILE", "ssl_cert_file", "SSL_CERT_DIR", "ssl_cert_dir"))
 _BAT_POISON = (
     "@echo off\r\n"
     + _BAT_NORMALIZE +
@@ -491,6 +665,7 @@ _BAT_POISON = (
     "set HTTPS_PROXY=http://127.0.0.1:1\r\n"
     "set ALL_PROXY=socks5://127.0.0.1:1\r\n"
     "set NO_PROXY=localhost,127.0.0.1\r\n"
+    + "".join("set " + n + "=" + v + "\r\n" for n, v in _TRUST_POISON)
 )
 
 
@@ -505,14 +680,14 @@ def test_machine_truth_bat_scrub_clears_poison(tmp_path):
         pytest.skip("cmd.exe 不可用")
     out = (res.stdout or "") + (res.stderr or "")
     assert "PROXY-ENV-SCRUBBED names=" in out, f"bat 块没打出响亮 token：{out}"
-    assert "names=none" not in out, f"注入了 4 枚却报 names=none——累加器坏了：{out}"
+    assert "names=none" not in out, f"注入了 6 枚却报 names=none——累加器坏了：{out}"
     assert "PROBE_STATE=STILL_" not in out, f"清环境后仍有变量存活：{out}"
     assert "PROBE_STATE=CLEAN" in out, f"探针自己没跑到判定行：{out}"
     assert "FINDSTR_RC=1" in out, f"set|findstr 还能看到代理变量（rc 不是 1）：{out}"
 
 
 def test_machine_truth_bat_counterexample_no_scrub_leaves_vars(tmp_path):
-    """反例：同样注入、**不**跑清环境块，四枚变量必须还在（AFTER 不是 CLEAN、findstr 命中）。"""
+    """反例：同样注入、**不**跑清环境块，六枚变量必须还在（AFTER 不是 CLEAN、findstr 命中）。"""
     res = _run_cmd_file(_BAT_POISON + _BAT_CHECK_TAIL, tmp_path)
     if res is None:
         pytest.skip("cmd.exe 不可用")

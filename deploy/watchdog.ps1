@@ -519,9 +519,18 @@ function Remove-ProxyEnvForChild {
     # Use a fixed roster (both cases) instead; the regex below is the roster's
     # machine-readable shape, not an enumeration source.
     # This is defence-in-depth only: a failed scrub must never abort a swap.
+    # SSL_CERT_FILE / SSL_CERT_DIR are the two env names OpenSSL itself reads for
+    # its verify locations: inheriting them lets the parent session add trust
+    # anchors the child would otherwise never accept. Same both-cases fixed roster.
+    # Range: child-start inheritance only. An .env read inside the process and a
+    # manual start are out of range - see backend/tests/test_launch_env_hygiene.py.
     $roster = @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+                'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+                'SSL_CERT_FILE', 'SSL_CERT_DIR', 'ssl_cert_file', 'ssl_cert_dir')
     $names = @($roster | Where-Object { $_ -match '(?i)^(HTTP|HTTPS|ALL|NO)_PROXY$' })
+    # SECOND filter, appended after the proxy one: the hygiene lock reads the first
+    # -match literal as the proxy roster's shape, so that one has to stay first.
+    $names += @($roster | Where-Object { $_ -match '(?i)^SSL_CERT_(FILE|DIR)$' })
     $removed = @()
     foreach ($n in $names) {
         $had = $false
