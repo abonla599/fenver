@@ -192,6 +192,13 @@ def test_control_chars_and_tag_forgery_are_neutralized(enabled):
     ("package", "com.otpbank.app", "com.otpbank.app"),
     ("package", "not-a-package", device_context.REDACTED),
     ("package", "验证码", device_context.REDACTED),
+    # 空串没有包名可脱敏 ⇒ 渲染为空，不是 [已脱敏]（那是对模型说假话）。
+    ("package", "", ""),
+    # 空串豁免不许顺手放宽形状闸：非空不合形状（空格/斜杠/单段/前导数字）仍必须替换。
+    ("package", "com.example.app ", device_context.REDACTED),
+    ("package", "a/b", device_context.REDACTED),
+    ("package", "single", device_context.REDACTED),
+    ("package", "1abc.def", device_context.REDACTED),
 ])
 def test_free_text_fields_use_their_ruled_predicate(enabled, field, value, expected):
     """三字段各按裁决谓词：package 形状闸、device_id/window_title 敏感词。

@@ -48,8 +48,10 @@ def _java_ints(src: str) -> dict:
 
 
 def _java_sensitive_pattern(src: str) -> str:
-    m = re.search(r"Pattern\.compile\(\s*\"(\(\?i\)\([^\"]+\))\"", src)
-    assert m, "Java 侧没找到敏感词表：Pattern.compile(\"(?i)(...)\"...)"
+    # 锚定 SENSITIVE 常量名，不取「第一枚 (?i)」：一枚字面量完全正确的诱饵
+    # SENSITIVE_LOCK_DECOY 排在真表之前时，first-match 会读到诱饵、放过真表被抽词。
+    m = re.search(r"\bSENSITIVE\b\s*=\s*Pattern\.compile\(\s*\"(\(\?i\)\([^\"]+\))\"", src)
+    assert m, "Java 侧没找到敏感词表：SENSITIVE = Pattern.compile(\"(?i)(...)\"...)"
     return m.group(1)
 
 
@@ -85,6 +87,9 @@ _SERVER_EXPECTED = {
                   _PROBE_SENSITIVE_TEXT: device_context.REDACTED},
 }
 _JAVA_FIELD_HELPER = {"sensitive": "fieldText", "shape": "packageText"}
+# put 值表达式不仅判助手名，还判参数名：fieldText(windowTitle) 喂给 device_id 是
+# 参数调包——助手名照对、键名键序全不动，只判助手名的判据看不见（实际参数名现读 build）。
+_FIELD_PUT_PARAM = {"device_id": "id", "package": "pkg", "window_title": "windowTitle"}
 
 
 def _server_field_outcomes(monkeypatch) -> dict:
@@ -122,15 +127,36 @@ def _java_shape_pattern(src: str) -> str:
     return m.group(1).replace("\\\\", "\\")
 
 
+# 真 SENSITIVE 声明前缀与完整词表字面量（与 Java 源码逐字同；read_text 已归一为 LF）。
+_SENSITIVE_DECL = "private static final Pattern SENSITIVE = Pattern.compile("
+_FULL_TABLE = '"(?i)(密码|口令|验证码|动态码|卡号|身份证|password|passwd|otp|cvv|card.?no|id.?card)"'
+
+
+def _decoy_then_drop(src: str, word: str) -> str:
+    """在真 SENSITIVE 前插一枚字面量完全正确的诱饵，再从真表抽走 word。
+
+    锚定常量名的键表锁必须读到被抽词的真表（与服务端不等 ⇒ 红）；旧的 first-match
+    会读到排在前面的诱饵（完整词表 ⇒ 与服务端相等 ⇒ 绿），这正是 G3 的缴械路径。
+    """
+    dropped = _FULL_TABLE.replace("|" + word, "", 1)
+    assert dropped != _FULL_TABLE, f"词表里没有 {word}，抽词变异没生效"
+    s = src.replace(_FULL_TABLE, dropped, 1)          # 先抽真表（此时全文件仅一处）
+    decoy = ("private static final Pattern SENSITIVE_LOCK_DECOY = Pattern.compile(\n"
+             "            " + _FULL_TABLE + ",\n"
+             "            Pattern.UNICODE_CASE);\n    ")
+    return s.replace(_SENSITIVE_DECL, decoy + _SENSITIVE_DECL, 1)
+
+
 def _java_field_predicate_problems(src: str) -> list[str]:
     problems = []
     exprs = _java_put_exprs(src, "payload")
     bodies = {h: _java_method_body(src, h) for h in _JAVA_FIELD_HELPER.values()}
     for field, pred in _FIELD_PREDICATE.items():
         helper = _JAVA_FIELD_HELPER[pred]
+        param = _FIELD_PUT_PARAM[field]
         expr = exprs.get(field, "").strip()
-        if not re.fullmatch(re.escape(helper) + r"\(\s*\w+\s*\)", expr):
-            problems.append(f"{field} 的 put 值不是 {helper}(...)：{expr!r}")
+        if not re.fullmatch(re.escape(helper) + r"\(\s*" + re.escape(param) + r"\s*\)", expr):
+            problems.append(f"{field} 的 put 值不是 {helper}({param})：{expr!r}")
     for helper, matcher, other in (("fieldText", "SENSITIVE.matcher", "PACKAGE_SHAPE"),
                                    ("packageText", "PACKAGE_SHAPE.matcher", "SENSITIVE.matcher")):
         body = bodies[helper]
@@ -138,6 +164,14 @@ def _java_field_predicate_problems(src: str) -> list[str]:
             problems.append(f"{helper} 本体缺清洗/判定/替换")
         if other in body:
             problems.append(f"{helper} 混进了另一套谓词 {other}")
+        # 子串判据会被死代码喂饱：if(false){真脱敏} 照样含全部子串。本体必须是
+        # 直白的条件脱敏——不许分支/循环，返回必须是唯一一条含判定与替换的三元表达式。
+        if re.search(r"\b(if|else|switch|for|while|do)\b", body):
+            problems.append(f"{helper} 本体出现分支/循环，脱敏被藏进了控制流")
+        rets = re.findall(r"\breturn\b([^;]*);", body)
+        if (len(rets) != 1 or "?" not in rets[0] or ":" not in rets[0]
+                or matcher not in rets[0] or "REDACTED" not in rets[0]):
+            problems.append(f"{helper} 的返回不是唯一的直接三元脱敏表达式")
     if _java_shape_pattern(src) != device_context._PACKAGE_RE.pattern:
         problems.append("package 形状闸正则两侧不同值")
     return problems
@@ -200,7 +234,9 @@ def test_wire_key_names_and_order_match_the_server_models():
 def test_field_predicates_match_on_both_sides(monkeypatch):
     """三字段两端谓词逐字对应：package=形状闸、device_id/window_title=敏感词。
 
-    服务端用行为探针（真 ingest 一遍看快照值），Java 侧扫 put 值表达式与助手本体。
+    服务端用行为探针（真 ingest 一遍看快照值），Java 侧扫 put 值表达式与助手本体：
+    put 值逐字段判助手名**与参数名**（id/pkg/windowTitle），助手本体不许分支/循环、
+    返回必须是唯一一条直接三元脱敏（子串判据会被死代码掏空喂饱）。
     任一端把某字段的谓词换掉（哪怕键名键序都没动），这里当场红。
     """
     server = _server_field_outcomes(monkeypatch)
@@ -250,6 +286,20 @@ def test_device_side_class_stays_free_of_android_imports():
                          "return cleaned;"), "pred", "fieldText-body"),
     (lambda s: s.replace("PACKAGE_SHAPE.matcher(cleaned).matches()",
                          "SENSITIVE.matcher(cleaned).find()"), "pred", "packageText-body"),
+    # G1：死代码掏空 fieldText（保留全部判据子串）——本体判据必须仍报红。
+    (lambda s: s.replace(
+        "        String cleaned = cleanText(raw);\n"
+        "        return SENSITIVE.matcher(cleaned).find() ? REDACTED : cleaned;",
+        "        String cleaned = cleanText(raw);\n"
+        '        if (Boolean.parseBoolean("false")) {\n'
+        "            return SENSITIVE.matcher(cleaned).find() ? REDACTED : cleaned;\n"
+        "        }\n"
+        "        return cleaned;"), "pred", "dead-code"),
+    # G2：参数调包 device_id←windowTitle（助手名照对）——put 判据必须判参数名。
+    (lambda s: s.replace('payload.put("device_id", fieldText(id))',
+                         'payload.put("device_id", fieldText(windowTitle))'), "pred", "param-swap"),
+    # G3：干净诱饵 + 真表抽走「口令」——键表锁锚定常量名才读得到被抽词的真表。
+    (lambda s: _decoy_then_drop(s, "口令"), "kw", "decoy-drop"),
 ])
 def test_parity_checks_can_go_red(mutate, detector, hint):
     """变异自证：把设备侧改坏一处，对应的那条对照必须报得出来。

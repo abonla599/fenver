@@ -113,8 +113,11 @@ public class DeviceContextPayloadTest {
 
     @Test
     public void sensitiveKeywordInTextIsRedactedWithTheWholeSegment() {
+        // 12 词各一格（节点文本路径）：抽走任意一词，对应那格的脱敏断言必红。
         for (String text : Arrays.asList("验证码 123456", "卡号 6222 0000", "请输入密码",
-                                         "PASSWORD: abc", "cvv 123", "OTP 987654")) {
+                                         "PASSWORD: abc", "cvv 123", "OTP 987654",
+                                         "支付口令", "动态码 987", "身份证 110",
+                                         "passwd entry", "card no 6222", "id card 110")) {
             DeviceContextPayload.Built b = build("accessibility", node(text));
             assertTrue(b.reason, b.ok);
             Map<String, Object> first = (Map<String, Object>) nodesOf(decoded(b.json)).get(0);
@@ -159,7 +162,9 @@ public class DeviceContextPayloadTest {
 
     @Test
     public void packageWithInvalidShapeIsRedactedWhole() {
-        for (String pkg : Arrays.asList("not-a-package", "com.example.app;rm", "验证码")) {
+        // 非空不合形状仍必须替换：空串豁免（见下格）不许顺手放宽形状闸。
+        for (String pkg : Arrays.asList("not-a-package", "com.example.app;rm", "验证码",
+                                        "com.example.app ", "a/b", "single", "1abc.def")) {
             DeviceContextPayload.Built b = DeviceContextPayload.build(
                     "dev-1", 1L, pkg, "t", "accessibility",
                     Collections.<DeviceContextPayload.Node>emptyList());
@@ -167,6 +172,16 @@ public class DeviceContextPayloadTest {
             assertEquals("不合形状的包名没被整段换掉：" + pkg,
                     DeviceContextPayload.REDACTED, decoded(b.json).get("package"));
         }
+    }
+
+    @Test
+    public void emptyPackageRendersEmptyNotRedacted() {
+        // 空串没有包名可脱敏：渲染为空，不是 [已脱敏]（那是对模型说假话）。
+        DeviceContextPayload.Built b = DeviceContextPayload.build(
+                "dev-1", 1L, "", "t", "accessibility",
+                Collections.<DeviceContextPayload.Node>emptyList());
+        assertTrue(b.reason, b.ok);
+        assertEquals("空包名应渲染为空", "", decoded(b.json).get("package"));
     }
 
     @Test
@@ -194,6 +209,29 @@ public class DeviceContextPayloadTest {
                 "dev-1", 1L, "com.example.app", "t", "accessibility",
                 Collections.<DeviceContextPayload.Node>emptyList());
         assertEquals("dev-1", decoded(plain.json).get("device_id"));
+    }
+
+    @Test
+    public void everySensitiveKeywordIsRedactedInFreeTextFields() {
+        // 12 词各一格（device_id / window_title 路径）：抽走任意一词，对应那格必红。
+        // 每条触发文本只含它自己那一味，避免被词表里别的词掩盖（脱敏断言才咬得住真表）。
+        for (String trigger : Arrays.asList(
+                "请输入密码", "支付口令", "验证码 123456", "动态码 987", "卡号 6222",
+                "身份证 110", "PASSWORD: abc", "passwd entry", "OTP 987654", "cvv 123",
+                "card no 6222", "id card 110")) {
+            DeviceContextPayload.Built win = DeviceContextPayload.build(
+                    "dev-1", 1L, "com.example.app", trigger, "accessibility",
+                    Collections.<DeviceContextPayload.Node>emptyList());
+            assertTrue(win.reason, win.ok);
+            assertEquals("window_title 没整段脱敏：" + trigger,
+                    DeviceContextPayload.REDACTED, decoded(win.json).get("window_title"));
+            DeviceContextPayload.Built dev = DeviceContextPayload.build(
+                    trigger, 1L, "com.example.app", "t", "accessibility",
+                    Collections.<DeviceContextPayload.Node>emptyList());
+            assertTrue(dev.reason, dev.ok);
+            assertEquals("device_id 没整段脱敏：" + trigger,
+                    DeviceContextPayload.REDACTED, decoded(dev.json).get("device_id"));
+        }
     }
 
     // ---------------------------------------------------------------- 上限与拒收

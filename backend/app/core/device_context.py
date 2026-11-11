@@ -33,6 +33,11 @@ MAX_DEPTH = 30
 MAX_TEXT_CHARS = 500
 MAX_DEVICE_ID_CHARS = 64
 
+# 字节上限两端量法不同（登记为可接受残留，本轮不对齐）：服务端在**脱敏前**的
+# model_dump 上量（见 ingest），设备侧在**脱敏组装后**的成品上量。同一条临界输入
+# 可能设备侧放行、服务端仍回 413。方向 fail-safe：服务端是权威闸且未动，超大负载
+# 进不了暂存；对齐量法会改动既有 413 契约，风险大于收益，故只登记不改。
+
 # 暂存条数双闸：量级抄 result_store 的 MAX_TOTAL / MAX_PER_OWNER（内容型值），
 # 不是键数表的量级——这里存的是 MAX_PAYLOAD_BYTES 级的完整快照，量级大了吃内存。
 # 按属主那级防单个账号占满全表把别人锁在外面。与 result_store 的超限淘汰不同：
@@ -74,7 +79,13 @@ class DeviceNode(BaseModel):
 
 
 class DeviceContextPayload(BaseModel):
-    """设备上报的一次快照。permission=none 表示设备侧权限没授予，一律不暂存。"""
+    """设备上报的一次快照。permission=none 表示设备侧权限没授予，一律不暂存。
+
+    既有跨端不对称（先于本轮存在，本轮只登记不改）：
+    - device_id 长度：服务端 pydantic 数码点，设备侧 id.length() 数 UTF-16 单元，
+      含增补平面字符时两端长度判定不一致。
+    - package 长度：服务端 pydantic ≤200，设备侧无 200 闸（只有 500 截断）。
+    """
     device_id: str = Field(..., min_length=1, max_length=MAX_DEVICE_ID_CHARS)
     captured_at: int = 0
     package: str = Field(default="", max_length=200)
@@ -97,9 +108,10 @@ def _redact_field(value: str) -> str:
 
 
 def _package_field(value: str) -> str:
-    """package：形状闸。敏感词会误伤含 password/otp 的合法包名，这里只判形状。"""
+    """package：形状闸。敏感词会误伤含 password/otp 的合法包名，这里只判形状。
+    空串没有包名可脱敏，渲染为空而非 [已脱敏]——后者是对模型说假话（本来就没有）。"""
     cleaned = _clean_text(value)
-    return cleaned if _PACKAGE_RE.fullmatch(cleaned) else REDACTED
+    return cleaned if (not cleaned or _PACKAGE_RE.fullmatch(cleaned)) else REDACTED
 
 
 def _redact_node(node: DeviceNode) -> dict:

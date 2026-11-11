@@ -34,6 +34,13 @@ import java.util.regex.Pattern;
  * <p>射程边界（别读成"设备侧全都验过了"）：本类只判形状与脱敏，不采集。
  * 真正的节点树来自 AccessibilityService，采集侧一行 {@code performAction} 都不许有
  * （锁：{@code backend/tests/test_v040_android_read_only.py} 扫整棵 android 树）。
+ *
+ * <p>既有跨端不对称（先于本轮存在，只登记不改）：
+ * <ul>
+ *   <li>device_id 长度：这里 {@code id.length()} 数 UTF-16 单元，服务端 pydantic 数码点，
+ *       含增补平面字符时两端长度判定不一致；</li>
+ *   <li>package 长度：服务端 pydantic ≤200，这里无 200 闸（只有 {@code cleanText} 的 500 截断）。</li>
+ * </ul>
  */
 public final class DeviceContextPayload {
 
@@ -42,7 +49,11 @@ public final class DeviceContextPayload {
 
     // ---------- 与服务端逐字同值的上限（backend/app/core/device_context.py） ----------
 
-    /** 单次负载上限：服务端在解析后的 model_dump 上量，这里量的是已脱敏的成品。 */
+    /**
+     * 单次负载上限。两端量法不同（登记为可接受残留，本轮不对齐）：服务端在**脱敏前**
+     * 的 model_dump 上量，这里量的是**脱敏组装后**的成品。同一条临界输入可能这里放行、
+     * 服务端仍回 413。方向 fail-safe：服务端是权威闸且未动，超大负载进不了暂存。
+     */
     public static final int MAX_PAYLOAD_BYTES = 128 * 1024;
 
     /** 节点数上限。 */
@@ -129,10 +140,12 @@ public final class DeviceContextPayload {
      * package 的出口谓词：形状闸（与服务端 {@code _package_field} 同口径）。
      * 不走敏感词——密码管理器/银行 app 的合法包名里就有 password/otp，
      * 整段脱敏会打掉头部用例；形状不合法才换 {@link #REDACTED}。
+     * 空串没有包名可脱敏，渲染为空而非 {@link #REDACTED}（后者是对模型说假话）。
+     * 写成单条三元、不引入分支：本体判据禁分支，死代码掏空会把真脱敏藏进条件块。
      */
     public static String packageText(String raw) {
         String cleaned = cleanText(raw);
-        return PACKAGE_SHAPE.matcher(cleaned).matches() ? cleaned : REDACTED;
+        return PACKAGE_SHAPE.matcher(cleaned).matches() || cleaned.isEmpty() ? cleaned : REDACTED;
     }
 
     private static String limitCodePoints(String s, int limit) {
