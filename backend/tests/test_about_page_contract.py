@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.test_apk_release_discipline import _code                        # noqa: E402
 from tests.test_schedule_ui_contract import _native               # noqa: E402
-from tests.test_web_pwa import STATIC                             # noqa: E402
+from tests.test_web_pwa import STATIC, _strip_js_comments                # noqa: E402
 
 TAGLINE = "Fenver：跑在你自己服务器上的个人 Agent 助理"
 REPO_HOST = "github.com/abonla599/fenver"
@@ -166,10 +166,26 @@ def test_the_admin_console_still_shows_the_server_build():
     单号口径的配对判据：About 屏的干净不许靠拆掉别人的判据换来。/health 的 build
     字段本身由 test_v0342_single_version_row_contract.py 钉着（main.py / buildinfo），
     这一条钉它在 web 侧带标签的消费者——服务端号的正当去处是这里，不是版本行。
+    匹配前先剥 JS 注释（复用 _strip_js_comments，与本仓其它 admin.js 读者同一把尺子）：
+    把真消费删掉、原句留在注释里，裸读会被诱饵喂绿，剥注释后才会红。
     """
-    admin = (STATIC.parent / "admin" / "admin.js").read_text(encoding="utf-8")
+    admin = _strip_js_comments((STATIC.parent / "admin" / "admin.js").read_text(encoding="utf-8"))
     assert 'statCell(data.build || "—", "构建")' in admin, \
         "管理台「构建」不再读 /health 的 build：服务端号没有带标签的去处了"
+
+
+def test_the_admin_build_lock_is_not_fooled_by_a_comment_decoy():
+    """反向锁 + 零假阳性：注释诱饵必须被剥掉，真源码剥完仍找得到真消费。
+
+    诱饵形状与实测缴械路径同形——真消费删掉、原句原样留在 // 注释里。剥注释后诱饵不算数；
+    再对真 admin.js 跑一次同一把尺子，确认它没有把真消费一并剥掉（零假阳性）。
+    """
+    decoy = '// statCell(data.build || "—", "构建")\nbox.appendChild(statCell("—", "构建"));'
+    assert 'statCell(data.build || "—", "构建")' not in _strip_js_comments(decoy), \
+        "注释诱饵没被剥掉：这把锁还能被一句注释缴械"
+    admin = _strip_js_comments((STATIC.parent / "admin" / "admin.js").read_text(encoding="utf-8"))
+    assert 'statCell(data.build || "—", "构建")' in admin, \
+        "剥注释把真消费也剥掉了（假阳性）：真源码里这一句明明在"
 
 
 def test_native_opens_the_repository_in_the_browser_not_in_app():

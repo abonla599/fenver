@@ -2321,17 +2321,42 @@ _WEB_SHELL_VER_DEF = ('const shellVer = typeof caps.version === "string" && caps
 # 「服务端」三个字本身不禁——那句无号说明里正当含有它；禁的是拿它当号码前缀。
 _WEB_VERSION_FORBIDDEN = ("serverBuild", "fetchServerBuild", "Api.health", '"/health"',
                           "parts.push", "joinToString", "listOfNotNull", '"壳 ', '"服务端 ')
+# 条数钉：这个 9 是独立手抄的（逐条数上面那味清单得来），不是 len(_WEB_VERSION_FORBIDDEN)
+# 派生——派生即恒真，砍味时它跟着变短、永远不红。集合钉同样手抄，防"等长换味"。
+_WEB_VERSION_FORBIDDEN_COUNT = 9
+_WEB_VERSION_FORBIDDEN_SET = frozenset({
+    "serverBuild", "fetchServerBuild", "Api.health", '"/health"',
+    "parts.push", "joinToString", "listOfNotNull", '"壳 ', '"服务端 ',
+})
+# 版本行元素 box 的"写操作"形状：属性赋值（含 += 与 dataset.x）、下标赋值、 mutating 方法。
+# 唯一赋值点判据数的是这些写操作的总数，与它由哪个条件守卫无关：任何新分支要让第二个号
+# 上屏都得再写一次 box，计数就从 1 变 2 ⇒ 不必枚举分支，也罩得住以后新加的分支。
+_BOX_WRITE = re.compile(
+    r'\bbox\s*\.\s*[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*(?:\+|-|\|\||&&|\?\?)?=(?!=)'
+    r'|\bbox\s*\[\s*[^\]]+\]\s*(?:\+|-|\|\||&&|\?\?)?=(?!=)'
+    r'|\bbox\s*\.\s*(?:setAttribute|setAttributeNS|removeAttribute|appendChild|append|prepend|'
+    r'insertBefore|insertAdjacentHTML|insertAdjacentText|replaceChildren|replaceWith)\s*\('
+)
+# 属性位写（title / aria-* / data-*）：视觉看不见但读屏能读到，那还是两个号。
+_BOX_ATTR_WRITE = re.compile(
+    r'\bbox\s*\.\s*(?:title|dataset|ariaLabel|ariaDescribedBy|aria[A-Z]\w*)\b'
+    r'|\bbox\s*\.\s*setAttribute\s*\('
+    r'|\bbox\s*\[\s*["\'](?:title|aria-|data-)'
+)
 
 
 def _web_version_row_problems(js: str) -> list:
     """返回常驻版本行违反单号口径的清单；空列表 = 合规。
 
     取清单而不是直接断言，是为了让反向锁能喂合成语料：只会判真文件的判据
-    没法证明它有牙。四层判据：
+    没法证明它有牙。判据分层：
     ① 值赋值必须逐字是「shellVer || 那句无号说明」——只有一个号码来源，浏览器档零号码；
     ② shellVer 本身只许由 caps.version 拼出（与原生钉 BuildConfig.VERSION_NAME 同源）；
-    ③ 版本行切片里不许有第二个号的来源 / 拼接动作 / 手写号；
-    ④ renderAboutRows 整个函数不许再去 fetch——"拉来不用"也算违例（白跑一次网络）。
+    ③ 版本行元素 box 在整个函数里只被写一次，且不许写属性位（title/aria-*/data-*）——
+       视觉藏号也是号、条件追加第二号也是号；数的是写操作总数而非枚举分支，故罩得住未知分支；
+    ④ 整个函数不许有第二个号的来源 / 拼接动作 / 手写号（不只夹在两个锚点之间）；
+    ⑤ renderAboutRows 整个函数不许再去 fetch——"拉来不用"也算违例（白跑一次网络）；
+    ⑥ 两个锚点各恰好一处、切片有长度下限：诱饵锚点截短切片会在这里红（与原生半 count==1 同口径）。
     """
     problems = []
     body = _js_fn(js, "renderAboutRows")
@@ -2342,19 +2367,32 @@ def _web_version_row_problems(js: str) -> list:
             problems.append(f"第二个号的来源还在函数里：{token}")
     if _WEB_SHELL_VER_DEF not in body:
         problems.append("shellVer 不再只由 caps.version 拼出——版本号出现了第二个来源")
-    start = body.find('const box = $("versionVal")')
-    stop = body.find('const diag = $("bridgeDiag")', start + 1) if start >= 0 else -1
+    box_anchor = 'const box = $("versionVal")'
+    diag_anchor = 'const diag = $("bridgeDiag")'
+    if body.count(box_anchor) != 1:
+        problems.append(f"版本行锚点不再是恰好一处（{body.count(box_anchor)}）：改名/复制/诱饵都会让切片失真")
+    if body.count(diag_anchor) != 1:
+        problems.append(f"桥诊断锚点不再是恰好一处（{body.count(diag_anchor)}）：诱饵可截短切片缴械判据")
+    start = body.find(box_anchor)
+    stop = body.find(diag_anchor, start + 1) if start >= 0 else -1
     if start < 0 or stop < 0:
         problems.append("版本行切片切不出来：锚点挪了，判据要跟着改（fail-closed）")
         return problems
     ver = body[start:stop]
+    if len(ver) < 40:
+        problems.append(f"版本行切片短得不像话（{len(ver)}）：被诱饵截短了")
     if _WEB_VERSION_ASSIGN not in ver:
         problems.append("版本行的值不再是「shellVer || 无号句」：" + ver.strip()[:120])
+    writes = _BOX_WRITE.findall(body)
+    if len(writes) != 1:
+        problems.append(f"版本行元素 box 在函数里被写了 {len(writes)} 次（只许一处赋值）：{writes}")
+    if _BOX_ATTR_WRITE.search(body):
+        problems.append("版本行元素被写了属性位（title/aria-*/data-*）：视觉藏号也是号")
     for forbidden in _WEB_VERSION_FORBIDDEN:
-        if forbidden in ver:
+        if forbidden in body:
             problems.append(f"版本行又掺进了第二个号（命中 {forbidden!r}）")
-    if re.search(r"[\"'`]v?\d+\.\d+", ver):
-        problems.append("版本行里出现了手写版本号字面量")
+    if re.search(r"[\"'`]v?\d+\.\d+", body):
+        problems.append("版本行函数里出现了手写版本号字面量")
     return problems
 
 
@@ -2397,6 +2435,61 @@ def test_the_second_number_has_no_source_left_in_the_web_app():
     assert "fetchServerBuild" not in js, "关于屏还在拉 /health 的 build"
 
 
+def test_the_web_forbidden_list_keeps_its_full_length():
+    """禁字清单条数钉 + 集合钉：砍味或等长换味都必须红。
+
+    条数那个数是独立手抄的常量（_WEB_VERSION_FORBIDDEN_COUNT），不是从清单 len() 派生——
+    派生即恒真：清单变短时它跟着变短，永远不红。集合钉防"砍一味补一味"的等长替换。
+    牙由变异验证给：把清单砍到 1 味 / 砍掉一味，这条必须当场红。
+    """
+    assert len(_WEB_VERSION_FORBIDDEN) == _WEB_VERSION_FORBIDDEN_COUNT, (
+        f"禁字清单被砍到 {len(_WEB_VERSION_FORBIDDEN)} 味（手抄条数钉是 {_WEB_VERSION_FORBIDDEN_COUNT}）")
+    assert set(_WEB_VERSION_FORBIDDEN) == _WEB_VERSION_FORBIDDEN_SET, (
+        f"禁字清单被换味：{sorted(set(_WEB_VERSION_FORBIDDEN) ^ _WEB_VERSION_FORBIDDEN_SET)}")
+
+
+def test_the_web_single_number_lock_catches_attribute_and_branch_smuggling():
+    """反向锁：属性位藏号与条件追加第二号，每一种都必须被报出来。
+
+    这两族是"全绿缴械"的自然写法——加 tooltip/无障碍标签会写 title/aria-*，
+    原始缺陷本身就是"某能力在时才追加第二号"的条件分支。喂同形合成语料证明判据真会咬；
+    真语料必须先绿，否则下面的红没有对照。
+    """
+    js = _js()
+    assert _web_version_row_problems(js) == [], "真语料必须先绿，否则下面的红没有对照"
+    ifblock = '  if (box) {\n    ' + _WEB_VERSION_ASSIGN + '\n  }\n'
+    assert js.count(ifblock) == 1, "唯一赋值点锚点漂了：合成语料没法精确追加"
+    tails = (
+        '  box.title = shellVer + " / " + (caps.version || "");\n',
+        '  box.setAttribute("aria-label", shellVer + " " + (caps.version || ""));\n',
+        '  box.setAttribute("aria-describedby", shellVer + " " + (caps.version || ""));\n',
+        '  box.setAttribute("data-stamp", shellVer + " " + (caps.version || ""));\n',
+        '  box.dataset.stamp = shellVer + " " + (caps.version || "");\n',
+        '  if (caps.exactAlarms) box.textContent += " · 服务端 " + (caps.version || "");\n',
+        '  if (caps.notifications) box.textContent += " · 服务端 " + (caps.version || "");\n',
+    )
+    for tail in tails:
+        mutated = js.replace(ifblock, ifblock + tail)
+        assert mutated != js, "合成语料没命中唯一赋值点"
+        assert _web_version_row_problems(mutated), (
+            f"属性位/条件分支藏了第二个号，判据却没响：{tail.strip()!r}")
+
+
+def test_the_version_row_markup_carries_no_number_bearing_attributes():
+    """markup 半：versionVal 这一格不许带 title/aria-label/aria-describedby/data-*，且必须为空。
+
+    JS 侧的属性位写由唯一赋值点判据钉着；直接在 HTML 里给版本行塞一个 title="vX.Y"
+    是另一条路，由这条钉着。号只能由 JS 从 caps.version 填，markup 自带字或藏号属性都会红。
+    """
+    html = _html()
+    at = html.index('id="versionVal"')
+    tag_start = html.rfind("<span", 0, at)
+    tag = html[tag_start:html.index(">", at) + 1]
+    assert not re.search(r'\b(?:title|aria-label|aria-describedby|data-[\w-]+)\s*=', tag), (
+        f"版本行 markup 带了可能藏号的属性位：{tag}")
+    assert 'id="versionVal"></span>' in html, "版本行 markup 自带了字：它只能由壳/后端填"
+
+
 # ---------- 版本行三种形态 + 浏览器胶囊：node 真跑 ----------
 #
 # 与 reminderStatusCard 那节同一个理由：「给定这几种输入，屏幕上出现哪句话、露哪颗
@@ -2412,6 +2505,7 @@ class El {
   constructor(id) {
     this.id = id; this.textContent = ""; this.href = ""; this.onclick = null;
     this._hidden = true;
+    this.attrs = {}; this.children = [];
     const self = this;
     this.classList = {
       add(c) { if (c === "hidden") self._hidden = true; },
@@ -2419,7 +2513,18 @@ class El {
       toggle(c, force) { if (c === "hidden") self._hidden = force === undefined ? !self._hidden : !!force; },
       contains(c) { return c === "hidden" ? self._hidden : false; },
     };
+    // 属性位反射：title / setAttribute / dataset 都落进 attrs，DOM 级号码计数才看得见
+    // 视觉藏号（读屏能读到的 title/aria-*/data-* 也是号）。真源码不写这些 ⇒ 对四形态 inert。
+    this.dataset = new Proxy({}, {
+      set(t, k, v) { self.attrs["data-" + String(k).replace(/[A-Z]/g, (c) => "-" + c.toLowerCase())] = String(v); t[k] = v; return true; },
+      get(t, k) { return t[k]; },
+    });
   }
+  setAttribute(k, v) { this.attrs[String(k)] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  get title() { return this.attrs.title || ""; }
+  set title(v) { this.attrs.title = String(v); }
+  appendChild(c) { this.children.push(c); return c; }
 }
 const els = {};
 function $(id) { if (!els[id]) els[id] = new El(id); return els[id]; }
@@ -2442,6 +2547,7 @@ function fetch(url) { fetchCalls.push(String(url)); return Promise.reject(new Er
 const sandbox = {
   $, SHELL, Layers, fetch, bridgeCalls, layerOpens, layerHides, fetchCalls,
   console, JSON, Math, String, Number, Array, Object, Date, Boolean, Promise, Error,
+  Proxy, Reflect, document: { createElement: (t) => new El("") },
 };
 vm.createContext(sandbox);
 const driver = "\n;(function () {"
@@ -2452,6 +2558,9 @@ const driver = "\n;(function () {"
   + "   linkHref: $(\"rowUpdateLink\").href,"
   + "   diagHidden: $(\"bridgeDiag\").classList.contains(\"hidden\"),"
   + " };"
+  + " const vbox = $(\"versionVal\");"
+  + " out.versionAttrs = Object.assign({}, vbox.attrs);"
+  + " out.versionChildren = (vbox.children || []).map(function (c) { return { text: c.textContent || \"\", attrs: Object.assign({}, c.attrs) }; });"
   + " out.shown.forEach((id) => { const el = $(id); if (el.onclick) el.onclick(); });"
   + " out.afterClick = {"
   + "   dialogHidden: $(\"updateInfoModal\").classList.contains(\"hidden\"),"
@@ -2495,7 +2604,20 @@ def _run_about_js(scenario: dict) -> dict:
                         json.dumps(scenario)],
                        capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert r.returncode == 0, f"harness 自己就跑失败了：\n{r.stdout}\n{r.stderr}"
-    return json.loads(r.stdout)
+    out = json.loads(r.stdout)
+    # DOM 级号码计数：版本行文本 + 属性位（title/aria-*/data-*）+ 子元素，合起来数版本号。
+    # 视觉藏号也是号——只数 textContent 会漏掉 title 里那第二个号（读屏/悬停能读到）。
+    blob = out.get("version") or ""
+    for k, v in (out.get("versionAttrs") or {}).items():
+        if k not in ("id", "class"):
+            blob += " " + str(v)
+    for child in (out.get("versionChildren") or []):
+        blob += " " + (child.get("text") or "")
+        for k, v in (child.get("attrs") or {}).items():
+            if k not in ("id", "class"):
+                blob += " " + str(v)
+    out["versionNumberCount"] = len(re.findall(r"\d+\.\d+", blob))
+    return out
 
 
 def test_the_version_row_shows_one_number_in_a_shell_and_none_in_a_browser():
@@ -2573,6 +2695,32 @@ def test_the_web_update_dialog_says_what_is_true_and_defaults_to_hidden():
     assert 'classList.contains("hidden")' in opener, "没有重入守卫：点两下会往层栈里压两份"
     closer = _js_fn(js, "closeUpdateInfo")
     assert 'Layers.close("updateInfo")' in closer, "关闭不走层栈：历史与屏幕会漂移"
+
+
+def test_the_version_row_never_exposes_a_second_number_in_text_or_attributes():
+    """DOM 级：版本行文本 + 属性位合起来最多一个号，逐能力键各跑一格。
+
+    场景集从冻结能力键清单派生（不手抄）：caps.exactAlarms / notifications 这些键正在清单里，
+    而只喂 {} / {shell,version} / {shell,update,version} 三种形状时，"只在某能力在时才追加
+    第二号"的回归完全在射程外。逐键各一格把它罩进来；属性位藏号（title 等）也在计数之内。
+    复合 caps.version（壳报上来就是两个号）属运行时形状、不由源码锁保证，不在本格断言内。
+    """
+    from tests.test_native_android_discipline import SHELL_CAPABILITY_KEYS
+    base = {"shell": 1, "update": 1, "version": "0.36.4"}
+    scenarios = [
+        {"present": False, "caps": {}},
+        {"present": True, "caps": {"shell": 1, "version": "0.23.4"}},
+        {"present": True, "caps": dict(base)},
+    ]
+    for key in sorted(SHELL_CAPABILITY_KEYS):
+        caps = dict(base)
+        caps[key] = 1
+        scenarios.append({"present": True, "caps": caps})
+    for sc in scenarios:
+        out = _run_about_js(sc)
+        assert out["versionNumberCount"] <= 1, (
+            f"版本行在文本/属性位露出了第二个号：caps={sc['caps']} "
+            f"text={out['version']!r} attrs={out['versionAttrs']}")
 
 
 # ---------- 「发现版本更新」底部卡片 ----------
