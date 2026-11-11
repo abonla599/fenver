@@ -467,8 +467,15 @@ def _fetch_repo(repo: str):
         latest_url_for(repo), headers={"User-Agent": USER_AGENT,
                                        "Accept": "application/vnd.github+json"})
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS,
-                                    context=system_ssl_context()) as response:
+        # 显式 opener，不用默认 opener：ProxyHandler({}) 的**空 dict** 是关键——
+        # ProxyHandler() 或 None 会触发 getproxies() 读环境/注册表代理，把这条出站
+        # 改道给一个能中间人的人。信任锚必须走 HTTPSHandler(context=...)，因为
+        # opener.open 不接受 context= 实参（urlopen(..., context=) 的写法搬不过来）。
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=system_ssl_context()),
+        )
+        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
             body = json.loads(response.read(MAX_BYTES).decode("utf-8"))
     except Exception as e:                      # 超时/DNS/TLS/非 2xx/不是 JSON，全是一条 reason
         return None, f"拉取发布页失败：{type(e).__name__}"

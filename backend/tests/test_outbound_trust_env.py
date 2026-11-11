@@ -25,8 +25,10 @@ NO_PROXY 等环境代理（不发请求也会崩）。带方括号的 `[::1]` �
   None`——显式传了 transport 的客户端根本不读环境代理，对毒 NO_PROXY 免疫；
   实测当前测试构造点全部带 transport=，豁免名单以该机理为凭而不是以文件位置为凭，
   任何**不带 transport** 的新测试构造点出现时上面的行为反例与毒环境全量运行会先红。
-- urllib 出站（core/releases.py 里那处 urlopen）不在本锁射程：方括号毒不让它
-  构造崩，但环境代理会改道——该缺口已另登 #297。
+- urllib 出站（core/releases.py 的 _fetch_repo）不在本锁射程：本锁只数 httpx 客户端
+  构造点。它已改成显式 build_opener(ProxyHandler({}), HTTPSHandler(context=...))，
+  不再读环境/注册表代理（#297 已落地）；那条性质由 test_release_probe.py 与
+  test_v024_foundation_contract.py 两把 opener 形状锁钉着，不在本 httpx 名册里重复登记。
 - 不传 http_client 时 openai SDK 自建的客户端默认读环境代理，所以本锁同时钉
   每一处 `OpenAI(...)` / `AsyncOpenAI(...)` 构造点：必须显式传 http_client，
   且所传客户端必须是名册里已覆盖的站点（防未来冒出一处隐式客户端）。

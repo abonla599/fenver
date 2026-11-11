@@ -313,28 +313,47 @@ def test_the_dormant_github_chain_still_asks_the_configured_repo_first(
 
     v0.34 起这条链不再是默认取数源（`abonla599` 账号被停用，它恒 404；默认换成自托管
     清单），但代码一字未删。所以判据直接打 `releases._fetch_github`——它保证"哪天切
-    回去还是对的"，而不是在 `probe` 上假装它还在跑。
+    回去还是对的"，而不是在 `probe` 上假装它还在跑。出站形状一并钉：每次 build_opener
+    都必须带一个空代理表的 ProxyHandler 与一个 HTTPSHandler（不读环境/注册表代理）。
     """
+    import urllib.request
     from app.core import releases
 
     good = {"tag_name": "v0.23.15",
             "html_url": "https://github.com/abonla599/ai-assistant/releases/tag/v0.23.15",
             "assets": []}
     requested = []
+    handlers_seen = []
 
-    def fake_urlopen(request, timeout=None, context=None):
-        url = request.full_url
-        requested.append(url)
-        if "fenver" in url:                    # 新仓：还没发版，404
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-        return _Resp(json.dumps(good).encode("utf-8"))
+    class _Opener:
+        def open(self, request, timeout=None):
+            url = request.full_url
+            requested.append(url)
+            if "fenver" in url:                    # 新仓：还没发版，404
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return _Resp(json.dumps(good).encode("utf-8"))
+
+    def fake_build_opener(*handlers):
+        handlers_seen.extend(handlers)
+        return _Opener()
+
+    # 默认 urlopen 不许用：兜底抛错，既钉住"必须走显式 opener"，也保证换回 urlopen 的
+    # 漂移绝不真出网。getproxies 毒化成非空，使"ProxyHandler({})"判据对 ProxyHandler() 有牙。
+    def _no_default_urlopen(*a, **k):
+        raise AssertionError("不许用默认 urlopen：出站必须走显式 build_opener")
 
     releases.reset_for_tests()
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+    monkeypatch.setattr(urllib.request, "urlopen", _no_default_urlopen)
+    monkeypatch.setattr(urllib.request, "getproxies",
+                        lambda: {"https": "http://env-or-registry.proxy:8080"})
     payload, why = releases._fetch_github()
     assert why == "" and payload and payload["version"] == "0.23.15", "旧仓兜底没生效"
     assert "abonla599/fenver" in requested[0], "第一趟问的不是配置里的新仓"
     assert "abonla599/ai-assistant" in requested[1]
+    proxies = [h for h in handlers_seen if isinstance(h, urllib.request.ProxyHandler)]
+    assert proxies and all(h.proxies == {} for h in proxies), "出站没关掉环境/注册表代理"
+    assert any(isinstance(h, urllib.request.HTTPSHandler) for h in handlers_seen), "信任锚没走 HTTPSHandler"
     # GitHub 发布页那条路由（这条链的退路）仍在，只是不再当官网按钮的退路。
     assert releases.releases_page_for("abonla599/ai-assistant") == \
         "https://github.com/abonla599/ai-assistant/releases/latest"

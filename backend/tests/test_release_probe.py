@@ -17,6 +17,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.request
 
 import pytest
 from fastapi.testclient import TestClient
@@ -65,19 +66,19 @@ class _FakeResponse:
         return False
 
 
-class _Urlopen:
-    """假 urlopen：按脚本依次返回结果，并记下每一次调用。
+class _Opener:
+    """假 opener：按脚本依次返回结果，并记下每一次 open() 调用。
 
     脚本用完还被打第二次就直接失败——"多了一次出站请求"正是缓存那条锁要抓的事，
-    把它咽下来等于让锁闭着眼通过。
+    把它咽下来等于让锁闭着眼通过。opener.open 不收 context=（信任锚在 HTTPSHandler 上）。
     """
 
     def __init__(self, *script):
         self.script = list(script)
         self.calls = []
 
-    def __call__(self, request, timeout=None, context=None):
-        self.calls.append({"request": request, "timeout": timeout, "context": context})
+    def open(self, request, timeout=None):
+        self.calls.append({"request": request, "timeout": timeout})
         if not self.script:
             raise AssertionError(f"第 {len(self.calls)} 次出站超出脚本，缓存或重试不对")
         step = self.script.pop(0)
@@ -310,24 +311,70 @@ def test_a_manifest_digest_mismatch_gets_logged_and_clears_on_recovery(capsys, c
 def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypatch):
     """GitHub 那条取数链（留着可复用的活代码）回来的是要点给人去下载/安装的地址：
     能被中间人改掉，就等于能推任意安装包。所以那条请求必须走 `core/tls.py` 那份系统
-    证书库上下文。写成"验不过就退回不验"是这个仓库明确拒绝过的那种修法（524 那次）。
+    证书库上下文，且不许读环境/注册表代理（默认 opener 会读）。写成"验不过就退回不验"
+    是这个仓库明确拒绝过的那种修法（524 那次）。
 
     v0.34 起默认取数源不再出网，所以这条用例直接打 `_fetch_repo`（那条链本身没删）。
+    判据 patch 的是 build_opener（不是 urlopen）：信任锚走 HTTPSHandler(context=...)、
+    代理表必须是空 dict。证明信任锚**不读私有 _context**——patch system_ssl_context
+    返回一枚唯一哨兵，再 spy HTTPSHandler 的构造实参，断言哨兵原样进了 context=；
+    读 _context 会把判据绑死在实现细节上，改内部就假绿/假红。
     """
-    fake = _Urlopen(GOOD)
-    monkeypatch.setattr(releases.urllib.request, "urlopen", fake)
+    opener = _Opener(GOOD)
+    handlers_seen = []
+
+    def fake_build_opener(*handlers):
+        handlers_seen.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    # 默认 urlopen 一律不许用：兜底打桩成抛错，既钉住"必须走显式 opener"，也保证这条
+    # 用例（含把它换回 urlopen 的漂移）绝不真出网。
+    def _no_default_urlopen(*a, **k):
+        raise AssertionError("不许用默认 urlopen：出站必须走显式 build_opener")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_default_urlopen)
+
+    # 毒化 getproxies：ProxyHandler() 会调它读环境/注册表代理；本机若无代理它返回 {}，
+    # 会让"proxies == {}"假绿，所以喂一个非空毒值，使空 dict 判据真有牙。
+    proxy_reads = []
+
+    def _poison_getproxies():
+        proxy_reads.append(True)
+        return {"https": "http://env-or-registry.proxy:8080"}
+
+    monkeypatch.setattr(urllib.request, "getproxies", _poison_getproxies)
+
+    sentinel = object()
     seen = {}
 
     def fake_context():
         seen["called"] = True
-        return object()
+        return sentinel
 
     monkeypatch.setattr(releases, "system_ssl_context", fake_context)
+
+    real_https = urllib.request.HTTPSHandler
+    captured = {}
+
+    class _SpyHTTPSHandler(real_https):
+        def __init__(self, *args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "HTTPSHandler", _SpyHTTPSHandler)
+
     payload, why = releases._fetch_repo("o/r")
     assert why == "" and payload and payload["version"] == "0.18"
     assert seen.get("called"), "没走系统证书库"
-    assert fake.calls[0]["context"] is not None, "urlopen 没收到 context"
-    assert fake.calls[0]["timeout"] == releases.TIMEOUT_SECONDS, "没有超时的出站请求会拖死线程池"
+    proxies = [h for h in handlers_seen if isinstance(h, urllib.request.ProxyHandler)]
+    assert len(proxies) == 1 and proxies[0].proxies == {}, "出站没关掉环境/注册表代理"
+    assert not proxy_reads, "ProxyHandler 读了 getproxies()（环境/注册表代理）"
+    https = [h for h in handlers_seen if isinstance(h, real_https)]
+    assert len(https) == 1, "信任锚没走 HTTPSHandler"
+    assert captured.get("context") is sentinel, "HTTPSHandler 的 context 不是 system_ssl_context() 那一份"
+    assert opener.calls[0]["timeout"] == releases.TIMEOUT_SECONDS, "没有超时的出站请求会拖死线程池"
 
 
 def test_the_github_host_is_written_in_exactly_one_place():
