@@ -64,6 +64,85 @@ def _java_put_keys(src: str, receiver: str) -> list:
     return re.findall(re.escape(receiver) + r'\.put\(\s*"([^"]+)"', src)
 
 
+# ---------------------------------------------------------------- 三字段谓词对照
+# 裁决口径：package=形状闸，device_id/window_title=敏感词。键序锁只抓键名不管值
+# 表达式，把 cleanText(pkg) 换成 fieldText(pkg) 不会红——这一节补的就是那个洞。
+# 两个探针即可区分「形状闸 / 敏感词 / 只清洗」三种谓词：
+#   com.passwordvault.app —— 合法形状 + 含敏感词（形状闸放行、敏感词替换）
+#   not-a-package         —— 非法形状 + 无敏感词（形状闸替换、敏感词放行）
+_FIELD_PREDICATE = {"device_id": "sensitive", "package": "shape", "window_title": "sensitive"}
+_PROBE_SHAPE_OK_SENSITIVE = "com.passwordvault.app"
+_PROBE_SHAPE_BAD_PLAIN = "not-a-package"
+_PROBE_SENSITIVE_TEXT = "验证码 123456"
+_PROBES = (_PROBE_SHAPE_OK_SENSITIVE, _PROBE_SHAPE_BAD_PLAIN, _PROBE_SENSITIVE_TEXT)
+
+_SERVER_EXPECTED = {
+    "shape": {_PROBE_SHAPE_OK_SENSITIVE: _PROBE_SHAPE_OK_SENSITIVE,
+              _PROBE_SHAPE_BAD_PLAIN: device_context.REDACTED,
+              _PROBE_SENSITIVE_TEXT: device_context.REDACTED},
+    "sensitive": {_PROBE_SHAPE_OK_SENSITIVE: device_context.REDACTED,
+                  _PROBE_SHAPE_BAD_PLAIN: _PROBE_SHAPE_BAD_PLAIN,
+                  _PROBE_SENSITIVE_TEXT: device_context.REDACTED},
+}
+_JAVA_FIELD_HELPER = {"sensitive": "fieldText", "shape": "packageText"}
+
+
+def _server_field_outcomes(monkeypatch) -> dict:
+    """服务端一侧真 ingest 一遍取快照值（运行时行为，不啃源码排版）。"""
+    monkeypatch.setenv("FENVER_DEVICE_CONTEXT_ENABLED", "1")
+    store = device_context.DeviceContextStore()
+    out = {}
+    for field in _FIELD_PREDICATE:
+        out[field] = {}
+        for probe in _PROBES:
+            kw = {"device_id": "probe-device", "permission": "accessibility"}
+            kw[field] = probe
+            payload = device_context.DeviceContextPayload(**kw)
+            ok, reason, _ = store.ingest(payload, "probe-owner")
+            assert ok, reason
+            snap = store.lookup("probe-owner", payload.device_id)
+            out[field][probe] = snap[field]
+    return out
+
+
+def _java_put_exprs(src: str, receiver: str) -> dict:
+    """键 -> 值表达式。值里可能套一层调用括号，吃到 `);` 才算完整。"""
+    return dict(re.findall(re.escape(receiver) + r'\.put\(\s*"([^"]+)"\s*,\s*(.+?)\)\s*;', src))
+
+
+def _java_method_body(src: str, name: str) -> str:
+    m = re.search(r"static\s+String\s+" + re.escape(name)
+                  + r"\(\s*String\s+\w+\s*\)\s*\{([\s\S]*?)\n    \}", src)
+    return m.group(1) if m else ""
+
+
+def _java_shape_pattern(src: str) -> str:
+    m = re.search(r'PACKAGE_SHAPE\s*=\s*Pattern\.compile\(\s*"([^"]+)"', src)
+    assert m, "Java 侧没找到 package 形状闸：PACKAGE_SHAPE = Pattern.compile(...)"
+    return m.group(1).replace("\\\\", "\\")
+
+
+def _java_field_predicate_problems(src: str) -> list[str]:
+    problems = []
+    exprs = _java_put_exprs(src, "payload")
+    bodies = {h: _java_method_body(src, h) for h in _JAVA_FIELD_HELPER.values()}
+    for field, pred in _FIELD_PREDICATE.items():
+        helper = _JAVA_FIELD_HELPER[pred]
+        expr = exprs.get(field, "").strip()
+        if not re.fullmatch(re.escape(helper) + r"\(\s*\w+\s*\)", expr):
+            problems.append(f"{field} 的 put 值不是 {helper}(...)：{expr!r}")
+    for helper, matcher, other in (("fieldText", "SENSITIVE.matcher", "PACKAGE_SHAPE"),
+                                   ("packageText", "PACKAGE_SHAPE.matcher", "SENSITIVE.matcher")):
+        body = bodies[helper]
+        if matcher not in body or "REDACTED" not in body or "cleanText(" not in body:
+            problems.append(f"{helper} 本体缺清洗/判定/替换")
+        if other in body:
+            problems.append(f"{helper} 混进了另一套谓词 {other}")
+    if _java_shape_pattern(src) != device_context._PACKAGE_RE.pattern:
+        problems.append("package 形状闸正则两侧不同值")
+    return problems
+
+
 # 服务端那一侧：全部内省，不去啃源码排版。
 SERVER_INTS = {
     "MAX_PAYLOAD_BYTES": device_context.MAX_PAYLOAD_BYTES,
@@ -118,6 +197,18 @@ def test_wire_key_names_and_order_match_the_server_models():
     assert _java_put_keys(src, "m") == server_node
 
 
+def test_field_predicates_match_on_both_sides(monkeypatch):
+    """三字段两端谓词逐字对应：package=形状闸、device_id/window_title=敏感词。
+
+    服务端用行为探针（真 ingest 一遍看快照值），Java 侧扫 put 值表达式与助手本体。
+    任一端把某字段的谓词换掉（哪怕键名键序都没动），这里当场红。
+    """
+    server = _server_field_outcomes(monkeypatch)
+    for field, pred in _FIELD_PREDICATE.items():
+        assert server[field] == _SERVER_EXPECTED[pred], (field, server[field])
+    assert _java_field_predicate_problems(_java_text()) == []
+
+
 def test_permission_vocabulary_matches():
     """设备侧认的权限取值不许比服务端多：多一个就是"客户端以为能发、服务端 403"。"""
     src = _java_text()
@@ -149,6 +240,16 @@ def test_device_side_class_stays_free_of_android_imports():
     (lambda s: s.replace("public final class DeviceContextPayload {",
                          "import android.os.Build;\npublic final class DeviceContextPayload {"),
      "android", "android."),
+    (lambda s: s.replace('payload.put("package", packageText(pkg))',
+                         'payload.put("package", cleanText(pkg))'), "pred", "package"),
+    (lambda s: s.replace('payload.put("device_id", fieldText(id))',
+                         'payload.put("device_id", packageText(id))'), "pred", "device_id"),
+    (lambda s: s.replace('payload.put("window_title", fieldText(windowTitle))',
+                         'payload.put("window_title", cleanText(windowTitle))'), "pred", "window_title"),
+    (lambda s: s.replace("return SENSITIVE.matcher(cleaned).find() ? REDACTED : cleaned;",
+                         "return cleaned;"), "pred", "fieldText-body"),
+    (lambda s: s.replace("PACKAGE_SHAPE.matcher(cleaned).matches()",
+                         "SENSITIVE.matcher(cleaned).find()"), "pred", "packageText-body"),
 ])
 def test_parity_checks_can_go_red(mutate, detector, hint):
     """变异自证：把设备侧改坏一处，对应的那条对照必须报得出来。
@@ -170,6 +271,8 @@ def test_parity_checks_can_go_red(mutate, detector, hint):
         m = re.search(r"Arrays\.asList\(([^)]*)\)", bad)
         assert set(re.findall(r'"([^"]+)"', m.group(1))) != set(
             device_context.VALID_PERMISSIONS)
+    elif detector == "pred":
+        assert _java_field_predicate_problems(bad), "谓词漂移没被报出来"
     else:
         assert hint in bad, "变异没落进源码里"
         assert "import android." in bad

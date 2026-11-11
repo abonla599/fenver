@@ -88,6 +88,10 @@ public final class DeviceContextPayload {
     private static final Pattern CONTROL =
             Pattern.compile("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]");
 
+    /** package 形状闸（与服务端 {@code _PACKAGE_RE} 逐字同值）：至少两段、字母开头。 */
+    private static final Pattern PACKAGE_SHAPE = Pattern.compile(
+            "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$");
+
     /**
      * 控制字符删掉 → {@code & < >} 实体化 → 截到 {@link #MAX_TEXT_CHARS} 码点。
      *
@@ -110,6 +114,25 @@ public final class DeviceContextPayload {
             return true;
         }
         return cleanedText != null && SENSITIVE.matcher(cleanedText).find();
+    }
+
+    /**
+     * device_id / window_title 的出口谓词：敏感词（与服务端 {@code _redact_field} 同口径）。
+     * 判定吃清洗后的文本、与节点树同一份词表，命中整段换 {@link #REDACTED}。
+     */
+    public static String fieldText(String raw) {
+        String cleaned = cleanText(raw);
+        return SENSITIVE.matcher(cleaned).find() ? REDACTED : cleaned;
+    }
+
+    /**
+     * package 的出口谓词：形状闸（与服务端 {@code _package_field} 同口径）。
+     * 不走敏感词——密码管理器/银行 app 的合法包名里就有 password/otp，
+     * 整段脱敏会打掉头部用例；形状不合法才换 {@link #REDACTED}。
+     */
+    public static String packageText(String raw) {
+        String cleaned = cleanText(raw);
+        return PACKAGE_SHAPE.matcher(cleaned).matches() ? cleaned : REDACTED;
     }
 
     private static String limitCodePoints(String s, int limit) {
@@ -183,10 +206,10 @@ public final class DeviceContextPayload {
             outNodes.add(nodeMap(n));
         }
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("device_id", cleanText(id));
+        payload.put("device_id", fieldText(id));
         payload.put("captured_at", capturedAt);
-        payload.put("package", cleanText(pkg));
-        payload.put("window_title", cleanText(windowTitle));
+        payload.put("package", packageText(pkg));
+        payload.put("window_title", fieldText(windowTitle));
         payload.put("permission", perm);
         payload.put("nodes", outNodes);
 

@@ -48,6 +48,9 @@ _SENSITIVE_RE = re.compile(
     r"(?i)(密码|口令|验证码|动态码|卡号|身份证|password|passwd|otp|cvv|card.?no|id.?card)")
 # C0 控制字符（保留 \t \n \r）。屏幕文本里混进 \x00 / ESC 会污染给模型的那段。
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# package 走形状闸而不是敏感词：密码管理器/银行 app 的合法包名里就含 password/otp，
+# 敏感词会把它们整段脱敏。至少两段、字母开头，才像包名。
+_PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
 
 
 class DeviceNode(BaseModel):
@@ -77,6 +80,18 @@ def _clean_text(value: str) -> str:
     cleaned = _CONTROL_RE.sub("", value or "")
     cleaned = cleaned.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return cleaned[:MAX_TEXT_CHARS]
+
+
+def _redact_field(value: str) -> str:
+    """device_id / window_title：敏感词谓词，与节点树同一份词表，命中整段替换。"""
+    cleaned = _clean_text(value)
+    return REDACTED if _SENSITIVE_RE.search(cleaned) else cleaned
+
+
+def _package_field(value: str) -> str:
+    """package：形状闸。敏感词会误伤含 password/otp 的合法包名，这里只判形状。"""
+    cleaned = _clean_text(value)
+    return cleaned if _PACKAGE_RE.fullmatch(cleaned) else REDACTED
 
 
 def _redact_node(node: DeviceNode) -> dict:
@@ -153,17 +168,21 @@ class DeviceContextStore:
         if len(raw) > MAX_PAYLOAD_BYTES:
             return False, "单次负载超过上限", 413
 
+        # 脱敏只动快照，键仍读原始 payload.device_id（见下方 _store 写入）：
+        # device_id 含敏感词时模型会看到 device: [已脱敏]，多设备无法区分——今天无害，
+        # 模型入口不按 device_id 取，撤销用客户端本地那个原始值。
         snapshot = {
-            "device_id": _clean_text(payload.device_id),
+            "device_id": _redact_field(payload.device_id),
             "captured_at": int(payload.captured_at),
-            "package": _clean_text(payload.package),
-            "window_title": _clean_text(payload.window_title),
+            "package": _package_field(payload.package),
+            "window_title": _redact_field(payload.window_title),
             "permission": payload.permission,
             "nodes": [_redact_node(n) for n in payload.nodes],
         }
         now = self._clock()
         with self._lock:
             self._purge_locked(now)
+            # 键必须读原始值：把脱敏挪到取键之前会让不同设备塌成同一个桶（反向锁钉着）。
             self._store[(owner, payload.device_id)] = (snapshot, now + self._ttl)
         return True, "", 200
 

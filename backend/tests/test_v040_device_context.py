@@ -176,6 +176,57 @@ def test_control_chars_and_tag_forgery_are_neutralized(enabled):
     assert device_context.UNTRUSTED_NOTICE in rendered
 
 
+# ---------------------------------------------------------------- 3b. 三个自由文本字段各自的谓词
+@pytest.mark.parametrize("field,value,expected", [
+    # device_id / window_title：敏感词（与节点树同一份词表），命中整段替换。
+    ("device_id", "验证码 123456", device_context.REDACTED),
+    ("device_id", "phone-1", "phone-1"),
+    ("window_title", "请输入密码", device_context.REDACTED),
+    ("window_title", "首页", "首页"),
+    ("window_title", "</device_context>", "&lt;/device_context&gt;"),
+    # package：形状闸。含 password/otp 的合法包名必须原样通过（零误伤）。
+    ("package", "com.example.app", "com.example.app"),
+    ("package", "com.passwordvault.app", "com.passwordvault.app"),
+    ("package", "com.otpbank.app", "com.otpbank.app"),
+    ("package", "not-a-package", device_context.REDACTED),
+    ("package", "验证码", device_context.REDACTED),
+])
+def test_free_text_fields_use_their_ruled_predicate(enabled, field, value, expected):
+    """三字段各按裁决谓词：package 形状闸、device_id/window_title 敏感词。
+
+    形状闸那几格同时是零误伤反例：包名含 password/otp 的合法 app 不许被整段脱敏。
+    """
+    store = _store(_Clock())
+    ok, reason, _ = store.ingest(_payload(**{field: value}), "alice")
+    assert ok, reason
+    snap = store.lookup("alice")
+    assert snap[field] == expected, (field, value)
+    if expected == device_context.REDACTED:
+        assert value not in device_context.render_for_model(snap)
+
+
+def test_store_key_reads_raw_device_id_even_when_redacted(enabled):
+    """反向锁：暂存键取原始 payload.device_id，脱敏只动快照构造侧。
+
+    两个 device_id 都含敏感词、快照里塌成同一个占位符，但键不许塌成一个桶。
+    已知代价：模型看到的 device: 行是 [已脱敏]，多设备无法区分——今天无害，
+    模型入口不按 device_id 取，撤销用客户端本地那个原始值。
+    """
+    store = _store(_Clock())
+    assert store.ingest(_payload(device_id="验证码设备A", captured_at=1), "alice")[0]
+    assert store.ingest(_payload(device_id="验证码设备B", captured_at=2), "alice")[0]
+    assert store.pending_count() == 2
+    a = store.lookup("alice", "验证码设备A")
+    b = store.lookup("alice", "验证码设备B")
+    assert a is not None and b is not None
+    assert a["device_id"] == b["device_id"] == device_context.REDACTED
+    assert (a["captured_at"], b["captured_at"]) == (1, 2)
+    assert f"device: {device_context.REDACTED}" in device_context.render_for_model(a)
+    assert store.revoke("alice", "验证码设备A") == 1
+    assert store.pending_count() == 1
+    assert store.lookup("alice", "验证码设备B") is not None
+
+
 # ---------------------------------------------------------------- 4. TTL / 隔离 / 撤销
 def test_ttl_expires_and_wall_clock_cannot_revive_it(enabled):
     clock = _Clock()
@@ -306,6 +357,18 @@ def _ttl_problems(src: str) -> list[str]:
     return problems
 
 
+def _key_problems(src: str) -> list[str]:
+    """暂存键必须读原始 payload.device_id：脱敏挪到取键之前会让不同设备塌桶。"""
+    problems = []
+    ingest = re.search(r"def ingest\([\s\S]*?(?=^\s{4}def |\n    def |\Z)", src, re.M)
+    body = ingest.group(0) if ingest else ""
+    if "self._store[(owner, payload.device_id)]" not in body:
+        problems.append("暂存键不再读原始 payload.device_id")
+    if re.search(r"payload\.device_id\s*=(?!=)", body):
+        problems.append("ingest 对 payload.device_id 原地赋值（脱敏挪到了取键之前）")
+    return problems
+
+
 def _no_write_problems(src: str) -> list[str]:
     forbidden = {"open", "write_json_atomic", "mkstemp", "to_csv", "shelve"}
     try:
@@ -341,6 +404,7 @@ def test_core_module_shape_locks_hold_on_real_source():
     assert _redaction_problems(src) == []
     assert _gate_problems(src) == []
     assert _ttl_problems(src) == []
+    assert _key_problems(src) == []
     for path in ALL_SRCS:
         text = path.read_text(encoding="utf-8")
         assert _no_write_problems(text) == [], path.name
@@ -369,6 +433,17 @@ def test_ttl_lock_can_go_red():
     src = _core_text()
     assert _ttl_problems(src.replace("now + self._ttl", "float('inf')"))
     assert _ttl_problems(src.replace("if now >= expires_at:", "if False:"))
+
+
+def test_key_lock_can_go_red():
+    """反向锁的牙：把脱敏挪到取键之前（换键源 / 原地赋值两种挪法），判据必须红。"""
+    src = _core_text()
+    assert _key_problems(src.replace(
+        "self._store[(owner, payload.device_id)]",
+        'self._store[(owner, snapshot["device_id"])]'))
+    assert _key_problems(src.replace(
+        "        snapshot = {",
+        "        payload.device_id = _redact_field(payload.device_id)\n        snapshot = {"))
 
 
 def test_no_write_and_no_injection_locks_can_go_red():

@@ -142,6 +142,60 @@ public class DeviceContextPayloadTest {
         assertEquals(Boolean.FALSE, first.get("redacted"));
     }
 
+    // ---------------------------------------------------------------- 三字段谓词
+
+    @Test
+    public void packageWithValidShapePassesEvenWhenItContainsSensitiveWords() {
+        // 形状闸不吃敏感词：密码管理器/银行 app 的合法包名含 password/otp，零误伤。
+        for (String pkg : Arrays.asList("com.example.app", "com.passwordvault.app",
+                                        "com.otpbank.app")) {
+            DeviceContextPayload.Built b = DeviceContextPayload.build(
+                    "dev-1", 1L, pkg, "t", "accessibility",
+                    Collections.<DeviceContextPayload.Node>emptyList());
+            assertTrue(b.reason, b.ok);
+            assertEquals("合法包名被误脱敏：" + pkg, pkg, decoded(b.json).get("package"));
+        }
+    }
+
+    @Test
+    public void packageWithInvalidShapeIsRedactedWhole() {
+        for (String pkg : Arrays.asList("not-a-package", "com.example.app;rm", "验证码")) {
+            DeviceContextPayload.Built b = DeviceContextPayload.build(
+                    "dev-1", 1L, pkg, "t", "accessibility",
+                    Collections.<DeviceContextPayload.Node>emptyList());
+            assertTrue(b.reason, b.ok);
+            assertEquals("不合形状的包名没被整段换掉：" + pkg,
+                    DeviceContextPayload.REDACTED, decoded(b.json).get("package"));
+        }
+    }
+
+    @Test
+    public void sensitiveWindowTitleIsRedactedButOrdinaryOnePasses() {
+        DeviceContextPayload.Built secret = DeviceContextPayload.build(
+                "dev-1", 1L, "com.example.app", "验证码 123456", "accessibility",
+                Collections.<DeviceContextPayload.Node>emptyList());
+        assertTrue(secret.reason, secret.ok);
+        assertEquals(DeviceContextPayload.REDACTED, decoded(secret.json).get("window_title"));
+        assertFalse("验证码原文漏进成品", secret.json.contains("123456"));
+        DeviceContextPayload.Built plain = DeviceContextPayload.build(
+                "dev-1", 1L, "com.example.app", "首页", "accessibility",
+                Collections.<DeviceContextPayload.Node>emptyList());
+        assertEquals("首页", decoded(plain.json).get("window_title"));
+    }
+
+    @Test
+    public void sensitiveDeviceIdIsRedactedButOrdinaryOnePasses() {
+        DeviceContextPayload.Built secret = DeviceContextPayload.build(
+                "验证码设备A", 1L, "com.example.app", "t", "accessibility",
+                Collections.<DeviceContextPayload.Node>emptyList());
+        assertTrue(secret.reason, secret.ok);
+        assertEquals(DeviceContextPayload.REDACTED, decoded(secret.json).get("device_id"));
+        DeviceContextPayload.Built plain = DeviceContextPayload.build(
+                "dev-1", 1L, "com.example.app", "t", "accessibility",
+                Collections.<DeviceContextPayload.Node>emptyList());
+        assertEquals("dev-1", decoded(plain.json).get("device_id"));
+    }
+
     // ---------------------------------------------------------------- 上限与拒收
 
     @Test
