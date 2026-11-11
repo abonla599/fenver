@@ -386,6 +386,22 @@ def _trust_narrowing_problems(source: str) -> list:
     纯函数、吃源码字符串：这样能喂合成坏源码自证有牙，不必真去改 tls.py。
     fail-closed：解析不了、扫不到构造点、位置实参超过 purpose 那一枚、`**` 展开
     （实参看不到）一律报问题。注释与字符串里写着 cafile 不算数。
+
+    「扫不到构造点」那条兜底单独不够：模块里留一枚看起来干净的**诱饵**调用，兜底就
+    失效，而间接调用的关键字 AST 看不见。所以另加三条 fail-closed：
+    ① 构造点的**非调用引用**（别名赋值 / from-import 绑定 / partial 实参 / getattr 取名）；
+    ② 对 `ssl` 模块属性的**赋值**（构造点被整个换掉）；
+    ③ `exec` / `eval`（动态执行的源码 AST 看不见）。
+
+    射程：只读这一个模块的源码，且只认**名字是字面量**的形状。仍漏（逐条实测均绿）：
+    `setattr(ssl, "create_default_context", …)`（名字是字面量也漏——② 只认 Assign 目标）、
+    `ssl.__dict__[…] = …`、`import ssl as s` 之后给 `s.<attr>` 赋值（② 只认名字 `ssl`）、
+    `getattr(ssl, 算出来的名字)`、`__import__`/importlib 取到模块再 setattr、
+    `getattr(builtins, "exec")` 绕开 ③ 的名字匹配、以及**别的模块** monkeypatch ssl。
+    ③ 按名字判，所以 exec/eval 的载荷是不是常量都红。
+    `ctx.load_verify_locations(cafile=…)` 是往系统根库上**加根**（实测 209→301，
+    本机那枚中间人根仍在），不是收窄，判据绿是对的；`capath=` 那版根数不变是
+    hash-dir 惰性查找，同样不是收窄。
     """
     import ast
 
@@ -394,9 +410,11 @@ def _trust_narrowing_problems(source: str) -> list:
     except SyntaxError as exc:
         return [f"源码解析不了，判据无从下手：{exc}"]
     calls = []
+    called = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        called.add(id(node.func))
         func = node.func
         if isinstance(func, ast.Attribute):
             name = func.attr
@@ -421,6 +439,40 @@ def _trust_narrowing_problems(source: str) -> list:
             problems.append(
                 f"第 {call.lineno} 行构造有 {len(call.args)} 枚位置实参："
                 "create_default_context 的第 2/3/4 位就是 cafile/capath/cadata")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "create_default_context" \
+                and isinstance(node.ctx, ast.Load) and id(node) not in called:
+            problems.append(
+                f"第 {node.lineno} 行把 create_default_context 当值引用（别名/partial/赋值）："
+                "间接构造的实参看不见，fail-closed")
+        elif isinstance(node, ast.Name) and node.id == "create_default_context" \
+                and isinstance(node.ctx, ast.Load) and id(node) not in called:
+            problems.append(
+                f"第 {node.lineno} 行把 create_default_context 当值引用："
+                "间接构造的实参看不见，fail-closed")
+        elif isinstance(node, ast.ImportFrom) and node.module == "ssl" \
+                and any(a.name == "create_default_context" for a in node.names):
+            problems.append(
+                f"第 {node.lineno} 行 from ssl import create_default_context："
+                "绑定可以被改名，构造点就认不出来了，fail-closed")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "getattr" and len(node.args) >= 2 \
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "ssl" \
+                and isinstance(node.args[1], ast.Constant) \
+                and node.args[1].value == "create_default_context":
+            problems.append(
+                f"第 {node.lineno} 行用 getattr 取构造点：间接构造的实参看不见，fail-closed")
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) \
+                        and t.value.id == "ssl":
+                    problems.append(
+                        f"第 {node.lineno} 行给 ssl.{t.attr} 赋值：构造点被换掉了，fail-closed")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("exec", "eval"):
+            problems.append(
+                f"第 {node.lineno} 行有 {node.func.id}：动态执行的源码 AST 看不见，fail-closed")
     return problems
 
 
@@ -440,8 +492,9 @@ def test_the_trust_anchor_is_not_narrowed_to_another_ca_bundle():
     assert not problems, "信任锚被收窄了（那就是静默降级的入口）：" + "; ".join(problems)
 
 
-# 合成语料（不碰真 tls.py）：前六格必须红，最后一格必须绿——它证明判据走 AST 而不是
-# 子串，注释里提到 cafile 不算违规。
+# 合成语料（不碰真 tls.py）：每格自带 expect_red。必须绿的那几格证明判据走 AST 而不是
+# 子串（注释/字符串里提到 cafile 不算违规），以及"加根"不是"收窄"——把它们钉成绿格，
+# 是为了防止有人把判据改严到连 load_verify_locations 都报红。
 _TRUST_NARROWING_MUTANTS = (
     ("cafile-certifi",
      "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
@@ -461,17 +514,56 @@ _TRUST_NARROWING_MUTANTS = (
     ("anchor-replaced",
      "import ssl\n\n\ndef system_ssl_context():\n"
      "    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n", True),
+    # 间接构造 + 一枚干净诱饵：诱饵把"扫不到构造点就 fail-closed"那条兜底废掉，
+    # 所以这几格钉的是另外三条 fail-closed（非调用引用 / 模块属性赋值 / 动态执行）。
+    ("alias-plus-decoy",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    _cdc = ssl.create_default_context\n    return _cdc(cafile=certifi.where())\n\n\n"
+     "def _unused():\n    return ssl.create_default_context()\n", True),
+    ("getattr-plus-decoy",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     '    return getattr(ssl, "create_default_context")(cafile=certifi.where())\n\n\n'
+     "def _unused():\n    return ssl.create_default_context()\n", True),
+    ("monkeypatch-plus-decoy",
+     "import ssl\nimport certifi\n\n_orig = ssl.create_default_context\n\n\n"
+     "def _narrowed(*a, **k):\n    k['cafile'] = certifi.where()\n    return _orig(*a, **k)\n\n\n"
+     "ssl.create_default_context = _narrowed\n\n\n"
+     "def system_ssl_context():\n    return ssl.create_default_context()\n", True),
+    ("exec-plus-decoy",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context()\n\n\ndef _hidden():\n"
+     "    exec('import ssl,certifi;ssl.create_default_context(cafile=certifi.where())')\n", True),
+    ("from-import-alias-plus-decoy",
+     "from ssl import create_default_context as cdc\nimport ssl\nimport certifi\n\n\n"
+     "def system_ssl_context():\n    return cdc(cafile=certifi.where())\n\n\n"
+     "def _unused():\n    return ssl.create_default_context()\n", True),
+    # 只有"给 ssl 模块属性赋值"那条 fail-closed 能抓到这一格：构造点名字一次都没被
+    # 当值引用，诱饵调用看起来完全干净。
+    ("module-attr-rebind",
+     "import ssl\n\n\ndef _narrowed(*a, **k):\n    k['cafile'] = '/nonexistent-probe/ca.pem'\n"
+     "    return _orig(*a, **k)\n\n\nssl.create_default_context = _narrowed\n\n\n"
+     "def system_ssl_context():\n    return ssl.create_default_context()\n", True),
     ("comment-only",
      "import ssl\n\n\ndef system_ssl_context():\n"
      "    # cafile=certifi.where() 是被否决的修法\n"
      "    return ssl.create_default_context()\n", False),
+    # 加根不是收窄：cafile 那版实测 209→301 根、本机那枚中间人根仍在；capath 那版
+    # 根数不变是 hash-dir 惰性查找。两格都必须保持绿。
+    ("load-verify-locations-cafile-adds-roots",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    ctx = ssl.create_default_context()\n"
+     "    ctx.load_verify_locations(cafile=certifi.where())\n    return ctx\n", False),
+    ("load-verify-locations-capath-is-not-narrowing",
+     "import ssl\n\n\ndef system_ssl_context():\n"
+     "    ctx = ssl.create_default_context()\n"
+     "    ctx.load_verify_locations(capath='/nonexistent-probe/certs')\n    return ctx\n", False),
 )
 
 
 @pytest.mark.parametrize("label,source,expect_red", _TRUST_NARROWING_MUTANTS,
                          ids=[m[0] for m in _TRUST_NARROWING_MUTANTS])
 def test_trust_narrowing_lock_can_go_red(label, source, expect_red):
-    """变异自证：把信任集收窄的六种形状喂给同一条判据必须红；只写在注释里的那份必须绿。"""
+    """变异自证：收窄信任集的形状喂给同一条判据必须红；注释/字符串与"加根"那几格必须绿。"""
     problems = _trust_narrowing_problems(source)
     assert bool(problems) == expect_red, \
         f"[{label}] 期望{'红' if expect_red else '绿'}，实得 {problems}"
