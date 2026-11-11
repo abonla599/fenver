@@ -10,10 +10,12 @@ TTL 5 分钟不落盘、密码字段永不序列化、节点/深度/字节硬上
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import sys
+import textwrap
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -254,6 +256,157 @@ def test_owner_isolation_and_revoke(enabled):
     assert store.pending_count() == 1
 
 
+# ---------------------------------------------------------------- 4b. 暂存条数双闸
+# 形状抄 test_v0374_result_store.py 的容量格（=MAX_TOTAL / 每 owner 计数），但语义
+# 相反：那份是淘汰最旧，这份是拒收不淘汰——跨属主共享表，淘汰会让 A 的注入挤掉
+# B 的有效快照。上限是设计值：字面量手抄 + 条数 + 集合双钉，不从别处派生。
+def _fill(store, count, owner_of=lambda i: f"owner-{i}", prefix="dev"):
+    """塞 count 枚**新键**；默认每条一个属主，把按属主闸排除在外。"""
+    for i in range(count):
+        ok, reason, status = store.ingest(_payload(device_id=f"{prefix}-{i}"), owner_of(i))
+        assert (ok, status) == (True, 200), (i, reason)
+
+
+def test_capacity_constants_are_pinned_literals():
+    """双闸上限必须是整数字面量，条数 + 集合双钉。
+
+    AST 判据只认「名字 = 整数常量」：括号包裹、算术派生（如总量 // 8）都算漂移——
+    派生会让改总量时两级一起悄悄缩放，设计值就没人钉了。
+    """
+    expected = {"MAX_STORE_ENTRIES": 128, "MAX_ENTRIES_PER_OWNER": 16}
+    tree = ast.parse(_core_text())
+    found = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in expected):
+            assert isinstance(node.value, ast.Constant) and type(node.value.value) is int, (
+                node.targets[0].id, ast.dump(node.value))
+            found[node.targets[0].id] = node.value.value
+    assert len(found) == 2 and set(found) == set(expected), sorted(found)
+    assert found == expected, found
+    assert (device_context.MAX_STORE_ENTRIES,
+            device_context.MAX_ENTRIES_PER_OWNER) == (128, 16)
+
+
+def test_full_store_rejects_a_new_key_with_429_and_evicts_nothing(enabled):
+    """全局闸：128 格占满后新键拒收 429，且任何一份已有快照都不许被挤掉。"""
+    store = _store(_Clock())
+    _fill(store, device_context.MAX_STORE_ENTRIES)
+    ok, reason, status = store.ingest(_payload(device_id="late"), "late-owner")
+    assert (ok, reason, status) == (False, "暂存已满，请稍后重试", 429)
+    assert store.pending_count() == 128
+    assert store.lookup("late-owner", "late") is None
+    assert store.lookup("owner-0", "dev-0") is not None, "最旧一份被挤掉了：本表必须拒收不淘汰"
+
+
+def test_full_store_still_allows_overwriting_an_existing_key(enabled):
+    """设备正常刷新不许被自己占的额度锁死：满表后已有键覆写仍然成功。"""
+    store = _store(_Clock())
+    _fill(store, device_context.MAX_STORE_ENTRIES)
+    ok, reason, status = store.ingest(
+        _payload(device_id="dev-0", captured_at=42), "owner-0")
+    assert (ok, reason, status) == (True, "", 200)
+    assert store.pending_count() == 128
+    assert store.lookup("owner-0", "dev-0")["captured_at"] == 42
+
+
+def test_expired_entries_free_capacity_for_new_keys(enabled):
+    """过期条目不占额度：先 purge 再判长度。到期前一秒仍拒，到期即腾出。"""
+    clock = _Clock()
+    store = _store(clock)
+    _fill(store, device_context.MAX_STORE_ENTRIES)
+    clock.advance(device_context.DEVICE_CONTEXT_TTL_SECONDS - 1)
+    ok, _, status = store.ingest(_payload(device_id="early"), "early-owner")
+    assert (ok, status) == (False, 429)
+    clock.advance(1)
+    ok, reason, status = store.ingest(_payload(device_id="fresh"), "fresh-owner")
+    assert (ok, reason, status) == (True, "", 200), reason
+    assert store.pending_count() == 1, "过期条目仍占额度：没有先 purge 再判长度"
+
+
+def test_owner_cap_rejects_only_that_owner_while_others_can_still_ingest(enabled):
+    """按属主闸：A 占满 16 格后 A 的新设备被拒，而 B 仍能注入。
+
+    这一格是双闸设计的存在理由：只有全局闸时，单个账号能把 128 格全占满，
+    把别人永远锁在外面（跨属主拒绝服务）。
+    """
+    store = _store(_Clock())
+    _fill(store, device_context.MAX_ENTRIES_PER_OWNER, lambda i: "alice")
+    ok, reason, status = store.ingest(_payload(device_id="alice-extra"), "alice")
+    assert (ok, reason, status) == (False, "本账号暂存已满，请稍后重试", 429)
+    assert store.lookup("alice", "alice-extra") is None
+    ok, reason, status = store.ingest(_payload(device_id="bob-1"), "bob")
+    assert (ok, reason, status) == (True, "", 200), "B 被 A 的额度连坐：按属主闸没挡住跨属主拒绝服务"
+    assert store.pending_count() == 17
+    # A 覆写自己已有的键仍然允许：刷新不被自己的额度锁死。
+    ok, _, status = store.ingest(_payload(device_id="dev-0", captured_at=7), "alice")
+    assert (ok, status) == (True, 200)
+    assert store.lookup("alice", "dev-0")["captured_at"] == 7
+
+
+def _ingest_mutant_without(*gate_markers):
+    """内存变异：克隆 ingest，按标记删掉判据行（连同紧随的 return 行）。
+
+    共享工作树只跑测试、不落盘变异（同 result_store 的缺牙负控）。标记找不到
+    当场报红——变异没生效的负控等于空转。
+    """
+    src = textwrap.dedent(inspect.getsource(device_context.DeviceContextStore.ingest))
+    lines = src.splitlines(keepends=True)
+    out, i, removed = [], 0, 0
+    while i < len(lines):
+        if any(m in lines[i] for m in gate_markers):
+            assert "return False" in lines[i + 1] and "429" in lines[i + 1], lines[i:i + 2]
+            removed += 1
+            i += 2
+            continue
+        out.append(lines[i])
+        i += 1
+    assert removed == len(gate_markers), "变异没生效：判据行没找到"
+    # 两把闸都拆掉时覆写豁免只剩一个空壳 if，连它一起拆，克隆才编得过。
+    for j, line in enumerate(out):
+        if "if key not in self._store:" in line:
+            indent = len(line) - len(line.lstrip())
+            k = j + 1
+            while k < len(out) and (not out[k].strip() or out[k].lstrip().startswith("#")):
+                k += 1
+            if k >= len(out) or (len(out[k]) - len(out[k].lstrip())) <= indent:
+                out.pop(j)
+            break
+    ns = dict(vars(device_context))
+    exec("".join(out), ns)  # noqa: S102 - 跑的是同源删闸克隆，不是外来代码
+    return ns["ingest"]
+
+
+def test_negative_control_removing_total_gate_accepts_unbounded_injection(enabled):
+    """缺牙负控：拆掉总量闸 ⇒ 第 129 枚新键长驱直入，全局那格的 429 断言必红。"""
+    store = _store(_Clock())
+    store.ingest = MethodType(
+        _ingest_mutant_without("if len(self._store) >= MAX_STORE_ENTRIES:"), store)
+    _fill(store, device_context.MAX_STORE_ENTRIES)
+    ok, _, status = store.ingest(_payload(device_id="late"), "late-owner")
+    assert (ok, status) == (True, 200), "拆掉总量闸后第 129 枚仍被拒：那格 429 判据是假的"
+    assert store.pending_count() == 129
+
+
+def test_negative_control_removing_owner_gate_lets_one_owner_hoard(enabled):
+    """缺牙负控：拆掉按属主闸 ⇒ 单属主占 17 格，跨属主那格的拒收断言必红。"""
+    store = _store(_Clock())
+    store.ingest = MethodType(_ingest_mutant_without(">= MAX_ENTRIES_PER_OWNER"), store)
+    _fill(store, device_context.MAX_ENTRIES_PER_OWNER + 1, lambda i: "alice")
+    alice = sum(1 for o, _ in store._store if o == "alice")
+    assert alice == 17, "拆掉按属主闸后 A 仍没占到 17 格：那格拒收判据是假的"
+
+
+def test_negative_control_removing_both_gates_accepts_unbounded_injection(enabled):
+    """缺牙负控：两把闸整段拆掉 ⇒ 无上限注入必须穿透所有条数判据。"""
+    store = _store(_Clock())
+    store.ingest = MethodType(_ingest_mutant_without(
+        "if len(self._store) >= MAX_STORE_ENTRIES:", ">= MAX_ENTRIES_PER_OWNER"), store)
+    _fill(store, device_context.MAX_STORE_ENTRIES + 64, lambda i: "alice")
+    assert store.pending_count() == 192, "两把闸都拆了注入仍有上限：条数判据是假的"
+
+
 # ---------------------------------------------------------------- 5. 工具出口
 def test_tool_returns_untrusted_block_and_never_leaks_another_user(enabled):
     device_context.context_store.ingest(_payload(), "alice")
@@ -369,6 +522,30 @@ def _key_problems(src: str) -> list[str]:
     return problems
 
 
+def _cap_problems(src: str) -> list[str]:
+    """条数双闸的形状：两把闸都在、覆写豁免、先 purge 再判、拒收不淘汰、键读原始值。"""
+    problems = []
+    ingest = re.search(r"def ingest\([\s\S]*?(?=^\s{4}def |\n    def |\Z)", src, re.M)
+    body = ingest.group(0) if ingest else ""
+    if not body:
+        problems.append("ingest 函数不见了")
+    if "len(self._store) >= MAX_STORE_ENTRIES" not in body:
+        problems.append("总量条数闸不见了")
+    if ">= MAX_ENTRIES_PER_OWNER" not in body:
+        problems.append("按属主条数闸不见了")
+    if "if key not in self._store:" not in body:
+        problems.append("已有键的覆写豁免不见了")
+    if "key = (owner, payload.device_id)" not in body:
+        problems.append("额度判定的键不再读原始 payload.device_id")
+    purge_at = body.find("self._purge_locked(now)")
+    cap_at = body.find("MAX_STORE_ENTRIES")
+    if purge_at < 0 or cap_at < 0 or purge_at > cap_at:
+        problems.append("没有先清过期条目再判条数")
+    if ".pop(" in body:
+        problems.append("ingest 出现了淘汰调用：跨属主共享表必须拒收不淘汰")
+    return problems
+
+
 def _no_write_problems(src: str) -> list[str]:
     forbidden = {"open", "write_json_atomic", "mkstemp", "to_csv", "shelve"}
     try:
@@ -405,6 +582,7 @@ def test_core_module_shape_locks_hold_on_real_source():
     assert _gate_problems(src) == []
     assert _ttl_problems(src) == []
     assert _key_problems(src) == []
+    assert _cap_problems(src) == []
     for path in ALL_SRCS:
         text = path.read_text(encoding="utf-8")
         assert _no_write_problems(text) == [], path.name
@@ -444,6 +622,22 @@ def test_key_lock_can_go_red():
     assert _key_problems(src.replace(
         "        snapshot = {",
         "        payload.device_id = _redact_field(payload.device_id)\n        snapshot = {"))
+
+
+def test_cap_lock_can_go_red():
+    """双闸形状锁的牙：拆任一闸 / 拆覆写豁免 / 换键源 / purge 挪后 / 改淘汰，都要红。"""
+    src = _core_text()
+    assert _cap_problems(src.replace(
+        "if len(self._store) >= MAX_STORE_ENTRIES:", "if False:"))
+    assert _cap_problems(src.replace(
+        "if sum(1 for o, _ in self._store if o == owner) >= MAX_ENTRIES_PER_OWNER:",
+        "if False:"))
+    assert _cap_problems(src.replace("if key not in self._store:", "if True:"))
+    assert _cap_problems(src.replace(
+        "key = (owner, payload.device_id)", 'key = (owner, snapshot["device_id"])'))
+    assert _cap_problems(src.replace("self._purge_locked(now)", "pass"))
+    assert _cap_problems(src.replace(
+        "self._purge_locked(now)", "self._store.pop(next(iter(self._store)), None)"))
 
 
 def test_no_write_and_no_injection_locks_can_go_red():
