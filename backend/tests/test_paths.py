@@ -276,6 +276,25 @@ def test_both_hand_written_lists_name_every_store():
         assert not missing, f"{name} 里没有这些存储的环境变量：{missing}"
 
 
+def test_guide_manual_swap_recipe_clears_the_same_six_names_as_the_scripts():
+    """指南里手抄的那行 `Remove-Item env:` 必须与脚本同一份名单：代理四枚 + TLS 两枚。
+
+    与上一条同一个腐烂形状——抄给人看的清单没人查，漏一枚名字，照抄的人就把那枚
+    带进旧包。判据借 test_launch_env_hygiene 那把（一把尺子只有一份：名字带右边界，
+    `env:SSL_CERT_FILE_BAK` 这类超串不算在场），它同时量脚本打印的回滚指引与这份
+    手动换包配方。反例 = 只写四枚代理名。
+    """
+    from tests.test_launch_env_hygiene import PROXY_VARS, _rollback_scrub_instruction_line
+
+    text = (REPO_ROOT / "docs" / "安装部署指南.md").read_text(encoding="utf-8")
+    assert _rollback_scrub_instruction_line(text) is not None, (
+        "指南的手动换包配方里没有一行把六枚名字清齐：照抄的人会带着毒代理/信任锚起旧包")
+    four = ("Remove-Item " + ", ".join("env:" + v for v in PROXY_VARS)
+            + " -ErrorAction SilentlyContinue\n")
+    assert _rollback_scrub_instruction_line(four) is None, \
+        "只写四枚代理名时判据竟认了这一行——TLS 两枚被摘掉它不会红"
+
+
 def test_log_data_locations_tells_the_two_reasons_apart(capsys, tmp_path, monkeypatch):
     """这条日志的价值全在"说清为什么"：被指走 ≠ 读的是历史数据。
 

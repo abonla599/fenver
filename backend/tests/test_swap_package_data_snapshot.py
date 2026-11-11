@@ -47,7 +47,8 @@ r"""换包脚本 #42 那 214 行的锁：回滚之前先把 data\tasks.json 复�
 它自己读 `os.environ`）、`_code_lines` / `_idx` / `_func_body` / `_ascii_ok` / `REPO_ROOT` 来自
 `test_swap_package_disable_verify.py`，`_write_crlf` / `_run_powershell` 来自
 `test_swap_package_post_acceptance_tokens.py`，`_find_powershell` / `PROBE_TIMEOUT_SECONDS` 来自
-`test_swap_package_watchdog_enabled_machine_truth.py`。没有 powershell 就只 skip 机器那几条。
+`test_swap_package_watchdog_enabled_machine_truth.py`，`_TRUST_VARS`（5a) 那两枚 TLS token
+的唯一来源）来自 `test_launch_env_hygiene.py`。没有 powershell 就只 skip 机器那几条。
 
 **名字漂移已收口（#61）**：机制文件头 `:121` 曾登记
 `backend/tests/test_swap_package_rollback_data_snapshot.py`，而票面指定本文件叫
@@ -62,6 +63,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_launch_env_hygiene import _TRUST_VARS
 from tests.test_swap_package_disable_verify import (
     REPO_ROOT,
     _ascii_ok,
@@ -335,9 +337,12 @@ _HOWTO_SEVEN = ("DATA-SAVED dir=", "waiting_user", "erases", "data\\tasks.json",
                 "DATA-SAVE-FAIL")
 
 
+# TLS 两枚从 test_launch_env_hygiene 那份名单派生（一把尺子只有一份）：手抄第二份
+# 就会与脚本漂移。条数另有一把独立的钉，因为下面 _howto_ok 是"必含"语义——
+# 清单被悄悄改短、脚本一字不动，它照样绿。
 _HOWTO_5A = ("FIRST clear env proxy vars", "Remove-Item env:HTTP_PROXY",
-             "env:HTTPS_PROXY", "env:ALL_PROXY", "env:NO_PROXY",
-             "env:SSL_CERT_FILE", "env:SSL_CERT_DIR")
+             "env:HTTPS_PROXY", "env:ALL_PROXY", "env:NO_PROXY") + tuple(
+                 "env:" + v for v in _TRUST_VARS)
 
 
 def _howto_ok(text: str, pre_text: str) -> bool:
@@ -604,6 +609,16 @@ def test_rollback_howto_step_7_names_the_erasure_and_1_to_6_are_word_for_word_un
         "登记过的插格），或 5a) 少了 _HOWTO_5A 的清理要素之一，或 7) 少了：DATA-SAVED dir= / " +
         "waiting_user / erases / copy tasks.json back over data\\tasks.json / stop the backend / " +
         "DATA-SAVE-FAIL 六个要素之一")
+
+
+def test_howto_5a_token_count_is_pinned_exactly():
+    """`_HOWTO_5A` 的条数钉：`_howto_ok` 是逐 token"必含"，摘掉两枚、脚本一字不动也全绿。
+
+    7 是独立手抄的精确值，**不从 `_HOWTO_5A` 自己派生**（那样恒真、不构成防线）：
+    清单被改短、或 TLS 那截派生尾巴被摘掉，都在这里红。
+    """
+    assert len(_HOWTO_5A) == 7, \
+        f"5a) 清理要素的条数钉对不上（清单被改短了）：期望 7 实得 {len(_HOWTO_5A)}"
 
 
 def test_generated_probes_run_the_scripts_own_region_and_cannot_touch_production():
