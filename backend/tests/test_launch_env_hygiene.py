@@ -13,8 +13,10 @@ swap-package / start-ai-stack，`Start-Process` 把当前进程的环境原样�
 Start-Process）也必须把"先清代理"打给照抄指引的人——那是第 5 条落点，单独成类。
 
 这把锁属于"派生名册"一族（惯例见 test_pathmask.py / test_outbound_trust_env.py）：
-- 名册 `_LAUNCH_SITES` 与计数钉 `_ROSTER_SIZES` 是**手抄字面量**，判据用正则从真实脚本
-  字节现扫，两个方向分开报（在册未扫到 / 扫到未在册 / 机制 MISSING），不许自我派生；
+- 名册 `_LAUNCH_SITES` 与计数钉 `_ROSTER_SIZES` 是**手抄字面量**（"是不是字面量"由
+  `_literal_roster_problems` 走 AST 判赋值节点，正则看 RHS 开头挡不住括号包裹的派生），
+  判据用正则从真实脚本字节现扫，两个方向分开报（在册未扫到 / 扫到未在册 / 机制 MISSING），
+  不许自我派生；
 - 计数钉成精确值且 >0：摘掉一处调用，名册 MISSING 与计数钉双红；
 - 机器真相探针（纪律抄 test_swap_package_boot_poll_single_process_machine_truth.py）：
   抽脚本**自己的**清环境表达式（`PROXY-SCRUB-HELPER` 标记之间 / bat 的
@@ -156,15 +158,20 @@ def _rollback_printed_launch_line(text: str):
 
 
 def _rollback_scrub_instruction_line(text: str):
-    """Show-Rollback 里打印给操作者的"先清环境"命令行（Remove-Item env:…，六枚名字齐）。
+    """打印给操作者的"先清环境"命令行（Remove-Item env:…，六枚名字齐）。
 
     这一行是给人照抄的、脚本自己不执行：漏一枚名字，照抄的人就把那枚带进旧包，
     所以判据要求代理四枚与 TLS 两枚同时在场（反例见
-    test_rollback_instruction_lock_can_go_red）。
+    test_rollback_instruction_lock_can_go_red）。名字带右边界，口径与 _TRUST_FILTER
+    一致：`env:NO_PROXYY` / `env:SSL_CERT_FILE_BAK` 是**别的**变量名，清不到真正那枚。
+
+    同一把尺子也量 docs/安装部署指南.md 的手动换包配方（锁在 test_paths.py）：
+    两处都是抄给人看的名单，判据只留一份。
     """
     for i, ln in enumerate(text.splitlines()):
         if re.search(r"Remove-Item\s+env:", ln) \
-                and all(re.search(r"env:" + v, ln) for v in PROXY_VARS + _TRUST_VARS):
+                and all(re.search(r"env:" + v + r"(?![A-Za-z0-9_])", ln)
+                        for v in PROXY_VARS + _TRUST_VARS):
             return i
     return None
 
@@ -275,6 +282,7 @@ def test_rollback_instruction_lock_can_go_red():
 
     那一行是打印给操作者照抄的、脚本自己不执行：判据若只要求代理四枚，TLS 两枚被摘掉
     时它照样绿，第四处落点就成了"改了没人守"。正控 = 六枚齐的那行 + 真脚本那一行。
+    超串那几格钉的是右边界：名字被换成 `…_BAK` / `…X` 时清的是另一个变量，不许算在场。
     """
     def _line(names):
         return ("Remove-Item " + ", ".join("env:" + v for v in names)
@@ -288,6 +296,18 @@ def test_rollback_instruction_lock_can_go_red():
             f"缺 {missing} 时判据竟认了这一行（逐枚都要有牙）"
     assert _rollback_scrub_instruction_line(_line(PROXY_VARS + _TRUST_VARS)) == 0, \
         "六枚齐时判据必须认出这一行（正控）"
+
+    # 超串不算在场：逐枚把它换成"同名前缀的另一个变量"，判据都必须认不出这一行。
+    # 没有右边界时 `env:NO_PROXYY` 会被当成 `env:NO_PROXY` 在场，六枚全换也照样绿。
+    for suffix in ("_BAK", "X"):
+        for victim in PROXY_VARS + _TRUST_VARS:
+            names = tuple(v + suffix if v == victim else v
+                          for v in PROXY_VARS + _TRUST_VARS)
+            assert _rollback_scrub_instruction_line(_line(names)) is None, \
+                f"{victim} 被换成超串 {victim + suffix} 时判据竟认了这一行（右边界没了）"
+    all_super = tuple(v + "_BAK" for v in PROXY_VARS + _TRUST_VARS)
+    assert _rollback_scrub_instruction_line(_line(all_super)) is None, \
+        "六枚全是超串时判据竟认了这一行——它一个真名字都没要求"
 
     stext = _read(SWAP_PS1)
     instr = _rollback_scrub_instruction_line(stext)
@@ -315,20 +335,108 @@ def test_two_ps_helper_copies_are_identical():
     assert hw.strip() == hs.strip(), "watchdog 与 swap 的清环境 helper 已经分叉，必须同批改。"
 
 
+def _literal_roster_problems(source: str) -> list:
+    """名册/计数钉必须是模块顶层的**字面量**赋值（AST 判节点类型，不是正则看 RHS 开头）。
+
+    正则那版只要求 RHS 以 `(` / `{` 开头、且不以 `_标识符` 开头：把派生表达式用括号
+    包一层就同时满足两条，连"从脚本字节自派生"（#289 明令禁的形状）都照样绿。
+    AST 直接看节点：推导式 / 生成器 / 星号展开 / 调用一律不是字面量。
+    纯函数吃源码字符串，所以能喂合成坏源码自证有牙（口径同 test_providers.py 的
+    信任锚反向锁）。找不到赋值、或同名赋值不止一次，都 fail-closed 先红给人看。
+
+    射程：只钉"是不是字面量"，不钉"字面量内容与脚本一致"——后者由现扫名册锁与
+    计数钉两个方向分开判。仍漏：import 之后用 `globals()[…] = …` / 动态执行改写这
+    四个名字，模块顶层的 Assign 里看不见。
+    """
+    import ast
+
+    wanted = {"_LAUNCH_SITES": ast.Dict, "_ROSTER_SIZES": ast.Tuple,
+              "_TRUST_VARS": ast.Tuple, "_TRUST_ROSTER": ast.Tuple}
+    string_tuples = ("_TRUST_VARS", "_TRUST_ROSTER")
+
+    def literal(node):
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return all(literal(e) for e in node.elts)
+        if isinstance(node, ast.Dict):
+            return all(k is not None and literal(k) and literal(v)
+                       for k, v in zip(node.keys, node.values))
+        return False
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return [f"本文件解析不了，判据无从下手：{exc}"]
+    found = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in wanted:
+                    found.setdefault(t.id, []).append(node)
+    problems = []
+    for name, kind in wanted.items():
+        nodes = found.get(name, [])
+        if len(nodes) != 1:
+            problems.append(f"{name} 在模块顶层不是恰好一次赋值（实得 {len(nodes)} 次）")
+            continue
+        value = nodes[0].value
+        if not isinstance(value, kind):
+            problems.append(f"{name} 不是字面 {kind.__name__}：RHS 是派生表达式")
+        elif not literal(value):
+            problems.append(f"{name} 含非字面量元素：名单被派生出来了")
+        elif name in string_tuples and not all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts):
+            problems.append(f"{name} 的元素必须全是字符串字面量")
+    return problems
+
+
 def test_names_copied_literals_not_derived():
-    """名册/计数必须是本文件的手抄字面量——把名册赋成扫描/派生结果等于缴械（惯例 #289）。"""
+    """名册/计数必须是本文件的手抄字面量——把名册赋成扫描/派生结果等于缴械（惯例 #289）。
+
+    两族名字是两份独立的手抄事实：TLS 名单不许从 PROXY_VARS 派生，也不许从脚本派生。
+    反例见 test_literal_roster_lock_can_go_red。
+    """
+    problems = _literal_roster_problems(_read(Path(__file__)))
+    assert not problems, "名册/计数钉不再是手抄字面量（派生 = 缴械）：" + "; ".join(problems)
+
+
+def _roster_assignment_segment(src: str, name: str):
+    """按 AST 取某份名单的赋值原文：判据的反例不必手抄第二份本文件文本（抄的会腐烂）。"""
+    import ast
+
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.get_source_segment(src, node)
+    return None
+
+
+# 每格都是"把名单改成派生"的缴械形状；第一格是括号包裹的自派生——正则那版对它全绿。
+_LITERAL_ROSTER_MUTANTS = (
+    ("trust-vars-self-derived-in-parens", "_TRUST_VARS",
+     '_TRUST_VARS = (tuple(dict.fromkeys(re.findall('
+     'r"\'(SSL_CERT_FILE|SSL_CERT_DIR)\'", SWAP_PS1.read_text(encoding="utf-8-sig")))))'),
+    ("trust-roster-starred-from-trust-vars", "_TRUST_ROSTER",
+     "_TRUST_ROSTER = (*_TRUST_VARS, *(v.lower() for v in _TRUST_VARS))"),
+    ("trust-vars-from-proxy-vars", "_TRUST_VARS", "_TRUST_VARS = PROXY_VARS"),
+    ("launch-sites-comprehension", "_LAUNCH_SITES", "_LAUNCH_SITES = {k: v for k, v in ()}"),
+    ("roster-sizes-generator", "_ROSTER_SIZES",
+     '_ROSTER_SIZES = (tuple((k, v) for k, v in (("ps-helper-defs", 2),)))'),
+)
+
+
+@pytest.mark.parametrize("label,name,replacement", _LITERAL_ROSTER_MUTANTS,
+                         ids=[m[0] for m in _LITERAL_ROSTER_MUTANTS])
+def test_literal_roster_lock_can_go_red(label, name, replacement):
+    """变异自证：任一份名单被改成派生表达式，同一条判据必须红。正控是本文件自己。"""
     src = _read(Path(__file__))
-    assert re.search(r"_LAUNCH_SITES\s*=\s*\{", src), "名册得是字面 dict。"
-    assert re.search(r"_ROSTER_SIZES\s*=\s*\(", src), "计数钉得是字面 tuple。"
-    assert re.search(r"_TRUST_VARS\s*=\s*\(", src), "TLS 两枚名字得是字面 tuple。"
-    assert re.search(r"_TRUST_ROSTER\s*=\s*\(", src), "TLS 大小写两版名单得是字面 tuple。"
-    # 反缴械判据：两处名单的赋值 RHS 一旦变成标识符（`_derive...` 之类）就红。
-    assert not re.search(r"_LAUNCH_SITES\s*=\s*_[A-Za-z]", src), "名册 RHS 变成了表达式。"
-    assert not re.search(r"_ROSTER_SIZES\s*=\s*_[A-Za-z]", src), "计数钉 RHS 变成了表达式。"
-    assert not re.search(r"_TRUST_VARS\s*=\s*_[A-Za-z]", src), "TLS 名单 RHS 变成了表达式。"
-    assert not re.search(r"_TRUST_ROSTER\s*=\s*_[A-Za-z]", src), "TLS 两版名单 RHS 变成了表达式。"
-    assert not re.search(r"_TRUST_VARS\s*=\s*PROXY_VARS", src), \
-        "TLS 名单不许从代理名单派生：两族名字是两份独立的手抄事实。"
+    assert not _literal_roster_problems(src), "正控先绿：本文件自己就该过判据"
+    seg = _roster_assignment_segment(src, name)
+    assert seg is not None and src.count(seg) == 1, \
+        f"变异前提：{name} 的赋值原文在本文件里应恰好一处，实得 {seg!r}"
+    problems = _literal_roster_problems(src.replace(seg, replacement))
+    assert problems, f"[{label}] 名单被改成派生形状，判据竟不红"
 
 
 # ---------------------------------------------------------------- token / 形状
