@@ -273,10 +273,10 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
         /* v0.34.2：这里不再拉 /health 的 build 往「版本」那一行拼。以前这一行是
          * 「壳 v0.34.0 · 服务端 v0.34.1」两个号码并排，而 build 那截本身就是
          * `git describe` 出来的 vX.Y.Z——在一部手机上，它长得和一个"我能装的版本"
-         * 一模一样，但它装不到手机上（能装的只有壳，且由下面「检查更新」那一行报）。
+         * 一模一样，但它装不到手机上（能装的只有壳，且由「版本」行里的「检查更新」胶囊报）。
          * 用户 2026-10 的口径：「只显示可运行的最新版本，不要两个相加什么的」。
          * /health 的 build 字段本身没动（换包验收与 tools\pre_tag_gate.py 都读它），
-         * 网页侧「关于」也照旧显示服务端戳——浏览器里没有壳，服务端那份就是能跑的那份。 */
+         * 管理台「构建」带标签显示它；浏览器里的「关于」不再摆任何号码。 */
     }
 
     // 用户要求：设置页顶到最上面 —— 弹层高度不再封顶 600dp，直接铺满整屏
@@ -552,8 +552,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         }
     }
 
-    // 「检查更新」的三态与下载进度住在 Updater（对象级快照，弹层被划掉也不丢）；
-    // 值槽与两个对话框都从它读——这里不再另起一份 remember 状态做第二真相。
+    // 检查与下载的状态住在 Updater（对象级快照，弹层被划掉也不丢）；进度与授权弹层
+    // 直接从它读。「发现新版」的待弹旗标 offerUpdate 是 UI 本地的一次性标记，消费即清，
+    // 不做常驻显示，也不是第二份版本真相。
     val admin = Prefs.role == "admin"
     val me = Prefs.currentEntry()
     val name = me?.username ?: ""
@@ -588,6 +589,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     // 等"计算中…"——初值吃上一次算好的，后台重量一次覆盖它；只有进程内头一次才算没数。
     var cacheBytes by remember { mutableStateOf(SettingsCache.cacheBytes) }
     var confirmClearCache by remember { mutableStateOf(false) }
+    // 「发现新版」的待弹旗标：检查回来是 AVAILABLE 才置位，弹层消费（立即更新/稍后）即清。
+    // 它是一次性邀约，不是常驻显示——常驻版本行只留已装的那一个号，第二个号只进带标签的弹层。
+    var offerUpdate by remember { mutableStateOf<ReleasePlan.Decision?>(null) }
     val appCtx = ctx.applicationContext
     fun dirBytes(f: File?): Long = f?.let {
         runCatching { it.walkTopDown().filter { x -> x.isFile }.sumOf { x -> x.length() } }
@@ -715,43 +719,27 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     SetGroup("关于")
     SetNote(ABOUT_TAGLINE)
     val shellVer = "v" + BuildConfig.VERSION_NAME
-    // 「版本」这一行只报一个号码：这台手机上真能跑的那一版（壳的 versionName，
-    // 唯一来源是 android-native/app/build.gradle，与「检查更新」问的是同一个号）。
-    // 以前这里是「壳 vX · 服务端 vY」两个号码相加——服务端那一截本身就是
-    // git describe 出来的 vX.Y.Z，摆在一部手机上会被读成"这一版我能装"，
-    // 而它装不到手机上。可安装的那一版由下面那一行说，这里不再掺第二个号。
-    // 判据：backend/tests/test_v0342_single_version_row_contract.py
-    SetRow(FenverIcon.Info, "版本", plain = true, trailing = null,
-        valSlot = { SetValText(shellVer) })
-    // 网页版这行会新开浏览器去 GitHub；原生按用户要求改成应用内检查：
-    // v0.23 T1.8 起问的是自家后端 /v1/update/info（判据全在共享 ReleasePlan，
-    // 三态不许滑成"已是最新"），发现新版时值槽挂「立即更新」——全程不跳外部。
-    SetRow(FenverIcon.Refresh, "检查更新", trailing = null, valSlot = {
-        val d = Updater.decision
-        val available = d != null && d.kind == ReleasePlan.Kind.AVAILABLE
-        Row(verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SetValText(when {
-                Updater.checking -> "正在检查…"
-                Updater.downloading -> "下载中 ${Updater.percent}%"
-                available -> "发现新版本 ${d!!.version}"
-                d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
-                    "已是最新版本 v${d.version}"
-                d != null -> "检查更新失败：${d.reason}"
-                else -> "$shellVer · 点按检查"
-            })
-            if (available && !Updater.checking && !Updater.downloading) {
-                SetMiniPrimary("立即更新") {
-                    Updater.startDownload(ctx.applicationContext) { err ->
-                        err?.let { onNote("更新失败：$it", true) }
-                    }
+    // 「版本」行只留一个号码：这台手机上真装的那一版（BuildConfig.VERSION_NAME，
+    // 由 android-native/app/build.gradle 烘进包）。通道号与服务端号都不进这一行——
+    // 服务端号装不到手机上，通道号回滚后可能比已装版更旧，两个号不带标签并排摆
+    // 正是让用户读成"这一版我能装"的形状。检查入口是值槽里这颗胶囊；更新各态全部
+    // 走带标签的瞬态面：检查中/已是最新/失败走顶部 note，发现新版弹 UpdateAvailableDialog，
+    // 下载/安装沿用既有两张弹层。判据：backend/tests/test_v0342_single_version_row_contract.py
+    SetRow(FenverIcon.Info, "版本", plain = true, trailing = null, valSlot = {
+        SetValText(shellVer)
+        SetMini(if (Updater.checking) "正在检查更新…" else "检查更新",
+            enabled = !Updater.checking) {
+            Updater.startCheck(onDone = { err ->
+                val d = Updater.decision
+                when {
+                    err != null -> onNote("检查更新失败：$err", true)
+                    d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
+                        onNote("已是最新版本", false)
+                    d != null && d.kind == ReleasePlan.Kind.AVAILABLE -> offerUpdate = d
                 }
-            }
+            })
         }
-    }) {
-        if (Updater.checking) return@SetRow
-        Updater.startCheck()
-    }
+    })
     // 单主题：官网是墨绿一套配色，原生也不再提供「外观」切换入口。
     // 关于组的下一行是「意见反馈」，紧邻关系由 test_v0342 的位置锁接着。
     // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
@@ -807,8 +795,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } })
     }
 
-    // —— 应用内更新（T1.7）：进度对话框 + 「安装未知应用」授权引导 ——
-    // 状态在 Updater 上，弹层被划掉再进来时这两个对话框会原样挂回来（下载不丢）。
+    // —— 应用内更新：进度对话框 + 「安装未知应用」授权引导 + 「发现新版本」邀约 ——
+    // 进度与授权的状态在 Updater 上，弹层被划掉再进来时这两个会原样挂回来（下载不丢）；
+    // 发现新版是一次性邀约，消费即清，不常驻。
     if (Updater.downloading) {
         UpdateProgressDialog(onCancel = { Updater.cancelDownload() })
     }
@@ -816,6 +805,17 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         InstallGuideDialog(
             onGoSettings = { Updater.openInstallPermissionSettings(ctx.applicationContext) },
             onDismiss = { Updater.dismissInstallGuide() })
+    }
+    offerUpdate?.let { d ->
+        UpdateAvailableDialog(
+            version = d.version,
+            onUpdate = {
+                offerUpdate = null
+                Updater.startDownload(ctx.applicationContext) { err ->
+                    err?.let { onNote("更新失败：$it", true) }
+                }
+            },
+            onDismiss = { offerUpdate = null })
     }
 }
 

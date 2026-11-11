@@ -15,9 +15,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import xyz.fenever.assistant.nativeapp.update.Updater
 
-/* 应用内更新的两个底部弹层（v0.23 T1.7）：下载进度 + 「安装未知应用」授权引导。
+/* 应用内更新的三个底部弹层：下载进度 + 「安装未知应用」授权引导 + 「发现新版本」。
  * 状态全部住在 Updater（对象级快照），所以设置弹层被划掉、二级页换来换去，
- * 下载中的进度都不会丢——重开设置页时弹层会原样再挂上来。 */
+ * 下载中的进度都不会丢——重开设置页时弹层会原样再挂上来。
+ * 「发现新版本」是一次性邀约：号码只出现在它的标题里（带「发现新版本」标签），
+ * 常驻版本行只留已装的那一个号；它只暴露下载回调，不再触发检查（检查入口只有胶囊）。 */
 
 @Composable
 fun UpdateProgressDialog(onCancel: () -> Unit) {
@@ -80,6 +82,27 @@ fun InstallGuideDialog(onGoSettings: () -> Unit, onDismiss: () -> Unit) {
                 FenverButton("去设置", onClick = onGoSettings, kind = FenverButtonKind.Primary,
                     modifier = Modifier.weight(1f))
             }
+        }
+    }
+}
+
+/** 发现新版的一次性邀约：标题带标签报通道里那一版，两颗按钮「稍后 / 立即更新」。
+ *  version 由调用方从 Updater.decision 传入；这里只画与回调，不读状态、不再检查。 */
+@Composable
+fun UpdateAvailableDialog(version: String, onUpdate: () -> Unit, onDismiss: () -> Unit) {
+    FenverSheet(onDismiss = onDismiss) {
+        Text("发现新版本 v$version", style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(8.dp))
+        Text("下载完成后会交给系统安装页。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FenverButton("稍后", onClick = onDismiss, kind = FenverButtonKind.Secondary,
+                modifier = Modifier.weight(1f))
+            FenverButton("立即更新", onClick = onUpdate, kind = FenverButtonKind.Primary,
+                modifier = Modifier.weight(1f))
         }
     }
 }
