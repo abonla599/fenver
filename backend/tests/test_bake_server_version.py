@@ -165,10 +165,15 @@ def test_full_tag_re_is_imported_not_copied():
 
 
 def test_the_script_is_in_the_repo_not_only_on_this_machine():
-    """`/tools/*` 默认全排除；脚本进不了 CI 那次 checkout，上面那批锁就全在空转。"""
+    """`/tools/*` 默认全排除；脚本进不了 CI 那次 checkout，上面那批锁就全在空转。
+
+    用 `--no-index` 纯按规则判：脚本一旦入库，不带它的 check-ignore 对已跟踪路径
+    恒回"未忽略"，摘掉 ! 例外也不会红（假阴性）。--no-index 才量得到例外本身。
+    """
     assert TOOL.is_file()
-    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--",
-                          "tools/bake_server_version.py"], capture_output=True, timeout=60)
+    res = subprocess.run(["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "--no-index",
+                          "--", "tools/bake_server_version.py"],
+                         capture_output=True, timeout=60)
     assert res.returncode == 1, (
         "tools/bake_server_version.py 被 .gitignore 挡住了（rc=%d）：加一行 "
         "!/tools/bake_server_version.py（末尾追加，不插空行）" % res.returncode)
