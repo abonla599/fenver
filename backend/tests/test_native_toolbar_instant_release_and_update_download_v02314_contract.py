@@ -18,7 +18,8 @@
    SETTLE_MS 等包闹钟整个退役；迟到终包由 onResults 的 !listening 守卫作废；
    60s 硬顶 watchdog 保留；按住期间引擎提前回包仍只进 pending（第 13 轮铁律）；
 ④ 更新下载：APK 连接 15s/读 60s 超时单列一档（服务端替包跑 GitHub 首字节 ~8s，
-   12 秒必死）；不跟 302（跳 github.com 在国内网络挂死在 0 KB），3xx 给人话；
+   12 秒必死）；不跟 302（跳 github.com 在国内网络挂死在 0 KB），3xx 给人话
+   （2026-11 起这条链路是「点『发现新版本』一步下载」，失败文案是人话这件事更要紧）；
 ⑤ 装完自动清包：冷启动扫私有下载目录，只删版本 ≤ 当前已装版本的
    ai-assistant-native-*.apk(.part)——比当前新的包是用户正在装的那次升级，不许动。
 """
@@ -119,7 +120,10 @@ def test_update_download_timeout_and_redirect_traps_fixed():
         "不跟 302：跳 github.com 在国内网络就是 0 KB 挂死"
     assert UPD.count("instanceFollowRedirects = true") == 1, \
         "全文只剩 fetchInfo 一处跟跳（/v1/update/info 是本域小 JSON，无此坑）"
-    assert re.search(r'e\.contains\("HTTP 3"\)\) "更新服务这会儿取不到安装包', UPD), \
+    # 2026-11：这一步从"两颗按钮里的第二步"变成"点一颗按钮就直接下载"，失败时屏幕上
+    # 只有这一句话解释，所以 friendlyDownloadError 从两路 if 长成按失败类分的 when。
+    # 判据守的东西没变：302 不许把「服务回 HTTP 302」这种机器话甩到脸上。
+    assert re.search(r'e\.contains\("HTTP 3"\) -> "更新服务这会儿取不到安装包', UPD), \
         "服务端丢包（单飞槽被占/上游抽风）回 302：给人话，别甩『服务回 HTTP 302』"
 
 

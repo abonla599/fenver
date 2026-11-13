@@ -16,6 +16,8 @@ import threading
 import time
 import zlib
 from collections import defaultdict
+from datetime import timezone
+from email.utils import formatdate, parsedate_to_datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -418,6 +420,163 @@ _APK_RELAY: dict = {}              # version -> (monotonic, name, bytes)
 _APK_RELAY_LOCK = threading.Lock()
 
 
+# ---------- 「安卓版」这颗按钮的 HTTP 缓存口径（2026-11-13 修「下载太慢」） ----------
+# 修复前的现场（公网 https://ai.fenever.xyz 实测，同一分钟内三次整包）：7917507 字节
+# 分别用了 8.2s / 9.1s / 12.1s，三次响应头都是 `cache-control: no-cache` +
+# `cf-cache-status: EXPIRED`；同一条端点在 127.0.0.1:8000 上只要 10~30ms。
+# 判读：字节其实**在** Cloudflare 边缘（EXPIRED 的意思就是"存着、但过期了"），慢的是
+# 每个访问者都让边缘经隧道把整包**再传一遍**——家用上行 6~8Mbps，正好对上 8~12s。
+# 而边缘之所以每次都只得整包重拉，是因为这条响应从来答不出 304：`Response(content=data)`
+# 只认完整 GET，代理带着 If-None-Match / If-Modified-Since 来问"还是不是那一份"，
+# 它一律回 200 + 整包。
+# 同一台机器同一时刻的对照：/site/site.css 带 `no-cache` + ETag，第二次请求是
+# `cf-cache-status: REVALIDATED`、0.97s、源站回 304——边缘**能**替源站省掉字节，
+# 前提是源站答得上条件请求。
+# 所以这里三件事一起做：
+#   ① 出盘改 FileResponse：流式 + Range/断点续传白送，7.9MB 也不再整份进内存；
+#   ② 校验值按版本钉死：ETag = 版本号 + 发布摘要（见 apk_etag），版本一换就换，
+#      边缘上那份旧字节当场失效；
+#   ③ 答条件请求：校验值对得上回 304（几百字节的往返），对不上回整包。
+# `max-age=0, must-revalidate` 是刻意的，不是"缓存没开"：这条 URL 指的就是"最新那一版"，
+# 而版本快照 30 秒一换，任何正数保鲜期都可能把上一版发给下一个人（既有纪律，见
+# 下面那颗按钮的注释与 _relay_put）。0 秒 + must-revalidate 的含义是——边缘**可以**存，
+# 但每次使用前必须拿这枚版本钉死的校验值回来核一次：核对了就 304，核不对就重下。
+# **永远不会**在没有核对的情况下把旧包发出去，而每趟回源从 7.9MB 降到几百字节。
+APK_CACHE_CONTROL = "public, max-age=0, must-revalidate"
+
+
+def apk_etag(version: str, sha256: str = "") -> str:
+    """这一版字节的**强**校验值：版本号 + 发布摘要前 16 位。
+
+    强（不带 `W/`）是 Range 要求的：`If-Range` 只认强校验值，弱校验值会让断点续传
+    退化成"从头再下一遍"。摘要进 ETag 是为了让"版本号没动、字节被人换掉"也换校验值
+    ——边缘下一次重验证就会把它认成另一份，而不是继续端旧字节。
+    """
+    tail = (sha256 or "")[:16]
+    return f'"{version}-{tail}"' if tail else f'"{version}"'
+
+
+def _apk_headers(name: str, etag: str, last_modified: str = "") -> dict:
+    """官网那颗按钮的响应头：附件名 + 可缓存口径 + 版本钉死的校验值 + 允许 Range。"""
+    headers = {
+        "Content-Disposition": f'attachment; filename="{name}"',
+        "Cache-Control": APK_CACHE_CONTROL,
+        "ETag": etag,
+        "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if last_modified:
+        headers["Last-Modified"] = last_modified
+    return headers
+
+
+def _http_date(value: str):
+    """把 HTTP 日期串读成带时区的 datetime；读不懂就抛（调用方当"没带条件"处理）。"""
+    parsed = parsedate_to_datetime(value.strip())
+    if parsed is None:
+        raise ValueError(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _apk_not_modified(request: Request, etag: str, last_modified: str = "") -> bool:
+    """这次请求能不能只用校验值答完（304），一个字节的包都不出。
+
+    `If-None-Match` 优先于 `If-Modified-Since`（RFC 7232）：带了前者却对不上时，即使
+    后者对得上也必须回 200——反过来会让"我们换了包"这件事被一个过期的日期掩盖。
+    """
+    inm = (request.headers.get("if-none-match") or "").strip()
+    if inm:
+        for raw in inm.split(","):
+            tag = raw.strip()
+            if tag == "*" or tag == etag or (tag.startswith("W/") and tag[2:] == etag):
+                return True
+        return False
+    ims = (request.headers.get("if-modified-since") or "").strip()
+    if not ims or not last_modified:
+        return False
+    try:
+        since = _http_date(ims)
+        modified = _http_date(last_modified)
+    except (TypeError, ValueError):
+        # 日期读不懂就当"没带条件"：宁可多下一趟整包，也不许因为一句坏日期把人
+        # 判成"你已经有了"。这条判据的错法必须是"更保守"，不是"更省"。
+        return False
+    return modified <= since
+
+
+class ApkFileResponse(StarletteFileResponse):
+    """FileResponse，但校验值是**按版本钉死**的那一枚（流式与 Range 由父类提供）。
+
+    为什么要派生这一层：父类自己算的 ETag 是 `mtime-size` 的 md5——它一换版本当然也换，
+    但它换的理由只是"文件被重写过"，与"这是哪一版"无关；更要紧的是父类的 `If-Range`
+    判据（`_should_use_range`）写死成它自己算的那一枚，不跟着改的话：客户端拿着我们
+    发给它的 ETag 来做断点续传，`If-Range` 永远对不上，Range 会被忽略、整包从头再来
+    ——看起来"支持 Range"，实际每次续传都退化成重下。
+    """
+
+    def __init__(self, path: str, *, etag: str, last_modified: str, **kwargs):
+        super().__init__(path, **kwargs)
+        self.pinned_etag = etag
+        self.pinned_last_modified = last_modified
+
+    def _should_use_range(self, http_if_range, stat_result) -> bool:
+        return http_if_range in (self.pinned_etag, self.pinned_last_modified)
+
+
+def apk_file_response(request: Request, path: str, *, name: str, version: str,
+                      sha256: str = "") -> Response:
+    """盘上那份包的响应：流式 + Range，校验值按版本钉死；对得上校验值就回 304。
+
+    `stat_result` 先在这里取一次再交给父类：一来 `Last-Modified` 要用它，二来父类拿到
+    它就不再自己 stat——同一份字节在"判定"与"发送"之间被换掉的窗口因此只剩打开文件那
+    一瞬（apk_cache 刚刚整份核过摘要，这个窗口本来就是"加速器故障"级别）。
+    """
+    stat_result = os.stat(path)
+    last_modified = formatdate(stat_result.st_mtime, usegmt=True)
+    etag = apk_etag(version, sha256)
+    headers = _apk_headers(name, etag, last_modified)
+    if _apk_not_modified(request, etag, last_modified):
+        return Response(status_code=304, headers=headers)
+    return ApkFileResponse(path, etag=etag, last_modified=last_modified,
+                           media_type=APK_MEDIA_TYPE, headers=headers,
+                           stat_result=stat_result)
+
+
+# 单区间 Range（`bytes=0-1023` / `bytes=1024-` / `bytes=-512`）。多区间按 RFC 允许忽略
+# （回整包），不另造 multipart 编码——那条路的读者（下载器/壳）从来只发单区间。
+_APK_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def apk_bytes_response(request: Request, data: bytes, *, name: str, version: str,
+                       sha256: str = "") -> Response:
+    """内存里那份字节的响应（接力档 / 上游实时代取档）：同一套缓存口径 + 单区间 Range。
+
+    内存档今天只在上游实时代取的那一趟才会被走到，但它回的仍是"官网那颗按钮的字节"。
+    两条路给出两套 HTTP 语义的话，断点续传会以"有时能用有时不能用"的样子坏掉——那正是
+    最难查的一类。
+    """
+    etag = apk_etag(version, sha256)
+    headers = _apk_headers(name, etag)
+    if _apk_not_modified(request, etag):
+        return Response(status_code=304, headers=headers)
+    size = len(data)
+    raw_range = (request.headers.get("range") or "").strip()
+    m = _APK_RANGE_RE.match(raw_range) if raw_range else None
+    if m and (m.group(1) or m.group(2)):
+        if not m.group(1):                            # bytes=-512：末尾那一段
+            start, end = max(0, size - int(m.group(2))), size - 1
+        else:
+            start = int(m.group(1))
+            end = min(int(m.group(2)) if m.group(2) else size - 1, size - 1)
+        if start >= size or start > end:
+            return Response(status_code=416,
+                            headers={**headers, "Content-Range": f"bytes */{size}"})
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return Response(content=data[start:end + 1], media_type=APK_MEDIA_TYPE,
+                        status_code=206, headers=headers)
+    return Response(content=data, media_type=APK_MEDIA_TYPE, headers=headers)
+
+
 def _apk_throttled(ip: str) -> int:
     """还让不让这个来源再搬一次；让则返回 0，否则返回 Retry-After 秒数。"""
     now = time.monotonic()
@@ -501,6 +660,12 @@ def install_site(app: FastAPI) -> None:
         字节一律 302 发布页或 429，绝不回 200 空文件。这一条同时是 0.23.x 老壳
         「检查更新」的字节出口（`releases.SELF_APK_PATH`），所以那两档闸撞到它时
         的代价被特意压低：一次撞闸只是慢一点或多扣一格，不再是一次必然失败的下载。
+
+        2026-11-13（「下载安卓版太慢」）：出盘那一路从"整包读进内存再回 200"改成
+        FileResponse 流式 + 单区间 Range，并**答得上条件请求**——校验值按版本钉死
+        （见 `apk_etag`），对得上就回 304。根因与实测数据见 APK_CACHE_CONTROL 上面那段：
+        慢的不是源站（本机 10~30ms），是 Cloudflare 边缘每趟都得把 7.9MB 经家庭上行
+        再传一遍，而这个端点过去从不回 304，边缘无从省掉那趟传输。
         """
         plan, why = releases.download_plan()
         if not plan:
@@ -511,13 +676,25 @@ def install_site(app: FastAPI) -> None:
             raise HTTPException(status_code=429, detail="下载尝试过于频繁，请稍后再试",
                                 headers={"Retry-After": str(retry_after)})
 
-        def served(name: str, data: bytes):
-            return Response(content=data, media_type=APK_MEDIA_TYPE,
-                            headers={"Content-Disposition": f'attachment; filename="{name}"',
-                                     # 代理的是"最新那一版"，而这份快照 30 秒才换一次；
-                                     # 缓存这条响应就等于让下一个人下到上一版。
-                                     "Cache-Control": "no-cache",
-                                     "X-Content-Type-Options": "nosniff"})
+        # 响应口径（缓存头 / 校验值 / Range / 304）统一在 apk_file_response 与
+        # apk_bytes_response 里，理由见 APK_CACHE_CONTROL 上面那段实测记录。
+        # 这里只留一件事：**校验值必须按这一版的版本号钉死**——用"最新那一版"当键，
+        # 边缘上那份旧字节就会在下一次版本切换后继续被当成新的发出去。
+        def charge(response: Response) -> Response:
+            """扣格子后原样返回。量的是**真出盘的字节**：304 一个字节都不出，不计费。
+
+            这一格一小时只有 6 格，量的是"这个来源搬走了多少出口带宽"。把校验请求也
+            计进去的话，一次缓存复核（304）或一次断点续传的定位就会占掉真人额度——
+            而它们连一个包都没下。字节照出（200/206）的每一趟仍然照扣，红线条寸不动。
+            """
+            if response.status_code != 304:
+                _APK_DOWNLOADS[ip].append(time.monotonic())
+            return response
+
+        def served_bytes(name: str, data: bytes):
+            return apk_bytes_response(request, data, name=name,
+                                      version=plan["version"],
+                                      sha256=plan.get("sha256") or "")
 
         # 磁盘那一档（v0.28）：上一版发布时验过摘要的字节就在本地盘上，直接从磁盘
         # 出去——不占槽、不朝 GitHub 跑，也就没有"GitHub 慢或正忙"这一种失败。
@@ -525,20 +702,22 @@ def install_site(app: FastAPI) -> None:
         # 不 500，退回下面的接力档：缓存是加速器，不是单点。
         cached = apk_cache.cached_file(plan["version"], plan.get("sha256") or "")
         if cached:
+            # 整份读进内存改成由 FileResponse 流出去：7.9MB 不再每个下载者各占一份堆，
+            # 断点续传与 304 也由同一份实现提供（见 ApkFileResponse）。
             try:
-                with open(cached, "rb") as fh:
-                    data = fh.read()
-                _APK_DOWNLOADS[ip].append(time.monotonic())
-                return served(plan["name"], data)
+                return charge(apk_file_response(request, cached, name=plan["name"],
+                                                version=plan["version"],
+                                                sha256=plan.get("sha256") or ""))
             except OSError as e:
+                # 读文件失败（被手删/磁盘问题）不 500，退回下面的接力档：
+                # 缓存是加速器，不是单点。判据在打开文件那一刻，所以 try 包住整条构造。
                 print(f"[site] APK 缓存读取失败，退回接力档：{type(e).__name__}", flush=True)
 
         # 接力那一档：60 秒内第二个人（同屋第二台设备、老壳失败后的重试）不再占槽、
         # 不再朝 GitHub 跑，字节直接从这里出去；格子照扣——它量的是出口字节。
         relay = _relay_get(plan["version"])
         if relay:
-            _APK_DOWNLOADS[ip].append(time.monotonic())
-            return served(relay[0], relay[1])
+            return charge(served_bytes(relay[0], relay[1]))
 
         got = False
         for _ in range(APK_SLOT_RETRIES):
@@ -563,6 +742,7 @@ def install_site(app: FastAPI) -> None:
         if not ok:
             print(f"[site] APK 未落盘代管：{cache_why}", flush=True)
         _relay_put(plan["version"], plan["name"], data)
-        return served(plan["name"], data)
+        # 这一档上面已经扣过格了（那一行在朝上游跑之前：来回都是这个来源的账）。
+        return served_bytes(plan["name"], data)
 
     app.mount("/site", RevalidatingStaticFiles(directory=SITE_DIR), name="site")

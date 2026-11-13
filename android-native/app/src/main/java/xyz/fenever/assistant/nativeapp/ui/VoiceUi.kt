@@ -66,6 +66,20 @@ import kotlin.math.sin
  * 上滑进取消区。识别走 SpeechRecognizer（免弹窗的边说边出字），设备上没有识别
  * 服务时退化为状态条提示。第 12 轮起录音界面是豆包式全屏接管（VoiceScreen）。 */
 
+/** 「语音自检」的一次快照（第 19 轮）：设备有没有识别服务、现在绑的哪个引擎、
+ *  麦克风授权给没给、最近一次失败长什么样。四个问题各占一行，界面只管照着说人话。
+ *  这是只读诊断——不读声音、不存声音、不改任何设置。 */
+data class VoiceCheckup(
+    val recognizerAvailable: Boolean,
+    val manualEngine: ComponentName?,
+    val enginePkg: String?,
+    val engineLabel: String?,
+    val candidateCount: Int,
+    val micGranted: Boolean,
+    val lastErrorCode: Int?,
+    val lastErrorWords: String,
+)
+
 /** 一次识别会话的状态容器。回调都在主线程（SpeechRecognizer 的约定）。 */
 @Stable
 class VoiceRecorder(context: Context) {
@@ -89,6 +103,11 @@ class VoiceRecorder(context: Context) {
     var onEngineDead: ((Int) -> Unit)? = null
     // 手动指定的识别引擎（下次新建识别器时生效）；null = 跟随系统默认。
     var engine: ComponentName? = null
+    // 第 19 轮（小米真机：「虽然我同意了他对我的话筒权限，但是长按输入框还是不能
+    // 接收到声音」）：用户说不出卡在哪一层，我们也答不上来——从这一轮起把引擎回的
+    // 真实错码留下来，交给「语音自检」逐层摊开：设备有没有识别服务、跑的是哪个引擎、
+    // 麦克风授权、上一次失败长什么样。只记一个整数，不记声音。
+    var lastErrorCode by mutableStateOf<Int?>(null); private set
 
     private var keepSend = true
     private var holding = false        // 手指是否还按着：错误自动重试只发生在按住期间
@@ -218,6 +237,7 @@ class VoiceRecorder(context: Context) {
         }
         override fun onError(error: Int) {
             if (!listening) return
+            lastErrorCode = error
             // 权限错且手指还按着、还没重试过：旧识别器可能攥着授权前的拒权缓存，
             // 拆掉重建再启一次。用户下次长按就是新实例，"开了权限还说没权限"就地自愈。
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS &&
@@ -264,7 +284,28 @@ class VoiceRecorder(context: Context) {
         }
     }
 
-    private fun micGranted(): Boolean =
+    /** 语音自检（第 19 轮）：四件事各取一次真实值——设备有没有识别服务、现在绑的
+     *  哪个引擎、本 App 的麦克风授权、上一次失败长什么样。要碰 PackageManager
+     *  （两次 queryIntentServices + 逐个读应用名，是同步 binder 往返），调用方在
+     *  IO 线程喊它，别在组合阶段打这一枪。 */
+    fun checkup(): VoiceCheckup {
+        val manual = engine
+        val cands = speechServiceCandidates(appCtx)
+        val curPkg = manual?.packageName ?: speechServicePackage(appCtx)
+        return VoiceCheckup(
+            recognizerAvailable = SpeechRecognizer.isRecognitionAvailable(appCtx),
+            manualEngine = manual,
+            enginePkg = curPkg,
+            engineLabel = cands.firstOrNull { it.pkg == curPkg }?.label,
+            candidateCount = cands.size,
+            micGranted = micGranted(),
+            lastErrorCode = lastErrorCode,
+            lastErrorWords = lastErrorCode?.let { errText(it) }.orEmpty(),
+        )
+    }
+
+    /** 麦克风授权给没给（自检与拒权分流共用同一把尺子）。 */
+    fun micGranted(): Boolean =
         appCtx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
 
@@ -273,7 +314,8 @@ class VoiceRecorder(context: Context) {
 
     /* 文案口径（2026-09-28 真机反馈：说法要像日常说话，别像系统日志）：
      * 一句说清"怎么了"，一句说清"下一步做什么"，不出现"生效/ insufficient"这种机器词。 */
-    private fun errText(code: Int): String = when (code) {
+    /** 错码 → 一句日常话。自检界面也读它，别在两处各写一份说法。 */
+    fun errText(code: Int): String = when (code) {
         SpeechRecognizer.ERROR_AUDIO -> "没收到声音，凑近麦克风再说一次"
         SpeechRecognizer.ERROR_CLIENT -> "语音中断了，再按住试一次"
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
@@ -310,6 +352,42 @@ fun rememberVoiceRecorder(): VoiceRecorder {
     val rec = remember(ctx) { VoiceRecorder(ctx) }
     DisposableEffect(rec) { onDispose { rec.destroy() } }
     return rec
+}
+
+/** 把自检快照说成人话：四条，一条一层，哪一层坏了就直说哪一层——用户下次遇到
+ *  「同意过麦克风还是听不见」，照着这四条念给我们听就够定位了。
+ *  文案照本仓口径：像日常说话，不出现「生效 / insufficient」这类机器词。 */
+fun voiceCheckupWords(c: VoiceCheckup): String {
+    val who = c.engineLabel
+    val lines = ArrayList<String>(4)
+    // ① 设备有没有识别服务
+    lines += if (!c.recognizerAvailable)
+        "① 这台手机上没找到能用的语音识别服务。按住说话靠的就是它——先去系统设置里" +
+            "确认手机自带的语音助手（小米是「小爱」，别的机型多叫「语音服务」）没被停用。"
+    else "① 手机上能找到语音识别服务，一共 " + c.candidateCount + " 个，可以换着试。"
+    // ② 现在用的是哪个引擎
+    lines += when {
+        c.manualEngine != null && who != null -> "② 现在固定用的是「" + who + "」。"
+        c.manualEngine != null -> "② 现在固定用着你上次选的那个语音引擎（" + c.enginePkg + "）。"
+        who != null -> "② 现在跟着系统默认走，实际用的是「" + who + "」。"
+        else -> "② 现在跟着系统默认走，但认不出具体是哪个 App 在识别。"
+    }
+    // ③ 本 App 的麦克风授权
+    lines += if (c.micGranted) "③ 本 App（Fenver）的麦克风权限是开着的。"
+    else "③ 本 App（Fenver）的麦克风还没允许——长按输入框后点「允许」，再按住说一句。"
+    // ④ 上一次失败长什么样
+    val code = c.lastErrorCode
+    if (code == null) {
+        lines += "④ 这一轮还没失败过。按住说一句再回来看这条。"
+    } else {
+        val tail = if (code == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS && c.micGranted)
+            "可本 App 的麦克风明明开着，所以不是本 App 的事：说话要走" +
+                (if (who != null) "「" + who + "」" else "语音服务") +
+                "那个 App 自己的麦克风授权，得去它那儿开。"
+        else "照那句话说一遍通常就好了；一直这样的话，把第 ② 条的引擎换一个再试。"
+        lines += "④ 上一次失败：" + c.lastErrorWords + "（错误码 " + code + "）。" + tail
+    }
+    return lines.joinToString("\n")
 }
 
 /** 系统语音识别服务是哪个 App：部分 ROM 上「我们权限明明给了、服务还说不许录音」
@@ -467,6 +545,10 @@ fun rememberKeyboardVisible(): Boolean {
     return visible
 }
 
+/** 「按住说话」的判定线（毫秒）。第 19 轮抽成常量：这是「长按」这件事在本 App 里
+ *  唯一的时长口径，别处要判同一件事就读它，别再各写一个数。 */
+const val VOICE_HOLD_MS = 260L
+
 /**
  * 长按手势修饰符：按住 [holdMs] 毫秒不滑动即判定「按住说话」，
  * 上滑超过 [cancelUp] 进取消区，抬手回调结果。
@@ -479,7 +561,7 @@ fun rememberKeyboardVisible(): Boolean {
  *   Final 段拿到的事件与 pressed 状态不受消费先后影响，抬手一定看得见。
  */
 @Composable
-fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = 260L, cancelUp: Dp = 100.dp,
+fun Modifier.voiceHold(enabled: () -> Boolean, holdMs: Long = VOICE_HOLD_MS, cancelUp: Dp = 100.dp,
                        onTap: () -> Unit = {},
                        onStart: () -> Unit, onZone: (Boolean) -> Unit,
                        onFinish: (Boolean) -> Unit): Modifier {

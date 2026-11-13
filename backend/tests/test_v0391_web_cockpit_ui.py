@@ -61,22 +61,34 @@ def test_no_html_sinks_helper_proves_its_own_teeth():
 def test_context_ring_and_panel_are_wired_without_innerhtml_for_user_text():
     html = _html()
     js = _js()
-    assert 'id="ctxRingBtn"' in html, "输入卡没有上下文环按钮"
-    assert 'id="contextPanel"' in html, "没有上下文账本容器"
-    assert 'id="ctxBudgetRange"' in html, "账本没有预算滑杆"
-    assert 'id="ctxTidyBtn"' in html, "账本没有轻量整理按钮"
-    ring = _function_body(js, "renderContextRing")
-    assert "contextBudgetK(" in ring and "calibrateUsedK(" in ring, \
-        "环没有走本会话预算/校准口径"
-    panel = _function_body(js, "renderContextPanel")
-    assert "contextSegments(" in panel, "账本没有分段"
-    _no_html_sinks(panel, "上下文账本")
-    assert "textContent" in panel, "账本没有用 textContent 落文本"
-    assert "aria-label" in panel or "setAttribute(\"aria-label\"" in panel, \
-        "账本没有可读的无障碍标签"
-    tidy = _function_body(js, "applyContextTidy")
-    assert "dropOldestToBudget(" in tidy and "contextDropBySession" in tidy, \
-        "轻量整理没有按本轮发送丢最早消息"
+    # v0.40：用户点名「上下文长度撤掉」，同一句话里给了替代口径
+    # 「对话一长自动压缩，保留数据，保持上下文记忆」。这一格判的因此是
+    # "界面退场了、那件事还有人做"，两半缺一不可：只判退场会让下一个人
+    # 以"用户不要了"为由把预算与截断一起删掉，那才是真把功能弄丢。
+    for gone in ('id="ctxRingBtn"', 'id="contextPanel"', 'id="ctxBudgetRange"',
+                 'id="ctxTidyBtn"', 'id="ctxResetBtn"'):
+        assert gone not in html, f"上下文界面又回来了：{gone}"
+    fits = _function_body(js, "ensureContextFits")
+    assert "contextDropBySession" in fits, "自动压缩没有落到「只切发送范围」那张表上"
+    assert "budgetProviderId(" in fits, "自动压缩的预算没走统一口径（会与实发分叉）"
+    assert "state.messages.slice(drop" in fits, \
+        "自动压缩没有从历史原文出发算用量"
+    # v0.40 用户改口径：「摘要要更聪明：用模型来总结而不是抽首句」。
+    # 于是有两条路，两条都必须有：模型摘要（compactWithModel）是正路，
+    # 抽取式（extractiveSummaryOf）是断网/超时/无模型时的兜底——自动触发的东西
+    # 必须有一条永远走得通的路，否则断网时用户直接撞上下文超限。
+    model_sum = _function_body(js, "compactWithModel")
+    assert "API.summarize(" in model_sum, "模型摘要没有走专用端点（走 /v1/chat 会落历史）"
+    assert "extractiveSummaryOf(" in model_sum, "模型摘要失败时没有兜底：断网就等于压缩失效"
+    fallback = _function_body(js, "extractiveSummaryOf")
+    assert "前情摘要" in fallback, "兜底摘要没写明是前情摘要：模型不知道这段是什么"
+    out = _function_body(js, "outbound")
+    assert "contextSummaryBySession" in out, \
+        "摘要没有挂进 outbound：压了也白压，模型仍然看不到前情"
+    # 原文一条都不许删：这张表只记"从哪条开始发"，历史本身是用户资产。
+    for name in ("ensureContextFits", "outbound", "clientContextK"):
+        body = _function_body(js, name)
+        assert "messages.splice" not in body, f"{name} 动了历史原文"
 
 
 def test_ring_sits_beside_model_chip_and_the_budget_control_has_one_source():
@@ -85,24 +97,28 @@ def test_ring_sits_beside_model_chip_and_the_budget_control_has_one_source():
     map（contextBudgetK/setContextBudget），没有第三份真相。"""
     html = _html()
     js = _js()
+    # v0.40：芯片从输入脚搬到顶栏（用户点名「多对话框时它占了三分之一空间」）。
+    # 输入脚现在只放每轮都要按的东西：附件、提示、停止、发送。
     foot = html[html.index('class="input-foot"'):html.index("</form>")]
-    assert 'id="ctxRingBtn"' in foot and 'id="modelChip"' in foot, "环或芯片不在输入脚"
-    assert foot.index('id="ctxRingBtn"') < foot.index('id="modelChip"'), \
-        "环应排在芯片前（点环开账本，点芯片仍开模型菜单）"
+    assert 'id="modelChip"' not in foot, \
+        "模型芯片还在输入脚：它已经搬到顶栏，留在这儿就是第二份控件"
+    top = html[html.index('class="topbar"'):html.index("</header>")]
+    assert 'id="modelChip"' in top, "顶栏没有模型芯片"
+    assert 'id="ctxRingBtn"' not in foot and 'id="ctxRingBtn"' not in top, \
+        "上下文环退场后不许在任何一个栏里回来"
     assert 'id="ctxRange"' not in html, \
         "设置页还留着第二份预算滑杆：Task 9 迁走了它，留回来就是两个真相"
-    assert 'id="contextPanel"' in html and 'role="dialog"' in html
-    assert 'id="ctxBudgetRange"' in html, "预算控件迁移后仍要在上下文面板里"
+    assert 'id="contextPanel"' not in html, "账本容器退场后不许回来"
+    # 预算真源仍是一份：模型卡与自动压缩读同一个 map，谁都不许自己写一份。
     detail = _function_body(js, "renderModelDetail")
-    panel = _function_body(js, "renderContextPanel")
-    sync = _function_body(js, "syncCtxRow")
-    for name, body in (("账本", panel), ("模型卡", detail), ("读数行", sync)):
+    fits = _function_body(js, "ensureContextFits")
+    for name, body in (("模型卡", detail), ("自动压缩", fits)):
         assert "contextBudgetK(" in body, f"{name}没读那份按模型存的预算 map"
     assert "setContextBudget(" in detail, "模型卡没接本会话预算"
     assert "localStorage.setItem" not in detail and "localStorage.getItem" not in detail, \
-        "模型卡自己写了一份预算：与账本滑杆就此各存真相"
-    assert "localStorage.setItem" not in panel and "localStorage.getItem" not in panel, \
-        "账本自己写了一份预算：与模型卡就此各存真相"
+        "模型卡自己写了一份预算：与自动压缩就此各存真相"
+    assert "localStorage.setItem" not in fits and "localStorage.getItem" not in fits, \
+        "自动压缩自己写了一份预算：与模型卡就此各存真相"
 
 
 def test_panel_layer_and_ring_style_use_the_established_patterns():
@@ -110,14 +126,12 @@ def test_panel_layer_and_ring_style_use_the_established_patterns():
     conic-gradient 直接驱动；环刷新绝不能再调 renderMessages（递归）。"""
     js = _js()
     css = _css()
-    assert 'Layers.open("contextPanel"' in _function_body(js, "openContextPanel"), \
-        "账本没走让位层栈（返回键会对不上界面）"
-    assert 'Layers.close("contextPanel"' in _function_body(js, "closeContextPanel")
+    # v0.40：环与账本整块退场，conic-gradient 那套样式也随之不再被任何
+    # 元素引用。这一格改判"退场后不留悬空引用、且新的触发点不递归"。
+    assert 'id="contextPanel"' not in _html(), "账本容器又回来了"
     ring = _function_body(js, "renderContextRing")
-    assert 'setProperty("--ctx-pct"' in ring and 'setProperty("--ctx-color"' in ring
-    assert "renderMessages" not in ring, "环刷新里再调 renderMessages 就是递归"
-    assert "conic-gradient" in css and "--ctx-pct" in css and "--ctx-color" in css, \
-        "环样式没由自定义属性直接驱动"
+    assert "ensureContextFits()" in ring, "自动压缩没挂在消息/预算变化的那个钩子上"
+    assert "renderMessages" not in ring, "钩子里再调 renderMessages 就是递归"
 
 
 def test_ring_refresh_hooks_cover_every_changing_path():
@@ -125,9 +139,11 @@ def test_ring_refresh_hooks_cover_every_changing_path():
     队列函数经 queueUiRefresh 守卫调用刷新——Task 3 的纯状态机测试没有 DOM，
     守卫（typeof 判据住在 queueUiRefresh 里）不许被拆掉，拆了那批测试就炸。"""
     js = _js()
-    for name in ("renderMessages", "renderModelChip", "syncCtxRow", "applyContextTidy"):
+    # v0.40：applyContextTidy 随账本退场（自动压缩接替了它），钩子剩三处不变：
+    # 消息增减、清单/模型切换、预算夹逼——发送范围只从这三个入口重算。
+    for name in ("renderMessages", "renderModelChip", "syncCtxRow"):
         assert "renderContextRing()" in _function_body(js, name), \
-            f"{name} 变了没刷新上下文环"
+            f"{name} 变了没重算发送范围（自动压缩就挂在这个钩子上）"
     assert "renderContextRing()" in _function_body(js, "runStream"), \
         "done 落账后环没有立刻重读校准锚点"
     guard = _function_body(js, "queueUiRefresh")
@@ -140,9 +156,11 @@ def test_ring_refresh_hooks_cover_every_changing_path():
 
 def test_panel_controls_are_wired_and_state_maps_are_reset_with_identity():
     js = _js()
-    for needle in ('$("ctxRingBtn").onclick', '$("ctxTidyBtn").onclick',
-                   '$("ctxResetBtn").onclick', '$("ctxBudgetRange").oninput'):
-        assert needle in js, f"账本控件没接线：{needle}"
+    # v0.40：四个控件随账本一起退场，接线也必须一并消失——留着
+    # $("ctxRingBtn").onclick 而元素不在 HTML 里，就是每次启动一个 TypeError。
+    for gone in ('$("ctxRingBtn").onclick', '$("ctxTidyBtn").onclick',
+                 '$("ctxResetBtn").onclick', '$("ctxBudgetRange").oninput'):
+        assert gone not in js, f"账本控件已退场，接线还在：{gone}"
     reset = _function_body(js, "resetViewForIdentity")
     assert "lastUsageBySession" in reset and "contextDropBySession" in reset, \
         "换身份没清掉两张环/账本表：上一个人的用量会画到新会话头上"
@@ -240,17 +258,26 @@ def test_budget_provider_id_is_the_single_source_for_ring_outbound_and_send():
         "outbound 截断预算还读裸 pref.provider"
     assert "const providerId = budgetProviderId()" in _function_body(js, "runStream"), \
         "runStream 实发 payload 的 provider 与显示口径不同源"
-    for name in ("syncCtxRow", "renderContextRing", "renderContextPanel", "applyContextTidy"):
+    # v0.40：环/账本/整理的四个函数里，只剩 syncCtxRow（夹预算）与
+    # ensureContextFits（自动压缩）还在读预算；判据跟着这两个走。
+    for name in ("syncCtxRow", "ensureContextFits"):
         assert "budgetProviderId(" in _function_body(js, name), \
             f"{name} 的预算没走统一口径"
-    assert "setContextBudget(budgetProviderId(" in js, "预算滑杆的写键没走统一口径"
+    # v0.40：账本那颗滑杆（唯一一处 setContextBudget(budgetProviderId(...))）随
+    # 界面退场；现在还能写预算的只剩模型卡，它写的是 recordId（同一张 map，
+    # 不是第二份真相）。判据改为：写预算的地方必须有且只有模型卡这一处。
+    assert "setContextBudget(recordId, k)" in js, "模型卡那条预算写口不见了"
+    assert "setContextBudget(budgetProviderId(" not in js, \
+        "账本滑杆那条写口又回来了：它对着一颗不存在的元素接线"
     assert "contextBudgetK(pref.provider)" not in js, \
         "旧读法 contextBudgetK(pref.provider) 还在：显示与实发又能分叉"
     assert "const providerId = pref.provider" not in js, \
         "旧发送口径 const providerId = pref.provider 还在：payload 与环不同源"
-    ring = _function_body(js, "renderContextRing")
-    assert 'setProperty("--ctx-pct", "0")' in ring and "无可用模型" in ring, \
-        "清单为空时环必须归零并如实说'无可用模型'，不许 retain 上一次的填充"
+    # v0.40：环退场后没有"归零显示"这回事了；无可用模型时自动压缩
+    # 直接早退（没有模型就没有预算可依），这条判据改为钉住那个早退。
+    fits = _function_body(js, "ensureContextFits")
+    assert "if (!cm) return" in fits, \
+        "没有可用模型时自动压缩没有早退：会在无预算的情况下乱切发送范围"
 
 
 # ---------------- Task 5：接力队列 UI 与自动发送 ----------------
@@ -404,7 +431,9 @@ def test_model_menu_is_a_two_pane_container_with_one_manage_entry():
     html = _html()
     js = _js()
     at = html.index('id="modelMenu"')
-    menu = html[at:html.index('id="contextPanel"', at)]
+    # v0.40：账本退场后，模型菜单的右边界不再是 #contextPanel——
+    # 改用 </form> 之后的第一个 attach-menu / 文件输入作为下界。
+    menu = html[at:html.index('id="imageInput"', at)]
     for el in ('id="modelList"', 'id="modelDetail"', 'id="modelManageBtn"'):
         assert el in menu, f"模型菜单的两栏容器缺 {el}：清单/详情/管理必须同在这一层"
     assert '$("modelManageBtn")' in js, "「模型管理」按钮没接线"

@@ -617,6 +617,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
         if (!enginePickerOpen) return@LaunchedEffect
         engineCands = withContext(Dispatchers.IO) { speechServiceCandidates(ctx) }
     }
+    // 第 19 轮（小米真机：「同意过麦克风还是听不到声音」）：语音自检。用户下一次再遇到，
+    // 能在输入卡上一条一条念出来：设备有没有识别服务、跑的是哪个引擎、麦克风授权、
+    // 上一次失败长什么样。null = 还没量（或正在量），界面先说「正在看」。
+    var voiceCheckOpen by remember { mutableStateOf(false) }
+    var voiceCheck by remember { mutableStateOf<VoiceCheckup?>(null) }
     val listState = rememberLazyListState()
     // v0.28：composer 那一块此刻的实测高度（像素）。悬浮「跳到底部」箭头
     // 要悬在它正上方 14dp——箭头是浮层不占布局，位置只能按实测高度算。
@@ -1736,6 +1741,15 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
      * 只在输入框为空、没在生成时接管长按；松手出字直接 sendNow，上滑取消。 */
     val voice = rememberVoiceRecorder()
     var voiceCancel by remember { mutableStateOf(false) }
+    // 第 19 轮：一次「长按真的开成了录音」的计数。粘贴兜底观察器在按下时记下它，
+    // 抬手时对不上就说明这一按被语音接管了，整趟让位（详见 pasteBackstop）。
+    var voiceGestureTick by remember { mutableIntStateOf(0) }
+    // 自检快照在这里量：要读 voice.checkup()，它只能在录音器备好之后才拿得到
+    //（上面那两个 state 是界面开关，先声明后使用没有问题）。
+    LaunchedEffect(voiceCheckOpen) {
+        if (!voiceCheckOpen) return@LaunchedEffect
+        voiceCheck = withContext(Dispatchers.IO) { voice.checkup() }
+    }
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) setStatus("麦克风打开了，按住说话就行")
@@ -1823,8 +1837,17 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             keyboardController?.show()
         }
     }
+    // 第 19 轮改判（小米真机：「虽然我同意了他对我的话筒权限，但是长按输入框的时候还是
+    // 不能接收到声音」）：旧闸 `(voiceMode || !keyboardUp)` 把「键盘起着」整段排除在语音
+    // 之外——用户先点一下输入框（键盘弹起）再长按，这一按根本到不了录音，交给的是文本框
+    // 选字；可空文本框里本来就没有字可选，那道闸拦掉的只有「想说话」这一种动作。
+    // 现在：文本框为空时长按一律归语音（键盘起没起都一样）；框里有字时长按仍归选字；
+    // 🎙 语音模式无条件归语音。
+    // 「键盘不许因长按闪现/抢焦点」的地基一个字没动：键盘没起时闸门在位、文本框压根不
+    // 挂载（voiceArmed 仍吃 !keyboardUp，见上）；键盘起时长按也不再交给文本框，
+    // 长按过判定线就 stashIme() 收键盘再 voice.start()，焦点照旧不落到框上。
     val voiceHoldMod = Modifier.voiceHold(
-        enabled = { input.text.isEmpty() && !busy && !voice.listening && (voiceMode || !keyboardUp) },
+        enabled = { !busy && !voice.listening && (voiceMode || input.text.isEmpty()) },
         // 第 10 轮：短按松手 = 想打字——记一笔 fieldPending 让下面重组挂回文本框请键盘。
         onTap = { if (!voiceMode) fieldPending = true },
         onStart = {
@@ -1838,6 +1861,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                 voiceCancel = false
                 // 双保险压键盘：第 10 轮起闸门在位时文本框压根不挂载，正常路径这里
                 // 是空转；只防极窄的重组间隙里键盘恰好在升的动画途中。
+                voiceGestureTick++
                 stashIme()
                 voice.start()
             }
@@ -2288,6 +2312,10 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         },
                         onTrySystemVoice = { trySystemVoice() },
                         onPickEngine = { enginePickerOpen = true },
+                        onOpenVoiceCheck = {
+                            voiceCheck = null
+                            voiceCheckOpen = true
+                        },
                     )
                     // 引擎选择弹窗（第 6 轮）：默认引擎连不上自家服务器时，换引擎
                     // 才是正解。列全部候选 + 跟随系统默认 + 系统语音设置直达。
@@ -2339,6 +2367,42 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                                                 setStatus("这台手机没有系统语音设置页，去「设置 → 应用管理」里找语音服务")
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 语音自检（第 19 轮，小米真机「同意过麦克风还是听不到声音」）：
+                    // 四层逐条摊开说人话——设备有没有识别服务 / 跑的是哪个引擎 /
+                    // 麦克风授权 / 上一次失败长什么样。用户照着念，就不用猜是哪一层。
+                    if (voiceCheckOpen) {
+                        Dialog(onDismissRequest = { voiceCheckOpen = false }) {
+                            Surface(shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                                Column(Modifier.fillMaxWidth().padding(20.dp)) {
+                                    Text("语音自检", fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface)
+                                    Spacer(Modifier.height(10.dp))
+                                    val snap = voiceCheck
+                                    if (snap == null) {
+                                        Text("正在看这台手机的语音设置…", fontSize = 13.sp,
+                                            color = text3Color())
+                                    } else {
+                                        Text(voiceCheckupWords(snap), fontSize = 13.sp,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            lineHeight = 21.sp)
+                                    }
+                                    Spacer(Modifier.height(14.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        if (snap != null && !snap.micGranted)
+                                            ActionPill(text = "去允许麦克风", onClick = {
+                                                voiceCheckOpen = false
+                                                micPermission.launch(
+                                                    android.Manifest.permission.RECORD_AUDIO)
+                                            })
+                                        ActionPill(text = "知道了", filled = false,
+                                            onClick = { voiceCheckOpen = false })
                                     }
                                 }
                             }
@@ -2769,7 +2833,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                       voiceArmed: Boolean, voiceLive: Boolean,
                       voiceHintOn: Boolean, voiceHintLabel: String?,
                       onOpenVoiceService: () -> Unit, onTrySystemVoice: () -> Unit,
-                      onPickEngine: () -> Unit) {
+                      onPickEngine: () -> Unit, onOpenVoiceCheck: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val view = LocalView.current
     // 第 17 轮（用户验收改判：「粘贴的UI不好看，希望它小一点并且位置跟着光标」）：
@@ -2792,8 +2856,12 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
     val gateOn = voiceMode || voiceArmed || voiceLive
     val pasteGuardMod = Modifier.pasteBackstop(
         toolbar = nativeToolbar,
+        // 「键盘起 + 空框 + 语音闸门不在位」三条件原样保留（只在键盘竖着、文本框真的
+        // 挂出来的时候才可能弹粘贴）。第 19 轮空框长按改归语音后，两者靠 voiceTick
+        // 分流：这一按期间语音真的开起来了，兜底观察器整趟让位。
         eligible = { !gateOn && keyboardUp && !voiceMode && latestInput.text.isEmpty() },
         anchorRect = { fieldRect },
+        voiceTick = { voiceGestureTick },
         onPasteText = { text ->
             val cur = latestInput
             val start = cur.selection.min
@@ -2834,7 +2902,10 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                                 fontWeight = FontWeight.SemiBold,
                                 color = scheme.onSurfaceVariant)
                         }
-                        else Text(if (voiceLive) "正在听你说…" else "发消息或按住说话…",
+                        // 第 19 轮（可发现性）：能长按说话时的提示写得直白点——用户
+                        // 找不到入口时，最该看见的就是「按住这里说话」这五个字。
+                        else Text(if (voiceLive) "正在听你说…" else if (keyboardUp) "发消息或按住说话…"
+                                  else "点一下打字，按住说话…",
                             fontSize = 15.sp, color = text3Color())
                     } else {
                         CompositionLocalProvider(
@@ -2943,6 +3014,10 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                         text = if (voiceHintLabel != null) "去给「$voiceHintLabel」开麦克风"
                                else "去开语音服务权限")
                     ActionPill(onClick = onTrySystemVoice, text = "用系统语音输入试试",
+                        filled = false)
+                    // 第 19 轮：出问题的时候给一条「看看到底卡在哪」——四层逐条摊开，
+                    // 用户照着念就能说清是哪一层。
+                    ActionPill(onClick = onOpenVoiceCheck, text = "看看语音卡在哪",
                         filled = false)
                 }
             }
@@ -3057,10 +3132,12 @@ private fun Modifier.pasteBackstop(
     toolbar: PopupTextToolbar,
     eligible: () -> Boolean,
     anchorRect: () -> Rect?,
+    voiceTick: () -> Int = { 0 },
     onPasteText: (String) -> Unit,
 ): Modifier {
     val ctx = LocalContext.current
     val eligibleRef = rememberUpdatedState(eligible)
+    val tickRef = rememberUpdatedState(voiceTick)
     val rectRef = rememberUpdatedState(anchorRect)
     val pasteRef = rememberUpdatedState(onPasteText)
     return pointerInput(toolbar) {
@@ -3068,6 +3145,10 @@ private fun Modifier.pasteBackstop(
         val holdMs = viewConfiguration.longPressTimeoutMillis
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
+            // 第 19 轮：空文本框的长按现在一律归语音（voiceHold 的 enabled 不再让键盘）。
+            // 两个 pointerInput 挂在同一个节点上，谁先看到抬手不定——所以拿"这一按期间
+            // 语音有没有真的开起来"当判据（计数在 voice.start() 那一刻 +1），不赌时序。
+            val tickAtDown = tickRef.value()
             if (!eligibleRef.value()) return@awaitEachGesture
             // 一趟循环等这一指头真正离开：滑出/丢指/取消都拿不到干净的抬手，直接让位。
             // 这段不许包进 run {} 或任何换接收者的挂起 lambda——AwaitPointerEventScope
@@ -3082,6 +3163,9 @@ private fun Modifier.pasteBackstop(
             val up = lift ?: return@awaitEachGesture
             // 按下不足长按时限 = 普通点按/放光标：这一下归文本框自己，全程不掺和
             if (up.uptimeMillis - down.uptimeMillis < holdMs) return@awaitEachGesture
+            // 这一按期间语音真的开起来了 = 用户是在说话，兜底观察器整趟让位，
+            // 别在刚说完话的地方再弹一枚「粘贴」。
+            if (tickRef.value() != tickAtDown) return@awaitEachGesture
             if (toolbar.status == TextToolbarStatus.Shown) return@awaitEachGesture
             val text = readClipText(ctx) ?: return@awaitEachGesture
             val rect = rectRef.value() ?: return@awaitEachGesture

@@ -45,12 +45,16 @@ def test_keyboard_signal_is_height_shrink_not_focus():
     assert re.search(r"maxH - h > maxH / 5", VOICE), "现高比最矮窗高基线矮 1/5 判键盘在"
     assert re.search(r"if \(w != lastW\) \{ lastW = w; maxH = h \}", VOICE), \
         "宽度一变（旋转/分屏）旧基线作废重立——别把换窗当起键盘"
-    # 门控吃 keyboardUp：键盘起着 voiceHold 让位给系统工具条（豆包图 2：全选/粘贴/选择）
-    assert re.search(r"enabled = \{[^}]*!keyboardUp", CHAT), \
-        "键盘起着长按归文本框自己（选字+系统工具条），语音不抢"
+    # 第 19 轮改判：门控不再吃 keyboardUp——空文本框长按一律归语音（小米真机：
+    # 先点输入框再长按收不到声音）。有字时长按仍归选字+系统工具条，这条语义由
+    # input.text.isEmpty() 那一半守着。
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+        "空文本框长按归语音、有字时长按仍归文本框自己（选字+系统工具条）"
+    # 第 19 轮：闸门（不挂框、零键盘闪的地基）原样吃键盘信号——键盘起着仍然必挂
+    # 文本框；改的只是长按归谁：空框的长按由 voiceHold 那头接管为说话。
     assert re.search(r"val voiceArmed = input\.text\.isEmpty\(\) && !busy"
                      r" && !voice\.listening &&[\s\S]{0,80}!keyboardUp", CHAT), \
-        "闸门同样吃键盘信号：键盘起着必挂文本框（没框就没光标，豆包图 1 口径）"
+        "闸门照样吃键盘信号：键盘起着必挂文本框（没框就没光标，豆包图 1 口径）"
 
 
 def test_voice_paths_unaffected_by_signal_swap():

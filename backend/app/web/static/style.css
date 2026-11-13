@@ -116,6 +116,15 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* v0.40 真机反馈（「有些页面没有很好地填充整个屏幕，角上有缝隙」）：
+   100% 解的是**布局视口**，而手机浏览器的地址栏收起/展开、软键盘弹出时，
+   可视视口（dvh）比布局视口矮——差的那一截就是屏底那条缝：。app 的 flex
+   高度链跟着 100% 走，于是聊天区提前结束，露出下面的 html 背景。
+   这里把三者统一钉到 dvh（支持时才生效，老浏览器仍是 100%，不是硬降级）。
+   .set-sheet 那条 calc(100dvh - 8px) 早就在用同一个单位，现在全仓口径一致。 */
+@supports (height: 100dvh) {
+  html, body, .app { height: 100dvh; }
+}
 html { background: var(--fv-bg); }
 body {
   /* 官网那层 32px 网点：只在侧栏与留白处露出来，聊天卡片与气泡是实色表面，
@@ -623,7 +632,10 @@ a.trace-result-title:hover { text-decoration: underline; }
    （和参考截图里 "Qwen3.8-Fla…" 一样的观感）；弹单纵向列可用模型，当前项打 ✓。 */
 .model-chip {
   display: inline-flex; align-items: center; gap: 4px; flex: none;
-  max-width: 46vw; margin-left: auto;
+  /* v0.40：芯片搬到顶栏标题右侧（原来在输入脚的右下角，靠 margin-left:auto 顶边）。
+     顶栏用 gap 排版，这里不再自己推开；宽度也放宽一点——顶栏整行都是它的余量，
+     46vw 在窄屏上会把 Qwen3.8-Flash 这类名字截得太早。 */
+  max-width: 52vw; margin-left: 0;
   border: 1px solid var(--line); background: var(--bg-soft); color: var(--text);
   border-radius: var(--fv-radius-pill); padding: 5px 10px; font-size: 13px; cursor: pointer;
   transition: border-color .18s ease, background .18s ease;
@@ -785,7 +797,11 @@ a.trace-result-title:hover { text-decoration: underline; }
 .set-back { flex: none; font-size: 20px; }
 .set-x { flex: none; margin-left: auto; }
 .set-bar:has(.set-back) .set-title { text-align: left; }
-.set-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 22px; }
+/* v0.40：底部补安全区。原来只有 22px，Android 的手势条会压住"关于"那组
+   最后一行（与原生那处缝隙同一类问题：内容没有铺到安全区外沿）。
+   只吃既有的 --safe-bottom 令牌，不引新变量。 */
+.set-scroll { flex: 1; min-height: 0; overflow-y: auto;
+              padding: 4px 16px calc(22px + var(--safe-bottom)); }
 .set-group { margin: 22px 2px 8px; color: var(--text-3); font-size: 12.5px; letter-spacing: .4px; }
 .set-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .set-last { margin-top: 18px; }
@@ -921,7 +937,10 @@ a.set-mini { text-decoration: none; }
   .msg.user .msg-body { max-width: 88%; }
   .msg-tools { opacity: 1; }
   .modal { padding: 0 0 8px; align-items: flex-end; }
-  .modal-card { width: 100%; max-height: 92vh; border-radius: 20px 20px 0 0; border-bottom: 0; }
+  /* v0.40：手机上的弹层最大高度改跟**可视视口**。92vh 是按布局视口算的，
+     地址栏在屏上时它比真实可视高度还高，弹层下沿被切掉一截（看起来像没铺满）。
+     dvh 与 .set-sheet 那条 calc(100dvh - 8px) 同口径。 */
+  .modal-card { width: 100%; max-height: calc(100dvh - 8px); border-radius: 20px 20px 0 0; border-bottom: 0; }
   /* 设置弹层在手机上接近全屏：原先"底部半屏 + 内容在里面再滚一次"是双重滚动，
      「关于」最后一行永远看不见。现在只留一个滚动轴，底部那 8px 是弹层的边界。 */
   .set-sheet { max-height: calc(100dvh - 8px); }

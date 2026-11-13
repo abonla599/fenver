@@ -56,8 +56,8 @@ def test_status_banners_self_dismiss():
 
 def test_voice_mode_is_explicit_and_service_hint_reachable():
     assert '"按住说话"' in CHAT, "语音模式：输入区必须能整块变成「按住说话」大按钮"
-    assert "voiceMode || !keyboardUp" in CHAT, \
-        "语音模式下无条件接管长按；文本模式下仍要让着键盘"
+    assert "(voiceMode || input.text.isEmpty())" in CHAT, \
+        "语音模式下无条件接管长按；文本模式下只在框里没字时接管（第 19 轮改判）"
     assert "speechServicePackage(ctx)" in CHAT and "ACTION_APPLICATION_DETAILS_SETTINGS" in CHAT, \
         "拒录音时给直达入口：跳语音服务 App 的系统详情页开麦克风"
     assert "去开语音服务权限" in CHAT

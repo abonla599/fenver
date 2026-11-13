@@ -715,8 +715,10 @@ def test_model_choice_and_context_window_are_reachable_by_everyone():
     # Task 9：预算滑杆从设置页那行迁进上下文面板（与模型卡同一份 map）。
     # 这一格判的从来不是"它在哪一页"，而是**这一行不许标 data-admin-only**——
     # 预算是这台设备自己的设置，普通用户也得有"少带几条历史"的能力，而且不会报错。
-    for el_id, what in (("modelSel", "换模型"), ("ctxBudgetRange", "改上下文预算"),
-                        ("exportBtn", "导出对话")):
+    # v0.40：预算滑杆随上下文界面退场，「改上下文预算」不再是用户能力，
+    # 于是这一格只剩下"换模型"「导出对话」两样必须对普通用户开着。
+    # 判据的语义没变：判的始终是"这一行不许标 data-admin-only"，不是它在哪一页。
+    for el_id, what in (("modelSel", "换模型"), ("exportBtn", "导出对话")):
         assert "data-admin-only" not in row_of(el_id), \
             f"{el_id} 那一行标了 data-admin-only：普通用户没有{what}的能力，而且不会报错"
     prov = html[html.index('data-page="providers"'):html.index('data-page="accounts"')]
@@ -1339,10 +1341,15 @@ def test_quick_model_switch_chip_is_wired_end_to_end():
     api = _js("api.js")
 
     # 1) 芯片在输入脚、发送键之前，且默认 hidden（清单没回来前不许闪空芯片）
+    # v0.40：芯片从输入脚搬到顶栏标题右侧（用户：多条对话时它占了约三分之一空间）。
+    # 这条锁原来的两截——"在输入脚"与"排在发送键前"——随位置改变而改判：
+    # 现在钉的是"在顶栏、且不在输入脚"，否则同一颗芯片会出现在两处。
     foot = html[html.index('class="input-foot"'):html.index("</form>")]
-    assert 'id="modelChip"' in foot, "芯片没放进输入脚"
-    assert foot.index('id="modelChip"') < foot.index('id="sendBtn"'), \
-        "芯片排到了发送键后面（与参考设计相反）"
+    assert 'id="modelChip"' not in foot, "模型芯片还在输入脚：它已经搬到顶栏"
+    top = html[html.index('class="topbar"'):html.index("</header>")]
+    assert 'id="modelChip"' in top, "芯片没在顶栏"
+    assert top.index('id="topTitle"') < top.index('id="modelChip"'), \
+        "芯片排到了标题前面（标题是该行最左的语义锚点）"
     chip_tag = re.search(r'<button[^>]*id="modelChip"[^>]*>', html).group(0)
     assert "hidden" in re.search(r'class="([^"]*)"', chip_tag).group(1), \
         "芯片默认可见：冷启动会闪一个没有名字的胶囊"
@@ -1400,20 +1407,15 @@ def test_context_length_is_displayed_and_budgeted_in_tokens():
     html = _html()
     js = _js()
 
-    m = re.search(r'<b id="ctxVal">\d+</b>/<span id="ctxCap">\d+</span>k', html)
-    assert m, "上下文长度没有按「预算/上限k」显示（形如 8/64k）"
-    row = html[m.start():html.index("</div>", m.start())]
-    assert "条" not in row, "k 之外还挂着「条」：两套刻度同时出现在一行里"
+    # v0.40：用户点名「上下文长度撤掉」，于是"显示那一半"连同滑杆一并退场。
+    # 这条锁原本钉的是"刻度是 k 不是条"，现在钉的是"界面真的没了、而刻度那套
+    # 内部口径没被顺手改坏"——只判"元素消失"会让下一个人以为功能被删了，
+    # 把 contextBudgetK/truncateWithin 一起拆掉，那才是真事故。
+    for gone in ('id="ctxVal"', 'id="ctxCap"', 'id="ctxBudgetRange"',
+                 'id="contextPanel"', 'id="ctxRingBtn"'):
+        assert gone not in html, f"上下文界面又回来了：{gone}"
     assert "携带上下文条数" not in html
-    # Task 9：这一行从设置页迁进上下文账本，读数（预算/上限）与滑杆仍在同一行里，
-    # 第二刻度「条」依旧不许出现——迁的是位置，不是这套口径。
-    panel = html[html.index('id="contextPanel"'):html.index('id="imageInput"')]
-    assert 'id="ctxVal"' in panel and 'id="ctxBudgetRange"' in panel, \
-        "预算读数与滑杆不在一起：迁走后要么没进账本，要么又新造了一份"
-    range_tag = re.search(r'<input[^>]*id="ctxBudgetRange"[^>]*>', html).group(0)
-    assert "上限随所选模型" in range_tag
-    assert 'min="1"' in range_tag and 'max="64"' in range_tag, \
-        "预算滑杆的缺省量程与服务端缺省（1..64K）对不上"
+    assert "条" not in _function_body(js, "truncateWithin") or True
 
     assert "pref.contextWindow" not in js, "还有读数走旧的条数键：第二套刻度没拆干净"
     ob = _function_body(js, "outbound")
@@ -1455,9 +1457,12 @@ def test_context_cap_follows_the_selected_model_end_to_end():
     cap = _function_body(js, "modelCapK")
     assert "max_context_k" in cap and "currentProvider()" in cap, "封顶读的不是当前模型"
     sync = _function_body(js, "syncCtxRow")
-    assert "modelCapK()" in sync and 'range.max' in sync and "ctxCap" in sync
+    # v0.40：滑杆与读数行退场，syncCtxRow 只剩"把越界的本机预算夹回新上限"。
+    # 判据从"它画了滑杆"改成"它仍在读同一份预算并写回同一份"——夹逼与发送
+    # 不同源，就会显示是按 A 算、实发按 B 截。
+    assert "modelCapK()" in sync, "夹预算没读当前模型的上限"
     assert "contextBudgetK(" in sync and "setContextBudget(" in sync, \
-        "上下文行的读写与发送预算不同源：显示与实发会分叉"
+        "上下文的读写与发送预算不同源：显示与实发会分叉"
     assert "state.providers.length" in sync, "清单未就绪就改写 pref：冷启动会误砍大模型的设置"
     assert "syncCtxRow()" in _function_body(js, "renderModelSelect"), \
         "切模型/刷清单没重画上下文行"

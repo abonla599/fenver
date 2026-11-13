@@ -94,7 +94,6 @@ import xyz.fenever.assistant.nativeapp.ApiException
 import xyz.fenever.assistant.nativeapp.AuthResult
 import xyz.fenever.assistant.nativeapp.BuildConfig
 import xyz.fenever.assistant.core.ExportName
-import xyz.fenever.assistant.core.ReleasePlan
 import xyz.fenever.assistant.nativeapp.export.ExportTracker
 import xyz.fenever.assistant.nativeapp.export.SessionDownloads
 import xyz.fenever.assistant.nativeapp.ModelInfo
@@ -273,10 +272,17 @@ fun SettingsSheet(page: String, cachedProviders: List<ModelInfo>,
         /* v0.34.2：这里不再拉 /health 的 build 往「版本」那一行拼。以前这一行是
          * 「壳 v0.34.0 · 服务端 v0.34.1」两个号码并排，而 build 那截本身就是
          * `git describe` 出来的 vX.Y.Z——在一部手机上，它长得和一个"我能装的版本"
-         * 一模一样，但它装不到手机上（能装的只有壳，且由「版本」行里的「检查更新」胶囊报）。
+         * 一模一样，但它装不到手机上（能装的只有壳，且由「版本」行里那颗「发现新版本」按钮报）。
          * 用户 2026-10 的口径：「只显示可运行的最新版本，不要两个相加什么的」。
          * /health 的 build 字段本身没动（换包验收与 tools\pre_tag_gate.py 都读它），
          * 管理台「构建」带标签显示它；浏览器里的「关于」不再摆任何号码。 */
+
+        /* 2026-11：进入设置页静默问一次"有没有新版本"。
+         * 它是这一屏的一次性副作用（LaunchedEffect(Unit) 只在首次组合时跑一次），
+         * 不是按钮、不置任何"检查中"状态——所以这一行永远不会闪"正在检查"。
+         * 问不到就什么都不发生；重进设置由 Updater 那边的 30 分钟闸挡住，不重复打网络。
+         * 只有真问到新版本时，Updater.available 才会让上面那颗按钮出现。 */
+        Updater.offer()
     }
 
     // 用户要求：设置页顶到最上面 —— 弹层高度不再封顶 600dp，直接铺满整屏
@@ -553,8 +559,8 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     }
 
     // 检查与下载的状态住在 Updater（对象级快照，弹层被划掉也不丢）；进度与授权弹层
-    // 直接从它读。「发现新版」的待弹旗标 offerUpdate 是 UI 本地的一次性标记，消费即清，
-    // 不做常驻显示，也不是第二份版本真相。
+    // 直接从它读。「有没有新版本」的真相也只有 Updater.available 一份：非空时「版本」
+    // 那一行才多挂一颗按钮，别处不再有第二个可以报可安装版本的入口。
     val admin = Prefs.role == "admin"
     val me = Prefs.currentEntry()
     val name = me?.username ?: ""
@@ -589,9 +595,6 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     // 等"计算中…"——初值吃上一次算好的，后台重量一次覆盖它；只有进程内头一次才算没数。
     var cacheBytes by remember { mutableStateOf(SettingsCache.cacheBytes) }
     var confirmClearCache by remember { mutableStateOf(false) }
-    // 「发现新版」的待弹旗标：检查回来是 AVAILABLE 才置位，弹层消费（立即更新/稍后）即清。
-    // 它是一次性邀约，不是常驻显示——常驻版本行只留已装的那一个号，第二个号只进带标签的弹层。
-    var offerUpdate by remember { mutableStateOf<ReleasePlan.Decision?>(null) }
     val appCtx = ctx.applicationContext
     fun dirBytes(f: File?): Long = f?.let {
         runCatching { it.walkTopDown().filter { x -> x.isFile }.sumOf { x -> x.length() } }
@@ -719,30 +722,32 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
     SetGroup("关于")
     SetNote(ABOUT_TAGLINE)
     val shellVer = "v" + BuildConfig.VERSION_NAME
-    // 「版本」行只留一个号码：这台手机上真装的那一版（BuildConfig.VERSION_NAME，
-    // 由 android-native/app/build.gradle 烘进包）。通道号与服务端号都不进这一行——
-    // 服务端号装不到手机上，通道号回滚后可能比已装版更旧，两个号不带标签并排摆
-    // 正是让用户读成"这一版我能装"的形状。检查入口是值槽里这颗胶囊；更新各态全部
-    // 走带标签的瞬态面：检查中/已是最新/失败走顶部 note，发现新版弹 UpdateAvailableDialog，
-    // 下载/安装沿用既有两张弹层。判据：backend/tests/test_v0342_single_version_row_contract.py
+    // 「版本」行：常驻只有一个号码——这台手机上真装的那一版（BuildConfig.VERSION_NAME，
+    // 由 android-native/app/build.gradle 烘进包）。通道号与服务端号都不进这一行：
+    // 服务端号装不到手机上，通道号回滚后可能比已装版更旧。判据见
+    // backend/tests/test_v0342_single_version_row_contract.py（那个锁现在切的是"新按钮挂载之前"）。
+    //
+    // 2026-11 用户改的口径（原话）：「当如果有新版本的时候，然后这个按钮才会弹出来，
+    // 如果没有新版本的话，就没有检查更新这个按钮，就只是显示版本号」——
+    // 所以这里不再有「检查更新」这颗常驻胶囊，也没有"检查中"这个中间态：
+    // 有新版本才多挂一颗「发现新版本 vX.Y」（版本号只出现在这一颗带标签的按钮里，
+    // 全页唯一一处报可安装的是哪一版），点它一步进下载（Updater.attemptDownload）。
+    // 没新版本：这一行就只有一个号，连「已是最新版本」的顶部提示都不弹（用户点名不要这噪音）。
+    // 检查在下面那条 LaunchedEffect 里静默发生，失败不显示——所以这里没有任何检查态。
     SetRow(FenverIcon.Info, "版本", plain = true, trailing = null, valSlot = {
         SetValText(shellVer)
-        SetMini(if (Updater.checking) "正在检查更新…" else "检查更新",
-            enabled = !Updater.checking) {
-            Updater.startCheck(onDone = { err ->
-                val d = Updater.decision
-                when {
-                    err != null -> onNote("检查更新失败：$err", true)
-                    d != null && d.kind == ReleasePlan.Kind.UP_TO_DATE ->
-                        onNote("已是最新版本", false)
-                    d != null && d.kind == ReleasePlan.Kind.AVAILABLE -> offerUpdate = d
-                }
-            })
+        // 没有新版本时这里连一颗灰胶囊都不许留：SetMini 本身总会画（只是置灰），
+        // 而用户要的是"没有新版就只有一个版本号"。所以挂载条件写在 if 上，不是 enabled 上。
+        if (Updater.available != null) {
+            SetMini("发现新版本 " + Updater.available.orEmpty(),
+                onClick = {
+                    Updater.attemptDownload(appCtx) { err -> err?.let { onNote(it, true) } }
+                })
         }
     })
     // 单主题：官网是墨绿一套配色，原生也不再提供「外观」切换入口。
     // 关于组的下一行是「意见反馈」，紧邻关系由 test_v0342 的位置锁接着。
-    // 上面那颗「检查更新」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
+    // 上面那颗「发现新版本」全程不跳外部，下面那行「开源仓库」却是要把人送到 GitHub
     // 上去的——它问的是"这个项目本身在哪、能不能拿去看"，↗ 后缀（网页 .set-go
     // 同一条）就是"点下去会离开本应用"的意思，别换成 ›。
     // 「意见反馈」v0.27 起不再跳 GitHub：改成应用内一页（› 前缀），填完直达
@@ -795,9 +800,9 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
             dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } })
     }
 
-    // —— 应用内更新：进度对话框 + 「安装未知应用」授权引导 + 「发现新版本」邀约 ——
-    // 进度与授权的状态在 Updater 上，弹层被划掉再进来时这两个会原样挂回来（下载不丢）；
-    // 发现新版是一次性邀约，消费即清，不常驻。
+    // —— 应用内更新：进度对话框 + 「安装未知应用」授权引导 ——
+    // 两个状态都住在 Updater 上，弹层被划掉再进来时会原样挂回来（下载不丢）。
+    // 「发现新版本」不再是一次性弹层邀约：它现在是版本行里那颗按钮，点下去直接下载。
     if (Updater.downloading) {
         UpdateProgressDialog(onCancel = { Updater.cancelDownload() })
     }
@@ -805,17 +810,6 @@ private fun SettingsList(onOpenPage: (String?) -> Unit,
         InstallGuideDialog(
             onGoSettings = { Updater.openInstallPermissionSettings(ctx.applicationContext) },
             onDismiss = { Updater.dismissInstallGuide() })
-    }
-    offerUpdate?.let { d ->
-        UpdateAvailableDialog(
-            version = d.version,
-            onUpdate = {
-                offerUpdate = null
-                Updater.startDownload(ctx.applicationContext) { err ->
-                    err?.let { onNote("更新失败：$it", true) }
-                }
-            },
-            onDismiss = { offerUpdate = null })
     }
 }
 

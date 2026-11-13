@@ -9,5 +9,25 @@
     <style name="Theme.Fenver" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/window_bg</item>
         <item name="android:colorBackground">@color/window_bg</item>
+
+        <!-- v0.36.7 真机反馈（小米：有些页面没有很好地填充整个屏幕，四角/边角有缝隙）：
+             上下这两条带子不是 App 画的。App 全程没开 edge to edge（内容由系统让位到系统栏
+             下面，Compose 内衬恒为 0——v0233 契约里「adjustResize 非 edge-to-edge，IME
+             内衬恒为 0」写的就是这条路），主题又没给 statusBarColor /
+             navigationBarColor，取值于是落到平台主题 Theme.Material.Light 的默认值上：
+             状态栏取平台色板的 colorPrimaryDark、导航栏（含手势条）近黑。深墨绿画布上下
+             各压一条异色带，圆角屏的四角又正好落在两条带子里，看着就是「没铺满、有缝」。
+             修法只动颜色、不动布局：两条栏钉成画布色（@color/window_bg，与
+             FenverTokens.Bg 逐字节同源，v0.28 与 v0.36 两条锁盯着），画布因此连续到屏幕
+             上下两端。深底要浅图标：父主题 Material.Light 在 API 23+ 默认开浅色系统栏外观，
+             两个 light 项显式关掉，否则白图标配浅底、或黑图标配深底。
+             decorFitsSystemWindows 保持 true：布局与 adjustResize 键盘路径都依赖系统替它
+             让位；翻成 edge to edge 会牵动整套内衬（顶栏吃状态栏、输入卡吃导航栏、每个弹层
+             各一套，且 ChatUi 里 imePadding 挂了两处同级兄弟），那是布局改动，不塞进这批。 -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@color/window_bg</item>
+        <item name="android:navigationBarColor">@color/window_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

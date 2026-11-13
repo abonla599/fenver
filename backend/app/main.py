@@ -803,6 +803,40 @@ def chat(request: ChatRequest, http: Request, principal: Principal = CurrentPrin
     out["trace"] = compacted
     return out
 
+
+@app.post("/v1/chat/summarize")
+def chat_summarize(request: ChatRequest, http: Request, principal: Principal = CurrentPrincipal):
+    """把一段对话压成前情摘要（客户端自动压缩用，v0.40）。
+
+    为什么不复用 /v1/chat：那个端点有 session_id 就往会话历史里**落两条消息**。
+    自动压缩是后台动作，把"摘要请求"本身写成用户说过的话、再写一条助手回复，
+    等于每压缩一次就给用户的历史里塞两段谁都没说过的话；而且它还会被
+    test_web_pwa 的"绝不整段重发 /v1/chat"那条反向锁看见（那条锁要的是
+    "断线不许烧钱重发"，不是"永远只有一个聊天入口"——两者形状相同，语义不同）。
+
+    这个端点因此刻意做成**无副作用**的：不落会话、不挂附件、不发工具、不记 trace。
+    它只回答一段文本。调用方（app.js 的 compactWithModel）对任何非 2xx 都退回
+    本地抽取式摘要，所以这里的失败路径不需要对用户说人话——它永远不会被看见。
+    """
+    _throttle_chat(http, principal)
+    _shadow_gate(principal)
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="messages 不能为空")
+    try:
+        provider = provider_store.resolve(request.provider, legacy_model=request.model,
+                                          user_id=principal.user_id)
+    except ProviderError as e:
+        raise HTTPException(status_code=400, detail=hide_paths(str(e))) from None
+    try:
+        reply = get_llm_response(
+            model=provider["model"], messages=list(request.messages),
+            temperature=0.3, provider_id=provider["id"], user_id=principal.user_id)
+    except Exception as e:
+        reason = _fail_reason(e)
+        print(f"摘要调用失败: {reason}", file=sys.stderr, flush=True)
+        raise HTTPException(status_code=502, detail=f"摘要失败：{reason}")
+    return {"reply": reply}
+
 # ---------- 流式聊天接口 ----------
 from fastapi.responses import StreamingResponse
 import json as json_module

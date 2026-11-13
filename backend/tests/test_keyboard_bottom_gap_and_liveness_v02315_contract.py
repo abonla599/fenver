@@ -94,8 +94,10 @@ def test_polling_safety_net_no_stale_signal():
 
 def test_keyboard_up_still_gates_voice_and_placeholder():
     # 用户本轮的真痛点：键盘起着要能长按粘贴，不能被语音抢
-    assert "voiceMode || !keyboardUp" in CHAT, \
-        "键盘起着长按归文本选择（系统粘贴菜单）、语音不触发：活门控原样在位"
+    # 第 19 轮改判（小米真机）：判据从 keyboardUp 换成文本框空不空——键盘起着但框是
+    # 空的，长按仍归语音；框里有字才归文本选择（系统粘贴菜单）。
+    assert "(voiceMode || input.text.isEmpty())" in CHAT, \
+        "活门控原样在位：空框长按归语音、有字归文本选择"
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT), \
         "占位符判据原样在位：键盘一起只写『发消息…』"
     assert "fieldFocused" not in CHAT and "onFieldFocus" not in CHAT, \

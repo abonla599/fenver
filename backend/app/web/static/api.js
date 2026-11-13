@@ -751,6 +751,10 @@ const API = (() => {
     replaceMessages: (id, messages) =>
       request("/v1/sessions/" + encodeURIComponent(id) + "/messages", { method: "PUT", body: { messages } }),
     chat: (payload) => request("/v1/chat", { method: "POST", body: payload }),
+    // v0.40 自动压缩：把一段对话压成前情摘要。**不是** chat 的别名——
+    // /v1/chat 有 session_id 就往会话历史里落两条消息，而这个动作必须无副作用：
+    // 摘要请求本身不该变成用户"说过的话"。判据见 main.py 的 chat_summarize。
+    summarize: (payload) => request("/v1/chat/summarize", { method: "POST", body: payload }),
     streamChat,
     /* "停止"是一个显式动作，不再只是关页面的副作用：带 run_id 打服务端取消，翻标志、
      * 尽力当场关上游、下一个付费轮不发生（见 core/stream_runs.py + main.py 的 cancel 端点）。

@@ -906,7 +906,94 @@ def test_the_apk_route_hands_over_bytes_with_a_save_header(monkeypatch):
     assert res.headers["content-type"].startswith("application/vnd.android.package-archive")
     assert res.headers["content-disposition"] == 'attachment; filename="ai-assistant-native-0.17.apk"'
     assert res.content == b"12345"
-    assert res.headers["cache-control"] == "no-cache", "缓存住了就等于让人下到上一版"
+    # 2026-11-13 改口径：**这条断言原来钉的是 "no-cache"**，钉它的理由是"缓存住了就等于
+    # 让人下到上一版"。理由一个字没变，变的是"缓存住"这件事的实现方式：
+    # 公网实测（三次整包 8.2s/9.1s/12.1s，全部 cache-control: no-cache + cf-cache-status:
+    # EXPIRED）说明 no-cache 换来的不是"永远最新"，而是**每个访问者都让 Cloudflare 边缘
+    # 经隧道把 7.9MB 再传一遍**——边缘能存但不敢用，因为源站从不肯答 304。
+    # 现在的形状是 public, max-age=0, must-revalidate + 一枚**按版本钉死**的 ETag：
+    # 边缘可以存，但每次使用前必须回来核对这枚校验值；版本一换校验值就换，于是
+    # "把上一版发给下一个人"这件事仍然不可能发生（它要么核对失败、要么回 200 新包）。
+    # 真正守着这条红线的是下面的 test_the_apk_route_pins_its_validator_to_the_version。
+    assert res.headers["cache-control"] == "public, max-age=0, must-revalidate", \
+        "缓存口径退回不可协商：边缘又得每趟整包回源"
+    assert "no-cache" not in res.headers["cache-control"], \
+        "no-cache 会让边缘每趟都重新下单整包（实测 8~12s），且它同样允许存——不是更安全，只是更慢"
+    assert res.headers["etag"], "没有校验值就没有 304：边缘每趟都得把整包再拉一遍"
+
+
+def _apk_plan(version="0.17", sha="", name=None):
+    return {"url": "https://github.com/o/r/releases/download/v%s/x.apk" % version,
+            "name": name or f"ai-assistant-native-{version}.apk", "size": 5,
+            "version": version, "sha256": sha}
+
+
+def test_the_apk_route_answers_conditional_requests_instead_of_resending(monkeypatch):
+    """**这是那条"下载太慢"的回归锁**：校验值对得上时必须回 304，不许再发一整包。
+
+    2026-11-13 之前这条端点只会回 200 + 整包。于是 Cloudflare 边缘每次都只能整包回源
+    ——公网实测 7.9MB 走 8.2s / 9.1s / 12.1s，而同一份字节在源站上只要 10~30ms
+    （cf-cache-status 一直是 EXPIRED：对象就在边缘、只是过期，而源站答不上"还是不是
+    那一份"）。把它改回"只回 200"这条锁当场红。
+    """
+    releases = _fake_plan(monkeypatch, (_apk_plan(), ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"12345", ""))
+
+    first = client.get("/site/android.apk")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    again = client.get("/site/android.apk", headers={"If-None-Match": etag})
+    assert again.status_code == 304, f"校验值对上了仍在重发整包：{again.status_code}"
+    assert again.content == b"", "304 带了正文"
+
+    # 另一种形状：只有日期的那种老代理（If-Modified-Since）。它也得能省下整包。
+    last_modified = first.headers.get("last-modified")
+    if last_modified:
+        dated = client.get("/site/android.apk", headers={"If-Modified-Since": last_modified})
+        assert dated.status_code == 304, "If-Modified-Since 对上了却仍重发整包"
+
+
+def test_the_apk_route_pins_its_validator_to_the_version(monkeypatch):
+    """缓存键必须**跟着版本号走**：换了版本，校验值必须换，旧的那枚当场失效。
+
+    这是"可缓存"与"永远给人最新那一版"两条要求的接缝。按"最新那一版"当键（或者干脆
+    不换键）的话，边缘上那份旧字节会在下一次版本切换后继续被当成新的发出去——那正是
+    _relay_put / apk_cache 一直在防的形状，只是换到了 HTTP 这一层。
+    这条锁同时会拦住"顺手把 ETag 写成常量"这种改法。
+    """
+    releases = _fake_plan(monkeypatch, (_apk_plan("0.17"), ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"12345", ""))
+    stale = client.get("/site/android.apk").headers["etag"]
+
+    _fake_plan(monkeypatch, (_apk_plan("0.18"), ""))
+    fresh = client.get("/site/android.apk")
+    assert fresh.status_code == 200, "换了版本却回了 304：把上一版当成这一版发出去"
+    assert fresh.headers["etag"] != stale, \
+        "两个版本的校验值一样：边缘会一直认定手里那份还是新的"
+    # 拿着旧校验值回来问，必须拿不到 304——否则边缘凭旧键就能把旧包发出去。
+    assert client.get("/site/android.apk",
+                      headers={"If-None-Match": stale}).status_code == 200
+    # 摘要变了、版本号没变（有人原地换了包）：同样要换校验值。
+    _fake_plan(monkeypatch, (_apk_plan("0.18", sha="b" * 64), ""))
+    assert client.get("/site/android.apk").headers["etag"] != fresh.headers["etag"], \
+        "版本号没变、字节换了，校验值却没变：边缘会继续端旧字节"
+
+
+def test_the_apk_route_supports_range_so_a_broken_download_can_resume(monkeypatch):
+    """断点续传：手机上下一半断网，重来时只补剩下的那一段，不是从头再来 7.9MB。
+
+    修复前实测 `curl -r 0-1023` 回的是 200 + 整包（整包进内存的 Response 不认识 Range）。
+    """
+    releases = _fake_plan(monkeypatch, (_apk_plan(), ""))
+    monkeypatch.setattr(releases, "fetch_asset", lambda url: (b"0123456789", ""))
+    res = client.get("/site/android.apk", headers={"Range": "bytes=2-5"})
+    assert res.status_code == 206, f"Range 被忽略了：{res.status_code}"
+    assert res.content == b"2345"
+    assert res.headers["content-range"] == "bytes 2-5/10"
+    assert res.headers["accept-ranges"] == "bytes"
+    # 越界要回 416 而不是悄悄给整包：后者会让下载器把残包当完整包装上去。
+    assert client.get("/site/android.apk",
+                      headers={"Range": "bytes=99-200"}).status_code == 416
 
 
 def test_the_apk_route_falls_back_to_the_release_page(monkeypatch):

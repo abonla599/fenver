@@ -1,4 +1,5 @@
 /* Fenver PWA 主逻辑 */
+/* release-marker-v0.40.0：本版只换服务端（官网安卓包下载提速：强 ETag 按版本号钉死 + 答 304 + 流式 FileResponse 支持断点续传，缓存头从 no-cache 改 must-revalidate；上下文界面整块退场、改由对话接近模型上限时自动压缩并把被移出的那几条交给模型压成前情摘要，原文一条不删；新增无副作用的 /v1/chat/summarize；模型芯片从输入卡搬到顶栏；网页版高度改 dvh 铺满屏幕）；APK 仍 0.36.6。 */
 /* release-marker-v0.39.2：本版只换服务端（界面统一到官网墨绿单主题：网页版 App 与管理台改用官网色板、字体、圆角与组件形态，去掉外观切换，官网成为三端色板唯一真源；安卓源码同步改了但本版不出包）；APK 仍 0.36.4。 */
 /* release-marker-v0.39.1：本版只换服务端（v0.39.0 从未上线，本版把模型驾驶舱一并带上线：上下文环与账本、按模型各存一份的会话预算、接力队列与立即插话、两栏模型菜单、终帧回传本轮 token 数；另修四处出站客户端误读会话代理导致的静默降级，启动脚本拉起后端前先清代理变量；思考档位这一格今天不出网）；APK 仍 0.36.4。 */
 /* release-marker-v0.39.0：本版只换服务端（网页版 App 的模型驾驶舱：上下文环与账本、按模型各存一份的会话预算、接力队列与立即插话、两栏模型菜单、终帧回传本轮 token 数；思考档位这一格今天不出网）；APK 仍 0.36.4。 */
@@ -248,6 +249,12 @@ const state = {
   myDefault: null,        // /v1/me/providers 报的"我的默认"，服务端持久化那份
   me: null,               // /v1/auth/me 的结果；null = 还不知道自己是谁
   currentRunId: null,     // 这一轮流式对话的 run_id：停止要打服务端取消、断线续播也认它
+  // v0.40 自动压缩：compactingBySession 是"这个会话已经有一个摘要请求在途"的闸——
+  // renderContextRing 一轮会调十几次，不设闸就是十几次并发的付费调用。
+  compactingBySession: {},
+  // contextSummaryBySession 是"被移出发送范围的那几条"压成的前情摘要，
+  // 由 outbound 挂在 persona 之后发出去。换身份时与 contextDropBySession 一起清。
+  contextSummaryBySession: {},
   // 任务面（v0.35 #133）：tasks 是列表那一屏，taskDetail 是**唯一**的卡片真相（GET 读回来
   // 的那一份），taskOpenId 记着这一页开的是哪一条，taskAnswering 是那一枪长阻塞在途。
   tasks: [],
@@ -455,11 +462,12 @@ function modelCapK() {
    读数与写数都走「用户 + provider」预算（contextBudgetK/setContextBudget），
    与 outbound 同源；清单没回来时只读不写，冷启动不会把大模型的设置误砍成 64。 */
 function syncCtxRow() {
+  // v0.40：滑杆与读数行随账本一起退场，这里只剩"夹预算"这一件真事——
+  // 管理员把模型上限调小时把本机存着的越界值夹回来，并提示一次。原来那几行
+  // 直接摸 DOM（range.max / ctxVal / ctxCap），元素没了再摸就是 TypeError 打断
+  // loadModels 整条链路，所以先判存在再走。夹预算不依赖界面。
   const known = state.providers.length > 0;
   const cap = Math.max(2, modelCapK());
-  const range = $("ctxBudgetRange");
-  range.max = cap;
-  range.step = cap <= 64 ? 2 : (cap <= 256 ? 8 : 32);
   const pid = budgetProviderId();
   const budget = contextBudgetK(pid);
   // 存着的那份预算越过**新**上限（管理员把上限调小了）：当场夹进 map 并记下这一笔，
@@ -471,11 +479,143 @@ function syncCtxRow() {
     noteBudgetClamp(pid, stored, cap);
     setContextBudget(pid, cap);
   }
-  const shown = Math.min(budget, cap);
-  range.value = shown;
-  $("ctxVal").textContent = shown;
-  $("ctxCap").textContent = cap;
-  renderContextRing();   // 预算/上限变了环的分母就变了，不刷等于画一张旧账
+  renderContextRing();   // 这个钩子现在是自动压缩的触发点，不再是"画环"
+}
+
+/* ---------------- 自动压缩（v0.40） ----------------
+ * 用户点名要的口径：「对话一长自动压缩，保留数据，保持上下文记忆」。
+ *
+ * 三件事必须同时成立，缺一条这个功能就是假的：
+ *  ① 数据不丢——只把最早几条移出**本轮发送范围**（state.contextDropBySession），
+ *     state.messages 一条都不删，往上翻还是原文，导出也还是全文；
+ *  ② 不报错——发送前把历史压进当前模型的预算里，用户不会撞上"上下文超限"；
+ *  ③ 记忆还在——被移出的那几条压成一段摘要挂在最前面，模型仍知道前面聊过什么。
+ *
+ * 摘要用**确定性抽取**（每条取首句、截到固定长度），不花一次模型调用：
+ * 自动触发的东西如果每次都要钱，用户会在不知情的时候被扣费；而且要它
+ * 同步出结果的话，发送会被网络拖住。确定性摘要至少稳定、免费、不发不出网。
+ *
+ * 触发点在 renderContextRing()——它本来就是"消息/预算/模型变了，重算发送
+ * 范围"那个钩子，现在界面没了，钩子还在，正好给这件事用。
+ */
+const AUTO_COMPACT_RATIO = 0.75;     // 用量过预算的 75% 就提前压，不等撞墙
+const AUTO_COMPACT_MAX_SRC = 12000;  // 送进摘要器的最长原文（字符）；再多就再切一半
+const AUTO_COMPACT_TIMEOUT_MS = 20000;
+
+/* 兜底摘要：模型摘要失败（断网/超时/无模型/接口报错）时用它。
+ * 抽取式（每条取首句）不如模型总结，但它确定、免费、不会失败——自动触发的
+ * 功能必须有一条永远走得通的路，否则断网时用户会直接撞"上下文超限"。
+ * 判据：前情摘要这个说法与格式在 test_v0391_web_cockpit_ui 里被钉着。 */
+const AUTO_COMPACT_HEAD = 80;
+
+function extractiveSummaryOf(msgs) {
+  const lines = msgs.map((m) => {
+    const who = m.role === "user" ? "用户" : "助手";
+    const one = String(m.content || "").replace(/\s+/g, " ").trim();
+    const cut = one.length > AUTO_COMPACT_HEAD ? one.slice(0, AUTO_COMPACT_HEAD) + "…" : one;
+    return who + "：" + cut;
+  });
+  return "【前情摘要】以下是本次对话更早的内容（原文仍在本会话里，可往上翻）：\n" + lines.join("\n");
+}
+
+/* 模型摘要：把要移出发送范围的那几条交给当前模型总结成一段前情。
+ * ⚠️ 这是唯一一处"为用户动作之外再花一次模型调用"的地方，所以纪律很硬：
+ *  ① 只在真的越过阈值那一刻触发一次，不是每轮都花；
+ *  ② 请求里不带工具、不带附件、只要纯文本——它是一段摘要，不是一次对话；
+ *  ③ 任何失败（无模型/断网/超时/非 2xx）都退回 extractiveSummaryOf，
+ *     绝不因为摘要失败把用户这一轮卡住；
+ *  ④ 摘要本身也占预算，超过预算 1/4 就从最早那几条继续丢，直到塞得下。
+ * 原文进摘要器前先切到 AUTO_COMPACT_MAX_SRC 以内：摘要请求自己也要装得下。 */
+async function compactWithModel(msgs, budgetTokens) {
+  const cm = currentProvider();
+  if (!cm) return extractiveSummaryOf(msgs);
+  let src = msgs;
+  while (src.length > 1 && estimateTokens(src.map((m) => m.content).join("")) > AUTO_COMPACT_MAX_SRC) {
+    src = src.slice(Math.ceil(src.length / 2));
+  }
+  const transcript = src.map((m) => (m.role === "user" ? "用户：" : "助手：")
+    + String(m.content || "")).join("\n\n");
+  const payload = {
+    model: cm.id, provider: cm.id,
+    messages: [
+      { role: "system", content:
+        "你负责把一段对话压缩成前情摘要，供后续轮次继续使用。"
+        + "只输出摘要正文，不要开场白、不要分点符号、不要评价。"
+        + "必须保留：用户明确说过的偏好与约束、已经做出的决定、"
+        + "尚未完成的事项、涉及的具体名字/数字/路径。"
+        + "可以省略：寒暄、重复确认、已经解决的失败尝试。"
+        + "长度控制在 300 字以内，用陈述句写成一段。" },
+      { role: "user", content: "以下是需要压缩的对话：\n\n" + transcript },
+    ],
+  };
+  try {
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), AUTO_COMPACT_TIMEOUT_MS) : null;
+    let out = "";
+    try {
+      // 走专用端点，不走 /v1/chat：后者有 session_id 就落历史，摘要会变成
+      // 用户说过的话。这里要的是"无副作用地问一句、拿一段文本"。
+      const res = await API.summarize(Object.assign({ signal: ctrl ? ctrl.signal : undefined }, payload));
+      out = String((res && res.reply) || "").trim();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!out) return extractiveSummaryOf(msgs);
+    let summary = "【前情摘要】下面是这次对话更早的内容（原文仍在本会话里，可往上翻）：\n" + out;
+    // 摘要自己不能把预算吃光：超了就继续从最早处丢源材料再问一次是浪费，
+    // 直接截断到 1/4 预算更稳——它只是前情，不是原文。
+    const capTokens = Math.max(200, budgetTokens / 4);
+    if (estimateTokens(summary) > capTokens) {
+      const keepChars = Math.max(200, Math.floor(capTokens * 0.8));
+      summary = summary.slice(0, keepChars) + "…";
+    }
+    return summary;
+  } catch (_) {
+    return extractiveSummaryOf(msgs);
+  }
+}
+
+function ensureContextFits() {
+  const cm = currentProvider();
+  if (!cm) return;
+  const sid = pref.sessionId;
+  const persona = pref.persona(sid);
+  const reserve = persona ? estimateTokens(persona) + 4 : 0;
+  const budgetK = contextBudgetK(budgetProviderId());
+  const budgetTokens = Math.max(500, budgetK * 1000 - reserve);
+  const drop = state.contextDropBySession[sid] || 0;
+  const live = state.messages.slice(drop).filter((m) => m.content && !m.transient);
+  const used = live.reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
+  // 没到阈值就不动。阈值用比例而不是绝对值：小预算的模型（16K）和大预算的
+  // （200K）都该在"还剩四分之一"的时候开始压，而不是各自定一个数字。
+  if (used <= budgetTokens * AUTO_COMPACT_RATIO) return;
+  const keep = dropOldestToBudget(live, budgetTokens).droppedCount;
+  if (!keep) return;
+  const moved = state.messages.slice(drop, drop + keep).filter((m) => m.content && !m.transient);
+  if (!moved.length) return;
+
+  // 发送范围立刻收窄——这一步不等网络，用户这一轮马上就不会超限。
+  state.contextDropBySession[sid] = drop + keep;
+  state.contextSummaryBySession = state.contextSummaryBySession || {};
+
+  // 摘要是**异步**补上的：模型要多花一次调用，绝不把发送卡在它身上。
+  // 这就是"先保证不超限，再保证不失忆"——两件事分开做，各自的失败不牵连对方。
+  // 兜底摘要先落位：它确定、免费、不会失败。模型摘要回来后再覆盖。
+  state.contextSummaryBySession[sid] = extractiveSummaryOf(moved);
+
+  // 同一会话同一时刻只允许一个摘要请求在途。renderContextRing 是十余处共用的
+  // 钩子，一轮里会连调十几次；不设闸就是十几次并发的付费调用。
+  if (state.compactingBySession && state.compactingBySession[sid]) return;
+  state.compactingBySession = state.compactingBySession || {};
+  state.compactingBySession[sid] = true;
+  compactWithModel(moved, budgetTokens).then((summary) => {
+    // 只写回还是同一个会话的那一份：期间用户可能已经切走，
+    // 把 A 的前情摘要挂到 B 的头上就是串会话（v0.36.1 那道守卫的同族）。
+    if (summary && pref.sessionId === sid) {
+      state.contextSummaryBySession[sid] = summary;
+    }
+  }).catch(() => { /* 兜底摘要已经在了，这里失败不影响任何东西 */ })
+    .then(() => { state.compactingBySession[sid] = false; });
 }
 
 function outbound() {
@@ -492,6 +632,11 @@ function outbound() {
   const msgs = truncateWithin(
     state.messages.slice(drop).filter((m) => m.content && !m.transient),
     Math.max(500, budgetK * 1000 - reserve));
+  // v0.40 自动压缩：被移出发送范围的那几条，用一段确定性摘要顶在前面，
+  // 于是"少发了历史"和"模型忘了前面"不是同一件事。摘要挂在 persona 之后，
+  // 因为它比角色设定次要、但比本轮新消息更早。
+  const summary = (state.contextSummaryBySession || {})[pref.sessionId];
+  if (summary) msgs.unshift({ role: "system", content: summary });
   if (persona) msgs.unshift({ role: "system", content: persona });
   return msgs;
 }
@@ -517,170 +662,34 @@ function sessionQueueK() {
 }
 
 function renderContextRing() {
-  const btn = $("ctxRingBtn");
-  if (!btn) return;
-  const cm = currentProvider();
-  if (!cm) {
-    // 清单为空/没有可用模型：归零并如实说，不许 retain 上一次的填充——
-    // 把旧账原样画着，等于告诉用户"预算还是刚才那样"，那是假账。
-    btn.style.setProperty("--ctx-pct", "0");
-    btn.style.setProperty("--ctx-color", "var(--accent)");
-    btn.setAttribute("aria-label", "无可用模型，上下文用量暂无从算起");
-    btn.classList.remove("warn", "danger");
-    return;
-  }
-  const { known } = clientContextK();
-  const last = state.lastUsageBySession[pref.sessionId];
-  const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
-  const budget = contextBudgetK(budgetProviderId());
-  const budgetTokens = Math.max(1, budget * 1000);
-  const pct = Math.min(100, used / budgetTokens * 100);
-  const over = used > budgetTokens;
-  const qK = sessionQueueK();
-  // --fv-warn 目前是空头支票（本版没有第三强调色），兜到既有 --danger；
-  // 将来补 warn token 时这里与 style.css 一并生效，不加新色。
-  const color = over ? "var(--danger)"
-    : pct >= 70 ? "var(--fv-warn, var(--danger))" : "var(--accent)";
-  btn.style.setProperty("--ctx-pct", String(pct));
-  btn.style.setProperty("--ctx-color", color);
-  btn.setAttribute("aria-label",
-    `上下文 ${pct.toFixed(1)}%，${Math.round(used / 1000)}K / ${budget}K；待发 +${qK}K`);
-  btn.classList.toggle("warn", pct >= 70 || over);
-  btn.classList.toggle("danger", over);
+  // v0.40 退场占位：上下文环已从界面移除，但 renderContextRing() 仍被
+  // renderMessages / renderModelChip / queueUiRefresh 等十来处当"账本变了"的
+  // 通用钩子调用。直接删函数会让那些调用点抛 ReferenceError，而那些调用点
+  // 分散在消息、队列、模型三条链路里——为一次纯界面退场去改它们，风险远大于
+  // 收益。这里保留同名函数、留一行 no-op，并把新的事（自动压缩）挂在这里，
+  // 因为"发送范围要重算"恰好就是这些调用点在表达的意思。
+  if (typeof ensureContextFits === "function") ensureContextFits();
 }
 
-function renderContextPanel() {
-  const body = $("ctxPanelBody");
-  if (!body) return;
-  // 清空用 removeChild，不用字符串赋值：动态内容全是 createElement + textContent，
-  // 模型名/消息预览都可能是服务端或用户原文，innerHTML 等于给他们开门。
-  while (body.firstChild) body.removeChild(body.firstChild);
-  const cm = currentProvider();
-  if (!cm) {
-    const none = document.createElement("p");
-    none.className = "ctx-note";
-    none.textContent = "还没有可用模型，上下文用量暂无从算起。";
-    body.appendChild(none);
-    return;
-  }
-  const { known, msgs, persona } = clientContextK();
-  const last = state.lastUsageBySession[pref.sessionId];
-  const used = calibrateUsedK(known, last && last.prompt_tokens, last && last.clientK);
-  const budget = contextBudgetK(budgetProviderId());
-  const pct = Math.min(100, used / Math.max(1, budget * 1000) * 100);
-
-  const head = document.createElement("p");
-  head.className = "ctx-head";
-  head.setAttribute("aria-label", "当前模型与用量");
-  head.textContent = `${cm.name} · ${Math.round(used / 1000)}K / ${budget}K（${pct.toFixed(1)}%）`;
-  body.appendChild(head);
-
-  const personaTokens = persona ? estimateTokens(persona) + 4 : 0;
-  const historyTokens = msgs.reduce((n, m) => n + estimateTokens(m.content) + 4, 0);
-  const inputTokens = estimateTokens($("input").value || "");
-  const segs = contextSegments(used, {
-    persona: personaTokens, history: historyTokens, input: inputTokens,
-  });
-  const bar = document.createElement("div");
-  bar.className = "ctx-seg-bar";
-  bar.setAttribute("aria-label", "上下文构成：角色 / 历史 / 输入 / 其余");
-  [["persona", "ctx-seg-persona", segs.parts.persona],
-   ["history", "ctx-seg-history", segs.parts.history],
-   ["input", "ctx-seg-input", segs.parts.input],
-   ["residual", "ctx-seg-residual", segs.parts.residual]].forEach(([label, cls, tokens]) => {
-    const seg = document.createElement("i");
-    seg.className = "ctx-seg " + cls;
-    seg.style.width = Math.max(0, Math.min(100,
-      Number(tokens) / Math.max(1, used) * 100)) + "%";
-    seg.setAttribute("aria-label", `${label} ${Math.round(Number(tokens) / 100) / 10}K`);
-    bar.appendChild(seg);
-  });
-  body.appendChild(bar);
-
-  const legend = document.createElement("p");
-  legend.className = "ctx-note";
-  legend.textContent = "其余 = 系统提示/检索注入/校准差额，客户端不猜服务端注入了什么。";
-  body.appendChild(legend);
-
-  const ledger = document.createElement("p");
-  ledger.className = "ctx-note";
-  ledger.setAttribute("aria-label", "上轮服务端用量");
-  ledger.textContent = last
-    ? `上轮实报 prompt ${Math.round((Number(last.prompt_tokens) || 0) / 1000)}K`
-      + `（当时客户端估 ${Math.round((Number(last.clientK) || 0) / 1000)}K，模型 ${last.providerId || "未知"}）`
-    : "还没收到服务端 usage：当前读数全是客户端估算，首轮回账后自动校准。";
-  body.appendChild(ledger);
-
-  const drop = state.contextDropBySession[pref.sessionId] || 0;
-  const meta = document.createElement("p");
-  meta.className = "ctx-note";
-  meta.textContent = `本轮发送已从最早处切掉 ${drop} 条；待发队列 +${sessionQueueK()}K。历史原文未动。`;
-  body.appendChild(meta);
-
-  const list = document.createElement("div");
-  list.className = "ctx-preview";
-  list.setAttribute("aria-label", "本轮将发送的消息预览");
-  msgs.slice(-6).forEach((m) => {
-    const row = document.createElement("div");
-    row.className = "ctx-preview-row";
-    const role = document.createElement("span");
-    role.className = "ctx-preview-role";
-    role.textContent = m.role === "user" ? "我"
-      : m.role === "assistant" ? "模型" : m.role;
-    const prev = document.createElement("span");
-    prev.className = "ctx-preview-text";
-    prev.textContent = String(m.content || "").slice(0, 40);
-    row.append(role, prev);
-    list.appendChild(row);
-  });
-  if (!msgs.length) {
-    const empty = document.createElement("p");
-    empty.className = "ctx-note";
-    empty.textContent = "本轮没有携带历史消息。";
-    list.appendChild(empty);
-  }
-  body.appendChild(list);
-
-  const range = $("ctxBudgetRange");
-  const cap = Math.max(1, Number(cm.max_context_k) || 64);
-  range.max = String(cap);
-  range.value = String(budget);
-}
-
-function openContextPanel() {
-  renderContextPanel();
-  $("contextPanel").classList.remove("hidden");
-  Layers.open("contextPanel", hideContextPanel);
-}
-
-function closeContextPanel() {
-  Layers.close("contextPanel");
-}
-
-function hideContextPanel() {
-  $("contextPanel").classList.add("hidden");
-}
-
-/* 轻量整理：按当前预算算出要丢几条，累加进 contextDropBySession——
- * outbound 与 clientContextK 都读这一张表，所以省下来的每一 K 都是真不发出去的。
- * 只改这张表，绝不删 state.messages：历史原文是用户资产。 */
-function applyContextTidy() {
-  const cm = currentProvider();
-  if (!cm) return;
-  const { msgs } = clientContextK();
-  const plan = dropOldestToBudget(msgs, contextBudgetK(budgetProviderId()) * 1000);
-  if (!plan.droppedCount) {
-    setStatus("已在预算内，无需整理", false);
-    renderContextPanel();
-    return;
-  }
-  state.contextDropBySession[pref.sessionId] =
-    (state.contextDropBySession[pref.sessionId] || 0) + plan.droppedCount;
-  renderContextPanel();
-  renderContextRing();
-  setStatus(`已从本轮发送移除最早 ${plan.droppedCount} 条：省 ${plan.freedK}K；历史原文未动`, false);
-}
-
+/* ---------------- 上下文界面已整块退场（v0.40） ----------------
+ * 用户点名「上下文长度撤掉」，但同一句话里给了替代口径：
+ * 「对话一长自动压缩，保留数据，保持上下文记忆」。
+ *
+ * 所以退场的是**界面**，不是功能：
+ *   · 环、账本面板、预算滑杆、"轻量整理"/"恢复完整发送"两颗按钮 —— 全删；
+ *   · 预算与截断本身照旧在跑（contextBudgetK / truncateWithin / dropOldestToBudget），
+ *     只是用户再也看不见、也调不动那个数字；
+ *   · 压不下的部分由 ensureContextFits() 在发送前自动处理，并把被移出的
+ *     那几条压成一段摘要挂回 outbound —— 原文一条不删，模型也不失忆。
+ *
+ * 这里删掉的五个函数（renderContextPanel / openContextPanel / closeContextPanel /
+ * hideContextPanel / applyContextTidy）在退场后已无任何调用点；留着只会继续
+ * 引用 ctxPanelBody 这类早已不存在的元素 id，而 app.js 引用不存在的 id
+ * 是"静默打断其后所有事件绑定"的经典故障形状（test_web_pwa 的
+ * test_all_js_element_ids_exist_in_html 判的就是它）。
+ *
+ * renderContextRing() 仍保留（见上），因为它是十余处代码共用的"发送范围要重算"
+ * 钩子；它现在只做一件事：调 ensureContextFits()。 */
 /* ---------------- 接力队列：内存状态机 ----------------
    首版队列只在内存：state.queues[sessionId] = {items, paused, sendingId}。
    不落 localStorage；每标签页一份；切身份由 resetQueuesForIdentity 清空。
@@ -5677,41 +5686,20 @@ function bind() {
       setModelMenu(false);
     }
   });
-  // v0.39.x 驾驶舱环：点环开/收账本（stopPropagation 与芯片同款纪律，防"开完
-  // 立刻被同一次点击的冒泡收掉"）；点面板外任意处收起，走 closeContextPanel
-  // 回 Layers，返回键与历史条目不漂。模型菜单那侧一个字没动：点芯片仍开模型菜单。
-  $("ctxRingBtn").onclick = (e) => {
-    e.stopPropagation();
-    if ($("contextPanel").classList.contains("hidden")) openContextPanel();
-    else closeContextPanel();
-  };
-  document.addEventListener("click", (e) => {
-    const panel = $("contextPanel");
-    if (!panel.classList.contains("hidden") && !panel.contains(e.target)
-        && e.target !== $("ctxRingBtn")) {
-      closeContextPanel();
-    }
-  });
-  $("ctxBudgetRange").oninput = (e) => {
-    const cm = currentProvider();
-    if (!cm) return;
-    setContextBudget(budgetProviderId(), e.target.value);
-    syncCtxRow();            // 账本那行与环都从同一口径重读，不各写各的
-    renderContextPanel();
-  };
+  // v0.40：上下文环与账本整块退场（用户点名「上下文长度不要了」）。
+  // 原来这里挂的是环的开合、面板外的收起、预算滑杆的 oninput 三组监听。
+  // 现在没有环也没有面板，三组监听一并删掉——留着它们只会绑到 null 上报错。
+  // 预算本身仍在：contextBudgetK 照旧按模型夹逼、outbound 照旧按它截断，
+  // 只是用户再也看不见、也调不动那个数字。自动压缩见 ensureContextFits()。
   // 模型卡与清单同在一个容器里（Task 9）：底部那颗是"能力编辑区"的总开关。
   // 管的是当前这张卡；能不能真写得下去，由卡里的 can_edit 与服务端那道门说了算。
   $("modelManageBtn").onclick = () => {
     if (state.modelManage) closeModelManage();
     else openModelManage(state.modelDetailId || budgetProviderId());
   };
-  $("ctxTidyBtn").onclick = applyContextTidy;
-  $("ctxResetBtn").onclick = () => {
-    state.contextDropBySession[pref.sessionId] = 0;
-    renderContextPanel();
-    renderContextRing();
-    setStatus("本轮发送已恢复完整历史：整理只切发送范围，历史原文从未改过", false);
-  };
+  // v0.40：「轻量整理」「恢复完整发送」两颗按钮随账本一起退场。
+  // 它们原本是"手动把最早几条移出发送范围"，现在这件事由 ensureContextFits()
+  // 在每次发送前自动做，用户不必再理解"发送范围"这个概念。
   $("imageInput").onchange = (e) => pickFiles(e.target);
   $("fileInput").onchange = (e) => pickFiles(e.target);
 

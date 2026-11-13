@@ -102,7 +102,8 @@ def test_round9_ime_gear_kept_as_double_safety():
 def test_earlier_rounds_do_not_regress():
     assert "import androidx.compose.runtime.rememberUpdatedState" in VOICE
     assert "if (!enabledRef.value()) return@awaitEachGesture" in VOICE
-    assert "voiceMode || !keyboardUp" in CHAT, "第 8 轮活门控语义原样在位"
+    assert "(voiceMode || input.text.isEmpty())" in CHAT, \
+        "第 8 轮活门控机制原样在位（判据第 19 轮改判：空框归语音、有字归选字）"
     assert "SETTLE_MS" not in VOICE and "const val MAX_SESSION_MS = 60_000L" in VOICE, \
         "第 15 轮改判：松手即收尾，等包闹钟退役，防挂死靠 60s 硬顶"
     # 第 11 轮第四次改判：长按必出菜单；第 15 轮起菜单壳换成系统 PopupMenu（v02314 契约）

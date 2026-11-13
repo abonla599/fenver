@@ -19,6 +19,7 @@ import xyz.fenever.assistant.nativeapp.theme.AiTheme
 import xyz.fenever.assistant.nativeapp.ui.AuthScreen
 import xyz.fenever.assistant.nativeapp.ui.ChatScreen
 import xyz.fenever.assistant.nativeapp.ui.reenterRequested
+import xyz.fenever.assistant.nativeapp.update.Updater
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
@@ -91,6 +92,13 @@ private fun AppRoot() {
         key(bootTick) {
             LaunchedEffect(bootTick) {
                 Prefs.currentEntry()?.let { ReminderStore.setOwner(it.userId) }
+                /* v0.40：更新检查从"用户按的按钮"变成"App 的副作用"。
+                 * 进 App 就问一次：有新版本时设置页「版本」那一行自己长出
+                 * 「发现新版本 vX.Y」，没有就只有一个版本号——用户全程不必去
+                 * 「检查」什么。只在这一屏（已登录）问：登录页没有「关于」那一行
+                 * 可以显示结果，而 baseUrl 也要等本机偏好落定才准。
+                 * 重复调用无害：Updater.offer() 自带 30 分钟闸与"同时在途只许一条"。 */
+                Updater.offer()
             }
             ChatScreen(
                 onRequireAuth = { mode -> authMode = mode; showAuth = true },

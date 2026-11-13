@@ -163,12 +163,16 @@
 
     <!-- 主区 -->
     <main class="main">
-      <!-- 顶栏只有两样：开侧栏，和"我在哪段对话里"。模型选择、角色设定、导出原先
-           挤在这一行，现在都在设置的「当前会话」那一页——未登录时那个模型框还是个
-           空白框，占着首屏最贵的位置却什么都不能说。 -->
+      <!-- 顶栏三样：开侧栏、"我在哪段对话里"、切换模型。
+           模型芯片 v0.40 从输入脚搬到标题右侧：它原先和发送键挤在 .input-foot 里，
+           一条对话里常驻占位，可它其实是很久才动一次的东西。挪走之后输入区只剩
+           「附件 / 提示 / 停止 / 发送」，窄屏不再被模型名挤掉半行。
+           hidden 仍是默认值——模型清单要等 /v1/models 回来才知道有几条，默认可见
+           等于冷启动闪一个空芯片（判据 tests/test_web_pwa.py 的芯片段）。 -->
       <header class="topbar">
         <button class="icon-btn only-mobile" id="openSidebar" aria-label="打开侧栏">☰</button>
         <span class="top-title" id="topTitle">新对话</span>
+        <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
       </header>
 
       <section class="messages" id="messages" aria-live="polite"></section>
@@ -190,15 +194,8 @@
           <div class="input-foot">
             <button type="button" class="icon-btn plus-btn" id="attachBtn" aria-label="添加附件" title="添加附件">＋</button>
             <span class="hint" id="statusHint"></span>
-            <!-- 快速切换模型芯片：点开就是可用模型清单，选一个立刻生效并同步
-                 服务端「我的默认」。hidden 是默认值——模型清单要等 /v1/models
-                 回来才知道有几条，默认可见等于冷启动闪一个空芯片。
-                 v0.39.x 驾驶舱：芯片外面包一层 cockpit，环（用量+账本入口）排到
-                 芯片前——点环开账本，点芯片仍开模型菜单，两套控件不各建一份。 -->
-            <span class="model-cockpit" id="modelCockpit">
-              <button type="button" id="ctxRingBtn" class="ctx-ring-btn" aria-label="上下文用量"></button>
-              <button type="button" class="model-chip hidden" id="modelChip" aria-label="切换模型" title="切换模型"><span class="chip-name" id="modelChipName"></span><span class="chip-caret">⌄</span></button>
-            </span>
+            <!-- 模型芯片已搬到顶栏（见上）。这里只剩停止与发送：输入脚是窄屏上
+                 最贵的一行，只放每轮都要按的东西。 -->
             <button type="button" class="btn hidden" id="stopBtn">停止</button>
             <button type="submit" class="btn btn-send" id="sendBtn" aria-label="发送">↑</button>
           </div>
@@ -236,25 +233,12 @@
           <button type="button" class="fv-btn mm-manage-btn" id="modelManageBtn">模型管理</button>
         </div>
 
-        <!-- v0.39.x 驾驶舱账本：点上下文环展开。动态内容一律由 app.js 用
-             createElement/textContent 落进 #ctxPanelBody（模型名/消息预览都是
-             服务端或用户文本，不拼 innerHTML）；滑杆与两颗按钮是静态骨架。
-             层开合走 Layers，与模型弹单同一套返回键纪律。 -->
-        <div class="context-panel hidden" id="contextPanel" role="dialog" aria-label="上下文账本">
-          <div id="ctxPanelBody"></div>
-          <!-- Task 9：设置页那行「上下文长度」迁到这里。预算读数（8/64k）与滑杆同一行，
-               刻度只有 k 这一套（「条」那套第二刻度早于本版就拆了，不许回来）；模型卡上
-               那只预算滑杆读的是同一份按模型存的 map（contextBudgetK/setContextBudget），
-               两处不各存一份真相。 -->
-          <div class="set-row ctx-budget-row">
-            <span class="set-lbl">本会话预算</span>
-            <span class="set-val"><b id="ctxVal">8</b>/<span id="ctxCap">64</span>k
-              <input type="range" id="ctxBudgetRange" min="1" max="64" step="1" value="8" aria-label="本模型上下文预算（k），上限随所选模型"></span></div>
-          <div class="ctx-panel-actions">
-            <button type="button" class="fv-btn" id="ctxTidyBtn">轻量整理</button>
-            <button type="button" class="fv-btn" id="ctxResetBtn">恢复完整发送</button>
-          </div>
-        </div>
+        <!-- v0.40：上下文账本整块退场（用户点名「上下文长度不要了」）。
+             原来是环 + 面板 + 预算滑杆 + 两颗整理按钮，用户得先理解"预算/发送范围/
+             轻量整理"三个概念才能用。现在这件事收进 app.js 的 ensureContextFits()：
+             对话长到接近当前模型上限就自动把最早几条移出发送范围，并压成一段摘要
+             挂回去——原文一条不删，往上翻仍是全文。用户不再需要看见这个数字。
+             预算与截断的底层机制照旧在跑，只是不再是可调的界面。 -->
 
         <!-- 三个独立的 input，各自限定类型，避免系统弹出无关选项。
              accept 与后端 app/core/uploads.py 的白名单一一对应：列在这里的一定能传成功。 -->

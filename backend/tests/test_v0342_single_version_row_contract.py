@@ -1,24 +1,38 @@
-"""原生「设置 → 关于 → 版本」行：一个号码 + 「检查更新」胶囊（方案 B）。
+"""原生「设置 → 关于 → 版本」行：平时只有一个号码，有新版才多一颗「发现新版本」。
 
 判什么
 ------
-常驻的版本值只许有一个号码——这台设备上真装的那一版（BuildConfig.VERSION_NAME，
-由 android-native/app/build.gradle 烘进包）。独立的「检查更新」行已删除：检查入口
-是版本行值槽里的一颗胶囊，更新各态全部走带标签的瞬态面——检查中/已是最新/失败走
-顶部 note，发现新版弹 UpdateAvailableDialog，下载/安装沿用既有两张弹层。常驻列表
-永不保留第二个号：通道号在回滚后可能比已装版更旧，服务端号装不到手机上，两个号
-不带标签并排摆正是让用户读错的形状。禁止字符串那一族是这条指令的机制，不是装饰。
+2026-11 用户改的交互口径（原话）：「这个版本号旁边的检查更新按钮，我想要实现的效果
+就是当如果有新版本的时候，然后这个按钮才会弹出来，如果没有新版本的话，就没有检查
+更新这个按钮，就只是显示版本号……就改成发现新版本这个按钮，然后点击就可以下载新版本了。」
 
-「已是最新」不带号：旧文案报的是**通道**版本（`已是最新版本 v${d.version}`），
-通道回滚到比已装更旧时它会显示一个比版本行更小的号——那一形已判死，见
-test_the_up_to_date_note_carries_no_version。
+于是这一行有三条硬要求，本文件逐条钉住：
+
+A. **常驻只有一个号码**：这台设备上真装的那一版（BuildConfig.VERSION_NAME，由
+   android-native/app/build.gradle 烘进包）。通道号在回滚后可能比已装版更旧，服务端号
+   装不到手机上——两个号不带标签并排摆正是让人读成「这一版我能装」的形状。禁止字符串
+   那一族是这条指令的机制，不是装饰。
+B. **没有「检查更新」这颗常驻胶囊**：检查不再是用户要按的动作，而是进设置页时静默
+   发生一次（Updater.offer，带 30 分钟缓存闸）。那一行在没新版时什么都不多显示，
+   也就不会有「已是最新版本」这类噪音提示——用户点名不要。
+C. **有新版本才露出「发现新版本 vX.Y」**，且全页只有这一处报可安装的是哪一版；
+   点它一步进下载（Updater.attemptDownload），不再分「先检查再更新」两步。
+
+为什么新口径比旧口径更对（不是「用户改主意了」就算了）
+------------------------------------------------------
+旧口径（版本行里一颗常驻「检查更新」胶囊 + 查到 AVAILABLE 时弹一次性邀约弹层）有两个
+结构性问题：① 那颗胶囊在绝大多数时间里是**无效入口**——没有新版时点它只会换来一句
+「已是最新版本」的顶部提示，而那正是用户点名要删的噪音；② 可安装版本被报在**弹层**里，
+弹层一划掉就再也找不回来，用户只能再点一次胶囊。新口径把「有没有新版」这个事实从一个
+动作的结果，变成行本身的状态：有就有按钮，没有就只有号码；按钮同时是「可安装的是哪
+一版」的唯一出处，点下去直接下载。判据的形状也跟着从「常驻胶囊的字面文案」变成
+「按钮的挂载条件 + 号码只在按钮里 + 点击一步进下载」，比旧口径更难被悄悄改坏。
 
 射程（实测范围，不是全覆盖宣称）
 --------------------------------
-本锁读剥注释源码（_code），把版本行切片里 `Updater.startCheck(` 之前的部分当
-「常驻渲染段」（valSlot 的组合内容），判：第二个值槽 / 裸 Text / 字面号码 /
-字符串插值 / contentDescription / semantics / AnnotatedString / 读通道决定。
-仍漏（与 web 侧 #334 同族，如实登记）：
+本锁读剥注释源码（_code），把版本行切片里 `Updater.attemptDownload(` 之前的部分当
+「常驻渲染段」（valSlot 的组合内容），判：第二个值槽 / 裸 Text / 字面号码 / 字符串插值 /
+contentDescription / semantics / AnnotatedString。仍漏（与 web 侧 #334 同族，如实登记）：
 - 别名/间接层：号码经另一个变量或别处定义的 Modifier 扩展进入渲染段，文本判据看不见；
 - 组件内部：SetValText/SetMini/FenverRow 自身定义里若加 contentDescription 或拼接，
   不在本文件切片内（它们住在 FenverComponents.kt，本锁不读那份）；
@@ -28,7 +42,26 @@ test_the_up_to_date_note_carries_no_version。
 所以这里不写「第二个号已不可能出现」，只写上面这些形状会被咬住。
 
 语料用 `_code()`（剥注释那把尺子，住在 test_apk_release_discipline.py）：
-说明注释里原样写着旧文案，判"某串不存在"的条目读原文会假红，读剥掉注释的不会。
+说明注释里原样写着旧文案，判「某串不存在」的条目读原文会假红，读剥掉注释的不会。
+
+口径变更的账（旧锁 → 新锁，逐条交代为什么不是「删断言了事」）
+--------------------------------------------------------------
+1. `test_the_checking_state_says_so_without_a_number` → 删除并替换为
+   `test_the_checking_chip_is_gone`。旧锁钉的是常驻胶囊的「正在检查更新…」禁用态；
+   新口径里**没有检查态**，静默检查不许驱动任何一帧（Updater.asking 刻意不是 Compose
+   状态）。静态锁没有对象了，判据改钉「那两颗旧胶囊字面量一个字都不许回来」。
+2. `test_the_up_to_date_note_carries_no_version` → 转强。不是「不带号」，而是**连这句
+   都不许有**（用户点名不要这噪音）。见 `test_no_up_to_date_banner_and_no_failure_banner_by_default`。
+3. `test_the_offer_dialog_labels_the_number_and_only_offers_download` → 转写为
+   `test_the_offer_button_labels_the_number_and_starts_the_download`。旧锁要求号码在
+   弹层标题、弹层不许调检查；新口径号码在按钮文字里、点击一步进下载。「只有一个号码
+   出口」的意图没降：旧弹层被删掉（UpdateUi.kt 里不许再有第二处报号）。
+4. `test_the_failure_note_names_the_reason_without_a_number` → 收紧成
+   `test_the_download_path_reports_human_reasons` + 上面第 2 条里的一半：失败文案的
+   载体从「检查失败的顶部 note」变成「点按钮之后才可能出现的 note」，且静默那一路
+   没有任何回调可挂。
+5. 新增 `test_the_silent_check_runs_once_per_visit_and_is_cached`：把「不许每次开设置
+   都打网络」钉成可数的事实（30 分钟闸 + 全仓恰好一个 offer() 调用点 + 它不在按钮里）。
 """
 import re
 import sys
@@ -41,11 +74,16 @@ from tests.test_schedule_ui_contract import _native                   # noqa: E4
 
 REPO = Path(__file__).resolve().parents[2]
 
-# 行首字形是 FenverIcon 枚举报（v0.36.1 图标语言批起）。UPDATE_ROW 保留为
-# 「必须消失」的锚点：方案 B 删掉了独立的检查更新行，它再出现就是第二个常驻面。
+# 行首字形是 FenverIcon 枚举报（v0.36.1 图标语言批起）。
 VERSION_ROW = 'SetRow(FenverIcon.Info, "版本"'
+# 三条「必须消失」的锚点：独立行、旧常驻胶囊、旧邀约弹层都是旧口径的入口。
 UPDATE_ROW = 'SetRow(FenverIcon.Refresh, "检查更新"'
+UPDATE_CHIP = 'SetMini(if (Updater.checking)'
+OLD_DIALOG = 'UpdateAvailableDialog('
 NEXT_ROW = 'SetRow(FenverIcon.Mail, "意见反馈"'
+# 新口径的按钮：文字里带版本号（号码只出现在这一颗带标签的按钮里），点击一步进下载。
+OFFER_CHIP = 'SetMini("发现新版本 " + Updater.available.orEmpty()'
+OFFER_CLICK = 'Updater.attemptDownload(appCtx)'
 
 # 禁止字符串那一族：第二个号的来源与拼装手法。条数与集合各钉一道（独立手抄，
 # 不是 len() 派生）——砍味或换味都必红，见 test_the_forbidden_list_keeps_its_full_length。
@@ -66,20 +104,29 @@ def _update_ui() -> str:
     return _code(_native("nativeapp/ui/UpdateUi.kt"))
 
 
+def _updater() -> str:
+    return _code(_native("nativeapp/update/Updater.kt"))
+
+
 def _slice(text: str, start: str, stop: str) -> str:
     at = text.index(start)
     return text[at:text.index(stop, at)]
 
 
-def _persistent_row(ui: str) -> str:
-    """版本行的常驻渲染段：锚点起、到检查动作（startCheck）之前。
+def _row(ui: str) -> str:
+    """版本行整段（锚点起、到「意见反馈」之前）——只给「整段里恰好一处」那几条用。"""
+    return _slice(ui, VERSION_ROW, NEXT_ROW)
 
-    胶囊 onClick 里的回调是瞬态动作（note/弹窗），不是常驻显示；它的文案另由
-    五态判据钉。切在 startCheck 是因为回调体必然跟在它后面——这是文本近似，
-    不是控制流分析，射程见模块 docstring。
+
+def _persistent_row(ui: str) -> str:
+    """版本行的常驻渲染段：锚点起、到点击动作（attemptDownload）之前。
+
+    切在 attemptDownload 是因为回调体必然跟在它后面；那段 lambda 是被点出来的
+    瞬态动作（下载/一句人话），不是常驻显示。这是文本近似，不是控制流分析，
+    射程见模块 docstring。
     """
-    ver = _slice(ui, VERSION_ROW, NEXT_ROW)
-    return ver[:ver.index("Updater.startCheck(")]
+    ver = _row(ui)
+    return ver[:ver.index(OFFER_CLICK)]
 
 
 def _version_row_problems(ui: str) -> list[str]:
@@ -92,10 +139,10 @@ def _version_row_problems(ui: str) -> list[str]:
         return ["anchor-version"]
     if ui.count(NEXT_ROW) != 1:
         return ["anchor-next"]
-    ver = _slice(ui, VERSION_ROW, NEXT_ROW)
-    if "Updater.startCheck(" not in ver:
+    ver = _row(ui)
+    if OFFER_CLICK not in ver:
         return ["no-trigger"]
-    persist = ver[:ver.index("Updater.startCheck(")]
+    persist = ver[:ver.index(OFFER_CLICK)]
     if persist.count("SetValText(") != 1 or "SetValText(shellVer)" not in persist:
         problems.append("value-slot")
     for flavor in FORBIDDEN:
@@ -121,9 +168,11 @@ def test_the_corpus_is_the_real_settings_screen():
     assert ui.count(VERSION_ROW) == 1, "「版本」那一行不再是恰好一处（改名/复制都会让切片失真）"
     assert ui.count(NEXT_ROW) == 1, "「意见反馈」锚点不再是恰好一处"
     assert ui.count(UPDATE_ROW) == 0, \
-        "独立的「检查更新」行又回来了——方案 B 把它删了，检查入口是版本行里的胶囊"
-    ver = _slice(ui, VERSION_ROW, NEXT_ROW)
-    assert len(ver) > 200, f"「版本」那一行的切片短得不像话：{ver!r}"
+        "独立的「检查更新」行又回来了——它删掉之后检查是静默副作用，不是一行"
+    assert UPDATE_CHIP not in _row(ui), \
+        "旧口径那颗常驻「检查更新」胶囊回来了（它同时是「检查中」禁用态的唯一出处）"
+    assert OFFER_CHIP in _row(ui), "新口径那颗「发现新版本」按钮不在版本行里"
+    assert len(_row(ui)) > 200, f"「版本」那一行的切片短得不像话：{_row(ui)!r}"
 
 
 def test_the_version_row_shows_the_shell_version_alone():
@@ -137,26 +186,11 @@ def test_the_version_row_shows_the_shell_version_alone():
 
 
 def test_the_second_number_has_no_source_left_on_the_settings_page():
-    """整份文件里第二个号的来源一并没了：留着"拉来不用"等于白跑一次网络还留着坑。"""
+    """整份文件里第二个号的来源一并没了：留着「拉来不用」等于白跑一次网络还留着坑。"""
     ui = _ui()
     assert "serverBuild" not in ui, "serverBuild 那份状态还在（值不许显示，来源也不该留着）"
     assert "Api.health" not in ui, "设置页还在拉 /health 的 build"
     assert "versionVal" not in ui, "两号相加那个中间变量还在，说明拼接的逻辑没走远"
-
-
-def test_the_update_row_still_names_the_installable_version():
-    """「检查更新」那一行已删，但可安装版本仍必须被报出来——现在由带标签的弹层报。
-
-    用例名保留旧台账条目：守的意图仍是「可安装版本有出口、检查动作有人点」，
-    不是行的形状。三条文案锁迁往新载体：已是最新→note（不带号）、发现新版→
-    UpdateAvailableDialog 标题、触发动作→版本行胶囊 onClick。
-    """
-    ui = _ui()
-    ver = _slice(ui, VERSION_ROW, NEXT_ROW)
-    assert "Updater.startCheck(" in ver, "检查动作不再在版本行（胶囊）里"
-    assert 'onNote("已是最新版本", false)' in ui, "「已是最新」不再走顶部 note"
-    upd = _update_ui()
-    assert "发现新版本 v$version" in upd, "发现新版弹层不再报可安装的那一版"
 
 
 def test_the_server_build_field_is_still_served():
@@ -174,47 +208,125 @@ def test_the_native_health_client_is_untouched():
     assert 'suspend fun health(): JsonObject' in api, "Api.health() 被删了"
     assert 'call("/health")' in api, "Api.health() 不再打 /health"
 
-
-# ---------- 五态各一格：号码只许出现在带标签的瞬态里 ----------
-
-
-def test_the_checking_state_says_so_without_a_number():
-    """检查中：胶囊文字换成「正在检查更新…」并禁用，不带任何号码。"""
-    persist = _persistent_row(_ui())
-    assert 'SetMini(if (Updater.checking) "正在检查更新…" else "检查更新"' in persist, \
-        "检查中态不再是胶囊文字（或文案漂了）"
-    assert "enabled = !Updater.checking" in persist, "检查中胶囊不再禁用：连点会叠检查"
+# ---------- 新口径的状态机：静默检查 / 有新版本才露按钮 / 一点就下载 ----------
 
 
-def test_the_up_to_date_note_carries_no_version():
-    """已是最新：note 不带号。旧文案报的是通道版本，通道回滚时会比版本行更小。"""
+def test_the_checking_chip_is_gone():
+    """B 的前半：常驻胶囊与它的「检查中」态一起退场。
+
+    「检查中」是一帧中间态，而新口径要求这一行**一挂出来就是终态**（只有一个号，或
+    版本号 + 发现新版本）。旧锁 test_the_checking_state_says_so_without_a_number 钉的是
+    那颗胶囊的文案与禁用位；胶囊没有对象了，于是替换成这一条——判据从「文案对不对」
+    变成「那颗胶囊（含它的检查中分支）一个字都不许留」，同样可数、同样会咬人。
+    """
     ui = _ui()
-    assert 'onNote("已是最新版本", false)' in ui, "「已是最新」note 不在或形状漂了"
-    assert "已是最新版本 v" not in ui, \
-        "带号的「已是最新版本 v…」回来了——通道回滚时它会显示一个比已装版更小的号"
+    assert UPDATE_CHIP not in ui, "「正在检查更新…/检查更新」那颗常驻胶囊回来了：检查又变成用户要按的动作"
+    assert "正在检查更新" not in ui, "「正在检查更新…」这句回来了：这一行会出现检查中那一帧"
+    assert "startCheck" not in ui + _updater(), \
+        "startCheck 这个名字还在：检查入口必须只剩静默的 Updater.offer()"
+    # 正对照：扫的确实是这两份文件（写错路径时「没命中」和「守住了」长得一样）
+    assert "SetValText(shellVer)" in ui and "object Updater" in _updater()
 
 
-def test_the_offer_dialog_labels_the_number_and_only_offers_download():
-    """发现新版：号码只在带标签的瞬态弹层标题里；弹层只暴露下载，不再检查。"""
+def test_the_silent_check_runs_once_per_visit_and_is_cached():
+    """B 的后半：检查在进设置页时静默发生一次，且不许每次都打网络。
+
+    三条一起钉，缺一条这个「静默」就会变成另一种噪音：
+    ① 唯一的触发点是一次性副作用（LaunchedEffect(Unit) 里调 Updater.offer()），
+       不是按钮、不在 SetRow 的动作槽里——否则它又变成用户要按的东西；
+    ② Updater 侧有 30 分钟缓存闸（REFRESH_MS），反复进出设置不重复打网络；
+    ③ 检查态不进 Compose 状态：asking 是 @Volatile 而不是 mutableStateOf，
+       这样它不可能让「版本」值槽先画一帧「检查中」再跳（抖动）。
+    """
+    ui = _ui()
+    up = _updater()
+    assert ui.count("Updater.offer()") == 1, \
+        f"静默检查的调用点不是恰好一处（现在 {ui.count('Updater.offer()')} 处）"
+    at = ui.index("Updater.offer()")
+    window = ui[max(0, at - 900):at]
+    assert "LaunchedEffect(Unit)" in window, \
+        "静默检查不在 LaunchedEffect(Unit) 的一次性副作用里：重进设置会再来一遍"
+    block = window[window.rindex("LaunchedEffect"):]
+    assert "SetRow" not in block, \
+        "静默检查落进了某一行（SetRow）的动作槽：那它就是被点出来的，不是静默的"
+    assert "private const val REFRESH_MS = 30L * 60L * 1000L" in up, \
+        "静默检查没有 30 分钟缓存闸：每次开设置都会打一趟网络"
+    assert "if (asking || now - lastAskAt < REFRESH_MS) return" in up, \
+        "在途守卫与缓存闸不再一起挡在 offer() 的第一行"
+    assert "var asking by mutableStateOf(false)" not in up, \
+        "asking 变成了 Compose 状态：它一旦驱动重组，「版本」那一行就会先画一帧检查中"
+    assert "@Volatile private var asking = false" in up, "asking 不再是纯线程标记"
+    # 没新版 / 没问到 时 available 必须归 null：按钮的唯一挂载条件就是它非空
+    assert "available = if (d.kind == ReleasePlan.Kind.AVAILABLE) d.version else null" in up, \
+        "available 不再只在 AVAILABLE 时才有值：没新版时按钮也会露出来"
+
+
+def test_no_up_to_date_banner_and_no_failure_banner_by_default():
+    """用户点名要删的噪音：没有新版时不许多说一个字，检查失败也不许常驻。
+
+    旧锁 test_the_up_to_date_note_carries_no_version 守的是「已是最新版本」不带号；
+    新口径更进一步——这句根本不该出现（用户：「如果没有新版本的话，就没有检查更新
+    这个按钮，就只是显示版本号」）。失败态同理：静默那一路一个字都不说，
+    只有人主动点了按钮才可能看到理由，而且理由由 Updater 交回来，不是设置页自己弹。
+    """
+    ui = _ui()
+    up = _updater()
+    assert "已是最新版本" not in ui, \
+        "「已是最新版本」这句回来了：没新版时用户只想看到版本号，不要这个顶部提示"
+    assert "检查更新失败" not in ui, "设置页还在自己拼「检查更新失败：…」：失败态又常驻了"
+    # 静默那一路：offer() 的回包只落状态，不回调、不报错
+    offer = _slice(up, "fun offer()", "fun attemptDownload(")
+    assert "onDone" not in offer, "静默检查带上了回调：它有了一条能弹提示的路"
+    assert "decision = d" in offer and "available = if" in offer, "静默检查的回包没落进状态"
+    # 人主动点按钮那一路才允许说话，且话是 Updater 给的（不是设置页的第二种文案）
+    assert "Updater.attemptDownload(appCtx) { err -> err?.let { onNote(it, true) } }" in ui, \
+        "点按钮之后没有把失败理由交给顶部 note：下载中途断掉会变成一声不响"
+
+
+def test_the_offer_button_labels_the_number_and_starts_the_download():
+    """C：号码只在那一颗带标签的按钮里；点它一步进下载，不再有第二步确认。
+
+    旧锁 test_the_offer_dialog_labels_the_number_and_only_offers_download 守的是弹层
+    标题里的「发现新版本 v版本号」；载体换成按钮之后，守的东西一样不少：
+    ① 文字里带「发现新版本」标签（号码不带标签就会被读成一个常驻版本号）；
+    ② 号码来自 Updater.available（全页唯一一处可安装版本的真相）；
+    ③ 点击直接 attemptDownload —— 不许再出现「先检查、再点一次才下载」的两步形状；
+    ④ 旧的一次性邀约弹层连同它的旗标一起退场（留着就是第二处报号的出口）。
+    """
     ui = _ui()
     upd = _update_ui()
-    assert "fun UpdateAvailableDialog(version: String" in upd, "发现新版弹层不在了"
-    assert 'Text("发现新版本 v$version"' in upd, "弹层标题不再带标签报号（或改成了手写号）"
-    assert 'FenverButton("稍后"' in upd and 'FenverButton("立即更新"' in upd, \
-        "弹层的两颗按钮（稍后/立即更新）不齐"
-    assert "Updater.startCheck(" not in upd, \
-        "更新弹层里又调了 startCheck——全树恰好一处的纪律会被打破（检查入口只有胶囊）"
-    # 挂载是瞬态的：待弹旗标非空才挂，消费（更新/稍后）即清
-    assert "var offerUpdate by remember { mutableStateOf<ReleasePlan.Decision?>(null) }" in ui, \
-        "待弹旗标不在了（重组会反复弹，或弹层失去一次性）"
-    assert "offerUpdate?.let" in ui and "UpdateAvailableDialog(" in ui, "弹层没有挂在待弹旗标后面"
-    assert ui.count("offerUpdate = null") >= 2, "消费后不清旗标：弹层会赖着或反复弹"
+    assert OFFER_CHIP in ui, "「发现新版本」按钮不再带标签报出可安装的那一版"
+    assert "if (Updater.available != null) {" in ui, \
+        "按钮不再以 available 非空为挂载条件：没新版时会露出一颗置灰的空胶囊"
+    # 挂载条件必须写在 if 上而不是 enabled 上：SetMini 总会画，只是置灰——
+    # 用 enabled 当开关，没有新版时那一行就会多出一颗点不动的「发现新版本 」
+    assert "enabled = Updater.available != null" not in ui, \
+        "按钮又用 enabled 当开关了：没新版时它会以置灰形态常驻在版本行里"
+    assert OFFER_CLICK in ui, "点「发现新版本」没有一步进下载"
+    assert "Updater.startCheck(" not in ui and "Updater.startCheck(" not in upd, \
+        "更新这条路里又出现了「先检查」那一拍：两步形状回来了"
+    # 全页只有这一处报可安装的版本号
+    assert "发现新版本" not in upd, "UpdateUi.kt 里又出现「发现新版本」：第二处报号出口"
+    assert OLD_DIALOG not in ui and OLD_DIALOG not in upd, "旧的一次性邀约弹层还在"
+    assert "offerUpdate" not in ui, "旧的待弹旗标还在：它会让弹层与按钮同时成为报号出口"
+    assert "fun UpdateAvailableDialog(" not in upd, "旧邀约弹层函数没删干净"
 
 
-def test_the_failure_note_names_the_reason_without_a_number():
-    """失败：note 只插原因，不插版本号。"""
-    ui = _ui()
-    assert 'onNote("检查更新失败：$err", true)' in ui, "失败态不再走带原因的 note"
+def test_the_download_path_reports_human_reasons():
+    """点下去直接就下载，所以中途失败的**那唯一一句话**必须是人话。
+
+    旧链路里失败发生在用户明确的第二步（「立即更新」）上；新链路里它是「我点了那颗
+    按钮」的唯一后果，屏幕上没有第二句解释可以兜底。这里钉：① 断网 / 服务端忙 /
+    校验不过各有各的说法；② 什么都不说就 return 的静默失败路径全部消失。
+    """
+    up = _updater()
+    assert "fun attemptDownload(app: Context, onDone: (String?) -> Unit)" in up, \
+        "一步下载的入口（attemptDownload）不在了"
+    for human in ("网络断了", "更新服务这边正忙", "对不上", "已经是最新版本了"):
+        assert human in up, f"下载失败链路上少了这句人话：{human}"
+    assert "还没问到这一版能不能装" in up, \
+        "手里没有决定时静默 return 了：会留下一颗点了没反应的按钮"
+    assert "friendlyDownloadError" in up, "失败理由不再经人话翻译就上屏"
 
 
 def test_the_download_and_install_sheets_still_mount():
@@ -252,8 +364,8 @@ def _inject(ui: str, needle: str, extra: str) -> str:
 def test_the_single_number_predicate_bites_a_second_number():
     """反向锁：往常驻版本行注入第二个号的自然形状，谓词必须报得出。
 
-    每一味对应一种真会发生的写法（第二值槽/无障碍属性/条件追加/手写号/插值/
-    语义位/富文本/裸 Text）。合成语料直接喂给与正向锁同一个谓词。
+    每一味对应一种真会发生的写法（第二值槽 / 无障碍属性 / 条件追加 / 手写号 /
+    插值 / 语义位 / 富文本 / 裸 Text）。合成语料直接喂给与正向锁同一个谓词。
     """
     ui = _ui()
     assert not _version_row_problems(ui), "正对照失败：真源码本身就有问题"
@@ -270,7 +382,11 @@ def test_the_single_number_predicate_bites_a_second_number():
          {"value-slot", "channel-read"}),
         ("literal-number", _inject(ui, anchor, '\n        SetValText("v0.39.2")'),
          {"value-slot", "literal-number"}),
-        ("interpolation", ui.replace('"检查更新"', '"检查更新 ${Updater.decision?.version}"', 1),
+        # 插值那一味用 decision 而不是 available：available 本来就在常驻段里（它是那颗
+        # 按钮的挂载条件），拿它当违例会把真源码判红。第二个号经插值上屏时，掐它的
+        # 仍然是「字符串里不许有 $」+「不许读通道决定」这两条。
+        ("interpolation", ui.replace('SetMini("发现新版本 " + Updater.available.orEmpty()',
+                                     'SetMini("发现新版本 ${Updater.decision?.version}")', 1),
          {"interpolation", "channel-read"}),
         ("semantics-empty", _inject(ui, anchor, '\n        Modifier.semantics { }'),
          {"attr:semantics"}),

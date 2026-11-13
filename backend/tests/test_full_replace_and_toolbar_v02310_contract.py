@@ -12,8 +12,9 @@
    会掐死录音中的 pointerInput）；
 ② 默认工具条回归（第四次改判）：NoopTextToolbar 空壳整块退役，键盘起着时长按
    输入框出系统复制/粘贴/全选；防「点一下冒气泡」改由「键盘没起不挂框」承担；
-③ 键盘态门控不回退：enabled 仍吃 rememberUpdatedState + voiceMode || !keyboardUp
-   ——键盘起着长按归文本选择，语音不触发（v0.23.9 真机已验证此条成立）；
+③ 活门控不回退：enabled 仍吃 rememberUpdatedState；判据第 19 轮改判
+   （小米真机：同意过麦克风，长按输入框仍收不到声音）——空文本框长按归语音，
+   有字才归文本选择。让键盘那一半被真机证伪，见各契约文件里的改判注释；
 ④ 第 3~10 轮判据不回退（不挂框闸门、短按转发、SETTLE_MS、stashIme 双保险、
    坐标差检测、点名开麦/换引擎）。
 """
@@ -55,9 +56,10 @@ def test_default_text_toolbar_restored_round11():
 
 
 def test_keyboard_up_longpress_goes_to_selection_not_voice():
-    assert "voiceMode || !keyboardUp" in CHAT and \
+    # 第 19 轮改判：活门控（rememberUpdatedState）原样在位，判据换成「文本框空不空」。
+    assert "(voiceMode || input.text.isEmpty())" in CHAT and \
         re.search(r"val enabledRef = rememberUpdatedState\(enabled\)", VOICE), \
-        "键盘起着长按归文本选择（系统菜单）、语音不触发：活门控原样在位"
+        "空文本框长按归语音、有字归文本选择（系统菜单）：活门控原样在位"
     assert "down.consume()" in VOICE, "键盘没起时按下仍被语音闸门源头吃掉"
 
 

@@ -261,31 +261,44 @@ def test_install_intent_and_its_permission_arrive_together():
                                 else "Updater 里没有起安装页的那一句，或那个 MIME 不再是安装包"))
 
 
-def test_only_a_user_action_can_start_an_update_check():
-    """「不点检查更新就不会替你下载/安装」这句承诺在原生侧的下半段：那条链没有自动触发。
+def test_only_a_user_action_can_start_an_update_download():
+    """「没有人点，就不会替你下载/安装」这句承诺在原生侧的下半段：下载链没有自动触发。
 
-    判据是"可数"而不是"看着像"：全模块的 `Updater.startCheck(` 调用点恰好一处，且那一处
-    在设置行（SetRow）的动作槽里——那是人点出来的。今天多一处"顺手在 LaunchedEffect 里
-    查一下"，这句话就变成谎，而且没人会报错：GitHub 那个接口按来源 IP 限 60 次/小时，
-    自动化的第一个代价是把配额自己烧光；而这一条与网页那张底部卡片不冲突——卡片每天
-    自动问一次的是**服务端**只读端点，下载与安装仍然必须有人点。
+    2026-11 口径变了（用户：「有新版才露出按钮，点它就可以下载」）：**检查**从一个人要
+    按的动作变成了进设置页时的静默副作用（Updater.offer，带 30 分钟缓存闸），而**下载
+    与安装仍然必须有人点那颗「发现新版本」**——这条承诺一字未改，判据跟着抓它的新载体：
 
-    正对照同样钉死：`Updater.checking` 在原生里出现多次，说明扫到了文件；调用点数为 0
-    意味着这条链整个消失（那也该红，因为发版后就没人能点）。
+    ① 全模块 `Updater.attemptDownload(` 的调用点恰好一处，且那一处就在「版本」那一行的
+       值槽里（SetMini 的 onClick），不是 LaunchedEffect 之类的自动路径；
+    ② `Updater.startDownload(` 在设置页与 Updater 之外没有任何调用点——否则就有人绕过
+       那颗按钮自己开下载；
+    ③ 静默检查那一路（Updater.offer）不许回调任何"开始下载"的入口：写死这一条是因为
+       "检查完顺手开始下载"正是承诺最容易破的地方，而破了没人会报错。
+
+    正对照同样钉死：调用点数为 0 意味着这条链整个消失（发版后就没人能装新版）。
     """
-    hits = []
+    hits, downloads = [], []
     for path in KT:
         body = _code(path)
-        for m in re.finditer(r"Updater\.startCheck\s*\(", body):
+        if re.search(r"Updater\.attemptDownload\s*\(", body):
             hits.append(path)
+        if re.search(r"Updater\.startDownload\s*\(", body):
+            downloads.append(path)
     assert len(hits) == 1, (
-        f"Updater.startCheck 的调用点不是恰好一处（现在 {len(hits)} 处："
-        f"{[p.name for p in hits]}）——多出来的那一处就是「不点也会检查更新」")
+        f"Updater.attemptDownload 的调用点不是恰好一处（现在 {len(hits)} 处："
+        f"{[p.name for p in hits]}）——多出来的那一处就是「不点也会下载」")
+    assert not downloads, (
+        f"Updater.startDownload 被这些文件直接调用了：{[p.name for p in downloads]}——"
+        "下载的唯一入口必须是那颗「发现新版本」按钮（走 attemptDownload）")
     row = _code(SETTINGS_UI_KT)
-    at = row.index("Updater.startCheck(")
-    window = row[max(0, row.rindex("\n", 0, at - 1200)):at]
-    assert "SetRow" in window or "return@SetRow" in window, \
-        "唯一的调用点不在设置行的动作槽里：那它跟着界面一起自己跑"
+    at = row.index("Updater.attemptDownload(")
+    window = row[max(0, at - 600):at]
+    assert "SetMini(" in window and "onClick = {" in window, \
+        "唯一的下载调用点不在按钮的点击槽里：那它跟着界面一起自己跑"
+    upward = _code(UPDATER_KT)
+    offer = upward[upward.index("fun offer()"):upward.index("fun attemptDownload(")]
+    assert "startDownload" not in offer, \
+        "静默检查那一路自己开了下载：「没人点就不下载」当场变成谎"
 
     # 探测是【页面】的事，不是客户端的事。原生一旦自己去问 /v1/release/latest，网页那把
     # 「一天一次」的 localStorage 闸就管不到它了，而它烧的是服务端替所有人挡在前的配额。

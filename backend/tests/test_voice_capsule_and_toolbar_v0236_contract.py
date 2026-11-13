@@ -3,7 +3,8 @@
 钉四件事：
 ① 键盘开着时长按输入框必须能浮出「粘贴/全选/选择」：第 4 轮装的 NoopTextToolbar
    空壳整块退役（第 8 轮改判：允许覆写，但只许按压时长把关的壳）；
-   而语音长按的键盘门控（voiceMode || !keyboardUp）必须原样保留——两者不打架；
+   语音长按的门控（第 19 轮起是 voiceMode || input.text.isEmpty()）与它不打架：
+   框里有字时长按归文本选择，空框时归语音；
 ② 穹顶卡死根治：松手(send)后必须挂超时闹钟（SETTLE_MS + postDelayed），
    到点没等到 onResults/onError 就自己收尾——有半截字按半截发，没字安静收；
    识别回调与 destroy 必须先拆闹钟，不许让浮层挂在屏上；
@@ -31,9 +32,11 @@ def test_paste_toolbar_restored_and_voice_gate_kept():
     # 第 7 轮「长按出粘贴」的需求在第 9 轮被用户本人收回（「这个粘贴我说过我
     # 不要」），空壳改判回输入框作用域在位——本文件只继续钉第 6/7 轮不被第 9
     # 轮顺带弄丢的两样：语音长按让键盘的门控、以及语音模式无条件接管。
-    assert re.search(r"enabled = \{[^}]*!keyboardUp", CHAT), \
-        "语音长按仍要让着键盘：键盘起着不许再触录音（第 9 轮真机图仍在控诉）"
-    assert "voiceMode || !keyboardUp" in CHAT, "语音模式无条件接管，文本模式让键盘"
+    # 第 19 轮改判：让键盘那一半被真机证伪（小米：同意过麦克风，长按输入框收不到声音，
+    # 正是「先点输入框让键盘起来」造成的）。改判：空文本框归语音，有字才让给选字。
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+        "语音长按只在文本框空着时接管（这条与粘贴兜底并存：兜底读 voiceRef 让位）"
+    assert "(voiceMode || input.text.isEmpty())" in CHAT, "语音模式无条件接管，有字时让给选字"
 
 
 def test_release_exits_without_stuck_overlay():

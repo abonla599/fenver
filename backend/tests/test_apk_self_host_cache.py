@@ -488,3 +488,134 @@ def test_an_unreadable_cache_file_reports_the_error_class_not_its_location(tmp_p
     logged = capsys.readouterr().out
     assert cache_root in logged, logged
 
+
+# ---------- HTTP 语义：可缓存 / 校验值跟版本走 / 断点续传（2026-11-13「下载太慢」） ----------
+# 修复前的实测（公网 https://ai.fenever.xyz/site/android.apk，同一分钟三次整包）：
+# 7917507 字节分别用 8.2s / 9.1s / 12.1s，响应头清一色 cache-control: no-cache +
+# cf-cache-status: EXPIRED；同一份字节从源站 127.0.0.1:8000 出只要 10~30ms。
+# EXPIRED 的意思是"对象就在边缘，只是过期了"——慢的不是源站，是边缘每趟都得经隧道
+# 把整包再传一遍（家用上行 6~8Mbps，正好对上 8~12s）。
+# 边缘之所以每次都只能整包重拉，是因为这条端点从不答 304：整包进内存的 Response 只认
+# 完整 GET。同一时刻的对照：/site/site.css 带 no-cache + ETag，第二次就是
+# cf-cache-status: REVALIDATED（0.97s，源站回 304）。
+# 所以这四条的判据是"边缘能不能省掉那趟传输"，而不是"响应头写着 no-cache 还是别的"。
+
+def test_a_disk_hit_is_cacheable_and_answers_conditional_requests(monkeypatch):
+    """盘上那份字节：可缓存口径 + 校验值；带着校验值回来必须回 304，一个字节都不发。
+
+    这条是"下载慢"的回归锁。把 Response(content=data) + no-cache 改回来，它当场红。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    monkeypatch.setattr(releases, "download_plan", _plan)
+    monkeypatch.setattr(releases, "fetch_asset",
+                        lambda u: pytest.fail("盘上有货还朝外跑"))
+
+    c = peer_client(("203.0.113.41", 4141))
+    first = c.get("/site/android.apk")
+    assert first.status_code == 200 and first.content == _PKG
+    assert first.headers["cache-control"] == web_router.APK_CACHE_CONTROL, \
+        f"缓存口径不对：{first.headers['cache-control']}"
+    assert "no-cache" not in first.headers["cache-control"], \
+        "退回 no-cache：边缘每趟都要整包回源（实测 8~12s），而这并不比现在更安全"
+    etag = first.headers["etag"]
+    assert etag and etag == web_router.apk_etag(_VERSION, _SHA), \
+        f"校验值不是按版本钉死的那一枚：{etag}"
+
+    again = c.get("/site/android.apk", headers={"If-None-Match": etag})
+    assert again.status_code == 304, f"校验值对上了仍在重发整包：{again.status_code}"
+    assert again.content == b"", "304 带了正文：省下的字节又还回去了"
+
+
+def test_a_disk_hit_serves_ranges_so_a_broken_download_can_resume(monkeypatch):
+    """断点续传走的是**盘上那份文件**（FileResponse 流式），不是整包进内存。
+
+    修复前 `curl -r 0-1023` 实测回 200 + 整包：手机上下一半断网就得从头再来一遍。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    monkeypatch.setattr(releases, "download_plan", _plan)
+    monkeypatch.setattr(releases, "fetch_asset", lambda u: pytest.fail("盘上有货还朝外跑"))
+
+    c = peer_client(("203.0.113.42", 4242))
+    res = c.get("/site/android.apk", headers={"Range": "bytes=0-3"})
+    assert res.status_code == 206, f"Range 被忽略：{res.status_code}"
+    assert res.content == _PKG[:4]
+    assert res.headers["content-range"] == f"bytes 0-3/{len(_PKG)}"
+    assert res.headers["accept-ranges"] == "bytes"
+    # If-Range 拿的是我们**发给它**的那一枚校验值：对不上就该老老实实回整包。
+    # （父类 FileResponse 的默认判据认的是它自己算的 mtime-size，不跟着改的话这里会
+    # 忽略 Range、每次续传都退化成重下——"看起来支持 Range"的那种假支持。）
+    etag = res.headers["etag"]
+    resumed = c.get("/site/android.apk",
+                    headers={"Range": "bytes=4-7", "If-Range": etag})
+    assert resumed.status_code == 206 and resumed.content == _PKG[4:8], \
+        "If-Range 带着我们自己发的校验值却被判成不匹配：续传退化成了重下"
+
+
+def test_the_same_version_gets_the_same_validator_on_both_paths(monkeypatch):
+    """盘上档与接力档对**同一版**必须给出同一枚校验值，否则边缘会来回翻转。
+
+    两条路今天都会走到（第一趟是实时代取、之后才是盘上命中）。校验值今天不一样的话，
+    边缘手里的那份一会儿"还是新的"、一会儿"不是"，表现就是偶发的整包重下。
+    """
+    plan = _plan()[0]
+    trips = []
+    monkeypatch.setattr(releases, "download_plan", lambda: (plan, ""))
+    monkeypatch.setattr(releases, "fetch_asset",
+                        lambda u: (trips.append(u), (_PKG, ""))[1])
+
+    c = peer_client(("203.0.113.43", 4343))
+    relay_etag = c.get("/site/android.apk").headers["etag"]     # 第一趟：内存档
+    assert len(trips) == 1
+    disk_etag = c.get("/site/android.apk").headers["etag"]      # 第二趟：盘上档
+    assert disk_etag == relay_etag, \
+        f"同一版走了两条路给出两枚校验值：{relay_etag} vs {disk_etag}"
+
+
+def test_a_304_does_not_spend_the_download_budget(monkeypatch):
+    """缓存复核（304）不占那个"一小时 6 次"的额度，真出字节（200/206）才占。
+
+    这一格量的是"这个来源搬走了多少出口带宽"，不是"问了几次"。把 304 也计进去的话，
+    一次断点续传的定位请求 + 几次缓存复核就能把真人额度耗光，而他连一个包都没下完。
+    反过来也不能一刀切：真出字节的那几趟照扣，红线条寸不能松。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    monkeypatch.setattr(releases, "download_plan", _plan)
+    c = peer_client(("203.0.113.44", 4444))
+
+    first = c.get("/site/android.apk")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    for _ in range(web_router.APK_MAX_PER_SOURCE * 2):
+        assert c.get("/site/android.apk",
+                     headers={"If-None-Match": etag}).status_code == 304
+    assert len(web_router._APK_DOWNLOADS["203.0.113.44"]) == 1, \
+        f"304 也扣了额度：{len(web_router._APK_DOWNLOADS['203.0.113.44'])} 次"
+
+    # 真出字节的下一趟照扣，且扣满之后仍是 429——红线没被这条放宽带走。
+    assert c.get("/site/android.apk").status_code == 200
+    assert len(web_router._APK_DOWNLOADS["203.0.113.44"]) == 2
+    for _ in range(web_router.APK_MAX_PER_SOURCE):
+        c.get("/site/android.apk")
+    assert c.get("/site/android.apk").status_code == 429, "额度用完了却还能下"
+
+
+def test_the_version_pinning_lock_would_catch_a_constant_validator(monkeypatch):
+    """**自证会拦**（成对夹具）：把校验值换成不随版本变的常量，上面那些锁必须红。
+
+    只断言"两个请求的 ETag 不一样"是不够的：两次响应的 mtime 恰好不同也能让这句话成立，
+    那时锁在空转也没人知道。所以这里反过来喂一次**已知会被拦下的形状**——校验值退化成
+    常量——并证明端点确实在用它、而那个常量形状下"换版本换校验值"这条判据必然不成立。
+    """
+    assert apk_cache.store(_VERSION, _PKG, _SHA)[0]
+    monkeypatch.setattr(releases, "download_plan", _plan)
+
+    # 真正的校验值：版本一换就换（这就是被守的那一条）。
+    assert web_router.apk_etag("0.28.0", _SHA) != web_router.apk_etag("0.34.0", "f" * 64)
+
+    monkeypatch.setattr(web_router, "apk_etag", lambda version, sha256="": '"constant"')
+    c = peer_client(("203.0.113.45", 4545))
+    assert c.get("/site/android.apk").headers["etag"] == '"constant"', \
+        "端点没有用 apk_etag 算校验值：这条自证与它想证明的那条锁脱钩了"
+    # 同一枚常量被用在两个版本上 —— 正是上面那条"缓存键随版本变化"的锁判红的形状。
+    assert web_router.apk_etag("0.28.0", _SHA) == web_router.apk_etag("0.34.0", "f" * 64)
+

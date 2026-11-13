@@ -88,8 +88,10 @@ def test_model_button_opens_fullscreen_picker():
 def test_round9_to_11_gates_do_not_regress():
     assert "NoopTextToolbar" not in CHAT and "PopupTextToolbar" in CHAT, \
         "长按必须出菜单（第 11 轮口径）：第 15 轮起接的是系统 PopupMenu 壳，Noop 空壳不许复活"
-    assert re.search(r"enabled = \{[^}]*!keyboardUp", CHAT), \
-        "键盘起着长按归文本选择、语音不触发——活门控原样在位"
+    # 第 19 轮改判：活门控（rememberUpdatedState）原样在位，判据从 keyboardUp 换成
+    # 文本框空不空——空框长按归语音，有字才归文本选择。
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+        "空文本框长按归语音、有字归文本选择——活门控在位"
     assert re.search(r"val voiceArmed = input\.text\.isEmpty\(\) && !busy", CHAT) and \
         "!fieldPending" in CHAT, \
         "闸门在位不挂框（零键盘闪）+ 短按转发挂回：第 10 轮地基不动"

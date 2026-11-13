@@ -32,8 +32,12 @@ def test_voice_hold_gate_reads_latest_state_not_frozen_lambda():
     assert re.search(r"val enabledRef = rememberUpdatedState\(enabled\)", VOICE)
     assert "if (!enabledRef.value()) return@awaitEachGesture" in VOICE, \
         "按下判闸必须现取现用 enabledRef.value()，不许再直接调裸闭包"
-    assert re.search(r"enabled = \{[^}]*!keyboardUp", CHAT), \
-        "键盘起着不接管语音：这条门控的字样必须还在（语义由上面两条钉活）"
+    # 第 19 轮改判（小米真机：同意过麦克风，长按输入框还是收不到声音）：旧门控
+    # 「键盘起着不接管语音」正是病根——用户先点输入框（键盘起）再长按，这一按根本
+    # 到不了录音。活门控（rememberUpdatedState + enabledRef.value()）一个字没动，
+    # 换掉的是判据本身：空文本框只管说话，有字才让给选字。
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+        "空文本框长按归语音、有字归选字、语音模式无条件接管：这条门控必须这样写"
 
 
 def test_voice_takeover_stashes_ime_before_recording():
@@ -62,7 +66,7 @@ def test_earlier_rounds_do_not_regress():
     assert re.search(r"LaunchedEffect\(status\)[\s\S]{0,200}delay\(6000\)", CHAT)
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT)
     # 第 4 轮：拒录音直达入口；第 7 轮：语音模式字样在位
-    assert '"按住说话"' in CHAT and "voiceMode || !keyboardUp" in CHAT
+    assert '"按住说话"' in CHAT and "(voiceMode || input.text.isEmpty())" in CHAT
     assert "去开语音服务权限" in CHAT
     # 第 7 轮的「不卡死」判据第 15 轮换形态：松手当场收尾（等包闹钟退役），
     # 未知路防挂死仍由会话硬顶闹钟 postDelayed 守着
