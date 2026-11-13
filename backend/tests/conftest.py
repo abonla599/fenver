@@ -326,6 +326,25 @@ def _cleanup_test_data():
     shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _egress_gate():
+    """会话级出网闸：整套测试不许真出网（含 DNS 查询本身）。
+
+    复审在出网闸下跑全量时拦下了套件既有的 5 次出站尝试（搜索降级打 cn.bing.com、
+    假解析返回公网 IP 后真连）——「跑测试不出网」此前不成立。逐处补桩挡不住这一类
+    （触发它们的是全量顺序/时序，不是单文件），所以装在会话级覆盖整套。只拦非环回：
+    环回真服务器（uvicorn / ThreadingHTTPServer）与本地解析照常放行，bind/listen/accept
+    不拦。形状与拦截清单见 tests/_egress_gate.py；自证（先证会拦、再证不误伤环回）见
+    tests/test_egress_gate.py。
+    """
+    from pytest import MonkeyPatch
+    from tests import _egress_gate as gate
+    mp = MonkeyPatch()
+    gate.install(mp)
+    yield
+    mp.undo()
+
+
 # 上面那轮 CI 红换来的守卫：一次没还原成功的 monkeypatch 会把
 # AUTH_MODE=enforced + ACCESS_TOKEN=boot-token 留满整场，于是三十条与故障毫不
 # 相干的用例集体 401，红的地方离真凶隔了六个文件。

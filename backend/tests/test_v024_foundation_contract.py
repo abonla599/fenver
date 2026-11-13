@@ -311,9 +311,9 @@ def test_the_dormant_github_chain_still_asks_the_configured_repo_first(
     """T1.4 的更新链承诺（**解封后切回 GitHub 时仍成立**）：默认问新仓（fenver），
     新仓没发版时旧仓兜底——v0.23.x 的老用户不会因为改名收不到更新。
 
-    v0.34 起这条链不再是默认取数源（`abonla599` 账号被停用，它恒 404；默认换成自托管
-    清单），但代码一字未删。所以判据直接打 `releases._fetch_github`——它保证"哪天切
-    回去还是对的"，而不是在 `probe` 上假装它还在跑。出站形状一并钉：每次 build_opener
+    v0.34 起这条链不再是默认取数源（默认换成自托管清单），但代码一字未删。所以判据
+    直接打 `releases._fetch_github`——它保证"哪天切回去还是对的"，而不是在 `probe` 上
+    假装它还在跑。出站形状一并钉：每次 build_opener
     都必须带一个空代理表的 ProxyHandler 与一个 HTTPSHandler（不读环境/注册表代理）。
     """
     import urllib.request
@@ -361,7 +361,8 @@ def test_the_dormant_github_chain_still_asks_the_configured_repo_first(
 
 
 def test_the_fallback_target_is_our_own_site_not_github():
-    """拿不到包时的退路是**自家官网**——GitHub 那条链断了就不该再当退路（它会 404）。"""
+    """拿不到包时的退路是**自家官网**——退路落在我们自己托管的面上，不指 GitHub 发布页，
+    不依赖外部仓库此刻是否可达。"""
     from app.core import releases
 
     assert releases.releases_page() == releases.SITE_URL

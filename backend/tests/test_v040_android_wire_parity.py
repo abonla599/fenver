@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from app.core import device_context
+from tests.test_apk_release_discipline import _strip_java_comments
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JAVA_SRC = (REPO_ROOT / "android-native" / "app" / "src" / "main" / "java"
@@ -50,7 +51,11 @@ def _java_ints(src: str) -> dict:
 def _java_sensitive_pattern(src: str) -> str:
     # 锚定 SENSITIVE 常量名，不取「第一枚 (?i)」：一枚字面量完全正确的诱饵
     # SENSITIVE_LOCK_DECOY 排在真表之前时，first-match 会读到诱饵、放过真表被抽词。
-    m = re.search(r"\bSENSITIVE\b\s*=\s*Pattern\.compile\(\s*\"(\(\?i\)\([^\"]+\))\"", src)
+    # 匹配前先剥注释（复用全仓那把 Java/Kotlin 尺子，不另抄第二份）：在真声明前插一段
+    # 「全表注释」（注释里写一份字面量正确的词表）同样能骗过锚常量名的判据——注释不是
+    # 声明，剥掉之后正则才读得到真表。对真源码零假阳性：真声明在代码里、不在注释里。
+    code = _strip_java_comments(src)
+    m = re.search(r"\bSENSITIVE\b\s*=\s*Pattern\.compile\(\s*\"(\(\?i\)\([^\"]+\))\"", code)
     assert m, "Java 侧没找到敏感词表：SENSITIVE = Pattern.compile(\"(?i)(...)\"...)"
     return m.group(1)
 
@@ -145,6 +150,20 @@ def _decoy_then_drop(src: str, word: str) -> str:
              "            " + _FULL_TABLE + ",\n"
              "            Pattern.UNICODE_CASE);\n    ")
     return s.replace(_SENSITIVE_DECL, decoy + _SENSITIVE_DECL, 1)
+
+
+def _comment_decoy_then_drop(src: str, word: str) -> str:
+    """在真 SENSITIVE 前插一段「全表注释」（注释里写字面量正确的词表），再从真表抽走 word。
+
+    剥注释前：正则第一枚匹配落在注释里的全表 ⇒ 与服务端相等 ⇒ 绿（键表锁被缴械，
+    且不改任何可编译语义，比常量诱饵更隐蔽）。剥注释后：注释不算声明，正则读到被抽词
+    的真表 ⇒ 与服务端不等 ⇒ 红。这一格钉的就是「匹配前先剥注释」那道加固。
+    """
+    dropped = _FULL_TABLE.replace("|" + word, "", 1)
+    assert dropped != _FULL_TABLE, f"词表里没有 {word}，抽词变异没生效"
+    s = src.replace(_FULL_TABLE, dropped, 1)          # 先抽真表（此时全文件仅一处）
+    comment = "// SENSITIVE = Pattern.compile(" + _FULL_TABLE + ");\n    "
+    return s.replace(_SENSITIVE_DECL, comment + _SENSITIVE_DECL, 1)
 
 
 def _java_field_predicate_problems(src: str) -> list[str]:
@@ -300,6 +319,8 @@ def test_device_side_class_stays_free_of_android_imports():
                          'payload.put("device_id", fieldText(windowTitle))'), "pred", "param-swap"),
     # G3：干净诱饵 + 真表抽走「口令」——键表锁锚定常量名才读得到被抽词的真表。
     (lambda s: _decoy_then_drop(s, "口令"), "kw", "decoy-drop"),
+    # 注释诱饵 + 真表抽走「口令」——匹配前先剥注释才读得到被抽词的真表（剥注释前会绿）。
+    (lambda s: _comment_decoy_then_drop(s, "口令"), "kw", "comment-decoy-drop"),
 ])
 def test_parity_checks_can_go_red(mutate, detector, hint):
     """变异自证：把设备侧改坏一处，对应的那条对照必须报得出来。
