@@ -393,15 +393,30 @@ def _trust_narrowing_problems(source: str) -> list:
     ② 对 `ssl` 模块属性的**赋值**（构造点被整个换掉）；
     ③ `exec` / `eval`（动态执行的源码 AST 看不见）。
 
-    射程：只读这一个模块的源码，且只认**名字是字面量**的形状。仍漏（逐条实测均绿）：
+    射程：只读这一个模块的源码；构造点模型只认 `create_default_context` 这一个名字，
+    且只认它以 `Attribute`/`Name` **直接出现**的形状。仍漏（逐条实测均绿，分两类）：
+
+    一、动态/间接改名（构造点名字不以 Attribute/Name 直接出现）：
     `setattr(ssl, "create_default_context", …)`（名字是字面量也漏——② 只认 Assign 目标）、
     `ssl.__dict__[…] = …`、`import ssl as s` 之后给 `s.<attr>` 赋值（② 只认名字 `ssl`）、
     `getattr(ssl, 算出来的名字)`、`__import__`/importlib 取到模块再 setattr、
     `getattr(builtins, "exec")` 绕开 ③ 的名字匹配、以及**别的模块** monkeypatch ssl。
+
+    二、换构造器 / 把构造点名字藏进字符串实参 / 装饰器换锚——配一枚干净的
+    `create_default_context` 诱饵即可废掉「扫不到构造点」兜底；下列形状全是字面量名字、
+    同模块，判据仍绿（「只认名字是字面量」这句对它们不成立，故射程收到构造点模型本身）：
+    `ssl.SSLContext(…)` + `load_verify_locations(cafile=certifi)`（另一个构造器，第一遍
+    walk 不收集它）、`operator.methodcaller("create_default_context", cafile=…)(ssl)`、
+    `operator.attrgetter("create_default_context")(ssl)(cafile=…)`、
+    `ssl.__getattribute__("create_default_context")(cafile=…)`、
+    `from builtins import exec as _run` 改名 import 绕开 ③ 的 Name 匹配、
+    装饰器丢掉被饰函数的原返回、换回 `SSLContext`+certifi。
     ③ 按名字判，所以 exec/eval 的载荷是不是常量都红。
-    `ctx.load_verify_locations(cafile=…)` 是往系统根库上**加根**（实测 209→301，
-    本机那枚中间人根仍在），不是收窄，判据绿是对的；`capath=` 那版根数不变是
-    hash-dir 惰性查找，同样不是收窄。
+
+    `ctx.load_verify_locations(cafile=…)` 是往系统根库上**加根**（本机那枚中间人根仍在），
+    不是收窄，判据绿是对的；`capath=` 那版 `get_ca_certs()` 根数不变是 hash-dir 惰性查找
+    ——证书只在链构建时按 hash 取文件、不进 store 的对象列表，根数这个量具对 capath
+    结构性失明，同样不是收窄。
     """
     import ast
 
@@ -547,8 +562,9 @@ _TRUST_NARROWING_MUTANTS = (
      "import ssl\n\n\ndef system_ssl_context():\n"
      "    # cafile=certifi.where() 是被否决的修法\n"
      "    return ssl.create_default_context()\n", False),
-    # 加根不是收窄：cafile 那版实测 209→301 根、本机那枚中间人根仍在；capath 那版
-    # 根数不变是 hash-dir 惰性查找。两格都必须保持绿。
+    # 加根不是收窄：cafile 那版往系统根库上加根、本机那枚中间人根仍在；capath 那版
+    # get_ca_certs() 根数不变是 hash-dir 惰性查找（根数量具对 capath 结构性失明）。
+    # 两格都必须保持绿。
     ("load-verify-locations-cafile-adds-roots",
      "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
      "    ctx = ssl.create_default_context()\n"
@@ -557,6 +573,39 @@ _TRUST_NARROWING_MUTANTS = (
      "import ssl\n\n\ndef system_ssl_context():\n"
      "    ctx = ssl.create_default_context()\n"
      "    ctx.load_verify_locations(capath='/nonexistent-probe/certs')\n    return ctx\n", False),
+    # 已登记仍漏形状（判据今天看不见，故钉成常驻绿格）：换构造器 / 名字藏进字符串实参 /
+    # 装饰器换锚，各配一枚干净 create_default_context 诱饵废掉「扫不到构造点」兜底。
+    # 这些格只喂 AST、不执行语料；哪天判据补到能抓住它们，对应格翻红即须改判 expect_red。
+    ("sslcontext-plus-decoy-still-misses",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     "    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n"
+     "    ctx.load_verify_locations(cafile=certifi.where())\n    return ctx\n\n\n"
+     "def _decoy():\n    return ssl.create_default_context()\n", False),
+    ("methodcaller-string-name-still-misses",
+     "import ssl\nimport certifi\nimport operator\n\n\ndef system_ssl_context():\n"
+     '    return operator.methodcaller("create_default_context", cafile=certifi.where())(ssl)\n\n\n'
+     "def _decoy():\n    return ssl.create_default_context()\n", False),
+    ("attrgetter-string-name-still-misses",
+     "import ssl\nimport certifi\nimport operator\n\n\ndef system_ssl_context():\n"
+     '    return operator.attrgetter("create_default_context")(ssl)(cafile=certifi.where())\n\n\n'
+     "def _decoy():\n    return ssl.create_default_context()\n", False),
+    ("getattribute-literal-name-still-misses",
+     "import ssl\nimport certifi\n\n\ndef system_ssl_context():\n"
+     '    return ssl.__getattribute__("create_default_context")(cafile=certifi.where())\n\n\n'
+     "def _decoy():\n    return ssl.create_default_context()\n", False),
+    ("exec-renamed-import-still-misses",
+     "import ssl\nimport certifi\nfrom builtins import exec as _run\n\n\n"
+     "def system_ssl_context():\n"
+     "    _run(\"import ssl, certifi; globals()['CTX'] = ssl.create_default_context(cafile=certifi.where())\")\n"
+     "    return globals()['CTX']\n\n\n"
+     "def _decoy():\n    return ssl.create_default_context()\n", False),
+    ("decorator-swaps-anchor-still-misses",
+     "import ssl\nimport certifi\n\n\ndef _swap(f):\n"
+     "    def wrapper(*a, **k):\n        f(*a, **k)\n"
+     "        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n"
+     "        ctx.load_verify_locations(cafile=certifi.where())\n        return ctx\n"
+     "    return wrapper\n\n\n@_swap\ndef system_ssl_context():\n"
+     "    return ssl.create_default_context()\n", False),
 )
 
 
