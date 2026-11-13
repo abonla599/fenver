@@ -54,6 +54,8 @@ v0.28.1"——事后谁也说不清用户装的是哪一版，而这恰好是最
 带的 `--backend-only`**，闸门绝不自己推断"清单没宣告这一版 = 大概是不发 APK 吧"——
 推断就是这次事故的重演入口。选了会打印 `apk-materials=SKIPPED` 留痕。反过来它也**不
 授权事故本身**：清单已经把这一版宣告出去、盘上却没有那串字节时，带了这个开关照样红。
+它与说明里显式声明安卓专用（只出 APK）的版本互斥：一个说只出 APK、一个说不发 APK，
+两个声明矛盾，同时出现当场拒，不静默忽略任何一面旗。
 
 ## 第 1 条判据的形态豁免（#67）
 
@@ -769,7 +771,8 @@ def main(argv=None) -> int:
                          "发版物料顺序闸中『清单没宣告这一版』那一格。闸门**不会自己推断**"
                          "这件事，只会拒绝；只有带上这个开关才跳过，并且会打印 SKIPPED 留痕。"
                          "清单已经把这一版宣告出去的时候它不作保——那正是要拦的形状。"
-                         "它不影响前面四条判据，也不影响 --allow-unreachable 的边界。")
+                         "它不影响前面四条判据，也不影响 --allow-unreachable 的边界。"
+                         "与说明里显式声明安卓专用（只出 APK）的版本互斥：两者同时出现当场拒。")
     args = ap.parse_args(argv)
 
     tag = args.expect.strip()
@@ -800,6 +803,19 @@ def main(argv=None) -> int:
         return _fail("release-provenance-%s —— 构建之前这棵树必须正好是 %s 指向的那一笔、"
                      "且工作树干净；这一格没有跳过开关"
                      % (token, tag), 2 if token == "git-unreadable" else 1)
+
+    # 0b) 互斥的形态声明当场拒（照 --pre-build 与降级旗互斥的既有手法）：说明显式声明
+    #     安卓专用 = 只出 APK，安卓物料必须由第 5 关核；--backend-only = 本版不发新 APK，
+    #     第 5 关那一格被跳过。二者叠加时第 3 关豁免与第 5 关物料核同时失效，零物料也能
+    #     PASS——所以在这里拒，而不是静默忽略操作者的任何一面旗（#72）。这一拒也让第 3 关
+    #     豁免留痕里「安卓物料由第 5 关核」恒真：能走到那行的组合里 --backend-only 必为假。
+    if args.backend_only:
+        conflict_scope, _conflict_reason = note_scope_value(root, normalize_version(tag))
+        if conflict_scope == SCOPE_ANDROID_ONLY:
+            ap.error("token=%s-vs-backend-only —— 这一版说明显式声明安卓专用（只出 APK），"
+                     "安卓物料必须由第 5 关核；--backend-only 会跳过物料核，两个声明互相矛盾，"
+                     "不能同时用：安卓专用版去掉 --backend-only；纯后端版把说明的 scope 行"
+                     "改成 server-only" % SCOPE_ANDROID_ONLY)
 
     print("PRETAG expect=%s branch=%s health=%s" % (tag, git_branch(root), args.health_url))
 

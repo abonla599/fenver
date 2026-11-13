@@ -23,6 +23,15 @@ test_v0350_release_materials_gate.py）。只接掉与本格无关的旁证：`f
 漂移两枚（实跑记录在实现报告，不在这里恒绿自证）：
 - 拆掉第 3 关的 android-only 豁免 ⇒ 正控格当场红（live-build-mismatch）；
 - 拆掉第 5 关对 android-only 的物料核 ⇒ 三个物料反例格当场红（被放行）。
+
+## B-1 互斥锁（复审 §10.1 阻塞项）
+
+android-only 说明 + --backend-only 旗叠加会让第 3 关豁免与第 5 关物料核同时失效，
+零安卓物料也 PASS。修法是闸门把两个互斥声明当场拒（fail-closed，token
+android-only-vs-backend-only），不静默忽略操作者的旗。本文件同批补：
+- 互斥格（三种物料状态参数化）+ 线上取不到 + --allow-unreachable 仍拒；
+- 不许误伤：installer + 旗照旧 live-build-mismatch 红、server-only + 旗照旧 SKIPPED 绿。
+漂移：拆掉闸门第 0b 格互斥判据 ⇒ 互斥格当场红（被放行）；字节级还原。
 """
 import hashlib
 import importlib
@@ -43,6 +52,9 @@ TAG = "v0.99.0"
 VERSION = "0.99.0"
 SERVER_BUILD = "v0.39.2"          # 线上停在服务端线：安卓 tag 永不等于它
 SCOPE_ANDROID_ONLY_LINE = "<!-- scope: android-only -->"
+# 互斥拒绝的 token：运行时由闸门用 SCOPE_ANDROID_ONLY 常量拼出（闸门源码里不许出现
+# android-only 字面量，见委托锁），这里写死是为了钉住操作者真能看到的那个串。
+CONFLICT_TOKEN = "android-only-vs-backend-only"
 
 
 def _load_gate():
@@ -193,6 +205,98 @@ def test_android_only_with_matching_live_build_still_reports_ok(android_gate, ca
     out = capsys.readouterr().out
     assert code == 0 and "live-build=ok" in out, out
     assert "waived-scope" not in out
+
+
+# ------------------------------------------- B-1：android-only 与 --backend-only 互斥
+#
+# 复审实证（review-322-report.md §10.1）：android-only 说明 + --backend-only 旗叠加时，
+# 第 3 关因 android-only 豁免、第 5 关物料核因 --backend-only 跳过 ⇒ 零安卓物料也
+# verdict=PASS，且豁免留痕那句「安卓物料由第 5 关核」成了假话。修法是两个互斥声明当场拒
+# （fail-closed），不是静默忽略操作者的旗（#72）。下面几格钉住这件事。
+
+
+@pytest.mark.parametrize("materials", ["stale-manifest", "complete", "package-missing"])
+def test_android_only_plus_backend_only_is_rejected_outright(android_gate, capsys, materials):
+    """互斥格：android-only 说明 + --backend-only ⇒ 当场非零拒 + 可辨识 token。
+
+    两个声明矛盾（只出 APK vs 本版不发新 APK）。拒绝是**声明层面**的，与物料齐不齐无关，
+    所以三种物料状态各一格：清单宣告别的版 / 物料齐 / 清单宣告本版但包没落盘。任何一格
+    放行都是 B-1 重演。拒绝必须发生在第 3 关豁免与第 5 关之前——所以输出里既不许有
+    waived-scope 留痕，也不许有 SKIPPED，更不许有 PASS。
+    """
+    if materials == "stale-manifest":
+        _write_manifest(android_gate["manifest"], version="0.36.5")
+    elif materials == "complete":
+        (android_gate["apk_dir"] / (VERSION + ".apk")).write_bytes(b"fake apk bytes")
+        _write_manifest(android_gate["manifest"])
+    else:  # package-missing：清单宣告本版，盘上却没有那串字节
+        _write_manifest(android_gate["manifest"])
+    with pytest.raises(SystemExit) as boom:
+        android_gate["mod"].main(["--expect", TAG, "--backend-only"])
+    assert boom.value.code != 0, "android-only + --backend-only 没有当场拒（物料=%s）" % materials
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert CONFLICT_TOKEN in text, "拒绝没有可辨识 token：%s" % text
+    assert "verdict=PASS" not in text
+    assert "waived-scope" not in text, "互斥拒绝前不该印出第 3 关豁免留痕：%s" % text
+    assert "apk-materials=SKIPPED" not in text, "物料核被跳过 = B-1 重演：%s" % text
+
+
+def test_android_only_plus_backend_only_is_rejected_even_when_unreachable(android_gate, capsys):
+    """互斥拒绝先于可达性降级：线上取不到 + --allow-unreachable 也救不了这一组合。
+
+    若有人把互斥判据挪到第 3 关之后，--allow-unreachable 会让流程越过第 3 关、第 5 关又
+    被 --backend-only 跳过 ⇒ 零物料 PASS。这一格钉住拒绝必须在最前，不被任何降级旗绕过。
+    """
+    android_gate["mod"].fetch_build = lambda url, timeout: (None, "unreachable:URLError")
+    _write_manifest(android_gate["manifest"], version="0.36.5")
+    with pytest.raises(SystemExit) as boom:
+        android_gate["mod"].main(["--expect", TAG, "--backend-only", "--allow-unreachable"])
+    assert boom.value.code != 0, " unreachable + --allow-unreachable 把互斥组合放过了"
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert CONFLICT_TOKEN in text, "拒绝没有可辨识 token：%s" % text
+    assert "verdict=PASS" not in text
+
+
+def test_installer_plus_backend_only_keeps_its_existing_red(android_gate, capsys):
+    """不许误伤①：installer + --backend-only 的既有行为逐字不变。
+
+    线上 build 停在服务端线（≠ tag），installer 拿不到第 3 关豁免 ⇒ 照旧 live-build-mismatch
+    红。--backend-only 不影响第 3 关；互斥拒绝只针对 android-only，不许顺手把 installer 也拒了
+    或放绿。第 3 关先红，轮不到第 5 关，所以输出里不该出现 apk-materials。
+    """
+    _android_tree(android_gate["root"], scope_line="<!-- scope: installer -->")
+    _write_manifest(android_gate["manifest"], version="0.36.5")
+    code = android_gate["mod"].main(["--expect", TAG, "--backend-only"])
+    out = capsys.readouterr().out
+    assert code == 1 and "live-build-mismatch" in out, "installer + 旗的既有红变了：%s" % out
+    assert "waived-scope" not in out
+    assert CONFLICT_TOKEN not in out, "installer 被互斥拒绝误伤了：%s" % out
+    assert "apk-materials" not in out, "第 3 关先红，轮不到第 5 关：%s" % out
+    assert "verdict=PASS" not in out
+
+
+def test_server_only_plus_backend_only_keeps_its_existing_pass(android_gate, capsys):
+    """不许误伤②：server-only + --backend-only 的既有行为逐字不变（合法纯后端版）。
+
+    正确形状：versionName 不 bump（停在服务端线）、线上 build 已等于 tag（换包 done）、
+    清单没宣告本版 ⇒ 第 1 关 waived-scope、第 3 关 ok、第 5 关 SKIPPED 留痕、PASS。
+    互斥拒绝只针对 android-only，不许把 server-only 的合法旗也拒了。
+    """
+    _android_tree(android_gate["root"], scope_line="<!-- scope: server-only -->")
+    gradle = android_gate["root"] / "android-native" / "app" / "build.gradle"
+    gradle.write_text('versionName "0.39.2"\n', encoding="utf-8")   # 纯后端版不 bump
+    android_gate["mod"].fetch_build = lambda url, timeout: (TAG, "ok")   # 换包已完成
+    _write_manifest(android_gate["manifest"], version="0.36.5")
+    code = android_gate["mod"].main(["--expect", TAG, "--backend-only"])
+    out = capsys.readouterr().out
+    assert code == 0, "server-only + 旗的既有绿变了：%s" % out
+    assert "versionname=waived-scope" in out
+    assert "live-build=ok" in out
+    assert "apk-materials=SKIPPED (--backend-only)" in out
+    assert CONFLICT_TOKEN not in out, "server-only 被互斥拒绝误伤了：%s" % out
+    assert "verdict=PASS" in out
 
 
 # ------------------------------------------------ scope 模型：三值单源 + bool 不动
