@@ -156,8 +156,8 @@ param(
     # the repo and pins no machine-specific absolute path
     [string] $ProjectRoot = '',
 
-    # the tag this build must report, e.g. v0.29.1 (same string as
-    # git describe --tags --abbrev=0 that was baked into version.txt at build)
+    # the tag this build must report, e.g. v0.29.1 (same string that
+    # tools/bake_server_version.py --out version.txt baked in at build)
     [string] $ExpectedVersion = '',
 
     # a string only the NEW release's app.js contains (e.g. msg-trace);

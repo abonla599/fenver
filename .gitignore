@@ -32,7 +32,7 @@ __pycache__/
 dist/
 build/
 build_new/
-# 构建戳：打包前由 `git describe --tags --abbrev=0` 生成，随包一起打进去。
+# 构建戳：打包前由 `python tools/bake_server_version.py --out version.txt` 生成，随包一起打进去。
 # 版本号的唯一来源是 git tag——把它抄进源码或前端就是第二个事实来源，下次升版
 # 必然有一处是旧的、而且显示得理直气壮。所以只挡不追：文件本来就该每次构建现生成。
 version.txt
@@ -232,3 +232,8 @@ android-native/.gradle/
 # 哨兵锁在 backend/tests/test_paths.py 的
 # test_gitignore_ignores_a_root_call_ledger_by_a_rule_that_actually_exists：摘掉本行它红。
 /call-ledger-*.jsonl
+# 构建戳生成器（#322）。与 pre_tag_gate / release_marker 同一个理由：它必须进 CI 那次
+# checkout——backend/tests/test_bake_server_version.py 直接加载并真跑它，脚本进不了仓库，
+# 那把锁就变成一句注释。纯标准库、只读 git tag、只写显式传入的 --out（必填无默认，
+# 不会误覆写生产 version.txt）。
+!/tools/bake_server_version.py
