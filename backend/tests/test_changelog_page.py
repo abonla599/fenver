@@ -168,14 +168,20 @@ def test_the_current_version_is_the_newest_entry():
     所以这里从 `==` 放松到"不得落后"，放松的只有相等这一半：
     **日志落后于代码仍然当场红**，那一半由下面那条用例单独钉着，别把它读成"这条锁
     已经没人管了、可以顺手删"。
+
+    tag 命名空间分家（#322）后，比的对象是**安卓线最新条目**（`_installable_head`），
+    不再是全表最高版 `releases[0]`：服务端线可以独立领先（server-only 版不 bump
+    versionName），拿它当"不落后"的基准时，安卓 versionName 升版却漏写自己的 release
+    note 会被服务端的高版本号静默放行——那正是这把锁要防的"发版说明漏写"。
     """
     import re
     gradle = (REPO_ROOT / "android-native" / "app" / "build.gradle").read_text(encoding="utf-8")
     m = re.search(r'^\s*versionName\s+"([^"]+)"', gradle, re.M)
     assert m, "读不到 versionName"
-    newest = json.loads(ARTIFACT.read_text(encoding="utf-8"))["releases"][0]["version"]
-    assert _changelog_is_not_behind(newest, m.group(1)), (
-        f"更新日志落后于代码：日志最新是 v{newest}，而 versionName 已经是 "
+    head = _installable_head(_artifact_releases())
+    assert head, "更新日志里一条可安装的条目都没有：安卓线无从比起（头条锁也会红）"
+    assert _android_line_is_not_behind(_artifact_releases(), m.group(1)), (
+        f"更新日志落后于代码：安卓线最新是 v{head}，而 versionName 已经是 "
         f"v{m.group(1)}——本版说明没写（补 docs/releases/v{m.group(1)}.md），"
         "或写了没重新生成产物（跑一次 python tools/gen_changelog.py）")
 
@@ -257,6 +263,19 @@ def _installable_head(releases) -> str:
         if not rel.get("server_only"):
             return rel["version"]
     return ""
+
+
+def _android_line_is_not_behind(releases, version_name: str) -> bool:
+    """「不落后」锁的判决本体（#322）：与**安卓线最新条目**比，不取全表最高版。
+
+    安卓线 = 有安装包那一侧（缺省 / installer / android-only，生成器对它们都产
+    `server_only=False`），头条就是 `_installable_head`。服务端线（server-only）
+    独立领先是合法形状，拿 `releases[0]` 当基准会让安卓升版漏写说明被静默放行。
+    一条可安装条目都没有时判红（空串不是"不落后"，是"无从比起"）。
+    版本比较复用 `_changelog_is_not_behind`（releases.compare 那把尺子），不新写一套。
+    """
+    head = _installable_head(releases)
+    return bool(head) and _changelog_is_not_behind(head, version_name)
 
 
 def _undeclared_leaders(releases, version_name: str) -> list:
@@ -627,8 +646,9 @@ def test_the_headline_lock_bites_when_the_newest_installable_note_disappears(tmp
     """头条锁的牙：最新那条可安装的说明被撤走（这里用"改标成只换服务端"复现），必须红。
 
     原来那把"日志不得落后于 versionName"的锁对这类改动**是绿的**——它的 releases[0]
-    仍是 0.9.9（不比 versionName 旧）。所以"落后要红"这一半在这里由头条锁接管：
-    可安装头退到 0.9.8 之前的空集，而清单还写着 0.9.9。
+    仍是 0.9.9（不比 versionName 旧）。#322 把那把锁改成与安卓线比之后，它在这个形状
+    上也红（无可安装头条）；两把锁各判各的输入：头条锁对清单那一版，不落后锁对
+    versionName，不是重复的闸。
     """
     gen = _load_generator()
     root = _fake_release_root(tmp_path, {
@@ -638,14 +658,60 @@ def test_the_headline_lock_bites_when_the_newest_installable_note_disappears(tmp
     releases = gen.build(str(root))["releases"]
     head = _installable_head(releases)
     assert head == "", "两条都声明只换服务端时，可安装头必须是空串（页面那句要走的分支）"
-    # 老那把锁在这个形状上是**绿的**：releases[0] 仍是 0.9.9，不比 versionName 旧。
-    # 这句不是装饰——它记的是"为什么要另立一把"：哪天有人把老锁改成也能判死这一类，
-    # 本条就该并进那条，而不是留下两把重复的闸。
+    # #322 改锁后，"不落后"判据在这个形状上也判红：没有可安装头条 ⇒ 无从比起。
+    # 旧的 releases[0] 判据在这里是绿的（0.9.9 不比 versionName 旧）——对照保留，
+    # 它记的是"为什么要改这把锁"：服务端线的高版本号曾把这一类静默放行。
+    assert not _android_line_is_not_behind(releases, "0.9.9"), (
+        "两条都只换服务端时，安卓线判据应判红（无可安装头条）")
     assert _changelog_is_not_behind(releases[0]["version"], "0.9.9"), (
-        "老锁现在也能判死这一类了：那这把头条锁的独立存在理由要重新评估")
+        "前提塌了：旧 releases[0] 判据在这个形状上不再是绿的，上面的对照失去参照")
     assert head != "0.9.9", "清单那一版仍然被页面当头条播出去——这条锁没牙了"
     # 真产物的同一判据（把上面的合成语料换成现网那份，走的是同一个 _installable_head）
     assert _installable_head(_artifact_releases()) == _manifest_installable()
+
+
+def test_the_not_behind_lock_bites_when_the_android_line_falls_behind(tmp_path):
+    """#322(c) 的反例：安卓升版漏写自己的说明，不许被服务端线的高版本号遮蔽。
+
+    语料：服务端线 0.39.2（server-only，全表最高）、安卓线 0.36.5（有包）、
+    gradle versionName 已升到 0.36.6 而 changelog 里没有 0.36.6 条目。
+    旧判据拿 releases[0]=0.39.2 比 ⇒ 绿（遮蔽的定义）；新判据拿安卓线头条 0.36.5 比
+    ⇒ 红。把 `_android_line_is_not_behind` 拆回 releases[0]，本条当场红。
+    """
+    gen = _load_generator()
+    root = _fake_release_root(tmp_path, {
+        "v0.36.5.md": _FAKE_FULL.format(ver="0.36.5", scope=""),
+        "v0.39.2.md": _FAKE_FULL.format(ver="0.39.2", scope=SCOPE_SERVER_ONLY + "\n\n"),
+    })
+    releases = gen.build(str(root))["releases"]
+    assert releases[0]["version"] == "0.39.2", "语料没排成服务端线最高：对照失去前提"
+    assert _installable_head(releases) == "0.36.5"
+    assert not _android_line_is_not_behind(releases, "0.36.6"), (
+        "安卓线 0.36.5 落后于 versionName 0.36.6 却没被判红：遮蔽又回来了")
+    # 对照：旧判据在同一份语料上是绿的——这正是"静默放行"的定义，保留作参照。
+    assert _changelog_is_not_behind(releases[0]["version"], "0.36.6"), (
+        "前提塌了：旧 releases[0] 判据在这个语料上不再是绿的，上面的对照失去参照")
+
+
+def test_an_android_only_note_at_versionname_is_installable_not_an_undeclared_leader(tmp_path):
+    """android-only 说明就是 versionName 那一版：不被误判为未声明的领先者，且是可安装头条。
+
+    声明锁咬的是"领先 versionName 却没声明只换服务端"；android-only 版本身就是
+    versionName 那一版（不领先），判据无需改。这一格确认三值落地后相邻两把锁不误伤。
+    """
+    gen = _load_generator()
+    root = _fake_release_root(tmp_path, {
+        "v0.36.5.md": _FAKE_FULL.format(ver="0.36.5", scope=""),
+        "v0.36.6.md": _FAKE_FULL.format(ver="0.36.6",
+                                        scope="<!-- scope: android-only -->\n\n"),
+    })
+    releases = gen.build(str(root))["releases"]
+    entry = [rel for rel in releases if rel["version"] == "0.36.6"][0]
+    assert entry["server_only"] is False, "生成器把 android-only 读成了只换服务端"
+    assert _undeclared_leaders(releases, "0.36.6") == [], (
+        "android-only 版被误判为未声明的领先者：声明锁会逼人补一个错误的 server-only 标记")
+    assert _installable_head(releases) == "0.36.6", "android-only 就是最新可安装版"
+    assert _android_line_is_not_behind(releases, "0.36.6")
 
 
 def test_the_generator_refuses_an_unknown_scope_value(tmp_path):
