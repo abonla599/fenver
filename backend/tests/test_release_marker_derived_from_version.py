@@ -108,13 +108,14 @@ def _gradle_versionname() -> str:
 
 
 def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v0.34.2",),
-               server_only=(), live_markers=None, installer_only=()):
+               server_only=(), live_markers=None, installer_only=(), android_only=()):
     """只放判据真正会读的那几样东西，路径形状与仓库一致。
 
     `server_only` 里点名的那份说明会带上机器读的 `<!-- scope: server-only -->`（写在标题之后、
     第一个小节之前，与仓库里 v0.34.1.md 的位置一致）；`installer_only` 里点名的那份带上
-    `<!-- scope: installer -->`（安装包形态那一支的机器读法）；两个名单都不含的说明就是缺省
-    形状（没有 scope 行）。
+    `<!-- scope: installer -->`（安装包形态那一支的机器读法）；`android_only` 里点名的那份带上
+    `<!-- scope: android-only -->`（只出安卓包、不换服务端包的那一形态）；三个名单都不含的
+    说明就是缺省形状（没有 scope 行）。
 
     `live_markers` 是**假日机包**里已有的标记（缺省跟着 `markers`，即"仓库和线上是同一版"那种
     已上线状态）：#69 之后只换服务端那一版要读装机侧那一份，所以假树里必须自己带一棵假的
@@ -147,6 +148,8 @@ def _fake_repo(root: Path, version_name="0.34.2", markers=("0.34.2",), notes=("v
             text = "# %s\n\n%s\n\n本版只换服务端，安卓包不动。\n" % (note, SCOPE_SERVER_ONLY)
         elif note in installer_only:
             text = "# %s\n\n%s\n\n本版有可安装的产物。\n" % (note, SCOPE_INSTALLER)
+        elif note in android_only:
+            text = "# %s\n\n<!-- scope: android-only -->\n\n本版只出安卓包，不换服务端包。\n" % note
         else:
             text = "# %s\n" % note
         (releases / ("%s.md" % note)).write_text(text, encoding="utf-8")
@@ -157,9 +160,11 @@ def _repo_side_bare_expectation(root: Path):
     """测试自己算一遍"裸跑该给哪一串"：最新那份说明 + 装机无关的仓库文本，字面正则，
     不 import `rm` 的任何函数——否则这条锁只是在复读判据自己的输出。
 
-    返回 `(scope, target)`，其中 target 是不带 v 的三段号。算的过程就是被判据那几条：
-    最新说明领先 versionName、那份说明自己写着 server-only、app.js 里最新那枚标记也领先
-    versionName；任何一条不成立 ⇒ target=versionName、scope=installer。
+    返回 `(scope, target, mode)`，其中 target 是不带 v 的三段号。算的过程就是被判据那几条：
+    最新那份说明声明 android-only ⇒ mode="android-unknown"（工具必须退 2 UNKNOWN，
+    不推导服务端标记）；否则最新说明领先 versionName、那份说明自己写着 server-only、
+    app.js 里最新那枚标记也领先 versionName；任何一条不成立 ⇒ target=versionName、
+    scope=installer。
     """
     gradle_version = re.search(r'^\s*versionName\s+"([^"]+)"',
                                (root / "android-native" / "app" / "build.gradle").read_text(
@@ -167,16 +172,24 @@ def _repo_side_bare_expectation(root: Path):
     notes = sorted((NOTE_NAME_RE.match(p.name).group(1)
                     for p in (root / "docs" / "releases").iterdir()
                     if NOTE_NAME_RE.match(p.name)), key=_vkey)
-    newest_leads_server_only = False
-    if notes and _vkey(notes[-1]) > _vkey(gradle_version):
+    newest_scope_value = None
+    if notes:
         for raw in (root / "docs" / "releases" / ("v%s.md" % notes[-1])).read_text(
                 encoding="utf-8").splitlines():
             if raw.startswith("## "):
                 break
             hit = SCOPE_LINE_RE.match(raw)
             if hit:
-                newest_leads_server_only = hit.group(1).strip().lower() == "server-only"
+                newest_scope_value = hit.group(1).strip().lower()
                 break
+    if newest_scope_value == "android-only":
+        # 与工具同一条拒判：最新说明是安卓专用版时裸跑不推导服务端目标（ UNKNOWN 那一档）。
+        # 不领先 versionName 也算——那时 target 会落在安卓号上、installer 支会索要 app.js
+        # 标记，同样是跨命名空间猜目标。
+        return "android-only", notes[-1], "android-unknown"
+    newest_leads_server_only = False
+    if notes and _vkey(notes[-1]) > _vkey(gradle_version):
+        newest_leads_server_only = newest_scope_value == "server-only"
     markers = sorted((m.group(1) for m in NOTE_MARKER_RE.finditer(
         (root / "backend" / "app" / "web" / "static" / "app.js").read_text(
             encoding="utf-8"))), key=_vkey)
@@ -243,7 +256,14 @@ def test_real_repo_marker_equals_the_derived_declared_version(tmp_path):
     declared = rm.declared_version(str(REPO_ROOT))
     marker = rm.marker_for(declared)
     scope, target, mode = _repo_side_bare_expectation(REPO_ROOT)
-    if mode == "explicit":
+    if mode == "android-unknown":
+        bare_rc, bare_lines = _run(REPO_ROOT)
+        assert bare_rc == 2 and any("token=bare-shape=android-only-note" in ln
+                                    for ln in bare_lines), (
+            "最新说明是安卓专用版时裸跑必须退 2 UNKNOWN：%s" % bare_lines)
+        assert any("verdict=UNKNOWN" in ln for ln in bare_lines), bare_lines
+        assert not any("verdict=PASS" in ln for ln in bare_lines), bare_lines
+    elif mode == "explicit":
         bare_rc, bare_lines = _run(REPO_ROOT)
         assert bare_rc == 1 and any("version-jump" in ln for ln in bare_lines), (
             "跳号 server-only 版必须裸跑拒绝：%s" % bare_lines)
@@ -426,6 +446,66 @@ def test_the_scope_line_is_not_a_global_bypass(tmp_path):
     assert any("token=versionname-not-bumped" in ln for ln in lines), lines
     assert any("scope=installer" in ln for ln in _run(tmp_path, expect="v0.34.2")[1]), \
         "同一棵树按声明侧核必须是 installer 形态"
+
+
+# ------------------------- #322(e)：裸跑不许跨命名空间猜目标（android-only 说明）
+def test_bare_run_with_android_only_newest_note_is_unknown_not_marker_demand(tmp_path):
+    """最新那份说明是 android-only ⇒ 裸跑必须退 2 UNKNOWN，而不是 FAIL 索要 app.js 标记。
+
+    安卓专用版不换服务端包，app.js 是服务端 web 资产：把它当服务端目标、或为它要求
+    marker，都是跨命名空间猜目标。两条线数值交叉（安卓号越过服务端号）之后这一形状
+    必然出现，所以拒判必须在场。两个时刻各一格：说明领先声明侧（还没 bump）、
+    声明侧已追平安卓号（installer 支会索要 marker 的那一形）。
+    """
+    ahead = _fake_repo(tmp_path / "ahead", version_name="0.39.2", markers=("0.39.2",),
+                       notes=("v0.39.2", "v0.40.0"), android_only=("v0.40.0",))
+    rc, lines = _run(ahead)
+    assert rc == 2, "安卓专用说明领先时裸跑没有退 2：%s" % lines
+    assert any("verdict=UNKNOWN" in ln and "token=bare-shape=android-only-note" in ln
+               and "note=v0.40.0" in ln for ln in lines), lines
+    assert not any("verdict=FAIL" in ln for ln in lines), lines
+    assert not any("marker-newest=mismatch" in ln or "versionname-not-bumped" in ln
+                   or "release-note=ahead" in ln for ln in lines), (
+        "UNKNOWN 那一档不该再索要 marker / bump / 说明追平：%s" % lines)
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+    caught_up = _fake_repo(tmp_path / "caughtup", version_name="0.40.0", markers=("0.39.2",),
+                           notes=("v0.39.2", "v0.40.0"), android_only=("v0.40.0",))
+    rc2, lines2 = _run(caught_up)
+    assert rc2 == 2 and any("token=bare-shape=android-only-note" in ln for ln in lines2), (
+        "声明侧已追平安卓号时裸跑仍须 UNKNOWN，不许走 installer 支索要 marker：%s" % lines2)
+    assert not any("marker=absent" in ln or "marker-newest=mismatch" in ln for ln in lines2), lines2
+
+
+def test_android_only_presence_does_not_widen_the_installer_ahead_exemption(tmp_path):
+    """android-only 的存在不许顺手把 release-note=ahead 的豁免改宽。
+
+    真正领先的那份说明写的是 installer（有安装包却没追平声明侧）⇒ 照旧触发
+    release-note=ahead；中间那份 android-only 说明不是豁免理由。
+    """
+    root = _fake_repo(tmp_path, version_name="0.34.2", markers=("0.34.2",),
+                      notes=("v0.34.2", "v0.35.0", "v0.36.0"),
+                      android_only=("v0.35.0",), installer_only=("v0.36.0",))
+    rc, lines = _run(root)
+    assert rc == 1, "领先的 installer 说明被 android-only 的存在顺手豁免了：%s" % lines
+    assert any("token=release-note=ahead" in ln and "v0.36.0" in ln for ln in lines), lines
+    assert not any("verdict=UNKNOWN" in ln for ln in lines), lines
+    assert not any("verdict=PASS" in ln for ln in lines), lines
+
+
+def test_the_hand_mirror_agrees_on_the_android_only_bare_shape(tmp_path):
+    """手算镜像与工具在 android-only 形状上结论一致：镜像算得出第三种结局。
+
+    镜像刻意不 import 判据（字面正则独立读），所以这一格钉的是"两边口径没分叉"，
+    不是复读输出。常驻锁的两个消费者按 mode 分支，镜像少算这一档它们就会走错支。
+    """
+    root = _fake_repo(tmp_path, version_name="0.39.2", markers=("0.39.2",),
+                      notes=("v0.39.2", "v0.40.0"), android_only=("v0.40.0",))
+    scope, target, mode = _repo_side_bare_expectation(root)
+    assert (scope, target, mode) == ("android-only", "0.40.0", "android-unknown"), (
+        "手算镜像没算出 android-only 拒判那一档：%r" % ((scope, target, mode),))
+    rc, lines = _run(root)
+    assert rc == 2 and any("token=bare-shape=android-only-note" in ln for ln in lines), lines
 
 
 # ------------------------------------------------ #68：scope 的读法只有一把尺子
@@ -1210,6 +1290,13 @@ def test_real_repo_bare_run_names_the_marker_of_the_release_in_flight(tmp_path):
     expected = "release-marker-v%s" % target
     text = APP_JS.read_text(encoding="utf-8")
     newest_in_app_js = max((m.group(1) for m in NOTE_MARKER_RE.finditer(text)), key=_vkey)
+    if mode == "android-unknown":
+        rc, lines = _run(REPO_ROOT)
+        assert rc == 2 and any("token=bare-shape=android-only-note" in ln for ln in lines), (
+            "最新说明是安卓专用版时裸跑必须退 2 UNKNOWN，不推导服务端标记：%s" % lines)
+        assert any("verdict=UNKNOWN" in ln for ln in lines), lines
+        assert not any("verdict=PASS" in ln for ln in lines), lines
+        return
     if mode == "explicit":
         bare_rc, bare_lines = _run(REPO_ROOT)
         assert bare_rc == 1 and any("version-jump" in ln for ln in bare_lines), (

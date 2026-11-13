@@ -70,7 +70,7 @@ _VERSION_RE = re.compile(r"^v([0-9]+(?:\.[0-9]+)*)$")
 #   <!-- scope: server-only -->
 # 认这一种形状，别的写法（正文里加粗一句「本版只换服务端」）不算——那正是 v0.34.1
 # 留给人读、但没有任何机器读过的那句话。两侧空白与大小写可以松，`scope:` 后面的值必须
-# 是 VALID_SCOPES 里那两个之一；写错值不当"没标"处理而是**报错**（见 _parse_scope），因为
+# 是 VALID_SCOPES 里的一个；写错值不当"没标"处理而是**报错**（见 _parse_scope），因为
 # 静默回落到"有安装包"就是把一个装不上的版本播出去，而那正是本标记要防的事。
 #
 # 读法、合法值、扫引言区的循环都在 tools/release_marker.py（#68）：`scope_from_text` 是
@@ -231,8 +231,9 @@ def main(argv=None) -> int:
         # 一份说明写错 scope 值时必须**停下并说人话**，而不是回落到"有安装包"那一半：
         # 回落的结果是官网把只有一个域名的东西播出去，而红字里看不出任何事。
         print("changelog: BAD SCOPE —— %s" % e)
-        print('changelog: 一行只认两种值：<!-- scope: server-only -->（本版没有可安装的包）'
-              ' / <!-- scope: installer -->（有安装包）')
+        print('changelog: 一行只认三种值：<!-- scope: server-only -->（本版没有可安装的包）'
+              ' / <!-- scope: installer -->（有安装包）'
+              ' / <!-- scope: android-only -->（只出安卓包，不换服务端包）')
         return 1
     path = output_path(root)
     if args.check:

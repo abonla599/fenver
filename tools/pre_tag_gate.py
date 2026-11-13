@@ -170,8 +170,10 @@ if _TOOLS_DIR not in sys.path:
 from release_marker import (  # noqa: E402
     MarkerSourceError,
     NOTE_MISSING,
+    SCOPE_ANDROID_ONLY,
     SCOPE_SERVER_ONLY_LINE,
     note_scope,
+    note_scope_value,
 )
 
 DEFAULT_HEALTH_URL = "https://ai.fenever.xyz/health"
@@ -846,7 +848,12 @@ def main(argv=None) -> int:
         return _fail("release-note-missing: %s —— 发版说明必须与 tag 一起在场；"
                      "--allow-unreachable 只降级『线上取不到』，不放过这一格" % tag)
 
-    # 3) 现实侧：**线上**自报的 build 必须就是这个 tag
+    # 3) 现实侧：**线上**自报的 build 必须就是这个 tag。
+    #    安卓专用版（说明自己显式声明 SCOPE_ANDROID_ONLY）不换服务端包，线上 build
+    #    停在服务端线是预期形状，这一格对它不核「线上 build == tag」；安卓侧的现实
+    #    判据由第 5 关的物料闸承担（清单宣告该版 + 包落盘且摘要相符）。豁免只认说明里
+    #    读出来的原始 scope 值：缺说明 / 读不动 / 值不认识 ⇒ 拿不到值 ⇒ 照旧核，绝不推断。
+    scope_value, _scope_value_reason = note_scope_value(root, normalize_version(tag))
     live, why = fetch_build(args.health_url, args.timeout)
     if live is None:
         line = "PRETAG live-build=unreachable (%s)" % why
@@ -855,9 +862,13 @@ def main(argv=None) -> int:
         else:
             print(line)
             return _fail("live-build-unproven: %s —— 证明不了线上是这一版就不许打 tag" % why, 2)
-    elif live != tag:
+    elif live != tag and scope_value != SCOPE_ANDROID_ONLY:
         return _fail("live-build-mismatch online=%s expected=%s —— 换包还没做（或做的不是这一版）。"
                      "顺序是换包上线 + 线上验收在打 tag 之前，不是之后" % (live, tag))
+    elif live != tag:
+        print("PRETAG live-build=waived-scope scope=%s online=%s expected=%s —— 本版说明显式声明"
+              "安卓专用（只出 APK、不换服务端包），线上 build 停在服务端线是预期形状；"
+              "安卓物料由第 5 关核" % (SCOPE_ANDROID_ONLY, live, tag))
     else:
         print("PRETAG live-build=ok %s" % live)
 

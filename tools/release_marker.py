@@ -22,6 +22,7 @@
 
     「这一版要发的是哪个号、是哪一形态」的权威 = docs/releases/<tag>.md 的 scope 行
         <!-- scope: server-only -->   ⇒ 本版只换服务端，安卓包不动（v0.34.1 就是这一形态）
+        <!-- scope: android-only -->  ⇒ 本版只出安卓包，不换服务端包（tag 命名空间分家后的安卓线）
         没有这一行 / 写 installer      ⇒ 有可安装产物的那一版
     <VERSION>  = --expect 传进来的 tag；没有 --expect 时才是 build.gradle 的 versionName
                  （pre_tag_gate.py 第 1 条判据拿来跟 tag 比的就是那个**声明侧**，但它不是
@@ -63,7 +64,10 @@
     读不出这一版的 scope（值不认识 / 读不出文本）就**不豁免**，照旧红
 
     **裸跑（不带 --expect）时 <VERSION> 与形态的来源**：versionName 只是其中一条线索，还要问
-    "这一版正在路上的形状"。下面几条同时成立，target 换成 docs/releases 里最新那份说明的版本，
+    "这一版正在路上的形状"。**最新那份说明若声明 android-only，裸跑直接退 2（UNKNOWN）**：
+    本工具只推导服务端换包标记，安卓专用版不是服务端目标，也不许为它索要 app.js 标记——
+    判不准就是不许，要核哪一版用 --expect 明示。下面几条同时成立，target 换成 docs/releases
+    里最新那份说明的版本，
     判据随之变成「app.js 里最新 marker == 那个领先的版本」（等号右边取自说明，不是取自标记，
     所以一枚对不上说明的领先标记照旧红）：
         · 那份说明的版本号领先 versionName；
@@ -144,7 +148,11 @@ SCOPE_RE = re.compile(r"^\s*<!--\s*scope:\s*([A-Za-z0-9._-]+)\s*-->\s*$")
 SECTION_RE = re.compile(r"^##\s+(.*)$")
 SCOPE_SERVER_ONLY = "server-only"
 SCOPE_INSTALLABLE = "installer"
-VALID_SCOPES = (SCOPE_SERVER_ONLY, SCOPE_INSTALLABLE)
+# 安卓专用的一版：只出 APK、不换服务端包。它与 installer 的区别是"有没有服务端侧"，
+# 不是"有没有安装包"——所以 note_scope 的 bool（是不是只换服务端）对它与 installer
+# 同为 False，而需要区分两者的判据（闸门第 3 关、裸跑拒判）读 note_scope_value 的原始值。
+SCOPE_ANDROID_ONLY = "android-only"
+VALID_SCOPES = (SCOPE_SERVER_ONLY, SCOPE_INSTALLABLE, SCOPE_ANDROID_ONLY)
 SCOPE_SERVER_ONLY_LINE = "<!-- scope: server-only -->"
 NOTE_MISSING = "missing"
 
@@ -279,6 +287,32 @@ def scope_from_text(text):
     return False, None
 
 
+def note_scope_value(repo_root, version):
+    """这一版声明的 scope **原始值**：`(value_or_None, reason)`。
+
+    与 `note_scope` 同一份扫描、同一套 fail-closed（#68 的单源纪律）：缺说明回
+    `(None, NOTE_MISSING)`；读不出文本回 `(None, release-note-unreadable:…)`；没有
+    scope 行回 `(None, None)`（缺省形态＝有安装包）；值不认识回
+    `(None, release-note-scope-unknown:…)`——**绝不**回落成任何一个合法值。
+    需要区分 installer 与 android-only 的判据（闸门第 3 关、裸跑拒判）吃这一份；
+    只问"是不是只换服务端"的判据继续吃 `note_scope` 的 bool，两者不会读出两个结论。
+    """
+    path = release_note_path(repo_root, version)
+    if not os.path.isfile(path):
+        return None, NOTE_MISSING
+    try:
+        text = _read_text(path)
+    except MarkerSourceError as exc:
+        return None, "release-note-unreadable:%s" % exc
+    found, value = scope_from_text(text)
+    if not found:
+        return None, None
+    if value not in VALID_SCOPES:
+        return None, "release-note-scope-unknown:%s=%s（只认 %s）" % (
+            path, value, " / ".join(VALID_SCOPES))
+    return value, None
+
+
 def note_scope(repo_root, version):
     """这一版声明的是"只换服务端"吗？权威就是它自己那份发版说明的 scope 行。
 
@@ -287,20 +321,12 @@ def note_scope(repo_root, version):
     扫描是 `scope_from_text`（`tools/gen_changelog.py` 吃同一份实现，#68）：只扫标题之后、
     第一个 `##` 之前的引言区。scope 值不认识 = 报错，不当"没标"处理——静默回落成"有安装包"
     就是把一个装不上的版本号播出去，正是这枚标记要防的事。
+    读法委托 `note_scope_value`（同一份实现）：android-only 与 installer 在这里同为
+    False——两者都出安装包，"是不是只换服务端"这个问题的答案对它们相同。
     """
-    path = release_note_path(repo_root, version)
-    if not os.path.isfile(path):
-        return False, NOTE_MISSING
-    try:
-        text = _read_text(path)
-    except MarkerSourceError as exc:
-        return False, "release-note-unreadable:%s" % exc
-    found, value = scope_from_text(text)
-    if not found:
-        return False, None
-    if value not in VALID_SCOPES:
-        return False, "release-note-scope-unknown:%s=%s（只认 %s）" % (
-            path, value, " / ".join(VALID_SCOPES))
+    value, reason = note_scope_value(repo_root, version)
+    if reason is not None:
+        return False, reason
     return value == SCOPE_SERVER_ONLY, None
 
 
@@ -418,6 +444,17 @@ def evaluate(repo_root, expect=None, live_appjs=None):
         # 这一支判不了的：说明不存在、说明不领先 versionName、scope 行缺失或值不认识或读不出
         # 文本、标记还没补上、装机侧是否已有同一枚串、以及"versionName 该不该追平"（本版不追）。
         newest_note = max(notes, key=version_key) if notes else None
+        if newest_note is not None:
+            newest_scope_value, _ = note_scope_value(repo_root, newest_note)
+            if newest_scope_value == SCOPE_ANDROID_ONLY:
+                # 裸跑不许跨命名空间猜目标：最新那份说明是安卓专用版时，它既不是服务端
+                # 换包目标，也不该为它索要 app.js 标记（安卓版不换服务端包，app.js 是
+                # 服务端 web 资产）。判不准就是不许——与装机侧读不到同一档 fail-closed，
+                # 要核哪一版由 --expect 明示。installer 那一支的判据一个字节不改。
+                return 2, ["RELEASE-MARKER verdict=UNKNOWN token=bare-shape=android-only-note "
+                           "note=v%s —— 最新那份说明是安卓专用版（只出 APK、不换服务端包），"
+                           "本工具只推导服务端换包标记：不把它当服务端目标，也不为它索要 "
+                           "app.js 标记；请用 --expect <服务端 tag> 明示目标" % newest_note]
         if newest_note is not None and version_key(newest_note) > version_key(declared):
             note_is_server_only, _ = note_scope(repo_root, newest_note)
             newest_marker = max((v for _, v in found), key=version_key, default=None)
@@ -449,6 +486,12 @@ def evaluate(repo_root, expect=None, live_appjs=None):
     elif reason:
         return 2, ["RELEASE-MARKER verdict=UNKNOWN reason=%s —— 判据读不到就是不许" % reason]
 
+    # 输出标签读原始 scope 值：bool 分得清"是不是只换服务端"，分不清 installer 与
+    # android-only——把安卓专用版印成 installer 是对操作者说假话。缺 scope 行时
+    # 原始值为 None，标签沿用缺省形态 installer（与 bool 的读法一致）。
+    raw_scope, _ = note_scope_value(repo_root, target)
+    scope_label = raw_scope if raw_scope is not None else SCOPE_INSTALLABLE
+
     if not server_only and version_key(target) != version_key(declared):
         # 有安装包的那一版：这条判据是对的，留着——装不上的包不 bump versionName，能装的必须 bump。
         return 1, ["RELEASE-MARKER verdict=FAIL token=versionname-not-bumped "
@@ -467,13 +510,12 @@ def evaluate(repo_root, expect=None, live_appjs=None):
                    "（只有「带 --expect 的只换服务端版」会读）：这个开关在本版不生效，"
                    "不能让它看起来像一条已经核过的判据。去掉 --live-appjs 重跑；若这一版"
                    "其实只换服务端，先按它自己的发版说明核形态"
-                   % (SCOPE_SERVER_ONLY if server_only else SCOPE_INSTALLABLE, target,
+                   % (scope_label, target,
                       "server-only-marker-ahead" if bare_marker_ahead else "none")]
 
     marker = marker_for(target)
     lines.append("RELEASE-MARKER declared=v%s target=v%s scope=%s marker=%s"
-                 % (declared, target,
-                    SCOPE_SERVER_ONLY if server_only else SCOPE_INSTALLABLE, marker))
+                 % (declared, target, scope_label, marker))
     if bare_marker_ahead:
         # 把"这一支为什么换了 target"写在输出里：裸跑抄一行的人不该自己去猜这一版是不是
         # 只换服务端的那一形态，也不该猜这一枚串是怎么来的。
