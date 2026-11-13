@@ -317,8 +317,10 @@ def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypat
     v0.34 起默认取数源不再出网，所以这条用例直接打 `_fetch_repo`（那条链本身没删）。
     判据 patch 的是 build_opener（不是 urlopen）：信任锚走 HTTPSHandler(context=...)、
     代理表必须是空 dict。证明信任锚**不读私有 _context**——patch system_ssl_context
-    返回一枚唯一哨兵，再 spy HTTPSHandler 的构造实参，断言哨兵原样进了 context=；
-    读 _context 会把判据绑死在实现细节上，改内部就假绿/假红。
+    返回一枚唯一哨兵，spy 按实例记下构造实参里的 context，断言**真进了 build_opener
+    的那一枚实例**拿到的就是哨兵（不是「最后一枚构造」——末位诱饵骗不过它）；读运行期
+    _context 会把判据绑死在实现细节上，改内部就假绿/假红。另静态钉死「构造后不得再改
+    私有属性」：_fetch_repo 源码里任何对私有属性的赋值都判红（构造实参之外换锚的那条形）。
     """
     opener = _Opener(GOOD)
     handlers_seen = []
@@ -356,11 +358,13 @@ def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypat
     monkeypatch.setattr(releases, "system_ssl_context", fake_context)
 
     real_https = urllib.request.HTTPSHandler
-    captured = {}
 
     class _SpyHTTPSHandler(real_https):
         def __init__(self, *args, **kwargs):
-            captured["context"] = kwargs.get("context")
+            # 按实例记录构造实参里的 context（不读运行期私有 _context，那是 R18 明令
+            # 禁止的）：哨兵判据要绑到「真进了 build_opener 的那一枚实例」，而不是
+            # 「最后一枚构造」——否则末位构造一枚不接线的哨兵诱饵就能骗过判据。
+            self._review_ctx = kwargs.get("context")
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(urllib.request, "HTTPSHandler", _SpyHTTPSHandler)
@@ -373,8 +377,23 @@ def test_the_github_leg_path_still_fetches_over_the_system_trust_store(monkeypat
     assert not proxy_reads, "ProxyHandler 读了 getproxies()（环境/注册表代理）"
     https = [h for h in handlers_seen if isinstance(h, real_https)]
     assert len(https) == 1, "信任锚没走 HTTPSHandler"
-    assert captured.get("context") is sentinel, "HTTPSHandler 的 context 不是 system_ssl_context() 那一份"
+    assert https[0]._review_ctx is sentinel, \
+        "进 build_opener 的那枚 HTTPSHandler 的 context 不是 system_ssl_context() 那一份"
     assert opener.calls[0]["timeout"] == releases.TIMEOUT_SECONDS, "没有超时的出站请求会拖死线程池"
+    # 构造之后不许再改私有属性换锚：_fetch_repo 里任何对私有属性（_context 等）的赋值
+    # 都能在构造实参之外把信任锚换掉，而构造实参判据看不见它。静态钉死这一形——判的是
+    # 源码里有没有这种写法，不读运行期 _context 的值（R18）。真源码零假阳性：_fetch_repo
+    # 只构造 opener 并 open，没有任何私有属性赋值。
+    import ast
+    import inspect
+    private_writes = []
+    for node in ast.walk(ast.parse(inspect.getsource(releases._fetch_repo))):
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Attribute) and t.attr.startswith("_"):
+                    private_writes.append((node.lineno, t.attr))
+    assert not private_writes, f"构造后写私有属性换锚（_context 等）：{private_writes}"
 
 
 def test_the_github_host_is_written_in_exactly_one_place():
