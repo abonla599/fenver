@@ -2312,6 +2312,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
                         },
                         onTrySystemVoice = { trySystemVoice() },
                         onPickEngine = { enginePickerOpen = true },
+                        voiceTick = voiceGestureTick,
                         onOpenVoiceCheck = {
                             voiceCheck = null
                             voiceCheckOpen = true
@@ -2833,7 +2834,8 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                       voiceArmed: Boolean, voiceLive: Boolean,
                       voiceHintOn: Boolean, voiceHintLabel: String?,
                       onOpenVoiceService: () -> Unit, onTrySystemVoice: () -> Unit,
-                      onPickEngine: () -> Unit, onOpenVoiceCheck: () -> Unit) {
+                      onPickEngine: () -> Unit, onOpenVoiceCheck: () -> Unit,
+                      voiceTick: Int) {
     val scheme = MaterialTheme.colorScheme
     val view = LocalView.current
     // 第 17 轮（用户验收改判：「粘贴的UI不好看，希望它小一点并且位置跟着光标」）：
@@ -2861,7 +2863,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
         // 分流：这一按期间语音真的开起来了，兜底观察器整趟让位。
         eligible = { !gateOn && keyboardUp && !voiceMode && latestInput.text.isEmpty() },
         anchorRect = { fieldRect },
-        voiceTick = { voiceGestureTick },
+        voiceTick = { voiceTick },
         onPasteText = { text ->
             val cur = latestInput
             val start = cur.selection.min
