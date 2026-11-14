@@ -57,7 +57,7 @@ def test_default_text_toolbar_restored_round11():
 
 def test_keyboard_up_longpress_goes_to_selection_not_voice():
     # 第 19 轮改判：活门控（rememberUpdatedState）原样在位，判据换成「文本框空不空」。
-    assert "(voiceMode || input.text.isEmpty())" in CHAT and \
+    assert "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT and \
         re.search(r"val enabledRef = rememberUpdatedState\(enabled\)", VOICE), \
         "空文本框长按归语音、有字归文本选择（系统菜单）：活门控原样在位"
     assert "down.consume()" in VOICE, "键盘没起时按下仍被语音闸门源头吃掉"

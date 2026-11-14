@@ -36,7 +36,7 @@ def test_paste_toolbar_restored_and_voice_gate_kept():
     # 正是「先点输入框让键盘起来」造成的）。改判：空文本框归语音，有字才让给选字。
     assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
         "语音长按只在文本框空着时接管（这条与粘贴兜底并存：兜底读 voiceRef 让位）"
-    assert "(voiceMode || input.text.isEmpty())" in CHAT, "语音模式无条件接管，有字时让给选字"
+    assert "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT, "语音模式无条件接管，有字时让给选字"
 
 
 def test_release_exits_without_stuck_overlay():

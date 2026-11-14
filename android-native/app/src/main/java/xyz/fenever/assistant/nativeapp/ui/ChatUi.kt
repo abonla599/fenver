@@ -1847,7 +1847,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 挂载（voiceArmed 仍吃 !keyboardUp，见上）；键盘起时长按也不再交给文本框，
     // 长按过判定线就 stashIme() 收键盘再 voice.start()，焦点照旧不落到框上。
     val voiceHoldMod = Modifier.voiceHold(
-        enabled = { !busy && !voice.listening && (voiceMode || input.text.isEmpty()) },
+        // v0.41（用户点名「键盘弹出时希望长按对话框不会进行语音输入」）：
+        // 键盘竖着的时段长按退回文本框选字，语音只由 🎙 或「键盘收起时空框长按」进入。
+        enabled = { !busy && !voice.listening && (voiceMode || (input.text.isEmpty() && !keyboardUp)) },
         // 第 10 轮：短按松手 = 想打字——记一笔 fieldPending 让下面重组挂回文本框请键盘。
         onTap = { if (!voiceMode) fieldPending = true },
         onStart = {
@@ -2436,8 +2438,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 卡片后面，但不再糊满全屏。手势锚点仍在输入位那个 Box：卡片不挂
             // pointerInput、不吃事件，已按下手指的后续事件照常发给锚点。
             if (voice.listening) {
+                // v0.41（用户真机截图：「语音输入还是没有填满」）：原来这里留了 14dp，
+                // 卡片下面露出一条窗口底色，和卡片自身的表面色是两个色阶，看着就是没铺满。
+                // 现在贴到底，卡片底色改用页面底色（见 VoiceScreen），底下那条导轨也是同一个色，
+                // 视觉上从卡片顶一路连续到屏幕底。
                 VoiceScreen(voice.heard, voice.level, voiceCancel,
-                    Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp))
+                    Modifier.align(Alignment.BottomCenter))
             }
             // 修复轮 Minor 6：这层全屏弹层从前只有右上角 × 一个出口——本文件唯一的
             // BackHandler 属于设置弹层（下面那枚），modelMenuOpen 从来没接返回键，
@@ -2946,8 +2952,7 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                 // 模型清单，两个手势互不抢。（这两行各自保持 `if (chipVisible) X(...)` 单句
                 // 形状——v02312/v02313/v02314 的静态锁按原文吃这段的间距与整句，别折叠。）
                 if (!expanded) {
-                    if (chipVisible) ContextRing(ringPct, ringUsedK, ringBudgetK, onRingClick)
-                    if (chipVisible) ModelChip(chipModel, onToggleChip)
+                    // v0.41：模型钮与上下文环从输入卡退场（模型切换只在顶栏右上角那一处）
                     // 收起右钮：＋附件面板开关；open 态整枚旋转 45° 变「×」语义
                     GhostCircleButton(onClick = onToggleAttach,
                         rotation = if (attachOpen) 45f else 0f,
@@ -2970,10 +2975,9 @@ private fun InputCard(input: TextFieldValue, onInput: (TextFieldValue) -> Unit,
                         if (voiceMode) FenverIcon(FenverIcon.Keyboard, scheme.primary, Modifier.size(19.dp))
                         else FenverIcon(FenverIcon.VoiceWave, scheme.onSurfaceVariant, Modifier.size(19.dp))
                     }
-                    // 模型钮（对标图 2 的 Auto）：点开全屏「选择模型」页（见 ChatScreen 根层）；
-                    // 环排它左边（v0.39.x 驾驶舱，同网页 #ctxRingBtn 在 #modelChip 前）。
-                    if (chipVisible) ContextRing(ringPct, ringUsedK, ringBudgetK, onRingClick)
-                    if (chipVisible) ModelChip(chipModel, onToggleChip)
+                    // v0.41：输入卡里不再有模型钮/上下文环——用户点名「对话框的模型切换删了吧，
+                    // 右上角不是有了吗」。模型切换只保留顶栏那一处，上下文长度也已撤掉，
+                    // 这一行只放每轮都要按的东西：[声纹] … [＋] [发送]。
                     Spacer(Modifier.weight(1f))
                     if (busy) {
                         // 生成中：右侧只留「停止」一枚，＋/发送都让位，避免误点

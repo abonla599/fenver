@@ -66,7 +66,7 @@ def test_earlier_rounds_do_not_regress():
     assert re.search(r"LaunchedEffect\(status\)[\s\S]{0,200}delay\(6000\)", CHAT)
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT)
     # 第 4 轮：拒录音直达入口；第 7 轮：语音模式字样在位
-    assert '"按住说话"' in CHAT and "(voiceMode || input.text.isEmpty())" in CHAT
+    assert '"按住说话"' in CHAT and "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT
     assert "去开语音服务权限" in CHAT
     # 第 7 轮的「不卡死」判据第 15 轮换形态：松手当场收尾（等包闹钟退役），
     # 未知路防挂死仍由会话硬顶闹钟 postDelayed 守着

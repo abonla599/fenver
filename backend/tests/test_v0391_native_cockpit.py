@@ -152,9 +152,12 @@ def test_native_ring_and_panel_compose():
     assert "size(24.dp)" in ring, "环按 brief 是 24dp"
     assert '"上下文用量 $pct%' in chat, "环的无障碍标签没带百分比"
     card = _block(chat, "private fun InputCard(")
-    assert card.count("ContextRing(") >= 2, "收起/展开两行的模型按钮旁都要有环"
-    assert "ModelChip(" in card
-    assert card.index("ContextRing(") < card.index("ModelChip("), "环排在芯片前（同网页）"
+    # v0.41 翻面（用户原话：「对话框的模型切换删了吧，右上角不是有了吗？」）：
+    # 这一格原来钉「收起/展开两行各有一枚环、且环排在芯片前」。现在输入卡里
+    # 环与模型钮**一个都不许有**——模型切换只保留顶栏那一处，上下文长度按用户
+    # 要求撤掉，输入区只剩 [声纹] … [＋] [发送]。留着旧锁会让下一个人照着把它加回来。
+    assert "ContextRing(" not in card, "输入卡里又出现了上下文环（v0.41 已退场）"
+    assert "ModelChip(" not in card, "输入卡里又出现了模型钮（v0.41 已退场，模型切换只在顶栏）"
     panel = _block(chat, "private fun ContextPanel(")
     for needle in ("轻量整理", "恢复", "Prefs.setContextBudget(", "Slider(", "Text("):
         assert needle in panel, f"账本缺件：{needle}"

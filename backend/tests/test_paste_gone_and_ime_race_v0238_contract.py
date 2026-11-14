@@ -93,4 +93,4 @@ def test_earlier_rounds_do_not_regress():
     # 上移取消」（v02311 契约），输入卡锚点位留「正在听你说…」
     assert '"正在听你说…"' in CHAT
     # 语音模式无条件接管：这半条门控语义本轮原样保留
-    assert "(voiceMode || input.text.isEmpty())" in CHAT
+    assert "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT

@@ -71,4 +71,4 @@ def test_round4_gates_do_not_regress():
         "第 9 轮的空壳覆写与 Compose 自绘气泡都不许回来"
     assert re.search(r"LaunchedEffect\(status\)[\s\S]{0,200}delay\(6000\)", CHAT)
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT)
-    assert '"按住说话"' in CHAT and "(voiceMode || input.text.isEmpty())" in CHAT
+    assert '"按住说话"' in CHAT and "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT

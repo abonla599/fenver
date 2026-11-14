@@ -281,10 +281,14 @@ fun FenverSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     inline: Boolean = false,
+    // v0.41：壳的底色可覆盖。录音卡传页面底色（background），让「卡片 → 窗口底 →
+    // 底部导轨」三处同一个色阶，从卡片顶一路连续到屏幕底——用户真机截图里的
+    // 「语音输入还是没有填满」就是 surface 与 background 两个色阶接缝造成的。
+    color: Color = MaterialTheme.colorScheme.surface,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     if (inline) {
-        FenverSheetShell(modifier, content)
+        FenverSheetShell(modifier, color, content)
         return
     }
     Dialog(
@@ -292,7 +296,7 @@ fun FenverSheet(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-            FenverSheetShell(modifier, content)
+            FenverSheetShell(modifier, color, content)
         }
     }
 }
@@ -300,6 +304,7 @@ fun FenverSheet(
 @Composable
 private fun FenverSheetShell(
     modifier: Modifier,
+    color: Color,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
@@ -308,7 +313,7 @@ private fun FenverSheetShell(
             .fillMaxWidth()
             .shadow(24.dp, shape)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.surface)
+            .background(color)
             .padding(horizontal = 16.dp, vertical = 16.dp),
         content = content,
     )

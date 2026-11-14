@@ -636,8 +636,11 @@ fun VoiceScreen(heard: String, level: Float, cancelling: Boolean,
     val scheme = MaterialTheme.colorScheme
     val ink = if (cancelling) scheme.error else scheme.onSurface
     val waveInk = if (cancelling) scheme.error else scheme.primary
+    // v0.41：壳底用页面底色而不是 surface。录音卡贴在屏幕底部，底下那条导轨是窗口底色，
+    // 两者同色才不会在卡片下沿露出一道「没铺满」的缝（见 FenverSheet 的 color 参数）。
     FenverSheet(onDismiss = { /* 录音卡不吃点击，没有点外面关掉这一路 */ },
-        modifier = modifier, inline = true) {
+        modifier = modifier, inline = true,
+        color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally) {
             Text(if (cancelling) "松手取消" else "松手发送，上移取消",

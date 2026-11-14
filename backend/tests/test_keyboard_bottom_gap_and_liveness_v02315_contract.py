@@ -96,7 +96,7 @@ def test_keyboard_up_still_gates_voice_and_placeholder():
     # 用户本轮的真痛点：键盘起着要能长按粘贴，不能被语音抢
     # 第 19 轮改判（小米真机）：判据从 keyboardUp 换成文本框空不空——键盘起着但框是
     # 空的，长按仍归语音；框里有字才归文本选择（系统粘贴菜单）。
-    assert "(voiceMode || input.text.isEmpty())" in CHAT, \
+    assert "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT, \
         "活门控原样在位：空框长按归语音、有字归文本选择"
     assert re.search(r'if \(keyboardUp\) "发消息…" else "发消息或按住说话…"', CHAT), \
         "占位符判据原样在位：键盘一起只写『发消息…』"
@@ -109,9 +109,9 @@ def test_keyboard_up_still_gates_voice_and_placeholder():
 def test_version_bumped_and_release_notes_brief():
     gradle = _read(BUILD)
     # 版本号只有一份真相（gradle），所以每一轮的契约文件都跟着钉**当前**那一格：
-    # 第 15 轮那一格早被后面几版推过去了，v0.24.0 是 41、v0.24.1 是 42、v0.25.0 是 43、v0.25.1 是 44、v0.25.2 是 45、v0.26.0 是 46、v0.27.0 是 47、v0.28.0 是 48、v0.28.1 是 49、v0.28.2 是 50、v0.28.3 是 51、v0.29.0 是 52、v0.29.1 是 53、v0.29.2 是 54、v0.30.0 是 55、v0.31.0 是 56、v0.32.0 是 57、v0.33.0 是 58，v0.33.1 推到 59，v0.34.0 推到 60、v0.34.1 只换服务端没推、v0.34.2 推到 61、v0.35.0 推到 62、v0.35.4 推到 65、v0.35.5 推到 66、v0.36.0 推到 67、v0.36.1 推到 68、v0.36.4 推到 69、v0.36.5 推到 70、v0.36.6 推到 71。下面断的是现在那一格。
-    assert "versionCode 71" in gradle and 'versionName "0.36.6"' in gradle, \
-        "gradle 那一格漂了：这一版应是 71 / 0.36.6，且必须与 docs/releases/v0.36.6.md 同时存在"
+    # 第 15 轮那一格早被后面几版推过去了，v0.24.0 是 41、v0.24.1 是 42、v0.25.0 是 43、v0.25.1 是 44、v0.25.2 是 45、v0.26.0 是 46、v0.27.0 是 47、v0.28.0 是 48、v0.28.1 是 49、v0.28.2 是 50、v0.28.3 是 51、v0.29.0 是 52、v0.29.1 是 53、v0.29.2 是 54、v0.30.0 是 55、v0.31.0 是 56、v0.32.0 是 57、v0.33.0 是 58，v0.33.1 推到 59，v0.34.0 推到 60、v0.34.1 只换服务端没推、v0.34.2 推到 61、v0.35.0 推到 62、v0.35.4 推到 65、v0.35.5 推到 66、v0.36.0 推到 67、v0.36.1 推到 68、v0.36.4 推到 69、v0.36.5 推到 70、v0.36.6 推到 71、v0.36.7 推到 72、v0.36.8 推到 73。下面断的是现在那一格。
+    assert "versionCode 73" in gradle and 'versionName "0.36.8"' in gradle, \
+        "gradle 那一格漂了：这一版应是 73 / 0.36.8，且必须与 docs/releases/v0.36.8.md 同时存在"
     doc = _read(RELEASE_DOC)
     allowed = {"修复了什么", "优化了什么", "新增了什么"}
     heads = re.findall(r"^##\s*(.+?)\s*$", doc, flags=re.M)

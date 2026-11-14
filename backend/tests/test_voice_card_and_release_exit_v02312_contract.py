@@ -104,11 +104,12 @@ def test_keyboard_up_placeholder_says_send_only():
 
 
 def test_model_chip_next_to_plus_when_collapsed():
-    # 收起态 [声纹][占位文本][模型钮][＋]：不展开输入框也能换模型
-    assert re.search(r"if \(!expanded\) \{[\s\S]{0,220}if \(chipVisible\) ModelChip\(chipModel, onToggleChip\)", CHAT), \
-        "用户点名『模型切换放到加号旁边，不然我进去了怎么找到』：收起态必须挂"
-    assert CHAT.count("ModelChip(chipModel, onToggleChip)") == 2, \
-        "收起态与展开态下行共用同一枚 ModelChip（两处调用点）"
+    # v0.41 改判（用户原话：「对话框的模型切换删了吧，右上角不是有了吗？」）：
+    # 这一格原来钉「收起态也要在 ＋ 左边挂模型钮、两处调用点共用一枚」。现在
+    # 翻成相反的形状——输入卡里一个都不许有，模型切换只保留顶栏右上角那一处。
+    # 组件定义与全屏选模型页仍在（顶栏点它走同一条路），所以后半段原样保留。
+    assert CHAT.count("ModelChip(chipModel, onToggleChip)") == 0, \
+        "输入卡里又挂回了模型钮：v0.41 起模型切换只在顶栏右上角那一处"
     chip = re.search(r"private fun ModelChip\(chipModel: String, onToggleChip: \(\) -> Unit\)"
                      r"[\s\S]*?\n\}", CHAT)
     assert chip and "onToggleChip" in chip.group(0) \
