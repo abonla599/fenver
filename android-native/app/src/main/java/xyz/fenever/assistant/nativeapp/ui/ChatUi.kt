@@ -460,7 +460,12 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // 会话内容在途标记：加载中屏上不给旧消息留位，画一条轻量读取提示，
     // 数据回来后一次性替换（对齐网页 renderSessions 的"要么旧要么新，不混"）。
     var sessionLoading by remember { mutableStateOf(false) }
-    var sessions by remember { mutableStateOf(listOf<SessionSummary>()) }
+    // v0.41 冷启动首帧（用户真机反馈「打开软件会话要加载一下才显示」）：上一次退出时的
+    // 会话清单已经落在本机（按 userId 隔离），首帧直接用它；网络刷新只负责把顺序、标题、
+    // 可用性变得更准。没有快照（首次安装 / 换了账号）时仍是空表，行为与以前完全相同。
+    val bootOwner = Prefs.currentEntry()?.userId ?: ""
+    val bootSnapshot = remember(bootOwner) { Prefs.snapshot(bootOwner) }
+    var sessions by remember { mutableStateOf(bootSnapshot.sessions) }
     var messages by remember { mutableStateOf(listOf<UiMsg>()) }
     // v0.36.1 动效批：会话切换「挤入卡片」的转场快照（见 SwapTarget 注释）——
     // 换会话/换消息/换加载态都会生成新实例，但 AnimatedContent 的 contentKey 只认
@@ -482,8 +487,9 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     // TextFieldValue 而不是 String：程序改文案（点建议标语、发送后清空）时
     // String 版 BasicTextField 会把光标弹回句首，用户接着打字很别扭。
     var input by remember { mutableStateOf(TextFieldValue("")) }
-    var providers by remember { mutableStateOf(listOf<ModelInfo>()) }
-    var serverDefault by remember { mutableStateOf<String?>(null) }
+    // 同一份快照也给模型清单：顶栏模型芯片与设置页首帧都不再空一拍。
+    var providers by remember { mutableStateOf(bootSnapshot.models) }
+    var serverDefault by remember { mutableStateOf(bootSnapshot.serverDefault) }
     var pending by remember { mutableStateOf(listOf<AttItem>()) }
     var status by remember { mutableStateOf("") }
     var statusErr by remember { mutableStateOf(false) }
@@ -803,6 +809,16 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     }
     fun loadProviderRecords() { scope.launch { loadProviderRecordsNow() } }
 
+    /* 快照的唯一写口：只写「这一次成功拿到的东西」，绝不写半个状态。两处调用点在
+     * loadModelsNow 与 refreshSessionsNow 的成功分支——失败时不覆盖旧快照，
+     * 否则一次断网就会把上次的真值擦成空表（那正是要避免的"冷启动空白"）。 */
+    fun persistStartupSnapshot() {
+        if (bootOwner.isEmpty()) return
+        Prefs.saveSnapshot(Prefs.StartupSnapshot(
+            owner = bootOwner, sessions = sessions, models = providers,
+            serverDefault = serverDefault))
+    }
+
     // ---------- 冷启动：模型清单 + 会话列表（网页 boot 的 loadModels/loadSessions） ----------
     suspend fun loadModelsNow() {
         runCatching { Api.models() }.onSuccess { r ->
@@ -820,6 +836,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 只有最后一次可见，那句提示等于从没说过。本轮它说过话就让它留在屏上
             // （状态条自己 6 秒收，见上面那条 LaunchedEffect(status)）。
             if (providers.any { it.usable } && !clampedNow) setStatus("")
+            persistStartupSnapshot()
         }.onFailure { if (!logoutIf401(it)) setStatus(it.message ?: "", true) }
     }
 
@@ -859,6 +876,7 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
     suspend fun refreshSessionsNow(): String? =
         try {
             sessions = Api.listSessions()
+            persistStartupSnapshot()
             null
         } catch (e: CancellationException) {
             throw e
@@ -4503,4 +4521,5 @@ internal fun RichText(text: String, color: Color, streaming: Boolean = false) {
  * 第 9 轮的空壳工具条整块退役——用户点名「要和deepseek一模一样」：键盘起着时
  * 长按输入框要在光标旁出复制/粘贴/全选。键盘没起的窗口里输入位是占位条（闸门
  * 分支），单点不挂框、不冒菜单；长按归语音。两头各走各的，不再需要扣壳。 */
+
 

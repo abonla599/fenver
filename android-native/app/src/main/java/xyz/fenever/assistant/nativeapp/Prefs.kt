@@ -326,6 +326,43 @@ object Prefs {
 
     fun persona(sessionId: String): String = sp.getString("persona:$sessionId", "").orEmpty()
 
+    /* ---------------- 冷启动快照（v0.41） ----------------
+     * 用户真机反馈：「打开软件时会话需要加载一下才显示，点设置也要加载一下才完整」。
+     * 根因是冷启动首帧没有任何本地数据，两处都要等一次网络往返（服务端在 Cloudflare
+     * 隧道后面，往返 300ms~1s 量级），于是屏上先空一下再跳出来。
+     *
+     * 这里只存**上一次退出时已知的真值**：会话清单 + 模型清单 + 服务端默认模型。
+     * 首帧直接拿它渲染，网络回来只负责把它变得更准（顺序、标题、可用性都会更新）。
+     *
+     * 隔离：按 userId 分键，且 load 时校验 owner——换账号后拿到的是空快照，不会把
+     * 上一个人的会话标题显示给下一个人。登出不清这份文件也无害（读侧就挡住了），
+     * 但 retained 的标题与令牌同级：都在应用私有存储里，没有额外暴露面。
+     */
+    @Serializable
+    data class StartupSnapshot(
+        val owner: String = "",
+        val sessions: List<SessionSummary> = emptyList(),
+        val models: List<ModelInfo> = emptyList(),
+        val serverDefault: String? = null,
+    )
+
+    private fun snapshotKey(owner: String): String = "startup_snapshot:" + owner
+
+    /** 读某位用户的启动快照；没有、解析失败、或 owner 对不上，一律回空快照。 */
+    fun snapshot(owner: String): StartupSnapshot {
+        if (owner.isEmpty()) return StartupSnapshot()
+        val raw = sp.getString(snapshotKey(owner), "") ?: ""
+        if (raw.isEmpty()) return StartupSnapshot()
+        val parsed = runCatching { json.decodeFromString<StartupSnapshot>(raw) }.getOrNull()
+        return if (parsed != null && parsed.owner == owner) parsed else StartupSnapshot()
+    }
+
+    /** 覆盖写这一位用户的启动快照。owner 为空（未登录）直接不写。 */
+    fun saveSnapshot(s: StartupSnapshot) {
+        if (s.owner.isEmpty()) return
+        runCatching { sp.edit().putString(snapshotKey(s.owner), json.encodeToString(s)).apply() }
+    }
+
     /* 换服务器等于换一个身份世界：所有身份在新地址上都不作数，清凭据回登录页。 */
     fun setBaseUrlAndReauth(url: String) {
         baseUrl = url
