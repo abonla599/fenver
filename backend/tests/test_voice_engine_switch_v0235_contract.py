@@ -71,6 +71,6 @@ def test_round45_gates_do_not_regress():
     assert '去给「$voiceHintLabel」开麦克风' in CHAT and "去开语音服务权限" in CHAT
     assert "PopupTextToolbar" in CHAT and "NoopTextToolbar" not in CHAT, \
         "长按必出菜单（第 11 轮口径）：第 15 轮起是系统 PopupMenu 壳，空壳不许复活"
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT)
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT)
     assert "voiceHintOn" in CHAT and "FlowRow" in CHAT, \
         "修复行三枚胶囊用 FlowRow，窄屏换行不挤没"

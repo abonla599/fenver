@@ -2437,11 +2437,11 @@ fun ChatScreen(onRequireAuth: (String) -> Unit, onLoggedOut: () -> Unit,
             // 贴在屏幕底部的圆角卡片，正好盖住输入卡——输入框、模型钮、＋都藏进
             // 卡片后面，但不再糊满全屏。手势锚点仍在输入位那个 Box：卡片不挂
             // pointerInput、不吃事件，已按下手指的后续事件照常发给锚点。
+            // v0.41（用户真机截图：「语音输入还是没有填满」）：原来这里留了 14dp，
+            // 卡片下面露出一条窗口底色，和卡片自身的表面色是两个色阶，看着就是没铺满。
+            // 现在贴到底，卡片底色改用页面底色（见 VoiceScreen），底下那条导轨也是同一个色，
+            // 视觉上从卡片顶一路连续到屏幕底。
             if (voice.listening) {
-                // v0.41（用户真机截图：「语音输入还是没有填满」）：原来这里留了 14dp，
-                // 卡片下面露出一条窗口底色，和卡片自身的表面色是两个色阶，看着就是没铺满。
-                // 现在贴到底，卡片底色改用页面底色（见 VoiceScreen），底下那条导轨也是同一个色，
-                // 视觉上从卡片顶一路连续到屏幕底。
                 VoiceScreen(voice.heard, voice.level, voiceCancel,
                     Modifier.align(Alignment.BottomCenter))
             }

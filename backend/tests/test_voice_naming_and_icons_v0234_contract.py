@@ -65,7 +65,7 @@ def test_system_voice_fallback_is_manual_and_lives_in_voiceui():
 
 def test_round4_gates_do_not_regress():
     assert "WindowInsets.ime.getBottom(density) > 0 || frameKeyboardUp" in CHAT
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT)
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT)
     assert "NoopTextToolbar" not in CHAT and "PopupTextToolbar" in CHAT, \
         "长按必出菜单（第 11 轮第四次改判的口径）：第 15 轮起菜单壳换成系统 PopupMenu；" \
         "第 9 轮的空壳覆写与 Compose 自绘气泡都不许回来"

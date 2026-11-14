@@ -150,8 +150,8 @@ def test_earlier_rounds_do_not_regress():
     assert re.search(r"VoiceScreen\(voice\.heard, voice\.level, voiceCancel,\s*"
                      r"Modifier\.align\(Alignment\.BottomCenter\)", CHAT), \
         "第 13 轮贴底卡片不回退"
-    assert re.search(r"if \(!expanded\) \{[\s\S]{0,220}if \(chipVisible\) ModelChip", CHAT), \
-        "第 13 轮收起态模型钮在位"
+    assert not re.search(r"if \(!expanded\) \{[\s\S]{0,220}if \(chipVisible\) ModelChip", CHAT), \
+        "v0.41 起收起态不再有模型钮（模型切换只在顶栏右上角）"
     assert re.search(r"ModalNavigationDrawer\(\s*\n\s*drawerState = drawerState,\s*\n"
                      r"[\s\S]{0,400}gesturesEnabled = !voice\.listening", CHAT), \
         "第 14 轮录音中锁抽屉不回退"

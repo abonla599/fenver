@@ -128,7 +128,7 @@ def test_earlier_rounds_do_not_regress():
         "!fieldPending" in CHAT, "第 10 轮闸门在位不挂框（零键盘闪）"
     # 第 19 轮改判：空文本框长按归语音（小米真机症状的正面解法）；有字时仍归系统
     # 复制/粘贴/全选——两头的分工由 input.text.isEmpty() 这一环决定。
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT), \
         "空文本框长按归语音、有字归系统复制/粘贴——活门控"
     assert "NoopTextToolbar" not in CHAT and "PopupTextToolbar" in CHAT, \
         "工具条第 15 轮起是系统 PopupMenu 壳，Noop 空壳不许复活"

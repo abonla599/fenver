@@ -36,7 +36,7 @@ def test_voice_hold_gate_reads_latest_state_not_frozen_lambda():
     # 「键盘起着不接管语音」正是病根——用户先点输入框（键盘起）再长按，这一按根本
     # 到不了录音。活门控（rememberUpdatedState + enabledRef.value()）一个字没动，
     # 换掉的是判据本身：空文本框只管说话，有字才让给选字。
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT), \
         "空文本框长按归语音、有字归选字、语音模式无条件接管：这条门控必须这样写"
 
 

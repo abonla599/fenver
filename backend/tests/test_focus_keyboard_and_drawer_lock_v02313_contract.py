@@ -48,7 +48,7 @@ def test_keyboard_signal_is_height_shrink_not_focus():
     # 第 19 轮改判：门控不再吃 keyboardUp——空文本框长按一律归语音（小米真机：
     # 先点输入框再长按收不到声音）。有字时长按仍归选字+系统工具条，这条语义由
     # input.text.isEmpty() 那一半守着。
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT), \
         "空文本框长按归语音、有字时长按仍归文本框自己（选字+系统工具条）"
     # 第 19 轮：闸门（不挂框、零键盘闪的地基）原样吃键盘信号——键盘起着仍然必挂
     # 文本框；改的只是长按归谁：空框的长按由 voiceHold 那头接管为说话。
@@ -89,8 +89,8 @@ def test_earlier_rounds_do_not_regress():
         "第 13 轮必退场双保险（settled 一次收尾 + 60s 硬顶）在位"
     assert re.search(r"pending = t\n\s*return", VOICE), \
         "第 13 轮松手发送铁律（引擎提前回包先暂存）在位"
-    assert re.search(r"if \(!expanded\) \{[\s\S]{0,220}if \(chipVisible\) ModelChip", CHAT), \
-        "第 13 轮收起态模型钮在位"
+    assert not re.search(r"if \(!expanded\) \{[\s\S]{0,220}if \(chipVisible\) ModelChip", CHAT), \
+        "v0.41 起收起态不再有模型钮（模型切换只在顶栏右上角）"
     assert "NoopTextToolbar" not in CHAT and "LocalTextToolbar provides" in CHAT, \
         "用户第 14 轮点名要长按菜单：第 15 轮起给它接的是系统 PopupMenu 壳（v02314 契约钉形状），Noop 空壳不许复活"
 

@@ -26,7 +26,7 @@ def test_voice_longpress_yields_to_keyboard():
     # 第 19 轮改判（小米真机：同意过麦克风，长按输入框还是收不到声音）：『键盘没弹出』
     # 这条前置是病根——键盘一起，长按就再也到不了录音。改判为：文本框空着就归语音，
     # 框里有字才归文本选择。
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", kt), \
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", kt), \
         "voiceHold 的接管条件：空文本框归说话、有字归选字、语音模式无条件接管"
 
 

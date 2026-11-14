@@ -34,7 +34,7 @@ def test_paste_toolbar_restored_and_voice_gate_kept():
     # 轮顺带弄丢的两样：语音长按让键盘的门控、以及语音模式无条件接管。
     # 第 19 轮改判：让键盘那一半被真机证伪（小米：同意过麦克风，长按输入框收不到声音，
     # 正是「先点输入框让键盘起来」造成的）。改判：空文本框归语音，有字才让给选字。
-    assert re.search(r"enabled = \{[^}]*voiceMode \|\| input\.text\.isEmpty\(\)", CHAT), \
+    assert re.search(r"enabled = \{[^}]*voiceMode \|\| \(input\.text\.isEmpty\(\) && !keyboardUp\)", CHAT), \
         "语音长按只在文本框空着时接管（这条与粘贴兜底并存：兜底读 voiceRef 让位）"
     assert "(voiceMode || (input.text.isEmpty() && !keyboardUp))" in CHAT, "语音模式无条件接管，有字时让给选字"
 
