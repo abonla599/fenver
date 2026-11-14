@@ -78,9 +78,11 @@ def test_silent_release_always_exits():
 
 
 def test_voice_screen_is_compact_bottom_card():
+    # v0.41 改判：原来这里连 \.padding(bottom = 14\.dp) 一起钉住，而真机上正是这 14dp
+    # 让卡片与窗口底色之间露出两个色阶（用户截图原话「语音输入还是没有填满」）。
+    # 现在贴到底、不留 padding；「不铺满全屏、比输入框大一圈」这条意图不变（下一句 fillMaxSize 仍在钉）。
     assert re.search(r"if \(voice\.listening\) \{[\s\S]{0,160}VoiceScreen\(voice\.heard, "
-                     r"voice\.level, voiceCancel,\s*Modifier\.align\(Alignment\.BottomCenter\)"
-                     r"\.padding\(bottom = 14\.dp\)\)", CHAT), \
+                     r"voice\.level, voiceCancel,\s*Modifier\.align\(Alignment\.BottomCenter\)\)", CHAT), \
         "录音 UI 贴底渲染：用户点名『占据整个屏幕很不美观，大小比输入框大点就行』"
     screen = re.search(r"fun VoiceScreen\(heard: String, level: Float, cancelling: Boolean"
                        r"[\s\S]*?\n\}", VOICE)
