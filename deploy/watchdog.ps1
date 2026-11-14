@@ -578,8 +578,16 @@ try {
             -Launch {
                 $scrubToken = Remove-ProxyEnvForChild
                 Write-Log 'INFO' ("$Title 拉起前代理环境清理（#295）：$scrubToken")
+                # 2026-11-14 事故：这行原来是裸的 -WindowStyle Hidden -PassThru（无重定向）。
+                # 后端崩溃后看门狗来这里拉起时卡死在 Start-Process，日志停在上面那条清理行
+                # 之后再无输出，实例挂 16 小时，服务整晚没人拉起。实测：带 -RedirectStandardOutput
+                # / -Error 指向文件即立即返回且子进程存活；计划任务拉起的隐藏 PowerShell 没有
+                # 可继承控制台，所以这个形状只在「看门狗拉起」时出现。两个文件就是事故现场。
+                $beOutLog = Join-Path $LogDir 'backend.out.log'
+                $beErrLog = Join-Path $LogDir 'backend.err.log'
                 Start-Process -FilePath $BackendExe -WorkingDirectory $ProjectRoot `
-                    -WindowStyle Hidden -PassThru
+                    -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
             }
 
         # 进程活着只算及格。接着问一句"东西齐不齐"——上面那些故障没有任何一种会让
