@@ -13,9 +13,12 @@ from app.core.audit import _scrub_text
 
 
 def test_windows_and_posix_paths_are_masked():
-    win = r"写入失败: C:\Users\34426\ai-assistant\data\x.json"
+    # 用通用形状而不是真机路径：仓库里不许出现「某台机器才认得」的绝对路径
+    # （test_v0391_thinking_mapping.py::test_no_test_source_carries_a_machine_absolute_path
+    # 会当场判红）。要验的是「盘符路径被掩」，账号名是哪一串无关。
+    win = r"写入失败: C:\\Users\\someone\\proj\\data\\x.json"
     out = _scrub_text(win)
-    assert "34426" not in out and "ai-assistant" not in out, f"本机路径原样落盘：{out}"
+    assert "someone" not in out and "proj" not in out, f"本机路径原样落盘：{out}"
     assert "写入失败" in out, "句子其余部分要照读——掩码不是删句"
 
     posix = "/home/runner/work/fenver/data/y.json 不可读"
