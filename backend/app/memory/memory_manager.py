@@ -250,7 +250,26 @@ class MemoryManager:
                 model=self.embed_model,
                 input=[text]
             )
-            return response.data[0].embedding
+            vec = response.data[0].embedding
+            # #293（2026-11-26 收口）：返回维度必须当场验形状。
+            #
+            # 为什么不传 dimensions：不是所有上游都认这个参数（中转站式上游常直接忽略，
+            # 甚至因未知字段 400），传了反而多一种失败形状；而「维度是多少」真正的判据是
+            # **实际回来多少**。所以这里不猜、不传，只校验返回值。
+            #
+            # 为什么必须校验：ChromaDB 在首次写入时按当次向量锁维度，之后后端换了维度不会
+            # 报，只会在 add/query 时抛难以定位的 InvalidArgumentError。启动探测那条路已经
+            # 有 EmbeddingDimConflict 兜底，但那是 _open_collection 时算的一次；运行期上游
+            # 换模型/换中转站时，回来的向量会静默变成另一个维度，直到写入那一刻才炸。
+            if not isinstance(vec, list) or not vec or not isinstance(vec[0], (int, float)):
+                raise RuntimeError(
+                    "嵌入后端返回的向量形状不对（不是非空数值列表），拒绝写入记忆库")
+            if getattr(self, "embed_dim", None) and len(vec) != self.embed_dim:
+                raise EmbeddingDimConflict(
+                    f"嵌入后端返回的维度变了：此前后端是 {self.embed_dim} 维，这次回来 "
+                    f"{len(vec)} 维。两个向量空间不通用，写入会污染记忆库——请固定嵌入后端，"
+                    "或重建记忆库（会丢失已有记忆）。")
+            return vec
 
     def _summarize(self, text: str, max_length: int = 100) -> str:
         # 本地模型或伪嵌入模式不支持摘要，直接截断
