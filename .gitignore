@@ -237,3 +237,8 @@ android-native/.gradle/
 # 那把锁就变成一句注释。纯标准库、只读 git tag、只写显式传入的 --out（必填无默认，
 # 不会误覆写生产 version.txt）。
 !/tools/bake_server_version.py
+
+# 验证脚本在 backend/ 下用 tempfile.mkdtemp 留的临时树（2026-11-25 事故：
+# 我的手工验证脚本 os.chdir 到 backend/ 之后 mkdtemp 落在仓库里，被 git add -A
+# 带进了版本库，密钥扫描锁当场红在 backend/tmp*/users.json 上）。
+backend/tmp*/
