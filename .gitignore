@@ -242,3 +242,5 @@ android-native/.gradle/
 # 我的手工验证脚本 os.chdir 到 backend/ 之后 mkdtemp 落在仓库里，被 git add -A
 # 带进了版本库，密钥扫描锁当场红在 backend/tmp*/users.json 上）。
 backend/tmp*/
+
+safe-verify-*/
