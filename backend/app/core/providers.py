@@ -1019,6 +1019,19 @@ class ProviderStore:
         # 上限的判据从头到尾只有归一这一条。
         if pending.get("max_context_k") is None:
             pending["max_context_k"] = old.get("max_context_k")
+        # #229（2026-11-25 收口）：is_default 走同一条「没带就保留」纪律。
+        #
+        # 现场：两端表单都硬发 is_default=False（表单上根本没有这一格），而 upsert 是
+        # 整条替换 —— 于是「改一次模型名字」就等于把全站那颗 ★ 摘掉，全站默认悄悄漂到
+        # 另一条上，且一句错误都不说。实测复现：before=True → 改名 → after=False。
+        #
+        # 这里用真值判断而不是 None 判断，是因为 ProviderRequest.is_default 是
+        # bool = False（不是 Optional）——「没带」在这一层已经变成 False，与「用户明确
+        # 关掉」不可区分。所以：**请求里 False 一律视为没带**，要改默认只能走
+        # /v1/providers/default 那条专用路（它本来就存在，且两端都在用）。
+        # 显式设默认走 upsert 之外的路，因此这里保留旧值不会挡住任何合法诉求。
+        if not pending.get("is_default"):
+            pending["is_default"] = old.get("is_default", False)
         return pending, requested
 
     def upsert(self, record: dict) -> dict:

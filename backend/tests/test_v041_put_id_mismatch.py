@@ -7,7 +7,9 @@
 """
 
 BODY = {"label": "探针", "base_url": "https://api.openai.com/v1",
-        "api_key": "sk-put231-0123456789abcdef"  # secret-scan:allow 测试里造的假密钥, "model": "m-1"}
+        "model": "m-1",
+        # secret-scan:allow 测试里造的假密钥，这台机器上没有这颗 key
+        "api_key": "sk-put231-0123456789abcdef"}
 
 
 def _pid(client, hdr):
