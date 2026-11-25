@@ -1,6 +1,10 @@
 """v0.39.1 Task 8：provider 思考能力字段 + /v1/models 的 can_edit。
 
-判据源：.superpowers/sdd/2026-10-31-model-cockpit/task-8-brief.md。brief 内部两处
+#290（2026-11-25 收口）：判据源原来写的是 `.superpowers/sdd/.../task-8-brief.md`，而
+# `.superpowers/` 整目录被 .gitignore 排除 ⇒ 干净克隆与 CI 都读不到那份文件，等于把判据
+# 挂在只有做过那一轮的机器上才存在的东西上。入库的那份是
+# `docs/superpowers/plans/2026-10-31-model-cockpit.md`（git ls-files 可查），判据以它为准。
+判据源：docs/superpowers/plans/2026-10-31-model-cockpit.md。该计划内部两处
 自相矛盾按裁决落地（裁决 A/B 是 spec 第 207-237 行的口径）：
 
   裁决 A —— 更新时四个 thinking 字段的保留发生在 `_validate` **之前**。放在校验之后
