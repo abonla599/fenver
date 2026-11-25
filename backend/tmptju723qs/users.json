@@ -1,0 +1,31 @@
+{
+  "u_5100c2ca": {
+    "user_id": "u_5100c2ca",
+    "username": "audit-probe",
+    "username_lc": "audit-probe",
+    "pw_hash": "bcrypt:$2b$12$7Hz8.E6Hk8mAgBQHF1KwJeGL269aud7ncXllwahn7yDMbsUxoEnpG",
+    "tokens": [
+      "sha256:d715bda19d57c91d1579eed19efa456e14b95e2dc26b115c48701b907767d377"
+    ],
+    "role": "user",
+    "disabled": false,
+    "status": "active",
+    "must_change_password": false,
+    "created_at": "2026-11-25T23:57:38.215313",
+    "last_used_at": "2026-11-25T23:57:38.215313",
+    "session_anchor": 1795622258.2153134,
+    "token_issued_at": {
+      "sha256:d715bda19d57c91d1579eed19efa456e14b95e2dc26b115c48701b907767d377": 1795622258.2153134
+    },
+    "token_absolute_deadline": {
+      "sha256:d715bda19d57c91d1579eed19efa456e14b95e2dc26b115c48701b907767d377": 1811174258.2153134
+    },
+    "device_secrets": {
+      "sha256:435c555e5389ea74d033314d586f3fb6537020ee9baba27e8c5d8662c0f2abf2": {
+        "created_at": 1795622258.2153134,
+        "last_used_at": 1795622258.2153134,
+        "reauth_count": 0
+      }
+    }
+  }
+}

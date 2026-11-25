@@ -1,0 +1,31 @@
+{
+  "u_7cc952f4": {
+    "user_id": "u_7cc952f4",
+    "username": "p231",
+    "username_lc": "p231",
+    "pw_hash": "bcrypt:$2b$12$DsuS/c6IhofU3EzT5E4kmuNhKafTHZ1nACqdhpHq1Fbo4YsjXw2mO",
+    "tokens": [
+      "sha256:be249ee429ceca4658a6a20621c5f380798c08b7eec23fd066c86d2d36fadb26"
+    ],
+    "role": "user",
+    "disabled": false,
+    "status": "active",
+    "must_change_password": false,
+    "created_at": "2026-11-25T23:59:30.955366",
+    "last_used_at": "2026-11-25T23:59:30.955366",
+    "session_anchor": 1795622370.9553668,
+    "token_issued_at": {
+      "sha256:be249ee429ceca4658a6a20621c5f380798c08b7eec23fd066c86d2d36fadb26": 1795622370.9553668
+    },
+    "token_absolute_deadline": {
+      "sha256:be249ee429ceca4658a6a20621c5f380798c08b7eec23fd066c86d2d36fadb26": 1811174370.9553668
+    },
+    "device_secrets": {
+      "sha256:28d3243e03241829cef0c919d23bf0df14937b908641b31b1da9021b0911b0da": {
+        "created_at": 1795622370.9553668,
+        "last_used_at": 1795622370.9553668,
+        "reauth_count": 0
+      }
+    }
+  }
+}

@@ -1526,6 +1526,27 @@ def _owner_gate(provider_id: str, user_id: str, require_own: bool) -> dict:
 
 
 PROVIDER_CREATE_ID_DETAIL = "创建模型服务不接受自带 id，请留空或由服务端生成"
+# #231（2026-11-25 收口）：路径 id 与 body.id 不一致时，过去是**静默以路径为准**，而
+# MCP 面对同一件事是响亮的 400——两种口径并存，最坏的结果是「客户端以为改的是 A、
+# 实际改的是 B」而没有任何一处告诉它。现在两路 PUT 共用下面这道闸。
+PROVIDER_PUT_ID_MISMATCH_DETAIL = "请求体里的 id 与路径上的 id 不一致，请不要再传 id（以路径为准）"
+
+
+def _reject_put_id_mismatch(req: ProviderRequest, provider_id: str) -> None:
+    """PUT 两路共用：body 里带了 id 且与路径不一致 ⇒ 400。
+
+    只判「带了且不一致」：没带（None）与纯空白都算「没带」，由路径说了算——那是今天
+    两个客户端的正常形状，把正常 PUT 打死不是本单要修的东西。
+    """
+    if req.id is None:
+        return
+    given = str(req.id).strip()
+    if not given:
+        req.id = None
+        return
+    if given != provider_id:
+        raise HTTPException(status_code=400, detail=PROVIDER_PUT_ID_MISMATCH_DETAIL)
+    req.id = None   # 一致也不必传下去：存储层只认路径那一个
 
 
 def _reject_client_provider_id(req: ProviderRequest) -> None:
@@ -1586,6 +1607,7 @@ def add_provider(req: ProviderRequest, actor: Principal = RequireAdminReauth):
 def update_provider(provider_id: str, req: ProviderRequest,
                           actor: Principal = RequireAdminReauth):
     existing = _owner_gate(provider_id, "", require_own=False)
+    _reject_put_id_mismatch(req, provider_id)   # #231
     # exclude_none：请求里没带的字段 = "这次没动它"，不是"把它清空"。
     # pricing 与 paid_by 同一条纪律——旧表单不认识单价，一次普通改名
     # 绝不能把「有价」洗成「未定价」（那是把真花费报成算不出）。
@@ -1706,12 +1728,18 @@ def add_my_provider(req: ProviderRequest, principal: Principal = CurrentPrincipa
         saved = provider_store.upsert(record)
     except ProviderError as e:
         raise HTTPException(status_code=400, detail=hide_paths(str(e)))
+    # #230（2026-11-25 收口）：个人面写操作原来**零审计**——冒名覆盖不会被记录，
+    # 400 拒绝也看不见。与管理员面同一套口径：动作名带 .me 前缀区分归属面，
+    # after 只带 _public（那层没有密钥明文）。新建没有 before 可对，落一条 create 就够。
+    audit.log(principal, "provider.me.create", target=str(saved.get("id") or ""),
+              after=provider_store._public(saved))
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.put("/v1/me/providers/{provider_id}")
 def update_my_provider(provider_id: str, req: ProviderRequest,
                        principal: Principal = CurrentPrincipal):
     existing = _owner_gate(provider_id, principal.user_id, require_own=True)
+    _reject_put_id_mismatch(req, provider_id)   # #231
     # exclude_none 的口径与管理员面一致：没带 pricing = 保留原值。
     record = req.model_dump(exclude_none=True)
     record["id"] = provider_id
@@ -1724,13 +1752,19 @@ def update_my_provider(provider_id: str, req: ProviderRequest,
     # 护栏都跟着它重算——跨用户看不了内容，但变更史必须在（管理员排账时
     # 这是唯一能说"哪天这把尺子换过"的地方）。
     _audit_pricing_change(principal, provider_id, existing, saved)
+    # #230：更新面同样补一条。after 只带 _public，密钥明文不进审计（_redact 再兜一层）。
+    audit.log(principal, "provider.me.update", target=provider_id,
+              after=provider_store._public(saved))
     return {"status": "saved", "provider": provider_store._public(saved)}
 
 @app.delete("/v1/me/providers/{provider_id}")
 def remove_my_provider(provider_id: str, principal: Principal = CurrentPrincipal):
     _owner_gate(provider_id, principal.user_id, require_own=True)
-    provider_store.delete(provider_id)
-    return {"status": "deleted", "id": provider_id}
+    # #230：删是**不可逆**的那一个，尤其要有账。删成功才落条（与管理员面同序）。
+    if provider_store.delete(provider_id):
+        audit.log(principal, "provider.me.delete", target=provider_id)
+        return {"status": "deleted", "id": provider_id}
+    raise HTTPException(status_code=404, detail="模型服务不存在")
 
 @app.post("/v1/me/providers/default")
 def set_my_default_provider(req: ProviderDefaultRequest,
