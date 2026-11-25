@@ -27,6 +27,7 @@ import re
 import sys
 import threading
 
+from app.core.pathmask import hide_paths
 from app.core.paths import data_file, ensure_parent
 
 _LOCK = threading.Lock()
@@ -74,10 +75,20 @@ _LABELED_SECRET_RE = re.compile(
 
 
 def _scrub_text(text: str) -> str:
-    """隐掉自由文本里的凭据形状，其余一个字不动（保留标签，只隐值）。"""
+    """隐掉自由文本里的凭据形状**与本机绝对路径**，其余一个字不动（保留标签，只隐值）。
+
+    #225（2026-11-26 收口）：审计的自由文本字段原来只脱敏凭据形状，绝对路径原样落盘——
+    而 detail 是调用方可填的自由文本，一句异常原文就能把本机盘符路径写进 audit.jsonl。
+    出口层（response）早就有 pathmask 这道网，落盘层没有；而审计的要求比出口更高（长期
+    留存、管理台展示、会被导出）。
+
+    复用 pathmask 而不是在这里再写一份：路径长什么样只有一处真相（#67 那条纪律），抄第二
+    份就会在下一次改动里各说各话。pathmask 只依赖 re，不会与审计形成循环 import。
+    掩码是**明写**的（〈路径已隐去〉）而不是删掉：句子里少一截要能解释得清。
+    """
     if not text:
         return ""
-    out = str(text)
+    out = hide_paths(str(text))
     out = _LABELED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "***", out)
     out = _BEARER_RE.sub(lambda m: m.group(1) + "***", out)
     out = _GH_TOKEN_RE.sub("ghp_***", out)

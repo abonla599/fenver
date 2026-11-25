@@ -349,23 +349,55 @@ def _app_source_files():
     return [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
 
 
-def test_no_openai_client_is_built_without_an_explicit_http_client():
-    """每一处 OpenAI(...) 都必须自带 http_client。
+def _openai_calls_missing_http_client():
+    """扫出所有「构造了 OpenAI 客户端但没把 http_client 当关键字实参传」的位置。
 
-    本机卡巴斯基在拆 TLS：它签发的证书只有系统根库里那张自签根验得了，certifi 那份
-    根证书包里根本没有它（实测 certifi 里 Kaspersky 计数为 0），所以默认构造的
-    客户端一律 CERTIFICATE_VERIFY_FAILED。漏一处的后果还不一样——聊天会红着脸报错，
-    而 memory_manager 那处会静默降级成伪嵌入，语义检索再也读不到记忆，界面上毫无痕迹。
+    #296（2026-11-26 收口）：这一格原来是**正则 + 子串判据**——
+
+        re.finditer(r"OpenAI\(([^)]*)\)", text) 且 "http_client" not in call.group(1)
+
+    它有两个方向的错，而且都会静默：
+    · **假绿**：实参里任意位置出现 http_client 这个词就算过——注释里写一句、字符串里提
+      一嘴、甚至 `# TODO: http_client` 都算；真漏传反而看不见。
+    · **假红**：`[^)]*` 遇到 `httpx.Client(...)` 这种嵌套括号就断在中间，把合法的构造
+      误判成漏传。
+
+    现在用 AST 判 keyword.arg：只认「实参里真有一个名字叫 http_client 的关键字参数」。
+    注释、字符串、子表达式里的同名文本一概不算。与 tests/test_outbound_trust_env.py 同形。
+
+    为什么值得较真：本机卡巴斯基在拆 TLS，它签发的证书只有系统根库里那张自签根验得了，
+    certifi 里根本没有它，默认构造的客户端一律 CERTIFICATE_VERIFY_FAILED。漏一处的后果
+    还不一样——聊天会红着脸报错，而 memory_manager 那处会静默降级成伪嵌入，语义检索再也
+    读不到记忆，界面上毫无痕迹。
     """
-    import re
+    import ast
 
     offenders = []
     for path in _app_source_files():
         text = path.read_text(encoding="utf-8")
-        for call in re.finditer(r"OpenAI\(([^)]*)\)", text, re.S):
-            if "http_client" not in call.group(1):
-                offenders.append(path.name)
-    assert not offenders, f"以下文件里的 OpenAI 客户端没带 http_client：{sorted(set(offenders))}"
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name != "OpenAI":
+                continue
+            kwargs = {kw.arg for kw in node.keywords if kw.arg}
+            if "http_client" not in kwargs:
+                offenders.append(path.name + ":" + str(node.lineno))
+    return offenders
+
+
+def test_no_openai_client_is_built_without_an_explicit_http_client():
+    """每一处 OpenAI(...) 都必须把 http_client 作为**关键字实参**传进去。"""
+    offenders = _openai_calls_missing_http_client()
+    assert not offenders, (
+        "以下位置构造了 OpenAI 客户端但没把 http_client 当关键字实参传："
+        + str(offenders) + "——注释或字符串里出现这个词不算数（#296）")
 
 
 def test_the_trust_anchor_still_verifies_certificates():
