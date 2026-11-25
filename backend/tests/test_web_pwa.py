@@ -23,8 +23,10 @@ JS_FILES = ("api.js", "app.js", "markdown.js", "sw.js")
 # （tests/test_website.py::test_the_android_button_downloads_through_our_own_endpoint），
 # 端点本身的判据在 core/releases.py::SELF_APK_PATH。本文件两把更新链锁共用这两个权威串，
 # 各写一份字面量就会在下一次改动里各说各话。
-# 为什么不是 github.com 的发布页：`abonla599` 停用之后那条恒 404，而"送去一个 404
-# 比不放链接更糟"——全仓那把死链扫描锁见 tests/test_changelog_page.py。
+# 为什么不是 github.com 的发布页：那是**站外**、且它的可用性不归我们控（仓库改名/转私有/
+# 平台策略都足以让它变成 404），而"送去一个 404 比不放链接更糟"。旧注释写「`abonla599`
+# 停用后恒 404」——2026-11-25 实测该仓 releases 页与 API 都是 200，那句话不成立，已改正。
+# 全仓那把死链扫描锁见 tests/test_changelog_page.py。
 APK_EXIT = "/site/android.apk"
 CHANGELOG_PAGE = "/changelog"
 
@@ -2219,8 +2221,9 @@ def test_the_update_row_exists_and_never_becomes_a_dead_button():
     ① 胶囊被改没了（动了 markup 忘了这里）——壳其实能查，用户却找不到入口；
     ② 无条件走原生那条（不看 caps.update）——旧壳的桥里没有 checkUpdate 这个方法，
        点一下什么也不发生，页面连一句错都不显示，而它看起来和新壳上一模一样；
-    ③ 旧壳那颗 <a> 的去向又写成站外的发布页——v0.34 摘掉的就是它（`abonla599` 停用后
-       那条地址恒 404，把人送去 404 比不放链接更糟）。本条判它必须是自家那个"替访问者把
+    ③ 旧壳那颗 <a> 的去向又写成站外的发布页——v0.34 摘掉的就是它（站外地址的可用性不归
+       我们控，把人送去 404 比不放链接更糟。旧注释那句「`abonla599` 停用后恒 404」在
+       2026-11-25 实测为假：该仓 releases 页与 API 都回 200）。本条判它必须是自家那个"替访问者把
        这一版包取回来"的同源端点；全仓范围的扫描锁在
        tests/test_changelog_page.py::test_the_dead_github_hyperlinks_are_gone_from_the_web。
     纯浏览器那一档是第三颗元素：点下去弹「网页版无需安装」的瞬态对话框（判据在

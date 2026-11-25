@@ -672,7 +672,19 @@ def fetch_build(url: str, timeout: float):
     """
     req = urllib.request.Request(url, headers={"User-Agent": "fenver-pre-tag-gate/1"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # #326（2026-11-25 收口）：不用默认 opener。
+        #
+        # 默认 opener 在 Windows 上会装一个读「环境变量 + 注册表 Internet Settings」的
+        # ProxyHandler——谁能改 HKCU 下那组键，谁就能把这把闸门读到的 build 串改道到一个
+        # 自己复述的假 /health 上，闸门随后「放行」一个根本没换过的包。
+        # ProxyHandler({}) 的空 dict 才是「不走任何代理」；ProxyHandler() 不给实参反而会
+        # 触发 getproxies()，是同一个坑的另一面。
+        #
+        # TLS 行为刻意不变：这里不传 context，与原来 urlopen 的默认上下文同源。
+        # 钉 cafile/capath 被明令禁止（裁决 R1：本机信任根 209→147，拆 TLS 的那张根证书
+        # 消失，模型/搜索/取包全 CERTIFICATE_VERIFY_FAILED）。本次只砍代理读取。
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
             body = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:

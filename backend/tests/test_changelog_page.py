@@ -811,7 +811,9 @@ def test_the_web_offers_no_apk_download_except_the_single_latest_endpoint():
 def test_the_dead_github_hyperlinks_are_gone_from_the_web():
     """整张随包发布的 Web（官网 + PWA + 管理台）不许再有可点的 github.com 链接。
 
-    `abonla599` 被停用后那条地址恒 404（本机实测），把访客送去一个 404 比不放链接更糟。
+    站外地址的可用性不归我们控（仓库改名、转私有、平台策略变化都足以让它变成 404），
+    把人送去一个 404 比不放链接更糟。**旧注释写的是「`abonla599` 被停用后恒 404」，那
+    在 2026-11-25 实测为假**：该仓的 releases 页与 API 都回 200。判据不依赖这句话——
     这把锁原来只扫 `site/index.html`——v0.34 合流时 PWA（`static/index.html`）那两颗
     「检查更新 / 立即更新」还挂在 `github.com/.../releases/latest` 上没人对齐，就是
     "面只铺了一半"的代价：官网干净了，用户真点的那一面没干净。现在面按目录铺，
@@ -830,7 +832,7 @@ def test_the_dead_github_hyperlinks_are_gone_from_the_web():
     hits = _clickable_github_links()
     off_home = [(f, u) for f, u in hits if u != REPO_HOME]
     assert not off_home, (
-        "这些是可点的 github.com 链接，而那个账号停用之后它们恒 404——"
+        "这些是可点的 github.com 链接，而站外地址的可用性不归我们控（随时可能变成 404）——"
         "更新链的出口在自家端点上（/site/android.apk、/changelog），别指回站外："
         f"{off_home}")
     homes = [f for f, u in hits if u == REPO_HOME]
