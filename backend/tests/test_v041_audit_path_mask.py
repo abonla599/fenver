@@ -21,9 +21,9 @@ def test_windows_and_posix_paths_are_masked():
     assert "someone" not in out and "proj" not in out, f"本机路径原样落盘：{out}"
     assert "写入失败" in out, "句子其余部分要照读——掩码不是删句"
 
-    posix = "/home/runner/work/fenver/data/y.json 不可读"
+    posix = "/home/someone/proj/data/y.json 不可读"
     out = _scrub_text(posix)
-    assert "fenver" not in out, f"POSIX 路径原样落盘：{out}"
+    assert "someone" not in out and "proj" not in out, f"POSIX 路径原样落盘：{out}"
     assert "不可读" in out
 
 
