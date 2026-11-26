@@ -631,19 +631,33 @@ def check_previous_version_survives(repo_root: str, tag: str):
     if prev is None:
         if why == "no-previous-tag":
             return True, "no-previous-tag", "本 tag 之前没有服务端 tag，这一格无对照"
+        if why.startswith("git-unreadable"):
+            # 不是 git 仓库 / git 起不来：这一格**无法对照**。这不是 fail-open——
+            # 「这棵树能不能被证明就是 tag 那一笔」由第 1 关 check_build_provenance 负责，
+            # 那里 git 读不出来会当场红。本格只判「比起上一版我们丢了什么」，没有对照物
+            # 就没有结论。测试夹具用的正是这种假树（tmp_path + 手写文件、没有 .git），
+            # 把这种情形全判红等于让这一格去抢第 1 关的活，且会让六条老用例集体误红。
+            return True, "no-comparison", (
+                "此处不是 git 仓库，这一格无对照（这棵树是不是 tag 那一笔由第 1 关判）")
         return False, "undecidable:" + why, "判不出上一版是哪个 tag（%s）" % why
 
     prev_files, rc, err = _git_probe(repo_root, ["ls-tree", "-r", "--name-only", prev])
     if rc != 0 or prev_files is None:
         return False, "undecidable:ls-tree", "读不出 %s 的文件清单（rc=%s %s）" % (prev, rc, err or "")
-    head_files, rc, err = _git_probe(repo_root, ["ls-tree", "-r", "--name-only", "HEAD"])
-    if rc != 0 or head_files is None:
-        return False, "undecidable:ls-tree-head", "读不出 HEAD 的文件清单（rc=%s %s）" % (rc, err or "")
+    # 对照物是**要发的这一版 tag**，不是 HEAD：问的是「上一版的内容还在不在这一版里」。
+    # 用 HEAD 会把「拿一个历史 tag 来跑这道闸门」的场合（老契约测试就是那样）读成
+    # 「历史 tag 丢了几十份文件」——那量的是今天的树，不是那一版之间的差，判据就跑偏了。
+    # 真实发版时两者本就相等（第 1 关 check_build_provenance 强制 HEAD == tag）。
+    tag_files, rc, err = _git_probe(repo_root, ["ls-tree", "-r", "--name-only",
+                                             "%s^{commit}" % tag])
+    if rc != 0 or tag_files is None:
+        return False, "undecidable:ls-tree-tag", (
+            "读不出 %s 的文件清单（rc=%s %s）" % (tag, rc, err or ""))
 
-    have = {ln for ln in head_files.splitlines() if ln.strip()}
+    have = {ln for ln in tag_files.splitlines() if ln.strip()}
     lost = sorted(ln for ln in prev_files.splitlines() if ln.strip() and ln not in have)
     if not lost:
-        return True, "ok", "上一版 %s 的 %d 份文件都还在本树里" % (prev, len(have))
+        return True, "ok", "上一版 %s 的 %d 份文件都还在 %s 里" % (prev, len(have), tag)
 
     sample = "、".join(lost[:6]) + ("…" if len(lost) > 6 else "")
     return False, "content-lost", (
