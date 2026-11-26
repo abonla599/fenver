@@ -575,6 +575,82 @@ def _all_refs_resolve_to_commits(repo_root: str, refs):
     return True, ""
 
 
+def previous_server_tag(repo_root: str, tag: str):
+    """在本 tag 之前、同一命名空间里最近的那枚服务端 tag。
+
+    #291（2026-11-26 收口）：判「上一版还在不在」必须先认准「上一版是谁」。
+    命名空间口径与 tools/release_marker.py 同源：只认 v<数字>.<数字>.<数字>，安卓线与
+    site-only 那几枚都在同一个 tag 列表里，靠版本号比大小分先后。
+
+    回 (tag 或 None, 说明)。判不出来回 None 并带原因——调用方按 fail-closed 处理。
+    """
+    out, rc, err = _git_probe(repo_root, ["tag", "--list", "v*"])
+    if rc != 0 or out is None:
+        return None, "git-unreadable rc=%s %s" % (rc, err or "")
+    pattern = re.compile(r"^v(\d+\.\d+\.\d+)$")
+    candidates = []
+    for name in out.splitlines():
+        name = name.strip()
+        m = pattern.match(name)
+        if not m or name == tag:
+            continue
+        candidates.append((tuple(int(x) for x in m.group(1).split(".")), name))
+    if not candidates:
+        return None, "no-previous-tag"
+    mine = pattern.match(tag)
+    if not mine:
+        return None, "tag-not-in-server-namespace"
+    mykey = tuple(int(x) for x in mine.group(1).split("."))
+    older = [c for c in candidates if c[0] < mykey]
+    if not older:
+        return None, "no-previous-tag"
+    return max(older)[1], "ok"
+
+
+def check_previous_version_survives(repo_root: str, tag: str):
+    """**上一版服务端拥有的内容，必须仍然在这棵树里。** 回 (可以, 记号, 说明)。
+
+    #291（2026-11-26 收口）：发版闸门过去只问三件事——HEAD 是不是 tag 那一笔、发版说明
+    在不在、线上自报的 build 是不是这一版。它**不问**一件同样致命的事：「上一版的东西还在
+    不在」。
+
+    现场是三枚 site-only tag（v0.38.2/.3/.4）不是 v0.39.0 的祖先：那三版改的是官网，后来
+    从别的分支重开了主线，官网那批改动没有并回来。tag 都在、Release 都在、线上也确实跑过
+    ——直到某一次发版才发现那些页面内容在新树里已经没有了。闸门全程绿，因为没有任何一格
+    在看「比起上一版，我们丢了什么」。
+
+    判据取「上一版 tag 的文件清单」与「本树的文件清单」之差：上一版有、本树没有的路径就
+    报出来。比文件清单而不是比每行内容：这一格要抓的是「整块内容被弄丢」，不是代码评审；
+    逐行比会让任何正常改动都红，等于把闸门训成背景噪音（v0.37.5 连续七版红在同一格就是
+    那个教训）。文件级正是「丢了 vs 改了」的分界线。
+
+    判不出来（git 读不了、tag 解析不了）一律 False 并走 code=2，与「线上取不到」同档——
+    不许把「我不知道」说成「没问题」。
+    """
+    prev, why = previous_server_tag(repo_root, tag)
+    if prev is None:
+        if why == "no-previous-tag":
+            return True, "no-previous-tag", "本 tag 之前没有服务端 tag，这一格无对照"
+        return False, "undecidable:" + why, "判不出上一版是哪个 tag（%s）" % why
+
+    prev_files, rc, err = _git_probe(repo_root, ["ls-tree", "-r", "--name-only", prev])
+    if rc != 0 or prev_files is None:
+        return False, "undecidable:ls-tree", "读不出 %s 的文件清单（rc=%s %s）" % (prev, rc, err or "")
+    head_files, rc, err = _git_probe(repo_root, ["ls-tree", "-r", "--name-only", "HEAD"])
+    if rc != 0 or head_files is None:
+        return False, "undecidable:ls-tree-head", "读不出 HEAD 的文件清单（rc=%s %s）" % (rc, err or "")
+
+    have = {ln for ln in head_files.splitlines() if ln.strip()}
+    lost = sorted(ln for ln in prev_files.splitlines() if ln.strip() and ln not in have)
+    if not lost:
+        return True, "ok", "上一版 %s 的 %d 份文件都还在本树里" % (prev, len(have))
+
+    sample = "、".join(lost[:6]) + ("…" if len(lost) > 6 else "")
+    return False, "content-lost", (
+        "上一版 %s 有 %d 份文件在本树里找不到了：%s。"
+        "要么把它们并回来，要么在发版说明里点名撤掉并入白名单——"
+        "「上一版有、这一版没有却没人说」正是 #291 那次真实丢内容的形状" % (prev, len(lost), sample))
+
 def check_leak_quarantine(repo_root: str):
     """**有没有任何一个还能被推出去的 ref 能走到被隔离的提交？** 回 (可以, 记号, 说明)。
 
@@ -956,6 +1032,18 @@ def main(argv=None) -> int:
         leak_code = 1 if leak_token == "ref-reaches-quarantined" else 2
         return _fail("leak-quarantine-%s：%s —— 这一格没有开关，也不该有；名单清干净之前"
                      "任何 tag 都会把那个提交一起推出去" % (leak_token, leak_detail), leak_code)
+
+    # 7) 上一版内容闸（#291，2026-11-26 收口）：**上一版服务端拥有的文件，不许在新树里悄悄消失。**
+    #    放在 PASS 之前，与第 6 条同一个手法：前面各条的红先按自己的理由报出来。
+    #    这一格没有开关，也不该有——它拦的是「发版时间点才发现上一版内容没了」那种事故。
+    prev_ok, prev_token, prev_detail = check_previous_version_survives(root, tag)
+    if prev_ok:
+        print("PRETAG previous-version=ok %s" % prev_detail)
+    else:
+        print("PRETAG previous-version=REFUSED token=%s %s" % (prev_token, prev_detail))
+        # content-lost 是「确定丢了东西」＝1（与版本不符同档）；判不出来＝2（与「线上取不到」同档）。
+        prev_code = 1 if prev_token == "content-lost" else 2
+        return _fail("previous-version-%s：%s" % (prev_token, prev_detail), prev_code)
 
     print("PRETAG verdict=PASS —— 线上（与本机）正在服务的就是 %s，可以打 tag" % tag)
     return 0
