@@ -259,6 +259,32 @@ def _note_admin_reauth_failure(user_id: str, ip: str) -> None:
     _note(_ADMIN_REAUTH_FAILS_BY_USER, _admin_reauth_user_key(user_id), moment)
 
 
+def _clear_admin_reauth_failures(user_id: str, ip: str) -> None:
+    """本人二次验证**成功**时，把这个人的失败预算清干净（#283，2026-11-27 收口）。
+
+    为什么必须清（这是本单的全部理由）：两道闸都是在**验口令之前**判的——
+    `admin_reauth_endpoint` 先 `_admin_reauth_throttled`，满了就直接 429，根本走不到
+    `verify_password`。于是 ② 号那道（按 user_id 计数、30 次/10 分钟、跨来源）一旦被
+    别人从任意 IP 打满，**这位管理员本人在自己机器上、拿着正确口令也进不去**——
+    他连"证明我是我"的机会都没有，只能等窗口过去。这就是「已持会话者可跨来源把
+    另一个管理员锁在二次验证外」。
+
+    与「任何成功都不还回预算」那条裁决的关系（必须说清，否则会被当成推翻了 F3）：
+    那条裁决守的是**免凭据**的登录/注册端点——在那里"成功"是随手可得的（猜对自己的
+    口令、再注册个小号），所以成功不能还预算，否则枚举可以无限续命。
+    这里正相反：`/v1/auth/admin-reauth` 前面站着**已鉴权 + role==admin** 两道门，
+    能走到"验证成功"的人必须先是持票管理员本人。清账不是给攻击者续命，而是把
+    "别人替我打满的格子"还给我自己。登录/注册那两本账的判据一个字没动。
+
+    只清**本人**的键，不动 ① 号 (user|IP) 那本的其余格：那本按来源分开，别人的来源
+    该保留保留；这里清的是 `user|ip` 与 `user` 两个键——① 里只清自己这一个来源，
+    ② 里清自己这一格。
+    """
+    # 两格都经后端 drop：内存后端里账本对象就是存储，共享后端里那格住在 Redis list 上。
+    _LEDGER_BACKEND.drop(_ADMIN_REAUTH_FAILS_BY_USER, _admin_reauth_user_key(user_id))
+    _LEDGER_BACKEND.drop(_ADMIN_REAUTH_FAILS, _admin_reauth_key(user_id, ip))
+
+
 def reset_admin_reauth_throttle_for_tests() -> None:
     _ADMIN_REAUTH_FAILS.clear()
     _ADMIN_REAUTH_FAILS_BY_USER.clear()
@@ -855,6 +881,9 @@ def admin_reauth_endpoint(request: Request, response: Response,
                             account=principal.user_id, status=401,
                             detail="admin.reauth.denied")
         raise HTTPException(status_code=401, detail="口令不对")
+    # #283：验口令成功即清本人的失败预算。理由与边界见 _clear_admin_reauth_failures
+    # （它挡的是「别人从别的来源把我打满、我本人反而进不去」）。
+    _clear_admin_reauth_failures(principal.user_id, ip)
     ticket = admin_reauth.issue(principal.user_id)
     response.set_cookie(
         key=admin_reauth.COOKIE_NAME, value=ticket,

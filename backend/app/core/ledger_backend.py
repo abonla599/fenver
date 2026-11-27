@@ -49,6 +49,15 @@ class LedgerBackend:
     def prune(self, ledgers, moment: float, max_sources: int) -> None:
         raise NotImplementedError
 
+    def drop(self, ledger, key: str) -> None:
+        """把某一格预算整个删掉（#283：reauth 成功时清本人的账）。
+
+        为什么需要它是接口而不是调用方直接 `ledger.pop`：内存后端里账本对象**就是**存储，
+        pop 一下够了；共享后端里那格住在一个 Redis list 上，只有后端知道键怎么拼。
+        两套实现在这里分家、调用方却只写一次，才是这一层该有的样子。
+        """
+        raise NotImplementedError
+
 
 class MemoryLedgers(LedgerBackend):
     """默认后端：账本对象自己就是存储，一个字节都不搬。"""
@@ -68,6 +77,9 @@ class MemoryLedgers(LedgerBackend):
         stamps = [t for t in ledger[key] if moment - t < window]
         ledger[key] = stamps
         return stamps
+
+    def drop(self, ledger, key) -> None:
+        ledger.pop(key, None)
 
     def prune(self, ledgers, moment, max_sources) -> None:
         for ledger, window in ledgers:
@@ -117,6 +129,9 @@ class RedisLedgers(LedgerBackend):
         if len(fresh) != len(stamps):
             self.client.ltrim(rk, len(stamps) - len(fresh), -1)
         return fresh
+
+    def drop(self, ledger, key) -> None:
+        self.client.delete(self._key(ledger, key))
 
     def prune(self, ledgers, moment, max_sources) -> None:
         for ledger, window in ledgers:
