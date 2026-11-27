@@ -144,9 +144,15 @@ def test_admin_reauth_user_gate_uses_its_own_constant(client, enforced, monkeypa
         bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"},
                           headers={**BOOT, "CF-Connecting-IP": _src_ip(n)})
         assert bad.status_code == 401, (n, bad.status_code, bad.text)
-    loose = client.post("/v1/auth/admin-reauth", json={"password": "boot-token"},
-                        headers={**BOOT, "CF-Connecting-IP": _src_ip(user_limit)})
-    assert loose.status_code == 200, f"②号那道被并回①的上限了：{loose.status_code} {loose.text}"
+    # 这一截**故意不发"正确口令"的请求**：#283 起验证成功会清本人的失败预算，
+    # 而这里要用的是"①号那道到顶了、②号那道还没到"这个状态本身。发一次成功请求
+    # 会把账清空，下面那半段（打到②号上限才 429）就永远到不了上限了。
+    # 改成直接问判据函数，语义更纯：量的是"闸门的读数"，不是"发一次请求的副作用"。
+    # 牙口不变：把②指回①的上限（或两个常量改成相等），下面这句当场红。
+    from app.core import authz as _authz
+    assert not auth_router._admin_reauth_throttled(
+        _authz.BOOTSTRAP_PRINCIPAL.user_id, _src_ip(user_limit)), \
+        "②号那道被并回①的上限了：①到顶之后全新来源就被拦"
     for n in range(ip_limit, user_limit):
         bad = client.post("/v1/auth/admin-reauth", json={"password": "wrong"},
                           headers={**BOOT, "CF-Connecting-IP": _src_ip(n)})
