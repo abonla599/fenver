@@ -994,7 +994,16 @@ function Stop-AfterFailure {
             # do not double-start: two backends would write the same data\ files
             # ticket #295: scrub env proxies in THIS process before the child inherits them
             try { Remove-ProxyEnvForChild } catch { Write-Output ('PROXY-SCRUB-SKIPPED error=' + $_.Exception.Message) }
-            Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
+            # 2026-11-27 incident: this line used to be a bare -WindowStyle Hidden with
+            # no output redirection. The v0.40.1 swap HUNG here - the log stopped right after
+            # PROXY-ENV-SCRUBBED, process count was 0, and the operator had to start the
+            # service by hand. Same shape as the 2026-11-13 watchdog hang (that fix touched
+            # watchdog.ps1 only; this site was missed). With redirects it returns at once,
+            # and the two files are the incident scene.
+            $beOutLog = Join-Path $ProjectRoot 'logs\backend.out.log'
+            $beErrLog = Join-Path $ProjectRoot 'logs\backend.err.log'
+            Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
+                -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
             $package = 'old-package-restarted'
         }
     } catch {
@@ -1421,7 +1430,12 @@ Write-Output 'SWAPPED'
 try {
     # ticket #295: never let a poisoned NO_PROXY slip into the new backend's environment
     try { Remove-ProxyEnvForChild } catch { Write-Output ('PROXY-SCRUB-SKIPPED error=' + $_.Exception.Message) }
-    Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden
+    # Same as above (step 6, the main start site): without capturing the child's
+    # output the parent waits on its pipe handles, and the swap hangs here.
+    $beOutLog = Join-Path $ProjectRoot 'logs\backend.out.log'
+    $beErrLog = Join-Path $ProjectRoot 'logs\backend.err.log'
+    Start-Process -FilePath $LiveExe -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
+        -RedirectStandardOutput $beOutLog -RedirectStandardError $beErrLog
 } catch {
     Stop-AfterFailure 'start' $_.Exception.Message
 }
