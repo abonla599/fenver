@@ -549,6 +549,43 @@ def test_ps_trust_lock_can_go_red():
         "顺序陷阱的前提变了：挪到前面后第一个 -match 字面量竟不是 TLS 那条"
 
 
+
+
+# ---------- #296：Show-Rollback 打印的拉起命令必须带输出重定向 ----------
+# 真实的拉起语句（step 3 的 restart 与 step 6 的主启动）都接了 -RedirectStandardOutput /
+# -RedirectStandardError；而打印给运维照抄的那条过去是裸的 -WindowStyle Hidden。照抄的人
+# 于是复现 2026-11-27 那个挂住形状：父进程等子进程的管道句柄。
+# 判据只认 `_rollback_printed_launch_line` 定位到的那一行（打印文本，不是执行语句）：
+# 两枚开关与两个日志文件名必须都在这一行上，操作者抄走的就是一条能直接贴的命令。
+_REDIRECT_SWITCHES = ("-RedirectStandardOutput", "-RedirectStandardError")
+_REDIRECT_LOGS = ("backend.out.log", "backend.err.log")
+
+
+def _printed_launch_line_problems(text: str) -> list:
+    """打印的启动指引行缺了哪几样（空列表 = 两枚开关与两个日志文件名都在）。"""
+    i = _rollback_printed_launch_line(text)
+    if i is None:
+        return ["定位不到 Show-Rollback 打印的那条启动指引行：判据在空转"]
+    line = text.splitlines()[i]
+    return ["打印的启动指引行里没有 " + need
+            for need in _REDIRECT_SWITCHES + _REDIRECT_LOGS if need not in line]
+
+
+def test_the_printed_rollback_launch_line_hands_over_the_two_redirects():
+    """照抄那条命令的人必须拿到与真实拉起同样的两个重定向，否则会再挂住一次。
+
+    负控（本票修之前的形状）：把开关从那一行拿掉，判据必须红。
+    """
+    text = _read(SWAP_PS1)
+    problems = _printed_launch_line_problems(text)
+    assert not problems, "Show-Rollback 打印的拉起命令没把输出重定向交给操作者：" + "; ".join(problems)
+    i = _rollback_printed_launch_line(text)
+    lines = text.splitlines()
+    stripped = chr(10).join(lines[:i] + [lines[i].replace("-RedirectStandardOutput", "")] + lines[i + 1:])
+    assert _printed_launch_line_problems(stripped), (
+        "把开关从打印行里删掉后判据仍然绿：这条锁没有牙")
+
+
 def test_swap_helper_and_edits_are_pure_ascii():
     """swap-package.ps1 整文件（含 helper 与回滚指引新行）一个 >=0x80 字节都不许有——
     沿用 contract 那把 ASCII 钉的形状门；watchdog 允许 BOM+中文，但 helper 段本身

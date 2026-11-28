@@ -345,12 +345,41 @@ _HOWTO_5A = ("FIRST clear env proxy vars", "Remove-Item env:HTTP_PROXY",
                  "env:" + v for v in _TRUST_VARS)
 
 
+# #296 (2026-11-28): the 5a) launch line is now allowed to carry the two output
+# redirection switches the real launch sites already use. Until this ticket that line
+# printed a bare -WindowStyle Hidden, so an operator copying it started the backend
+# with no redirect - the 2026-11-27 hang, where the parent waits on the child's pipe
+# handles. The pin below still holds the line to its old self PLUS exactly those two
+# switches and their two log paths, so any other edit to the recipe still goes red.
+_HOWTO_LAUNCH_REDIRECTS = ("-RedirectStandardOutput", "-RedirectStandardError",
+                           "backend.out.log", "backend.err.log")
+
+
+def _howto_launch_line_ok(now_line: str, pre_line: str) -> bool:
+    """5a) 末尾那条启动指引行：要么与改前逐字相同，要么是「改前那行 + 两枚重定向开关」。
+
+    只认这一种追加：前缀必须逐字是改前那一行（去掉它结尾的引号与右括号之后的部分），
+    并且必须仍然以同一句 Write-Output 开头、以同样的收尾结束，同时带上两枚开关名与
+    两个日志文件名。把开关换成别的名字、少一枚、日志路径指向别处、或者另起一句命令，
+    都返回 False。没有这条收窄，放宽就会变成「整条配方随便改都没人拦」。
+    """
+    if now_line == pre_line:
+        return True
+    stem = pre_line[:-2]                   # 改前那行以引号+右括号收尾，去掉收尾再比前缀
+    if not now_line.startswith(stem):
+        return False
+    if not now_line.endswith(chr(34) + chr(41)):
+        return False
+    return all(need in now_line for need in _HOWTO_LAUNCH_REDIRECTS)
+
+
 def _howto_ok(text: str, pre_text: str) -> bool:
-    """(5)：1-6 步（含结尾那行 ref:）逐行与改前那份**完全相同**——唯一登记过的插格是 5a)：
-    第 5 步标题行一字不改（且仍是 5) 块唯一一行），启动那行一字不改地落在 5a) 块末尾，
-    中间插入的清理步内容由 `_HOWTO_5A` 逐 token 钉住（#295：被污染的 NO_PROXY 会随
-    Start-Process 遗传给子进程）。第 7 步是新增的，且写明"旧包解析不了 waiting_user ->
-    第一次落盘就抹掉记录"与"停服务 -> 把 tasks.json 拷回去 -> 再启动"的恢复方向。"""
+    """(5)：1-6 步（含结尾那行 ref:）逐行与改前那份相同——登记过的插格只有两处：
+    5a)（#295 的清环境步），以及 5a) 末尾那条启动指引行追加的两枚输出重定向开关
+    （#296：打印的配方原本是裸的 -WindowStyle Hidden，照抄的人会复现 2026-11-27 那个
+    父进程等子进程管道而挂住的形状）。第 7 步是新增的，且写明「旧包解析不了
+    waiting_user，第一次落盘就抹掉记录」与「停服务、把 tasks.json 拷回去、再启动」的
+    恢复方向。"""
     now = _howto_map(text)
     if now is None:
         return False
@@ -382,7 +411,7 @@ def _howto_ok(text: str, pre_text: str) -> bool:
         return False
     if now.get("5)") != pre.get("5)")[:1]:
         return False
-    if now["5a)"][-1] != pre["5)"][-1]:
+    if not _howto_launch_line_ok(now["5a)"][-1], pre["5)"][-1]):
         return False
     return not any("DATA-SAVED" in "\n".join(pre[k]) for k in pre)
 

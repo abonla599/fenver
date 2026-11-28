@@ -178,6 +178,16 @@ param(
     # a cold start with chromadb plus the provider probe is not a two-second job
     [int] $StartTimeoutSeconds = 90,
 
+    # TOTAL wall-clock budget for the whole guarded window (ticket: the 2026-11-27 swap
+    # hung at Start-Process with no timeout, no alarm and no rollback hint - the operator
+    # could only wait or kill it, and the service was already stopped with the crash guard
+    # disabled). This is a ceiling ABOVE the two per-step knobs, not a replacement for
+    # them: -StartTimeoutSeconds still bounds each wait on its own, the boot poll keeps
+    # its own window and its own retry cadence, and this one only fires when the run has
+    # spent longer than any healthy swap should. A negative or zero value disables the
+    # ceiling (the pre-ticket behaviour) rather than aborting at the first checkpoint.
+    [int] $SwapTimeoutSeconds = 300,
+
     # keep the watchdog restart counter exactly as this swap window left it.
     # Default is OFF (i.e. the budget IS handed back), because the whole point of
     # clearing it is that the next real crash must not meet a spent allowance.
@@ -274,6 +284,16 @@ $DataSnapshotRoot = Join-Path $ProjectRoot 'data\swap-snapshots'
 $DataSnapshotDir = Join-Path $DataSnapshotRoot $stamp
 
 $script:backupDone = $false
+# The total-duration guard's clock (see -SwapTimeoutSeconds). Taken here, after the
+# relative inputs were made absolute and before ANY step that can block, so the number
+# it answers covers the wait the operator actually experiences.
+$script:swapStartedAt = Get-Date
+# Seconds since this run entered the guarded window. The three checkpoints below all
+# read the elapsed time through this one function so "how long have we been in here"
+# has a single answer instead of three copies of the same arithmetic.
+function Get-SwapElapsedSeconds {
+    return [math]::Round(((Get-Date) - $script:swapStartedAt).TotalSeconds, 1)
+}
 # Whether THIS run currently holds the watchdog down. The restore machinery keys
 # off it so an abort can say in one token whether it actually gave the guard
 # back, and so a failure raised before any disable never claims to have re-enabled
@@ -784,7 +804,7 @@ function Show-Rollback {
     Write-Output 'ROLLBACK-HOWTO 5) start the old package and wait until /health answers with the OLD build:'
     Write-Output 'ROLLBACK-HOWTO 5a) FIRST clear env proxy vars and SSL_CERT_FILE/SSL_CERT_DIR in THIS window (#295: a poisoned NO_PROXY degrades cloud embedding in whatever it starts, and the two SSL_CERT_* names let this session add trust anchors the child would inherit):'
     Write-Output '    Remove-Item env:HTTP_PROXY, env:HTTPS_PROXY, env:ALL_PROXY, env:NO_PROXY, env:SSL_CERT_FILE, env:SSL_CERT_DIR -ErrorAction SilentlyContinue'
-    Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden")
+    Write-Output ("    Start-Process -FilePath '$LiveExe' -WorkingDirectory '$ProjectRoot' -WindowStyle Hidden -RedirectStandardOutput '$ProjectRoot\logs\backend.out.log' -RedirectStandardError '$ProjectRoot\logs\backend.err.log'")
     Write-Output 'ROLLBACK-HOWTO 6) only now re-enable the watchdog task (find it by its action, as this script did)'
     Write-Output ('ROLLBACK-HOWTO 7) runtime data copies this run saved (DATA-SAVED dir=) live at ' + $DataSnapshotDir + ' - if the package going live is older than v0.35 it cannot parse a waiting_user status and erases those records from data\tasks.json on its first flush, so stop the backend, copy tasks.json back over data\tasks.json, then start it again (DATA-SAVE-FAIL instead of DATA-SAVED means no copy exists)')
     Write-Output 'ROLLBACK-HOWTO ref: deployment guide, swap section - the same steps, in reverse order.'
@@ -955,7 +975,32 @@ function Restore-WatchdogTask {
     return [pscustomobject]@{ Status = $status; Error = $failDetail }
 }
 
+function Assert-SwapWithinBudget {
+    # The total-duration ceiling. One checkpoint shape for all three call sites:
+    # measure, and if the run has overrun its budget, say WHERE it is stuck (a bare
+    # "timed out" is the thing the 2026-11-27 log could already tell us), print the
+    # existing rollback recipe and leave through Stop-AfterFailure.
+    #
+    # NOT a new exit path, and that is the whole point of routing it there: past the
+    # backup rename Stop-AfterFailure prints moved=yes plus the recipe, before it prints
+    # moved=no plus the guard/package verdict it actually measured - and both branches
+    # already own the crash-guard restoration (Restore-WatchdogTask) and the old-package
+    # restart. A private throw here would repeat #32/#45/#47: an abort that walks past
+    # the one function that gives the guard back, leaving production stopped with no
+    # watchdog. The recipe itself is printed by Show-Rollback from inside that function,
+    # so it stays in one place.
+    param([string] $At)
+    if ($SwapTimeoutSeconds -le 0) { return }
+    $elapsed = Get-SwapElapsedSeconds
+    if ($elapsed -le $SwapTimeoutSeconds) { return }
+    # One physical line: PS 5.1 ends a statement at the newline unless it ends on an
+    # operator, and all_or_nothing_move's lock bans continuation lines starting with one.
+    Write-Output ('TIMEOUT stage=' + $At + ' elapsed=' + $elapsed + 's budget=' + $SwapTimeoutSeconds + 's moved=' + $(if ($script:backupDone) { 'yes' } else { 'no' }) + ' watchdog=' + $(if ($script:watchdogDisabled) { 'held-down-by-this-run' } else { 'up' }))
+    Stop-AfterFailure $At ('the swap blew its ' + $SwapTimeoutSeconds + ' second budget while in stage ' + $At + ' (' + $elapsed + 's elapsed). This is the total-duration ceiling, not a per-step timeout: the step it names was still running when the budget ran out, so assume the machine is stuck there rather than slow. Nothing after this checkpoint ran, so anything the recipe below needs may still be half-done - read moved= and watchdog= on the line above to see what was already changed. Follow the ROLLBACK recipe and re-enable the task only once the package you decide to keep is proven healthy.')
+}
+
 function Stop-AfterFailure {
+
     param([string] $FailedAt, [string] $Message)
     if ($script:backupDone) {
         # The live directory has been moved aside: nothing here is auto-undone (a
@@ -1399,6 +1444,11 @@ try {
 } catch {
     Stop-AfterFailure 'stop' ('aborted in the stop/port stage, before any package was moved: ' + $_.Exception.Message)
 }
+# CHECKPOINT 1 of 3: the service is now down. If the run already burnt its total
+# budget getting this far, stop here - before the backup rename - where the recovery
+# is complete (package intact, guard restored by Stop-AfterFailure's pre-backupDone
+# branch) instead of half-swapping and then discovering the overrun.
+Assert-SwapWithinBudget 'stop'
 
 # ------------------------------------- step 4/5: rename the old aside, then swap
 # Never Rename-Item: its -NewName takes only a LEAF name; given a full target
@@ -1427,6 +1477,11 @@ if (-not (Test-Path -LiteralPath $LiveExe)) {
     Stop-AfterFailure 'stage-move' ('no exe at ' + $LiveExe + ' after the swap')
 }
 Write-Output 'SWAPPED'
+# CHECKPOINT 2 of 3: the new package is in the live slot and nothing has been started
+# yet. Past this line Stop-AfterFailure takes its post-backupDone branch (moved=yes,
+# recipe printed, guard left down on purpose), so this is the last moment where an
+# overrun is still cheap to report honestly.
+Assert-SwapWithinBudget 'swap'
 
 # ------------------------------------------------------ step 6: start the new one
 # WorkingDirectory = project root, same shape as watchdog.ps1 and
@@ -1523,6 +1578,12 @@ $bootPollError = ''
 $bootPollFails = 0
 while ((Get-Date) -lt $bootDeadline) {
     Start-Sleep -Seconds 2
+    # CHECKPOINT 3 of 3: inside the boot poll, which is the longest single wait in the
+    # run. It keeps its own window (-StartTimeoutSeconds, untouched) and this one only
+    # fires when the TOTAL budget is gone - so a slow cold start still gets its full
+    # window, while a run stuck somewhere the window cannot see stops adding two-second
+    # sleeps to an already blown budget.
+    Assert-SwapWithinBudget 'boot-poll'
     try {
         # TICKET #52: the @() lives at the ASSIGNMENT, not at the predicate, and it
         # also filters a literal $null element. Why both halves matter:
