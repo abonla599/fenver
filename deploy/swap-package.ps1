@@ -1226,6 +1226,17 @@ if ($DryRun) {
 try {
     Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
     $script:watchdogDisabled = $true
+    # 2026-11-27 incident: a swap that HANGS or is KILLED after this point leaves the
+    # guard disabled with no process left to re-enable it (step 8 never runs, and the
+    # abort path deliberately leaves it down for an unverified package). The 11-28 task
+    # book claimed this script never restores the task - that was wrong, step 8 does;
+    # the real hole is this window. The marker below is how the independent guardian
+    # (deploy/watchdog-guardian.ps1) tells "a swap is in progress, stay out" apart from
+    # "a swap died and left the guard down, put it back".
+    try {
+        $markerPath = Join-Path $ProjectRoot 'data\swap-in-progress.marker'
+        Set-Content -LiteralPath $markerPath -Value ([string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) -Encoding ASCII
+    } catch { Write-Output ('SWAP-MARKER-WRITE-FAILED error=' + $_.Exception.Message) }
 } catch {
     # Captured before the DISABLE-THREW token is built; the lock in
     # test_swap_package_disable_threw_handler.py pins that order. It is NOT
@@ -1663,6 +1674,9 @@ try {
     # the planned re-enable too - otherwise a restore reached from anywhere later
     # would report re-enabling a task this script had already given back.
     $script:watchdogDisabled = $false
+    # The guard is back up, so the marker must go: a stale one would make a later
+    # guardian run read "swap in progress" and refuse to act.
+    try { Remove-Item -LiteralPath (Join-Path $ProjectRoot 'data\swap-in-progress.marker') -Force -ErrorAction SilentlyContinue } catch { }
 } catch {
     Stop-AfterFailure 'enable' ('swap is verified but re-enabling the task failed: ' + $_.Exception.Message)
 }
