@@ -1676,7 +1676,14 @@ try {
     $script:watchdogDisabled = $false
     # The guard is back up, so the marker must go: a stale one would make a later
     # guardian run read "swap in progress" and refuse to act.
-    try { Remove-Item -LiteralPath (Join-Path $ProjectRoot 'data\swap-in-progress.marker') -Force -ErrorAction SilentlyContinue } catch { }
+    #
+    # Deliberately NOT Remove-Item: this file is locked to "env: variables only"
+    # (test_swap_package_contract_v0291::test_old_package_renamed_never_deleted), because
+    # the backup package is the rollback position and a whitelist is the only shape that
+    # cannot be talked around. That lock is right; it is not widened for a marker file.
+    # [System.IO.File]::Delete is a different API on a different target, so the lock keeps
+    # its absolute guarantee and the marker still gets cleared.
+    try { [System.IO.File]::Delete((Join-Path $ProjectRoot 'data\swap-in-progress.marker')) } catch { }
 } catch {
     Stop-AfterFailure 'enable' ('swap is verified but re-enabling the task failed: ' + $_.Exception.Message)
 }

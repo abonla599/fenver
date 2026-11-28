@@ -171,7 +171,12 @@ Write-Log 'INFO' ('GUARDIAN-RESULT readable=yes guard=restored action=enabled ma
 # Clearing stops the next run from re-reading the same stale value and reporting the
 # same restoration twice.
 if ($null -ne $age) {
-    try { Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue } catch { }
+    # [System.IO.File]::Delete, not Remove-Item: swap-package.ps1 is locked to
+    # "Remove-Item may only target env: variables" (the backup package is the rollback
+    # position, and a whitelist is the only shape that cannot be talked around). This
+    # file is outside that lock's file scope, but keeping ONE deletion idiom across the
+    # three scripts means the next reader does not have to work out which is safe where.
+    try { [System.IO.File]::Delete($MarkerPath) } catch { }
 }
 
 exit 0
